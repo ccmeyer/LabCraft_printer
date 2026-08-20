@@ -26,8 +26,10 @@ The machine-data verification window opens before Settings, the normal main
 window, cameras, serial ports, balance services, or the machine controller are
 constructed.
 
-1. The current checkout's `local/` directory is offered when it exists, but it
-   is never selected or approved silently.
+1. The current checkout's direct `local/` directory is offered when it exists,
+   but it is never inspected or approved silently. After an update, prefer the
+   preserved wrapper containing the pre-update `local/` and `VERSION` so the
+   displayed source version remains authoritative.
 2. The operator may instead browse to:
    - the saved `local/` directory;
    - a parent folder containing `local/` and `VERSION`; or
@@ -40,12 +42,14 @@ constructed.
 5. If candidates conflict, choose the one known to belong to this physical
    printer and enter a specific source-selection reason. Do not combine the
    directories.
-6. Type the machine display ID and operator name. Type the displayed Camera X,
-   Y, and Z values exactly into the three Camera confirmation fields.
+6. Type the machine display ID and operator name. Camera X, Y, and Z are copied
+   directly from immutable inspected evidence and displayed read-only; review
+   them, then check the separate Camera-preservation approval. Do not transcribe
+   the coordinates.
 7. Enter the independent service-record reference when the dialog reports a
    preset or Camera preset match.
-8. Check the attestation only after reviewing all displayed targets, then start
-   backup/migration/activation.
+8. Check the source/target attestation only after reviewing all displayed
+   targets, then start backup/migration/activation.
 
 The app creates a verified source archive, copies into the external
 per-machine store, reopens and verifies every artifact, records separate source
@@ -141,11 +145,13 @@ Launch the same command again. In the verification window:
    calibration with the preserved source. Give Camera X/Y/Z their own review.
 5. Enter the physical printer's display ID, operator name, and a specific
    reason such as `Milestone 0 backup from <date> for <printer ID>`.
-6. Type the displayed Camera X, Y, and Z integers exactly into their separate
-   confirmation fields.
+6. Review the read-only Camera X, Y, and Z integers populated from the inspected
+   source, then check the separate approval to preserve that exact Camera
+   position. No coordinate transcription is required.
 7. If a preset warning is displayed, enter the real independent service-record
    reference. Stop rather than inventing a reference if none exists.
-8. Check the attestation, then select **Create verified backup and activate**.
+8. Check the source/target attestation, then select **Create verified backup and
+   activate**.
 
 The main window may appear only after activation succeeds. Take a screenshot
 as startup-lifecycle evidence and close the app normally without requesting any

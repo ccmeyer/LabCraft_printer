@@ -115,15 +115,26 @@ class MachineDataBootstrapDialog(QtWidgets.QDialog):
         self.camera_x = QtWidgets.QLineEdit()
         self.camera_y = QtWidgets.QLineEdit()
         self.camera_z = QtWidgets.QLineEdit()
+        for field in (self.camera_x, self.camera_y, self.camera_z):
+            field.setReadOnly(True)
+            field.setToolTip(
+                "Copied exactly from the inspected source; no transcription is required."
+            )
         self.service_record = QtWidgets.QLineEdit()
         form.addRow("Machine display ID (type exactly)", self.machine_id)
         form.addRow("Operator", self.operator)
         form.addRow("Source-selection reason", self.source_reason)
-        form.addRow("Confirm Camera X", self.camera_x)
-        form.addRow("Confirm Camera Y", self.camera_y)
-        form.addRow("Confirm Camera Z", self.camera_z)
+        form.addRow("Inspected Camera X (read-only)", self.camera_x)
+        form.addRow("Inspected Camera Y (read-only)", self.camera_y)
+        form.addRow("Inspected Camera Z (read-only)", self.camera_z)
         form.addRow("Independent service record (when required)", self.service_record)
         verify_layout.addLayout(form)
+        self.camera_attest = QtWidgets.QCheckBox(
+            "Preserve the exact inspected Camera position shown above without retyping it."
+        )
+        if hasattr(self.camera_attest, "setWordWrap"):
+            self.camera_attest.setWordWrap(True)
+        verify_layout.addWidget(self.camera_attest)
         self.attest = QtWidgets.QCheckBox(
             "I reviewed every displayed location/plate and confirm this source belongs to this physical printer."
         )
@@ -229,7 +240,9 @@ class MachineDataBootstrapDialog(QtWidgets.QDialog):
         elif (path / "local").is_dir():
             kind = CandidateSourceKind.OPERATOR_SELECTED_WRAPPER
         elif self.current_checkout_local is not None and path == self.current_checkout_local:
-            kind = CandidateSourceKind.CURRENT_CHECKOUT_LOCAL
+            # App supplies the direct checkout-local ``local/`` directory, not
+            # the repository root expected by CURRENT_CHECKOUT_LOCAL.
+            kind = CandidateSourceKind.OPERATOR_SELECTED_LOCAL
         else:
             kind = CandidateSourceKind.OPERATOR_SELECTED_LOCAL
         return CandidateSelection(kind, path, "operator-confirmed bootstrap source")
@@ -263,9 +276,11 @@ class MachineDataBootstrapDialog(QtWidgets.QDialog):
         self._candidate_history[candidate.candidate_id] = candidate
         self.review_summary.setPlainText(self._candidate_review_text(candidate))
         camera = candidate.safety_snapshot.get("locations", {}).get("camera", {})
-        self.camera_x.setPlaceholderText(f"Expected: {camera.get('X')}")
-        self.camera_y.setPlaceholderText(f"Expected: {camera.get('Y')}")
-        self.camera_z.setPlaceholderText(f"Expected: {camera.get('Z')}")
+        self.camera_x.setText(str(camera.get("X", "")))
+        self.camera_y.setText(str(camera.get("Y", "")))
+        self.camera_z.setText(str(camera.get("Z", "")))
+        self.camera_attest.setChecked(False)
+        self.attest.setChecked(False)
         if candidate.legacy_identity and candidate.identity_status == "assigned":
             self.machine_id.setText(candidate.legacy_identity.machine_id)
             self.machine_id.setReadOnly(True)
@@ -340,15 +355,33 @@ class MachineDataBootstrapDialog(QtWidgets.QDialog):
             )
         return "\n".join(lines)
 
-    def _camera_confirmation(self):
-        try:
-            return {
-                "X": int(self.camera_x.text().strip()),
-                "Y": int(self.camera_y.text().strip()),
-                "Z": int(self.camera_z.text().strip()),
-            }
-        except ValueError as exc:
-            raise ValueError("Type the displayed Camera X, Y, and Z values exactly.") from exc
+    @staticmethod
+    def _candidate_camera(candidate: CandidateEvidence) -> dict[str, int]:
+        camera = candidate.safety_snapshot.get("locations", {}).get("camera")
+        if not isinstance(camera, dict) or set(camera) != {"X", "Y", "Z"}:
+            raise ValueError("The inspected source has no valid Camera X/Y/Z position.")
+        result: dict[str, int] = {}
+        for axis in ("X", "Y", "Z"):
+            raw = camera.get(axis)
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise ValueError(f"The inspected Camera {axis} value is not numeric.")
+            try:
+                integer = int(raw)
+            except (OverflowError, ValueError) as exc:
+                raise ValueError(
+                    f"The inspected Camera {axis} value is not an integer step value."
+                ) from exc
+            if integer != raw:
+                raise ValueError(
+                    f"The inspected Camera {axis} value is not an integer step value."
+                )
+            result[axis] = integer
+        return result
+
+    def _camera_confirmation(self) -> dict[str, int]:
+        if self.candidate is None:
+            raise ValueError("No inspected Camera position is available.")
+        return self._candidate_camera(self.candidate)
 
     def _activate(self):
         if self.candidate is None:
@@ -356,6 +389,8 @@ class MachineDataBootstrapDialog(QtWidgets.QDialog):
             return
         try:
             camera = self._camera_confirmation()
+            if not self.camera_attest.isChecked():
+                raise ValueError("The Camera preservation approval checkbox is required.")
             if not self.attest.isChecked():
                 raise ValueError("The source/target attestation checkbox is required.")
             operator = self.operator.text().strip()

@@ -10,11 +10,17 @@
 - Added guarded configuration previews with exact deltas, hard-invalid rejection, and stronger confirmation for policy-threshold changes.
 - Added external update-preservation transactions, deployment anchors, receipt-gated relaunch, exact post-update byte verification, and support-guided legacy compatibility export and rollback.
 
+### Changed
+
+- Corrected first-start inspection of the prefilled checkout-local `local/` directory so it is treated as a direct candidate instead of an invalid nested `local/local` source.
+- Replaced manual Camera-coordinate transcription with read-only values sourced from immutable inspection evidence and a dedicated approval to preserve that exact position.
+
 ### Safety
 
 - Missing checkout-local or external data no longer silently becomes motion-authorized tracked preset data.
 - Saved-location authorization is checked before any safe-height, dogleg, or final-target command is queued.
 - Preset-like Camera values require explicit review and service evidence; migration requires the selected source, verified backup, canonical destination, and confirmation to agree exactly.
+- Changing the inspected source clears both Camera and whole-source approvals; activation cannot reuse stale review state.
 - Legacy rollback keeps canonical data frozen, verifies a target-specific checkout-local export before changing Git, and treats every legacy edit as an explicit re-upgrade conflict rather than silently copying it.
 
 ### Firmware

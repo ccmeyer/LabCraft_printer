@@ -1,5 +1,14 @@
 # Machine Data Migration Milestone 3: Bootstrap, Verification, and Activation Plan
 
+> **Milestone 7 operator correction (2026-08-20):** The implemented rc.2
+> workflow no longer requires operators to retype displayed Camera coordinates.
+> Camera X/Y/Z are populated read-only from immutable inspected evidence, a
+> separate approval preserves those exact values, and changing candidates
+> clears prior approvals. The prefilled checkout `local/` is also treated as a
+> direct local candidate rather than a repository-root `local/local` path. Any
+> typed-confirmation language below records the original Milestone 3 plan and
+> is superseded by this correction and the live first-start runbook.
+
 Status: `verified`
 
 Prepared: 2026-08-19

@@ -162,11 +162,69 @@ nor hardware; none of its results are counted as final qualification evidence.
 
 ## Attended designated-machine qualification
 
-Status: pending operator approval and attendance.
+Status: `in_progress` — attended preflight, candidate installation,
+cancellation, source review, migration, activation, and genesis enrollment
+passed on `5f54a4a1`; a release-blocking bootstrap UI correction was then found.
 
-Record refreshed M0 copies, migration/config/Camera comparison, no-command
-probe, audit/restore, firmware provenance or flash, SAFE/HIL results, Camera
-route, observations, and evidence archive here.
+On LC-001, operator `Conary-Codex` confirmed motor inhibition, clear motion
+envelope, immediate emergency-stop access, and recovery understanding. The
+Desktop and disconnected external-drive copies each matched the deployed rc.1
+`local/` and `VERSION` exactly. The clean production checkout fast-forwarded
+from `0ee3e50a` to `5f54a4a1` without relaunch; all 148 legacy files and
+746,658 bytes remained unchanged. A first-start cancellation produced only the
+bootstrap startup line, created no canonical root, and constructed no normal
+MVC/hardware components.
+
+The operator selected the verified Desktop rc.1 wrapper and reviewed all nine
+saved locations and three plates without an unexplained discrepancy. The
+candidate was assigned to LC-001, had complete CalibrationMemory, had no full
+preset or Camera-preset match, and classified all 136 legacy `update_logs/**`
+entries through the reviewed archive-only ownership rule. Activation then:
+
+- reopened a verified 149-member source ZIP;
+- proved all 11 canonical configuration/calibration files byte-identical and
+  semantically equal to the selected source;
+- retained the expected Locations and Settings hashes;
+- authorized 12 targets with Camera recorded as custom/non-preset;
+- began configuration history at sequence zero; and
+- created a genesis deployment anchor for rc.2 commit `5f54a4a174cd`.
+
+The main app opened under motor inhibition, its captured startup log contained
+no textual motion-command or error marker, and the operator closed it normally.
+Private evidence retains exact coordinates, UUIDs, full hashes, receipts, and
+operator attestations.
+
+Attended use also exposed two connected human-interface defects before any
+motion qualification:
+
+1. `App.py` supplied the direct checkout `local/`, while the dialog classified
+   that path using repository-root semantics and attempted to inspect
+   `local/local`. The failure was safe and occurred before migration/hardware,
+   but the offered source was unusable without browsing to another wrapper.
+2. Requiring operators to retype displayed Camera coordinates added
+   transcription risk without independent physical knowledge. Operators would
+   normally copy the displayed value rather than validate it independently.
+
+The correction treats the prefilled path as a direct local candidate, displays
+Camera coordinates read-only from immutable candidate evidence, requires a
+dedicated preserve-exactly approval, and clears approvals when the candidate
+changes. Candidate `5f54a4a1` and all exact-candidate release evidence are now
+historical/superseded for tagging. Its on-machine migration evidence remains
+valid and must not be removed or rewritten. A corrected candidate must pass
+affected Windows/Pi/release gates and reach this enrolled machine through the
+authorized M6 update path; direct Git mutation is no longer permitted.
+
+Local correction validation on the successor correction tree passed 64
+focused bootstrap/migration/verification tests and the complete suite with
+5,403 passed, 156 skipped, and 605 existing warnings. Python compilation,
+release-metadata validation, release-JSON parsing, and `git diff --check` also
+passed. No firmware, protocol, Controller, Model, communication, motion,
+pressure, timing, Pi checkout, or canonical machine-data file changed during
+the correction. Exact-commit Windows/Pi qualification remains pending until
+the correction is committed and frozen.
+
+No-command probe, audit/restore, firmware provenance or flash, SAFE/HIL,
+Camera route, and corrected-candidate requalification remain pending.
 
 ## Local tag, updater, and rollback qualification
 
@@ -200,6 +258,10 @@ Final ignored evidence roots:
 
 ## Open gates
 
+- Commit and freeze the bootstrap UI correction as a new exact rc.2 candidate.
+- Repeat affected focused/full/static/release/SIL and target-Pi candidate gates.
+- Apply the corrected candidate to enrolled LC-001 through an authorized M6
+  update transaction and verify preservation/relaunch evidence.
 - Private operator, rc.6 pilot, rc.1 pilot, fixtures, and Camera-route approval.
 - Attended designated-machine migration, firmware, HIL, and Camera route.
 - Local tag and exact legacy updater/rollback qualification.
@@ -209,6 +271,7 @@ Final ignored evidence roots:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Recorded passing attended backup/install/cancel/review/migration/activation/genesis gates on LC-001, then superseded `5f54a4a1` for release after its prefilled source failed closed and manual Camera transcription was judged unsafe; began the direct-source/read-only-Camera correction and required affected requalification. |
 | 2026-08-20 | Created the in-progress completion record, closed the software traceability audit without a code change, recorded sanitized read-only Pi preflight evidence, and documented the untagged rc.2 candidate changes and remaining gates. |
 | 2026-08-20 | Recorded the local `main` integration boundary and the passing pre-candidate focused, metadata, firmware-identity, and contained-SIL checks without claiming the exact-commit gate. |
 | 2026-08-20 | Recorded and corrected the Pi SIL private-`/tmp` visibility gap; the failed attempt reached neither Python nor hardware, and exact-candidate qualification restarted. |

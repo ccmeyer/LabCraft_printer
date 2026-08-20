@@ -1134,6 +1134,8 @@ Milestone 7 is `verified` only when:
 - [x] Create the Slice 2 rc.2 release commit without a tag.
 - [x] Pass Slice 3 Windows qualification and candidate-bundle verification.
 - [x] Pass Slice 4 unattended SSH Pi qualification and archive recheck.
+- [ ] Freeze the corrected rc.2 candidate and repeat affected Slice 3/4 gates
+  after the attended prefilled-source and Camera-transcription findings.
 - [ ] Pass Slice 5 attended designated-machine and Camera qualification.
 - [ ] Pass Slice 6 local-tag, exact old-updater, offline, rollback, and re-upgrade gates.
 - [ ] Publish and complete Slice 7 staged rollout.
@@ -1180,6 +1182,14 @@ Milestone 7 is `verified` only when:
 11. A sanitized fixture proves software behavior but cannot establish the
     physical correctness of a real machine's configuration or firmware. Both
     deployed source cohorts still require representative pilots.
+12. Attended LC-001 first start found that the prefilled direct `local/` was
+    incorrectly interpreted with repository-root `local/local` semantics. It
+    failed before mutation or hardware construction. The same review showed
+    that retyping displayed Camera coordinates adds transcription risk without
+    independent knowledge. The correction uses direct-local classification,
+    read-only Camera values from inspected evidence, a separate preserve-exact
+    approval, and stale-approval reset. The prior exact candidate is
+    superseded, while its enrolled machine-data evidence remains immutable.
 
 ## Frozen planning decisions
 
@@ -1241,6 +1251,7 @@ Milestone 7 is `verified` only when:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Attended LC-001 migration and genesis enrollment passed on `5f54a4a1`, then safely exposed the prefilled direct-local classification defect and unnecessary Camera transcription risk; superseded that release candidate and added a corrected-candidate requalification gate. |
 | 2026-08-20 | Created the concrete eight-slice rc.2 coverage, candidate, Windows, SSH/Pi, attended Camera/HIL, local-tag updater/rollback, publication, staged-rollout, evidence, stop-condition, and closeout plan. |
 | 2026-08-20 | Began implementation: closed the software coverage audit without a code change, captured private LC-001 read-only backup/Camera preflight over SSH, prepared untagged rc.2 release metadata and the in-progress completion record, and retained attended approval as the HIL/tag blocker. |
 | 2026-08-20 | Froze candidate `5f54a4a1`; corrected the Pi runner's private-`/tmp` checkout visibility with a read-only repo rebind and regression test; passed Windows focused/full/static/SIL and fresh SSH/Pi focused/cohort/private-device SIL/archive gates; left attended, tag-dependent, publication, and rollout work open. |

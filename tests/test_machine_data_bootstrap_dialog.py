@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -95,6 +96,14 @@ def test_current_checkout_candidate_is_visible_but_not_silently_confirmed(
     assert dialog.inspect_button.isEnabled()
     assert dialog.candidate is None
     assert dialog.pages.currentIndex() == 0
+    selection = dialog._selection()
+    assert (
+        selection.source_kind
+        is MachineDataMigration.CandidateSourceKind.OPERATOR_SELECTED_LOCAL
+    )
+    evidence = MachineDataMigration.inspect_candidate(selection)
+    assert evidence.is_importable
+    assert evidence.normalized_source == current_local.resolve()
 
 
 def test_folder_candidate_review_displays_coordinates_plates_and_source_metadata(
@@ -120,6 +129,15 @@ def test_folder_candidate_review_displays_coordinates_plates_and_source_metadata
     assert "camera: X=" in text
     assert "Plate calibrations:" in text
     assert dialog.source_reason.text() == ""
+    camera = candidate.safety_snapshot["locations"]["camera"]
+    assert dialog.camera_x.text() == str(camera["X"])
+    assert dialog.camera_y.text() == str(camera["Y"])
+    assert dialog.camera_z.text() == str(camera["Z"])
+    assert dialog.camera_x.isReadOnly()
+    assert dialog.camera_y.isReadOnly()
+    assert dialog.camera_z.isReadOnly()
+    assert not dialog.camera_attest.isChecked()
+    assert not dialog.attest.isChecked()
 
 
 def test_verification_fields_build_explicit_submission_without_hardware(
@@ -140,9 +158,12 @@ def test_verification_fields_build_explicit_submission_without_hardware(
     dialog.machine_id.setText("LC-001")
     dialog.operator.setText("Operator A")
     dialog.source_reason.setText("External pre-update backup")
-    dialog.camera_x.setText(str(camera["X"]))
-    dialog.camera_y.setText(str(camera["Y"]))
-    dialog.camera_z.setText(str(camera["Z"]))
+    # Even a programmatic widget mutation cannot change the submitted value;
+    # the immutable inspected candidate is the source of truth.
+    dialog.camera_x.setText("0")
+    dialog.camera_y.setText("0")
+    dialog.camera_z.setText("0")
+    dialog.camera_attest.setChecked(True)
     dialog.attest.setChecked(True)
     operations = []
     dialog._start_worker = lambda operation, **_kwargs: operations.append(operation)
@@ -159,7 +180,7 @@ def test_verification_fields_build_explicit_submission_without_hardware(
     assert dict(submission.camera_confirmation) == dict(camera)
 
 
-def test_missing_camera_confirmation_and_attestation_cannot_start_work(
+def test_missing_camera_preservation_approval_cannot_start_work(
     qapp, monkeypatch, tmp_path
 ):
     wrapper, candidate = _candidate(tmp_path / "source")
@@ -173,6 +194,10 @@ def test_missing_camera_confirmation_and_attestation_cannot_start_work(
     dialog = MachineDataBootstrapDialog.MachineDataBootstrapDialog(bootstrap)
     dialog.source_path.setText(str(wrapper))
     _inspect_now(dialog)
+    dialog.machine_id.setText("LC-001")
+    dialog.operator.setText("Operator A")
+    dialog.source_reason.setText("External pre-update backup")
+    dialog.attest.setChecked(True)
     warnings = []
     monkeypatch.setattr(
         QtWidgets.QMessageBox,
@@ -186,6 +211,49 @@ def test_missing_camera_confirmation_and_attestation_cannot_start_work(
     dialog._activate()
 
     assert warnings
+    assert "Camera preservation approval" in warnings[0][2]
+    assert bootstrap.submissions == []
+
+
+def test_noninteger_inspected_camera_is_shown_but_activation_fails_cleanly(
+    qapp, monkeypatch, tmp_path
+):
+    _wrapper, candidate = _candidate(tmp_path / "source")
+    locations = dict(candidate.safety_snapshot["locations"])
+    camera = dict(locations["camera"])
+    camera["Y"] = camera["Y"] + 0.5
+    locations["camera"] = camera
+    snapshot = dict(candidate.safety_snapshot)
+    snapshot["locations"] = locations
+    candidate = replace(candidate, safety_snapshot=snapshot)
+    bootstrap = FakeBootstrap(
+        _inspection(
+            tmp_path / "state",
+            MachineDataBootstrap.BootstrapState.CANDIDATE_SELECTION_REQUIRED,
+        ),
+        candidate,
+    )
+    dialog = MachineDataBootstrapDialog.MachineDataBootstrapDialog(bootstrap)
+    dialog._candidate_inspected(candidate)
+    assert dialog.camera_y.text().endswith(".5")
+    dialog.operator.setText("Operator A")
+    dialog.source_reason.setText("External pre-update backup")
+    dialog.camera_attest.setChecked(True)
+    dialog.attest.setChecked(True)
+    warnings = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda *_args: warnings.append(_args),
+    )
+    dialog._start_worker = lambda _operation, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("invalid Camera evidence cannot start")
+    )
+
+    dialog._activate()
+
+    assert warnings
+    assert "integer step value" in warnings[0][2]
     assert bootstrap.submissions == []
 
 
@@ -224,12 +292,16 @@ def test_multiple_inspected_candidates_show_duplicate_or_conflict_relation(
     dialog = MachineDataBootstrapDialog.MachineDataBootstrapDialog(bootstrap)
 
     dialog._candidate_inspected(first)
+    dialog.camera_attest.setChecked(True)
+    dialog.attest.setChecked(True)
     dialog._candidate_inspected(second)
 
     text = dialog.review_summary.toPlainText()
     assert "Comparison with other inspected candidates:" in text
     assert str(first.normalized_source) in text
     assert ": conflict" in text
+    assert not dialog.camera_attest.isChecked()
+    assert not dialog.attest.isChecked()
 
 
 def test_ready_state_revalidates_in_worker_before_accepting(qapp, monkeypatch, tmp_path):
