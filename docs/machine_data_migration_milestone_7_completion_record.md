@@ -1,17 +1,19 @@
 # Machine Data Migration Milestone 7 Completion Record
 
-> Current correction: rc.2 first-start qualification passed, but its enrolled
-> protected update failed safely before Git. The
-> [rc.3 correction plan](machine_data_migration_milestone_7_rc3_correction_plan.md)
-> now owns correction qualification, attended recovery, publication, and
-> rollout.
+> Current correction: rc.3 completed the protected update and normal reopen,
+> but the attended audit exercise found a safe restore-only deletion defect.
+> The
+> [rc.4 correction plan](machine_data_migration_milestone_7_rc4_correction_plan.md)
+> now owns correction qualification, exact recovery of the disposable target,
+> publication, and rollout.
 
-Status: `in_progress` — Windows and unattended Pi gates passed; attended,
-tag-dependent, publication, and rollout gates remain.
+Status: `in_progress` - rc.4 corrective implementation is active; exact-commit
+Windows, disposable-Pi, tag, attended recovery, publication, and rollout gates
+remain.
 
 Started: 2026-08-20
 
-Current target release: `v1.3.0-rc.3`
+Current target release: `v1.3.0-rc.4`
 
 Parent documents:
 
@@ -284,20 +286,40 @@ relaunch, and reopened rc.3. The retrieved Pi SIL archive is 3,402,813 bytes
 with SHA-256 `992EFE5A...99CD2AB8`; the separate 110,492-byte focused/recovery
 evidence archive matched at `0447F9BC...81C1AC`.
 
-Production postflight remained clean at `5f54a4a1`; active-pointer hash
-`392C8AA8...646AC80` and deployment-anchor hash
-`627EAD96...9046F2` were unchanged. The original rc.2 error updater remains
-open and no rc.3 tag exists. No production protected file, Git ref, hardware,
-or firmware state changed during this qualification.
+The rc.3 tag was subsequently created and the attended rc.2 recovery update
+completed successfully. Its verified pre-update archive, exact protected-byte
+preservation, full target deployment anchor, immutable terminal receipts,
+manual shortcut launch, and post-update result popup all passed. LC-001 now
+runs the clean immutable rc.3 commit `d965927e`; the normal app reopened and
+the update popup was acknowledged.
 
-No-command probe, audit/restore, firmware provenance or flash, SAFE/HIL, and
-the machine-specific Camera route remain pending.
+The guarded-change qualification then recorded a cancelled attempt, followed
+by an accepted addition of disposable location `qualification-unverified`.
+The new target was revoked. A real-authorizer no-command probe returned
+`target_revoked`, made zero route/motion calls, opened no protected device, and
+left every protected byte unchanged. Camera remained unchanged and trusted.
+
+Selecting the accepted event's exact pre-change backup exposed a new safe
+defect: rc.3's guard rejected the restore because it applied the import ban on
+removed locations to exact restore as well. The rejection was recorded as the
+next immutable event, changed no configuration, left no pending transaction,
+and retained the disposable target in its revoked state. The operator was
+instructed not to retry or edit configuration manually. Private evidence was
+sealed and copied with matching SHA-256 `36100C35...A673E435`.
+
+Rc.4 now owns the narrow correction. Its restore preview is bound to the
+unique immutable source event, machine identity, source manifest hash, backup
+fingerprint, and exact member hashes. Only a bound exact restore may remove an
+added target; governed imports remain deletion-prohibited. Pre-commit Windows
+gates passed 59 narrow tests, 336 broader affected tests, 5,434 full-suite
+tests with 156 skips, and contained SIL 96/96, plus release/static/firmware
+identity checks. Exact-candidate and target-Pi evidence remains pending.
 
 ## Local tag, updater, and rollback qualification
 
-Status: rc.2 tag/same-version discovery passed; rc.2-to-corrected-target apply
-exposed the fail-safe source-binding defect. rc.3 tag-dependent qualification
-is pending.
+Status: rc.2 and rc.3 tag-dependent gates passed through the successful
+attended rc.3 recovery update. Rc.4 remains untagged pending exact-candidate
+Windows and disposable-Pi qualification.
 
 Record peeled tag commit, metadata tag validation, release-aware bundle hash,
 exact rc.6/rc.1 old-updater lanes, offline equivalence, unchanged return, and
@@ -327,11 +349,12 @@ Final ignored evidence roots:
 
 ## Open gates
 
-- Complete exact-candidate Windows and disposable-Pi qualification for rc.3.
-- Authorize and create the immutable local `v1.3.0-rc.3` tag; do not push it
+- Complete exact-candidate Windows and disposable-Pi qualification for rc.4.
+- Authorize and create the immutable local `v1.3.0-rc.4` tag; do not publish it
   before the required tag-dependent and attended recovery gates pass.
-- Apply rc.3 to enrolled LC-001 through the narrow attended rc.2 recovery mode
-  and verify preservation, full target anchor, and manual reopen evidence.
+- Apply rc.4 through the normal protected updater, then complete the attended
+  exact restore of the disposable target with exact-byte, audit, authorization,
+  Camera, no-pending, and zero-motion evidence.
 - Private operator, rc.6 pilot, rc.1 pilot, fixtures, and Camera-route approval.
 - Attended designated-machine migration, firmware, HIL, and Camera route.
 - Local tag and exact legacy updater/rollback qualification.
@@ -341,6 +364,7 @@ Final ignored evidence roots:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Recorded the successful rc.3 protected recovery update and normal reopen, the guarded cancellation/addition/revocation/no-command passes, and the safe exact-restore deletion rejection; began the narrow rc.4 source-event/backup-bound correction and recorded its first 59 passing focused tests. |
 | 2026-08-20 | Froze exact rc.3 candidate `d965927e`; passed 270 affected Pi tests, 96/96 private-device SIL, and a fresh disposable real-Git short-anchor rc.2 recovery/full-anchor rc.3 reopen; rechecked unchanged production and sealed two matching evidence archives. |
 | 2026-08-20 | Implemented the rc.3 full-commit binding, exact rc.2 prefix compatibility, candidate-side recovery updater, exact-evidence rc.3 genesis enrollment, release metadata, and runbook; final Windows gates passed 602 focused/1 skipped, 5,430 full/156 skipped, and 96/96 contained SIL. |
 | 2026-08-20 | Recorded the immutable rc.2 tag and fail-safe attended `source_binding_mismatch`, proved no Git/protected-data mutation, and began the rc.3 full-commit compatibility and attended recovery correction plan. |

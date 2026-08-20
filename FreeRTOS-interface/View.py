@@ -511,13 +511,22 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
 
         result = self.assessment.get("result", "reject")
+        workflow = self.assessment.get("workflow")
         target = ", ".join(self.assessment.get("target_keys", []))
-        heading = QtWidgets.QLabel(
+        heading_text = (
             f"{result.replace('_', ' ').title()}: {target}\n"
             f"Policy {self.assessment.get('policy_id')} "
             f"({str(self.assessment.get('policy_sha256', ''))[:12]})\n"
             f"Proposal {str(self.assessment.get('proposal_sha256', ''))[:12]}"
         )
+        restore_evidence = self.assessment.get("preconditions", {}).get("restore")
+        if workflow == "configuration_restore" and isinstance(restore_evidence, dict):
+            manifest = restore_evidence.get("backup_manifest", {})
+            heading_text += (
+                f"\nVerified backup transaction {restore_evidence.get('transaction_id')}"
+                f"\nManifest {str(manifest.get('raw_sha256', ''))[:12]}"
+            )
+        heading = QtWidgets.QLabel(heading_text)
         heading.setWordWrap(True)
         layout.addWidget(heading)
 
@@ -530,7 +539,7 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
         rules = self.assessment.get("threshold_results", [])
         for row_index, change in enumerate(rows):
             before = change.get("before")
-            proposed = change.get("proposed") or {}
+            proposed = change.get("proposed")
             signed = change.get("signed_delta") or {}
             absolute = change.get("absolute_delta") or {}
             numeric = [value for value in absolute.values() if isinstance(value, int)]
@@ -541,9 +550,13 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
             values = (
                 change.get("target_key", ""),
                 "new" if before is None else f"{before.get('X')}/{before.get('Y')}/{before.get('Z')}",
-                f"{proposed.get('X')}/{proposed.get('Y')}/{proposed.get('Z')}",
+                (
+                    "removed by exact backup"
+                    if proposed is None
+                    else f"{proposed.get('X')}/{proposed.get('Y')}/{proposed.get('Z')}"
+                ),
                 signed.get("X"), signed.get("Y"), signed.get("Z"),
-                max(numeric) if numeric else "new",
+                max(numeric) if numeric else ("removed" if proposed is None else "new"),
                 rule,
             )
             for column, value in enumerate(values):
@@ -563,10 +576,18 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
         )
         layout.addWidget(checks)
 
-        notice = QtWidgets.QLabel(
-            "Saving does not verify this target. The changed value remains motion-blocked "
-            "until a separate exact-value physical or service-record verification is audited."
-        )
+        if workflow == "configuration_restore":
+            notice_text = (
+                "This restores the exact bytes from the verified backup shown above. "
+                "Any changed target remains motion-blocked until a separate exact-value "
+                "physical or service-record verification is audited."
+            )
+        else:
+            notice_text = (
+                "Saving does not verify this target. The changed value remains motion-blocked "
+                "until a separate exact-value physical or service-record verification is audited."
+            )
+        notice = QtWidgets.QLabel(notice_text)
         notice.setWordWrap(True)
         layout.addWidget(notice)
 
@@ -588,10 +609,13 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
         buttons = QtWidgets.QHBoxLayout()
         buttons.addStretch()
         self.cancel_button = QtWidgets.QPushButton("Cancel", self)
-        self.action_button = QtWidgets.QPushButton(
-            "Record Rejection and Close" if result == "reject" else "Save and Revoke",
-            self,
-        )
+        if result == "reject":
+            action_text = "Record Rejection and Close"
+        elif workflow == "configuration_restore":
+            action_text = "Restore Exact Backup and Revoke Changed Targets"
+        else:
+            action_text = "Save and Revoke"
+        self.action_button = QtWidgets.QPushButton(action_text, self)
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.action_button)
         layout.addLayout(buttons)

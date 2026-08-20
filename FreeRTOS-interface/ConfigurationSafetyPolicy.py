@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping, Sequence
+from uuid import UUID
 
 from MachineDataArchive import canonical_json_bytes
 
@@ -23,6 +24,8 @@ POLICY_SCHEMA_NAME = "labcraft.configuration_change_policy"
 POLICY_SCHEMA_VERSION = 1
 ASSESSMENT_SCHEMA_NAME = "labcraft.configuration_guard_assessment"
 ASSESSMENT_SCHEMA_VERSION = 1
+RESTORE_PRECONDITION_SCHEMA_NAME = "labcraft.configuration_restore_precondition"
+RESTORE_PRECONDITION_SCHEMA_VERSION = 1
 AXES = ("X", "Y", "Z")
 CONFIRMATION_RESULTS = frozenset(
     {"routine_confirmation", "strong_confirmation", "reject"}
@@ -72,6 +75,100 @@ def proposal_sha256(documents: Mapping[str, object]) -> str:
         return _sha256_bytes(canonical_json_bytes(normalized))
     except (TypeError, ValueError) as exc:
         raise ConfigurationSafetyError(f"Proposal is not canonical JSON: {exc}") from exc
+
+
+def _sha256_text(value: object, label: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(
+        char not in "0123456789abcdef" for char in value
+    ):
+        raise ConfigurationSafetyError(f"{label} is invalid.")
+    return value
+
+
+def _uuid_text(value: object, label: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigurationSafetyError(f"{label} is invalid.")
+    try:
+        parsed = UUID(value)
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise ConfigurationSafetyError(f"{label} is invalid.") from exc
+    if str(parsed) != value:
+        raise ConfigurationSafetyError(f"{label} must use canonical UUID text.")
+    return value
+
+
+_RESTORE_PRECONDITION_KEYS = {
+    "schema_name",
+    "schema_version",
+    "transaction_id",
+    "machine_id",
+    "machine_uuid",
+    "activation_id",
+    "backup_manifest",
+    "evidence_fingerprint",
+    "files",
+}
+_RESTORE_PRECONDITION_FILE_KEYS = {
+    "filename",
+    "size",
+    "raw_sha256",
+    "semantic_json_sha256",
+}
+_GOVERNED_FILENAMES = frozenset(
+    {
+        "Locations.json",
+        "Obstacles.json",
+        "Plates.json",
+        "RegulatorProfiles.json",
+        "Settings.json",
+    }
+)
+
+
+def parse_restore_guard_precondition(payload: object) -> dict[str, object]:
+    """Validate the immutable backup evidence that authorizes a restore preview."""
+
+    if not isinstance(payload, dict):
+        raise ConfigurationSafetyError("Restore preview lacks verified backup evidence.")
+    _expect_exact_keys(payload, _RESTORE_PRECONDITION_KEYS, "restore precondition")
+    if payload.get("schema_name") != RESTORE_PRECONDITION_SCHEMA_NAME:
+        raise ConfigurationSafetyError("Unknown restore-precondition schema.")
+    if payload.get("schema_version") != RESTORE_PRECONDITION_SCHEMA_VERSION:
+        raise ConfigurationSafetyError("Unknown restore-precondition version.")
+    transaction_id = _uuid_text(payload.get("transaction_id"), "Restore transaction UUID")
+    _nonempty_text(payload.get("machine_id"), "restore machine ID")
+    _uuid_text(payload.get("machine_uuid"), "Restore machine UUID")
+    _uuid_text(payload.get("activation_id"), "Restore activation UUID")
+    _sha256_text(payload.get("evidence_fingerprint"), "Restore evidence fingerprint")
+
+    reference = payload.get("backup_manifest")
+    if not isinstance(reference, dict) or set(reference) != {"relative_path", "raw_sha256"}:
+        raise ConfigurationSafetyError("Restore backup-manifest reference is invalid.")
+    expected_relative = f"backups/configuration/{transaction_id}/manifest.json"
+    if reference.get("relative_path") != expected_relative:
+        raise ConfigurationSafetyError("Restore backup-manifest path differs from its transaction.")
+    _sha256_text(reference.get("raw_sha256"), "Restore backup-manifest SHA-256")
+
+    files = payload.get("files")
+    if not isinstance(files, list) or not files:
+        raise ConfigurationSafetyError("Restore precondition has no verified backup members.")
+    seen = set()
+    for item in files:
+        if not isinstance(item, dict):
+            raise ConfigurationSafetyError("Restore backup-member evidence is invalid.")
+        _expect_exact_keys(item, _RESTORE_PRECONDITION_FILE_KEYS, "restore backup member")
+        filename = item.get("filename")
+        if filename not in _GOVERNED_FILENAMES or filename in seen:
+            raise ConfigurationSafetyError("Restore backup-member inventory is invalid.")
+        seen.add(filename)
+        if type(item.get("size")) is not int or item["size"] <= 0:
+            raise ConfigurationSafetyError("Restore backup-member size is invalid.")
+        _sha256_text(item.get("raw_sha256"), "Restore backup-member SHA-256")
+        _sha256_text(
+            item.get("semantic_json_sha256"),
+            "Restore backup-member semantic SHA-256",
+        )
+    return copy.deepcopy(payload)
 
 
 def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
@@ -569,6 +666,24 @@ def _coordinate_changes(
     return changes
 
 
+def _coordinate_removals(
+    before: Mapping[str, object], *, names: Sequence[str]
+) -> list[dict[str, object]]:
+    changes = []
+    for name in names:
+        prior = _point(before[name], f"prior {name}")
+        changes.append(
+            {
+                "target_key": name,
+                "before": prior,
+                "proposed": None,
+                "signed_delta": {axis: None for axis in AXES},
+                "absolute_delta": {axis: None for axis in AXES},
+            }
+        )
+    return changes
+
+
 class ConfigurationChangeGuard:
     def __init__(self, policy: ConfigurationChangePolicy, bounds: SafetyBounds):
         if not isinstance(policy, ConfigurationChangePolicy):
@@ -635,6 +750,16 @@ class ConfigurationChangeGuard:
         changes: list[dict[str, object]] = []
         target_class = "generic_location"
         try:
+            restore_precondition = None
+            raw_preconditions = dict(preconditions or {})
+            if workflow == "configuration_restore":
+                restore_precondition = parse_restore_guard_precondition(
+                    raw_preconditions.get("restore")
+                )
+            elif raw_preconditions.get("restore") is not None:
+                raise ConfigurationSafetyError(
+                    "Verified backup evidence is restricted to configuration restores."
+                )
             complete = copy.deepcopy(dict(before_documents))
             complete.update(copy.deepcopy(dict(proposed_documents)))
             self.validate_active_documents(complete)
@@ -706,13 +831,24 @@ class ConfigurationChangeGuard:
                         if old_locations.get(name) != new_locations.get(name)
                     )
                     removed = [name for name in changed_names if name not in new_locations]
-                    if removed:
+                    if removed and restore_precondition is None:
                         raise ConfigurationSafetyError(
-                            "Coordinate import/restore cannot remove saved locations: "
+                            "Coordinate import cannot remove saved locations: "
                             + ", ".join(removed)
                         )
+                    if removed:
+                        changes.extend(
+                            _coordinate_removals(old_locations, names=removed)
+                        )
+                    retained_or_added = [
+                        name for name in changed_names if name in new_locations
+                    ]
                     changes.extend(
-                        _coordinate_changes(old_locations, new_locations, names=changed_names)
+                        _coordinate_changes(
+                            old_locations,
+                            new_locations,
+                            names=retained_or_added,
+                        )
                     )
                 if "Plates.json" in proposed_documents:
                     old_plates = {
@@ -727,9 +863,22 @@ class ConfigurationChangeGuard:
                         if old_cal == new_cal:
                             continue
                         if not new_cal:
-                            raise ConfigurationSafetyError(
-                                f"Coordinate import/restore cannot remove calibration for {plate_name!r}."
+                            if restore_precondition is None:
+                                raise ConfigurationSafetyError(
+                                    f"Coordinate import cannot remove calibration for {plate_name!r}."
+                                )
+                            changes.extend(
+                                _coordinate_removals(
+                                    old_cal,
+                                    names=(
+                                        "top_left",
+                                        "top_right",
+                                        "bottom_right",
+                                        "bottom_left",
+                                    ),
+                                )
                             )
+                            continue
                         changes.extend(
                             _coordinate_changes(
                                 old_cal,
@@ -872,6 +1021,8 @@ def parse_guard_assessment(payload: object) -> dict[str, object]:
 __all__ = [
     "ASSESSMENT_SCHEMA_NAME",
     "ASSESSMENT_SCHEMA_VERSION",
+    "RESTORE_PRECONDITION_SCHEMA_NAME",
+    "RESTORE_PRECONDITION_SCHEMA_VERSION",
     "ConfigurationChangeGuard",
     "ConfigurationChangePolicy",
     "ConfigurationSafetyError",
@@ -879,6 +1030,7 @@ __all__ = [
     "load_configuration_change_policy",
     "parse_configuration_change_policy",
     "parse_guard_assessment",
+    "parse_restore_guard_precondition",
     "parse_safety_bounds",
     "proposal_sha256",
 ]

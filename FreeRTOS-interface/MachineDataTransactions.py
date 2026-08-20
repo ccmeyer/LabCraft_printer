@@ -41,7 +41,10 @@ from MachineDataVerification import (
 )
 from ConfigurationSafetyPolicy import (
     ConfigurationSafetyError,
+    RESTORE_PRECONDITION_SCHEMA_NAME,
+    RESTORE_PRECONDITION_SCHEMA_VERSION,
     parse_guard_assessment,
+    parse_restore_guard_precondition,
     proposal_sha256,
 )
 
@@ -2081,14 +2084,32 @@ class ConfigurationTransactionService:
 
     def _restore_inputs(self, transaction_id: str):
         transaction_id = _canonical_uuid(transaction_id, "restore transaction_id")
-        manifest_path = self.paths.configuration_backups_root / transaction_id / "manifest.json"
-        if not manifest_path.is_file():
-            raise ConfigurationValidationError("The requested configuration backup does not exist.")
-        reference = {
-            "relative_path": manifest_path.relative_to(self.paths.machine_root).as_posix(),
-            "raw_sha256": sha256_file(manifest_path)[0],
-        }
+        self.refresh(allow_pending=False)
+        source_events = []
+        for event_path in _all_files(self.paths.configuration_events_root):
+            event = parse_configuration_event(
+                _read_json(event_path, "configuration restore source event")
+            )
+            if event["transaction_id"] == transaction_id:
+                source_events.append(event)
+        if len(source_events) != 1:
+            raise ConfigurationValidationError(
+                "The requested configuration backup has no unique immutable source event."
+            )
+        reference = source_events[0].get("backup_manifest")
+        if reference is None:
+            raise ConfigurationValidationError(
+                "The requested configuration event has no restorable backup."
+            )
         manifest = _parse_backup_manifest(self.paths, reference)
+        if (
+            manifest["machine_id"] != self.identity.machine_id
+            or manifest["machine_uuid"] != self.identity.machine_uuid
+            or manifest["activation_id"] != self.active.activation_id
+        ):
+            raise ConfigurationRecoveryRequired(
+                "Configuration backup identity differs from the active machine."
+            )
         proposed = {}
         exact_serialized = {}
         for item in manifest["files"]:
@@ -2112,11 +2133,37 @@ class ConfigurationTransactionService:
                 ) from exc
             proposed[item["filename"]] = payload
             exact_serialized[item["filename"]] = data
-        return proposed, exact_serialized
+        restore_precondition = {
+            "schema_name": RESTORE_PRECONDITION_SCHEMA_NAME,
+            "schema_version": RESTORE_PRECONDITION_SCHEMA_VERSION,
+            "transaction_id": transaction_id,
+            "machine_id": manifest["machine_id"],
+            "machine_uuid": manifest["machine_uuid"],
+            "activation_id": manifest["activation_id"],
+            "backup_manifest": copy.deepcopy(reference),
+            "evidence_fingerprint": manifest["evidence_fingerprint"],
+            "files": [
+                {
+                    "filename": item["filename"],
+                    "size": item["size"],
+                    "raw_sha256": item["raw_sha256"],
+                    "semantic_json_sha256": item["semantic_json_sha256"],
+                }
+                for item in sorted(manifest["files"], key=lambda value: value["filename"])
+            ],
+        }
+        parse_restore_guard_precondition(restore_precondition)
+        return proposed, exact_serialized, restore_precondition
 
     def read_restore_proposal(self, transaction_id: str) -> dict[str, object]:
-        proposed, _exact = self._restore_inputs(transaction_id)
+        proposed, _exact, _precondition = self._restore_inputs(transaction_id)
         return copy.deepcopy(proposed)
+
+    def read_restore_preview(
+        self, transaction_id: str
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        proposed, _exact, precondition = self._restore_inputs(transaction_id)
+        return copy.deepcopy(proposed), copy.deepcopy(precondition)
 
     def restore_transaction(
         self,
@@ -2131,7 +2178,21 @@ class ConfigurationTransactionService:
         transaction_id = _canonical_uuid(transaction_id, "restore transaction_id")
         if machine_id_confirmation != self.identity.machine_id:
             raise ConfigurationValidationError("Exact machine ID confirmation is required.")
-        proposed, exact_serialized = self._restore_inputs(transaction_id)
+        proposed, exact_serialized, restore_precondition = self._restore_inputs(transaction_id)
+        if guard_evidence is not None:
+            try:
+                parsed_guard = parse_guard_assessment(guard_evidence)
+                preview_precondition = parse_restore_guard_precondition(
+                    parsed_guard["preconditions"].get("restore")
+                )
+            except ConfigurationSafetyError as exc:
+                raise ConfigurationValidationError(
+                    f"Restore guard evidence is invalid: {exc}"
+                ) from exc
+            if preview_precondition != restore_precondition:
+                raise ConfigurationConflictError(
+                    "The selected backup differs from the verified restore preview."
+                )
         return self._commit_documents(
             proposed,
             operator=operator,

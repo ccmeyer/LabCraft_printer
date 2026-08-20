@@ -1,0 +1,37 @@
+{
+  "channel": "release_candidate",
+  "machine_data": {
+    "data_schema_version": 1,
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "transition": "none",
+    "transition_id": null
+  },
+  "notes": [
+    "Corrects guarded exact-backup restore so a verified backup may remove locations or plate calibrations added by the transaction being undone; governed imports continue to reject coordinate deletion.",
+    "Binds the review and commit to the immutable source event, active machine identity, backup manifest SHA-256, evidence fingerprint, and exact backup-member hashes, and reopens that evidence before commit.",
+    "Makes restore removals explicit in the review window and keeps every changed restored target revoked pending separate exact-value verification.",
+    "Retains checkout-independent machine data, immutable configuration history, guarded location changes, verified pre-update backups, exact protected-byte checks, deployment anchors, and receipt-gated relaunch from rc.3.",
+    "The bundled firmware artifact is byte-identical to v1.3.0-rc.3, v1.3.0-rc.2, and v1.3.0-rc.1 (SHA-256 EDA070CE734D5167F0795FAF30DF461C8A07341E09CA698DE9D850315B0D5884). Direct v1.2.0-rc.6/v1.2.0 upgrades still require deployment; v1.3.0-rc.1/rc.2/rc.3 machines require verified matching provenance or redeployment."
+  ],
+  "previous_version": "v1.3.0-rc.3",
+  "release_date": "2026-08-20",
+  "requires_firmware": {
+    "artifact": "firmware/artifacts/LabCraft_firmware.bin",
+    "note": "Use the v1.3 firmware artifact bundled with this release. It is byte-identical to v1.3.0-rc.3, v1.3.0-rc.2, and v1.3.0-rc.1; direct v1.2.0-rc.6/v1.2.0 upgrades still require deployment, while v1.3.0-rc.1/rc.2/rc.3 upgrades require verified matching provenance or redeployment."
+  },
+  "rollback_version": "v1.2.0",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Corrected release candidate for verified exact-backup restore of added targets.",
+  "tag": "v1.3.0-rc.4",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q",
+    ".\\env\\Scripts\\python.exe tools\\validate_release_metadata.py",
+    ".\\env\\Scripts\\python.exe -m pytest -q tests\\test_configuration_guarded_workflows.py tests\\test_configuration_change_preview.py tests\\test_machine_data_transactions.py",
+    ".\\env\\Scripts\\python.exe tools\\run_virtual_workflow.py --scenario virtual_print_array_96_v1 --warmup-runs 0 --measured-runs 1 --host-label windows-m7-rc4-candidate --output-root <external-output-root>",
+    "Target-Pi disposable SSH qualification: add/revoke/exact-restore, immutable source-event and manifest binding, tamper rejection, exact original bytes, no pending transaction, and contained hardware-disabled SIL",
+    "Attended LC-001 rc.3-to-rc.4 protected update and exact restore of the disposable qualification target with no motion and unchanged Camera evidence",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.3.0-rc.4"
+}

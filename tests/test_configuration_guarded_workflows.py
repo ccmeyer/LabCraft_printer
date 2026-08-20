@@ -1,11 +1,17 @@
 import copy
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from Controller import Controller
-from MachineDataTransactions import ConfigurationValidationError, read_governed_documents
+from MachineDataTransactions import (
+    ConfigurationConflictError,
+    ConfigurationRecoveryRequired,
+    ConfigurationValidationError,
+    read_governed_documents,
+)
 from tests.test_machine_data_transactions import _active_context
 
 
@@ -75,6 +81,7 @@ def test_coordinate_import_and_exact_restore_require_and_preserve_guard_evidence
         before = read_governed_documents(context.paths)
         imported = copy.deepcopy(before["Locations.json"])
         imported["camera"]["Y"] += 40
+        imported["qualification-unverified"] = copy.deepcopy(imported["camera"])
         state = service.refresh(allow_pending=False)
         import_assessment = context.configuration_safety_guard.assess(
             before_documents=before,
@@ -94,24 +101,35 @@ def test_coordinate_import_and_exact_restore_require_and_preserve_guard_evidence
             guard_evidence=import_assessment,
         )
 
-        current = read_governed_documents(context.paths)
-        restore_proposal = service.read_restore_proposal(imported_result.transaction_id)
-        restore_state = service.refresh(allow_pending=False)
-        restore_assessment = context.configuration_safety_guard.assess(
-            before_documents=current,
-            proposed_documents=restore_proposal,
-            workflow="configuration_restore",
-            target_keys=("Locations.json",),
-            hardware_profile="current",
-            governed_file_sha256=restore_state.config_sha256,
-        )
-        restored = service.restore_transaction(
+        controller = Controller.__new__(Controller)
+        controller.configuration_transactions = service
+        controller.configuration_safety_guard = context.configuration_safety_guard
+        controller.profile = SimpleNamespace(name="current")
+        controller.error_occurred_signal = _Signal()
+        controller._configuration_capture_evidence = {}
+        controller._install_committed_configuration = lambda result: True
+        restore_proposal = controller.prepare_configuration_restore(
             imported_result.transaction_id,
+            machine_id_confirmation=context.identity.machine_id,
+        )
+        restore_assessment = restore_proposal["assessment"]
+        restore_precondition = restore_assessment["preconditions"]["restore"]
+        removed = next(
+            change
+            for change in restore_assessment["changes"]
+            if change["target_key"] == "qualification-unverified"
+        )
+        assert removed["proposed"] is None
+        assert restore_assessment["result"] == "strong_confirmation"
+        restored = controller.commit_guarded_configuration_proposal(
+            restore_proposal,
             operator="Alice",
             reason="exact guarded restore",
-            machine_id_confirmation=context.identity.machine_id,
-            expected_config_sha256=restore_state.config_sha256,
-            guard_evidence=restore_assessment,
+            confirmation={
+                "proposal_sha256": restore_assessment["proposal_sha256"],
+                "acknowledged": True,
+                "typed_phrase": restore_assessment["required_confirmation_phrase"],
+            },
         )
 
         assert (context.paths.config_root / "Locations.json").read_bytes() == original_bytes
@@ -120,6 +138,174 @@ def test_coordinate_import_and_exact_restore_require_and_preserve_guard_evidence
         )
         assert restore_event["workflow"] == "configuration_restore"
         assert restore_event["changes"][-1]["guard_assessment"]["result"] == "strong_confirmation"
+        assert (
+            restore_event["changes"][-1]["guard_assessment"]["preconditions"]["restore"]
+            == restore_precondition
+        )
+    finally:
+        context.close()
+
+
+def test_import_deletion_remains_rejected_and_restore_requires_bound_backup(tmp_path):
+    _base, context = _active_context(tmp_path)
+    try:
+        service = context.configuration_transactions
+        service.require_configuration_guard_evidence = True
+        before = read_governed_documents(context.paths)
+        deleting_import = copy.deepcopy(before["Locations.json"])
+        deleting_import.pop("camera")
+        state = service.refresh(allow_pending=False)
+
+        import_assessment = context.configuration_safety_guard.assess(
+            before_documents=before,
+            proposed_documents={"Locations.json": deleting_import},
+            workflow="governed_configuration_import",
+            target_keys=("Locations.json",),
+            hardware_profile="current",
+            governed_file_sha256=state.config_sha256,
+        )
+        assert import_assessment["result"] == "reject"
+        assert "Coordinate import cannot remove saved locations: camera" in next(
+            check["message"]
+            for check in import_assessment["hard_checks"]
+            if check["passed"] is False
+        )
+
+        missing_evidence = context.configuration_safety_guard.assess(
+            before_documents=before,
+            proposed_documents={"Locations.json": deleting_import},
+            workflow="configuration_restore",
+            target_keys=("Locations.json",),
+            hardware_profile="current",
+            governed_file_sha256=state.config_sha256,
+        )
+        assert missing_evidence["result"] == "reject"
+        assert "lacks verified backup evidence" in next(
+            check["message"]
+            for check in missing_evidence["hard_checks"]
+            if check["passed"] is False
+        )
+    finally:
+        context.close()
+
+
+def test_restore_commit_rejects_preview_bound_to_different_manifest(tmp_path):
+    _base, context = _active_context(tmp_path)
+    try:
+        service = context.configuration_transactions
+        service.require_configuration_guard_evidence = True
+        original = read_governed_documents(context.paths)
+        changed = copy.deepcopy(original["Locations.json"])
+        changed["camera"]["Y"] += 40
+        state = service.refresh(allow_pending=False)
+        change_assessment = context.configuration_safety_guard.assess(
+            before_documents=original,
+            proposed_documents={"Locations.json": changed},
+            workflow="governed_configuration_import",
+            target_keys=("Locations.json",),
+            hardware_profile="current",
+            governed_file_sha256=state.config_sha256,
+        )
+        changed_result = service.commit_documents(
+            {"Locations.json": changed},
+            operator="Alice",
+            reason="create restore source",
+            workflow="governed_configuration_import",
+            event_type="import",
+            expected_config_sha256=state.config_sha256,
+            guard_evidence=change_assessment,
+        )
+        proposed, restore_precondition = service.read_restore_preview(
+            changed_result.transaction_id
+        )
+        forged_precondition = copy.deepcopy(restore_precondition)
+        forged_precondition["backup_manifest"]["raw_sha256"] = "0" * 64
+        restore_state = service.refresh(allow_pending=False)
+        forged_assessment = context.configuration_safety_guard.assess(
+            before_documents=read_governed_documents(context.paths),
+            proposed_documents=proposed,
+            workflow="configuration_restore",
+            target_keys=("Locations.json",),
+            hardware_profile="current",
+            preconditions={"captures": [], "restore": forged_precondition},
+            governed_file_sha256=restore_state.config_sha256,
+        )
+        assert forged_assessment["result"] == "strong_confirmation"
+
+        with pytest.raises(
+            ConfigurationConflictError,
+            match="selected backup differs from the verified restore preview",
+        ):
+            service.restore_transaction(
+                changed_result.transaction_id,
+                operator="Alice",
+                reason="must reject forged manifest binding",
+                machine_id_confirmation=context.identity.machine_id,
+                expected_config_sha256=restore_state.config_sha256,
+                guard_evidence=forged_assessment,
+            )
+        assert service.refresh(allow_pending=False).sequence == 1
+    finally:
+        context.close()
+
+
+def test_restore_commit_reopens_and_rejects_tampered_backup_after_preview(tmp_path):
+    _base, context = _active_context(tmp_path)
+    try:
+        service = context.configuration_transactions
+        service.require_configuration_guard_evidence = True
+        before = read_governed_documents(context.paths)
+        changed = copy.deepcopy(before["Locations.json"])
+        changed["camera"]["Y"] += 41
+        state = service.refresh(allow_pending=False)
+        change_assessment = context.configuration_safety_guard.assess(
+            before_documents=before,
+            proposed_documents={"Locations.json": changed},
+            workflow="governed_configuration_import",
+            target_keys=("Locations.json",),
+            hardware_profile="current",
+            governed_file_sha256=state.config_sha256,
+        )
+        changed_result = service.commit_documents(
+            {"Locations.json": changed},
+            operator="Alice",
+            reason="create tamper restore source",
+            workflow="governed_configuration_import",
+            event_type="import",
+            expected_config_sha256=state.config_sha256,
+            guard_evidence=change_assessment,
+        )
+        proposed, restore_precondition = service.read_restore_preview(
+            changed_result.transaction_id
+        )
+        restore_state = service.refresh(allow_pending=False)
+        restore_assessment = context.configuration_safety_guard.assess(
+            before_documents=read_governed_documents(context.paths),
+            proposed_documents=proposed,
+            workflow="configuration_restore",
+            target_keys=("Locations.json",),
+            hardware_profile="current",
+            preconditions={"captures": [], "restore": restore_precondition},
+            governed_file_sha256=restore_state.config_sha256,
+        )
+        current_bytes = (context.paths.config_root / "Locations.json").read_bytes()
+        manifest_path = (
+            context.paths.configuration_backups_root
+            / changed_result.transaction_id
+            / "manifest.json"
+        )
+        manifest_path.write_bytes(manifest_path.read_bytes() + b" ")
+
+        with pytest.raises(ConfigurationRecoveryRequired, match="hash differs from event"):
+            service.restore_transaction(
+                changed_result.transaction_id,
+                operator="Alice",
+                reason="must reject backup changed after preview",
+                machine_id_confirmation=context.identity.machine_id,
+                expected_config_sha256=restore_state.config_sha256,
+                guard_evidence=restore_assessment,
+            )
+        assert (context.paths.config_root / "Locations.json").read_bytes() == current_bytes
     finally:
         context.close()
 

@@ -33,6 +33,30 @@ protected by the Milestone 0 off-device copy and the M2/M3 first-start
 migration. The first valid rc.2 start creates the one permitted genesis
 deployment anchor. Every later update requires M6 evidence.
 
+## Exact configuration restore after rc.4
+
+Use **Configuration History -> Restore Selected Backup** only for the event
+whose exact pre-change files are intended. Enter the exact machine ID, then
+review the verified source transaction and manifest shown in the preview. A
+location or plate calibration that was added by the selected transaction is
+shown as **removed by exact backup**. Do not substitute an exported/imported
+file to obtain deletion behavior; governed imports intentionally reject
+coordinate removal.
+
+The accepted restore reopens the immutable source event, manifest, and every
+backup member. It requires the transaction, active machine/activation,
+manifest SHA-256, evidence fingerprint, member raw and semantic hashes,
+proposal, policy, and current governed-file hashes to match the preview.
+Changed restored targets remain revoked pending separate audited exact-value
+verification. A target removed by the backup is absent and cannot be selected
+for saved-target motion.
+
+Stop without manual editing if the preview says the source event is missing or
+ambiguous, backup evidence differs, the configuration changed after preview,
+or the restore is rejected. Preserve the event, backup directory, current
+configuration, and error text for support. Rc.3 cannot restore a backup that
+must remove an added target; update through the protected rc.4 path first.
+
 ## Enrolled rc.2 source-binding recovery
 
 The immutable rc.2 release emits a 12-character source commit while its
@@ -158,7 +182,7 @@ pointer, coordinates, obstacles, hardware profile, target values, and target
 authorization. An unknown adapter or any semantic drift remains
 `recovery_required`.
 
-The rc.2 and rc.3 releases declare `transition: none`.
+The rc.2, rc.3, and rc.4 releases declare `transition: none`.
 
 ## Legacy rollback
 

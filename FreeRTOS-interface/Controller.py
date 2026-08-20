@@ -6620,11 +6620,22 @@ class Controller(QObject):
             raise ConfigurationSafetyError("Captured points do not share one motion trust epoch.")
         return evidence
 
-    def _prepare_guarded_proposal(self, proposed, *, workflow, target_keys, captures):
+    def _prepare_guarded_proposal(
+        self,
+        proposed,
+        *,
+        workflow,
+        target_keys,
+        captures,
+        restore_precondition=None,
+    ):
         guard, before, raw_hashes = self._governed_proposal_inputs()
         if guard is None:
             return None
         profile = before["Settings.json"].get("HARDWARE_PROFILE", self.profile.name)
+        preconditions = {"captures": copy.deepcopy(captures)}
+        if restore_precondition is not None:
+            preconditions["restore"] = copy.deepcopy(restore_precondition)
         try:
             assessment = guard.assess(
                 before_documents=before,
@@ -6632,7 +6643,7 @@ class Controller(QObject):
                 workflow=workflow,
                 target_keys=target_keys,
                 hardware_profile=profile,
-                preconditions={"captures": copy.deepcopy(captures)},
+                preconditions=preconditions,
                 governed_file_sha256=raw_hashes,
             )
         except ConfigurationSafetyError as exc:
@@ -6734,7 +6745,7 @@ class Controller(QObject):
             self.error_occurred_signal.emit("Configuration Restore Failed", "Exact machine ID confirmation is required.")
             return False
         try:
-            proposed = service.read_restore_proposal(transaction_id)
+            proposed, restore_precondition = service.read_restore_preview(transaction_id)
         except ConfigurationTransactionError as exc:
             self.error_occurred_signal.emit("Configuration Restore Failed", str(exc))
             return False
@@ -6745,6 +6756,7 @@ class Controller(QObject):
             workflow="configuration_restore",
             target_keys=tuple(sorted(proposed)),
             captures=[],
+            restore_precondition=restore_precondition,
         )
         if prepared:
             prepared.update(

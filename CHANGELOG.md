@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.3.0-rc.4 - 2026-08-20
+
+### Fixed
+
+- Fixed guarded exact-backup restore so it can remove a location or plate calibration that was added by the transaction being undone; ordinary governed imports still cannot remove saved coordinates.
+- Bound every restore preview to the source transaction, active machine identity, immutable source-event manifest hash, backup fingerprint, and exact member hashes, and revalidate that binding immediately before commit.
+- Restores now fail closed if the source event is missing or ambiguous, the backup changed after its original event or after preview, the active machine identity differs, or the configuration changed while the review window was open.
+- Clarified the restore review window by displaying the verified transaction and manifest, marking removals explicitly, and naming the exact-backup/revocation consequence on the action button.
+
+### Safety and compatibility
+
+- The correction changes no firmware, device protocol, motion, pressure, coordinate, obstacle, or timing behavior. Changed restored targets remain revoked until separately verified, and the current no-command authorization gate remains in force.
+- `v1.3.0-rc.3` remains immutable. This release preserves its external machine-data, audit history, guarded-change, protected-update, and rollback contracts and is intended to repair the attended restore failure without manual configuration editing.
+
 ## v1.3.0-rc.3 - 2026-08-20
 
 ### Fixed

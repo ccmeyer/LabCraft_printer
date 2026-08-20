@@ -4,10 +4,10 @@ Status: `in_progress`
 
 Prepared: 2026-08-19
 
-Current target release: `v1.3.0-rc.3`
+Current target release: `v1.3.0-rc.4`
 
-Milestone 7 rc.3 correction plan:
-[Protected-Update Correction Plan](machine_data_migration_milestone_7_rc3_correction_plan.md)
+Milestone 7 rc.4 correction plan:
+[Exact-Restore Correction Plan](machine_data_migration_milestone_7_rc4_correction_plan.md)
 
 ## Purpose
 
@@ -62,11 +62,11 @@ For every milestone update:
 | 4 | Add transactional configuration history | `verified` | Implementation `6925d029`; exact-restore correction `f6d65fd9` | 5,363 full-suite tests, contained 96-well SIL, and fresh target-Pi no-hardware qualification passed |
 | 5 | Add guarded location and calibration changes | `verified` | Commit `8b50872d` | 5,377 full-suite tests; clean target-Pi guarded transaction/reopen gate; 168 focused Pi tests; two 96/96 contained/traced SIL journeys; exact baseline-byte restoration; sealed evidence passed |
 | 6 | Protect future updates and controlled rollback | `verified` | Implementation `9e666291`; verification record `0ee3e50a` | 5,402 full-suite tests; clean target-Pi real-Git online/offline preservation, legacy profile/export/return focused tests, contained SIL, and sealed evidence passed |
-| 7 | Qualify, release, and stage deployment | `in_progress` | rc.2 is immutable at `d59f73be`; attended update exposed a fail-safe source-binding defect; rc.3 correction and recovery plan is in progress | rc.2 Windows/Pi and first-start gates passed; failed update changed neither Git nor protected data; rc.3 exact-candidate/Pi/tag/attended/rollout gates pending |
+| 7 | Qualify, release, and stage deployment | `in_progress` | rc.2 and rc.3 are immutable; rc.3 corrected the protected update and enrolled LC-001; attended exact restore exposed a safe restore-only deletion defect; rc.4 correction is in progress | rc.3 protected update/reopen and no-command revocation passed; failed restore changed no configuration; rc.4 exact-candidate/Pi/tag/attended/rollout gates pending |
 
-The immutable local `v1.3.0-rc.2` tag records its qualified historical
-candidate and must not be moved, deleted, or retargeted. Do not create or
-publish `v1.3.0-rc.3` until its correction gates pass. A release decision may
+The immutable `v1.3.0-rc.2` and `v1.3.0-rc.3` tags record their qualified
+historical candidates and must not be moved, deleted, or retargeted. Do not
+create or publish `v1.3.0-rc.4` until its correction gates pass. A release decision may
 defer a documented non-safety-critical item, but the fixed safety invariants
 below cannot be deferred.
 
@@ -2142,6 +2142,8 @@ Hardware use is last. It requires:
 | 2026-08-20 | M5 implementation | The existing obstacle list remains empty, but `override=True` previously bypassed both obstacles and global bounds | Enforce global endpoint bounds before every absolute/relative queue mutation; retain override only for existing route/exclusion behavior |
 | 2026-08-20 | M5 Pi qualification | Importing `Controller.py` loads pyserial support modules even when no port is opened | Treat import-only modules separately from traced device access; retain the independent Pi hardware-isolation proof as the zero-access gate |
 | 2026-08-20 | M5 Pi qualification | Simulated Pi status delivery at 100 ms stayed well inside the 2,500 ms freshness ceiling, while 2,501 ms rejected all axes | Retain 2,500 ms for rc.2 without connecting hardware solely to tune a software timeout |
+| 2026-08-20 | M7 attended rc.3 | A verified exact restore of a transaction that added a location was rejected because import and restore shared one blanket deletion prohibition | Keep import deletion prohibited; permit removal only for a restore bound to the immutable source event, active machine, manifest, fingerprint, and exact member hashes in rc.4 |
+| 2026-08-20 | M7 rc.4 implementation | Restore loading recomputed the current manifest hash instead of retrieving the hash sealed in the source event | Resolve exactly one immutable source event and use its manifest reference so pre-preview or post-preview backup changes fail closed |
 
 Add findings here as work proceeds. Do not rewrite prior findings to hide an
 earlier assumption; add a correction with date and evidence.
@@ -2174,6 +2176,7 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-20 | 6 | Milestone 6 verified at implementation commit `9e666291` | Clean target-Pi qualification: copied M5 sequence-zero baseline; detached external-store reopen; real-Git online/offline exact-byte preservation and receipts; 331 focused; hardware-disabled SIL 96/96; sealed archive SHA-256 `25a8b06...d7a8` | Create the concrete Milestone 7 release and staged-deployment plan |
 | 2026-08-20 | 7 | Concrete qualification, release, and staged-deployment plan created | `docs/machine_data_migration_milestone_7_implementation_plan.md`; eight slices; Windows and SSH/Pi gates; attended Camera/HIL; local-tag updater/rollback; staged cohort rollout | Complete Slice 0 traceability and private operator/cohort/Camera-route records before editing release metadata |
 | 2026-08-20 | 7 | Candidate implementation started | Direct software coverage mapped; clean LC-001 rc.1 backup/live evidence inspected read-only over SSH; untagged rc.2 metadata and completion record prepared; no runtime/firmware/tag change | Run focused metadata/static/SIL gates, then the complete Windows suite before freezing a candidate commit |
+| 2026-08-20 | 7 | Rc.3 update/reopen and guarded no-command gates passed; exact restore exposed a safe deletion defect; rc.4 corrective implementation completed locally | Failure left the disposable target revoked with no config mutation/pending transaction; sealed evidence `36100C35...A673E435`; rc.4 gates: 59 narrow, 336 broader, 5,434 full/156 skipped, SIL 96/96, release/static/firmware checks | Freeze one rc.4 commit, rerun the clean-commit SIL, then run disposable Pi exact-restore and contained-SIL qualification |
 
 ## Definition of done for v1.3.0-rc.2
 
@@ -2206,6 +2209,7 @@ The work is complete only when:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Advanced the target to rc.4 after successful rc.3 update/reopen and safe discovery of the exact-restore deletion defect; linked the source-event/backup-bound correction plan and recorded initial implementation evidence. |
 | 2026-08-20 | Recorded exact rc.3 candidate `d965927e`, passing final Windows and disposable-Pi focused/SIL/real-Git recovery gates, matching evidence archives, and unchanged production; retained local-tag and attended-recovery authorization gates. |
 | 2026-08-20 | Preserved immutable rc.2 after its enrolled update failed safely on short-versus-full source commit identity; advanced the Milestone 7 target to rc.3 and linked the concrete correction/recovery plan. |
 | 2026-08-19 | Created the living Milestones 0-7 migration, audit, safety, updater, rollback, qualification, and rollout plan for `v1.3.0-rc.2`. |
