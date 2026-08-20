@@ -16567,6 +16567,38 @@ class ExperimentDesignDialog(QDialog):
                 QMessageBox.warning(self, "Rename failed",
                                     f"A folder named '{name}' already exists. Keeping the current folder.")
 
+    def _confirm_resume_ready_new_experiment(self) -> bool:
+        """Confirm detaching a safely paused execution before starting fresh."""
+        controller = getattr(getattr(self, "main_window", None), "controller", None)
+        state_getter = getattr(controller, "get_array_run_state", None)
+        if not callable(state_getter):
+            return True
+        try:
+            array_state = str(state_getter() or "idle")
+        except Exception:
+            return True
+        if array_state != "resume_ready":
+            return True
+
+        prompt = QMessageBox(self)
+        prompt.setWindowTitle("Start New Experiment?")
+        prompt.setIcon(QMessageBox.Warning)
+        prompt.setText(
+            "This experiment has unfinished printing progress."
+        )
+        prompt.setInformativeText(
+            "Starting a new experiment will detach it from the printer. Its saved "
+            "files and progress will not be deleted and can be loaded again."
+        )
+        start_button = prompt.addButton(
+            "Start New Experiment", QMessageBox.DestructiveRole
+        )
+        cancel_button = prompt.addButton("Cancel", QMessageBox.RejectRole)
+        prompt.setDefaultButton(cancel_button)
+        prompt.setEscapeButton(cancel_button)
+        prompt.exec()
+        return prompt.clickedButton() is start_button
+
     def _on_new_experiment(self):
         """
         Reset the experiment to a fresh state (like app launch):
@@ -16576,6 +16608,8 @@ class ExperimentDesignDialog(QDialog):
         - Refresh UI
         """
         if not self._confirm_unsaved_changes("starting a new experiment"):
+            return False
+        if not self._confirm_resume_ready_new_experiment():
             return False
         self._set_tip("")
         main_window = getattr(self, "main_window", None)

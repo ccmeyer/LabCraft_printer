@@ -1194,6 +1194,10 @@ class _UnsavedPromptFake:
     def clickedButton(self):
         return self.clicked_button
 
+    @staticmethod
+    def warning(*_args, **_kwargs):
+        return None
+
 
 @pytest.mark.parametrize(
     ("choice", "save_result", "expected", "expected_save_calls"),
@@ -1243,6 +1247,99 @@ def test_new_experiment_is_cancelled_before_replacing_an_unsaved_draft(qapp):
         "starting a new experiment"
     )
     dialog.main_window.start_new_experiment_session.assert_not_called()
+
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
+def test_new_experiment_cancelled_from_resume_ready_preserves_current_session(
+    monkeypatch,
+    qapp,
+):
+    dialog = _build_real_dialog()
+    _seed_new_experiment_origin(
+        dialog,
+        upload_mode="explicit_wells",
+        lifecycle="partial",
+    )
+    dialog._confirm_unsaved_changes = Mock(return_value=True)
+    dialog.main_window.controller = SimpleNamespace(
+        get_array_run_state=Mock(return_value="resume_ready")
+    )
+    dialog.main_window.start_new_experiment_session = Mock()
+    _UnsavedPromptFake.choice = "Cancel"
+    monkeypatch.setattr(view_module, "QMessageBox", _UnsavedPromptFake)
+
+    assert dialog._on_new_experiment() is False
+
+    dialog.main_window.start_new_experiment_session.assert_not_called()
+    assert dialog.model.has_uploaded_design() is True
+    assert dialog.model.progress_data
+    assert dialog._progress_protected is True
+    prompt = _UnsavedPromptFake.last_instance
+    assert prompt.title == "Start New Experiment?"
+    assert "will not be deleted" in prompt.informative_text
+    assert prompt.default_button is prompt.buttons["Cancel"]
+    assert prompt.escape_button is prompt.buttons["Cancel"]
+
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
+def test_new_experiment_accepts_resume_ready_detach_before_fresh_reset(
+    monkeypatch,
+    qapp,
+    tmp_path,
+):
+    dialog = _build_real_dialog()
+    _seed_new_experiment_origin(
+        dialog,
+        upload_mode="automatic_wells",
+        lifecycle="partial",
+    )
+    dialog._confirm_unsaved_changes = Mock(return_value=True)
+    dialog.main_window.controller = SimpleNamespace(
+        get_array_run_state=Mock(return_value="resume_ready")
+    )
+    start_new_session = _install_successful_new_session_handler(dialog, tmp_path)
+    _UnsavedPromptFake.choice = "Start New Experiment"
+    monkeypatch.setattr(view_module, "QMessageBox", _UnsavedPromptFake)
+
+    assert dialog._on_new_experiment() is True
+
+    start_new_session.assert_called_once_with()
+    assert dialog.model.has_uploaded_design() is False
+    assert dialog.model.progress_data == {}
+    assert dialog._progress_protected is False
+    assert dialog.add_reagent_btn.isEnabled() is True
+    assert dialog.status_lbl.text().startswith("New experiment created:")
+
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
+@pytest.mark.parametrize("lifecycle", ["editable", "completed"])
+def test_idle_new_experiment_does_not_show_resume_detach_prompt(
+    monkeypatch,
+    qapp,
+    lifecycle,
+):
+    dialog = _build_real_dialog()
+    _seed_new_experiment_origin(
+        dialog,
+        upload_mode=None,
+        lifecycle=lifecycle,
+    )
+    dialog.main_window.controller = SimpleNamespace(
+        get_array_run_state=Mock(return_value="idle")
+    )
+
+    def unexpected_prompt(*_args, **_kwargs):
+        raise AssertionError("idle experiments must not show the resume prompt")
+
+    monkeypatch.setattr(view_module, "QMessageBox", unexpected_prompt)
+
+    assert dialog._confirm_resume_ready_new_experiment() is True
 
     dialog._allow_close_without_prompt = True
     dialog.close()
@@ -1359,9 +1456,13 @@ def test_new_experiment_backend_failure_preserves_prior_editor_state(
     dialog.main_window.start_new_experiment_session = Mock(
         side_effect=RuntimeError("new session failed")
     )
+    dialog.main_window.controller = SimpleNamespace(
+        get_array_run_state=Mock(return_value="resume_ready")
+    )
+    _UnsavedPromptFake.choice = "Start New Experiment"
+    monkeypatch.setattr(view_module, "QMessageBox", _UnsavedPromptFake)
     refresh_locks = Mock()
     dialog._refresh_all_lock_states = refresh_locks
-    monkeypatch.setattr(QMessageBox, "warning", lambda *_args, **_kwargs: None)
 
     assert dialog._on_new_experiment() is None
 

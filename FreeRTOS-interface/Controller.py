@@ -4302,11 +4302,19 @@ class Controller(QObject):
             return result
 
     def start_new_experiment_session(self, *, base_dir=None):
-        return self.model.start_new_experiment_session(
-            array_runner_idle=self.get_array_run_state() == "idle",
+        array_state = self.get_array_run_state()
+        array_runner_idle = (
+            array_state in {"idle", "resume_ready"}
+            and not bool(getattr(self, "_soft_stop_clear_uncertain", False))
+        )
+        experiment_path = self.model.start_new_experiment_session(
+            array_runner_idle=array_runner_idle,
             command_queue_empty=bool(self.check_if_all_completed()),
             base_dir=base_dir,
         )
+        self._array_context = None
+        self._set_array_run_state("idle")
+        return experiment_path
 
     def _emit_optional(self, signal_name, *args):
         signal = getattr(self, signal_name, None)

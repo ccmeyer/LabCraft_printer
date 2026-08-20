@@ -7550,6 +7550,96 @@ class ExperimentModel(QObject):
             if hasattr(self._calibration_manager, "begin_session"):
                 self._calibration_manager.begin_session(self.calibration_file_path)
 
+    def _reserve_new_experiment_directory(
+        self,
+        base_dir: Optional[str] = None,
+    ) -> tuple[Path, Path]:
+        """Atomically reserve a collision-free directory for a fresh session."""
+        root = (
+            Path(base_dir).expanduser().resolve()
+            if base_dir is not None
+            else Path(self.experiments_root).expanduser().resolve()
+        )
+        root.mkdir(parents=True, exist_ok=True)
+
+        base_name = self.sanitize_experiment_name(
+            self.metadata.get("name"),
+            fallback="Untitled-" + time.strftime("%Y%m%d_%H%M%S"),
+        )
+        suffix = 1
+        while True:
+            name = base_name if suffix == 1 else f"{base_name}-{suffix}"
+            destination = root / name
+            try:
+                destination.mkdir(exist_ok=False)
+            except FileExistsError:
+                suffix += 1
+                continue
+            return root, destination
+
+    def _validate_new_experiment_session_files(self) -> None:
+        """Validate the two seed files required by a fresh editor session."""
+        with open(self.experiment_file_path, "r", encoding="utf-8") as handle:
+            design = json.load(handle)
+        with open(self.progress_file_path, "r", encoding="utf-8") as handle:
+            progress = json.load(handle)
+
+        if not isinstance(design, dict):
+            raise RuntimeError("The new experiment design file must contain an object.")
+        metadata = design.get("metadata")
+        expected_name = Path(self.experiment_dir_path).name
+        if not isinstance(metadata, dict) or metadata.get("name") != expected_name:
+            raise RuntimeError(
+                "The new experiment design name does not match its folder."
+            )
+        if progress != {}:
+            raise RuntimeError("The new experiment progress file must be empty.")
+
+    @staticmethod
+    def _remove_failed_new_experiment_directory(
+        destination: Path,
+        root: Path,
+    ) -> None:
+        """Remove only the directory exclusively reserved by this creation attempt."""
+        resolved_root = root.resolve()
+        resolved_destination = destination.resolve()
+        if resolved_destination.parent != resolved_root:
+            raise RuntimeError(
+                "Refusing to clean up a new-experiment folder outside its root."
+            )
+        shutil.rmtree(resolved_destination)
+
+    def initialize_new_experiment_session(
+        self,
+        base_dir: Optional[str] = None,
+    ) -> str:
+        """Create and validate a collision-free fresh session on a detached model."""
+        if self._calibration_manager is not None:
+            raise RuntimeError(
+                "A fresh experiment candidate must not use the live calibration manager."
+            )
+
+        root, destination = self._reserve_new_experiment_directory(base_dir)
+        self.metadata["name"] = destination.name
+        self.experiment_dir_path = str(destination)
+        self.update_all_paths()
+
+        try:
+            self.save_experiment()
+            self.create_progress_file()
+            self._validate_new_experiment_session_files()
+        except Exception as creation_error:
+            try:
+                self._remove_failed_new_experiment_directory(destination, root)
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "New experiment creation failed and its incomplete folder could "
+                    f"not be removed: {destination}. Cleanup error: {cleanup_error}"
+                ) from creation_error
+            raise
+
+        return str(destination)
+
     def update_all_paths(self):
         """Update file paths based on current experiment_dir_path."""
         import os
@@ -17153,12 +17243,43 @@ class Model(QObject):
             raise RuntimeError("A new experiment cannot start while commands are queued.")
         if self.rack_model.get_gripper_printer_head() is not None:
             raise RuntimeError("Remove the printer head from the gripper before starting a new experiment.")
-        self._clear_runtime_experiment_without_signal()
-        self.experiment_model.reset_experiment_model()
-        self.experiment_model.set_calibration_manager(self.calibration_manager)
-        self.experiment_model.initialize_experiment(base_dir=base_dir)
+
+        active_experiment = self.experiment_model
+        fresh_experiment = ExperimentModel(
+            prof=getattr(self, "profile", None),
+            experiments_root=getattr(
+                active_experiment,
+                "experiments_root",
+                getattr(self, "experiments_root", None),
+            ),
+        )
+        new_experiment_path = fresh_experiment.initialize_new_experiment_session(
+            base_dir=base_dir
+        )
+
+        try:
+            self._clear_runtime_experiment_without_signal()
+        except Exception:
+            destination = Path(new_experiment_path).resolve()
+            fresh_experiment._remove_failed_new_experiment_directory(
+                destination,
+                destination.parent,
+            )
+            raise
+
+        active_experiment.reset_experiment_model()
+        active_experiment.metadata = copy.deepcopy(fresh_experiment.metadata)
+        active_experiment.experiment_dir_path = new_experiment_path
+        active_experiment.update_all_paths()
+        active_experiment.progress_data = {}
+        active_experiment.unsaved_changes = False
+        active_experiment.set_calibration_manager(self.calibration_manager)
+        if hasattr(self.calibration_manager, "begin_session"):
+            self.calibration_manager.begin_session(
+                active_experiment.calibration_file_path
+            )
         self.experiment_loaded.emit()
-        return str(self.experiment_model.experiment_dir_path)
+        return new_experiment_path
 
     def _default_rack_stock_ids_for_execution(self, plan) -> tuple[str, ...]:
         """Return the stock order produced by normal experiment finalization."""
