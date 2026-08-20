@@ -16269,7 +16269,7 @@ class ExperimentDesignDialog(QDialog):
         )
         self._update_well_selection_summary()
     
-    def _sync_controls_from_model(self):
+    def _sync_controls_from_model(self, *, recompute: bool = True):
         md = self.model.metadata
 
         blockers = []
@@ -16342,7 +16342,8 @@ class ExperimentDesignDialog(QDialog):
                 if idx >= 0:
                     self.plate_format_combo.setCurrentIndex(idx)
 
-        self._recompute_silent()
+        if recompute:
+            self._recompute_silent()
         self._update_well_selection_summary()
         self._apply_manual_assignment_lock_state()
         self._refresh_conditional_design_option_states()
@@ -16436,8 +16437,19 @@ class ExperimentDesignDialog(QDialog):
                 self._set_status(f"New experiment failed (fallback): {e}", severity="error")
                 return
 
+        timer = getattr(self, "_auto_timer", None)
+        if timer is not None:
+            timer.stop()
+
+        self._uploaded_design_active = bool(self.model.has_uploaded_design())
+        self._uploaded_design_path = getattr(
+            self.model, "_uploaded_design_source", None
+        )
         self._progress_reset_confirmed = False
         self._set_progress_protection(False)
+        self._apply_requested = False
+        self._design_optimization_dirty = True
+        self._last_optimization_result = None
 
         # Repaint UI from the fresh model (avoid auto-update churn while setting)
         blockers = [
@@ -16452,16 +16464,19 @@ class ExperimentDesignDialog(QDialog):
 
         self.choice_groups = set()
         self._load_factors_into_table()
-        self._sync_controls_from_model()
+        self._sync_controls_from_model(recompute=False)
         self._refresh_stock_table()
         self._update_summary_labels()
         self._update_well_selection_summary()
         self._update_unique_conditions_button_label()
         self._refresh_all_prior_availability()
-        self._refresh_editor_lifecycle_state()
-        self._refresh_editable_copy_availability()
-        self._apply_requested = False
+        self._clear_target_color_state()
+        self._apply_volume_input_issue_state({})
+        self._apply_stock_input_issue_state({})
+        self._set_stock_table_stale(False, "")
+        self._update_run_button_dirty_state()
         self._reset_draft_dirty_from_model()
+        self._refresh_all_lock_states()
 
         self._set_status(
             f"New experiment created: {getattr(self.model, 'experiment_dir_path', '(unsaved yet)')}",

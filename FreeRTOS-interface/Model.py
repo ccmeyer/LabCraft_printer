@@ -12740,6 +12740,7 @@ class ExperimentModel(QObject):
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
         self._last_authoritative_calibration_transition = None
+        self._last_authoritative_terminal_transition = None
         self._progress_execution_reference = None
         self._prepared_execution_replacement_context = None
 

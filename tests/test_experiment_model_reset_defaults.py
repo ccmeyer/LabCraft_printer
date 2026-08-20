@@ -34,3 +34,14 @@ def test_reset_experiment_model_clears_runtime_context():
 
     assert em._runtime_well_plate is None
     assert em._runtime_reaction_collection is None
+
+
+def test_reset_experiment_model_clears_terminal_transition_cache():
+    em = ExperimentModel(prof=CURRENT_PROFILE)
+    em._last_authoritative_terminal_transition = {
+        "cache_path": "cached_completion",
+    }
+
+    em.reset_experiment_model()
+
+    assert em._last_authoritative_terminal_transition is None
