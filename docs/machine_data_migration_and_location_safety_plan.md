@@ -1237,7 +1237,14 @@ merely switching app code back.
   entries resolved by reviewed archive-only ownership rule
   `legacy-update-logs-v1`; no unmatched or prohibited path was activated.
 - Milestone 3 is verified at fix commit `08d41bc2`. The disposable Pi evidence
-  root remains preserved pending documentation commit and reviewed cleanup.
+  was copied to the ignored local evidence directory
+  `verification_reports/milestone3_pi_08d41bc2_20260819` before cleanup.
+- After evidence capture, the detached validation worktree was removed through
+  Git and the exact disposable root
+  `/tmp/labcraft-m3-first-start.vfMfeu` was deleted. The Pi's primary checkout
+  was fast-forwarded to documentation commit `9dcf4936` and was clean. The
+  independent Milestone 0 Desktop backup and copied `VERSION` file remain in
+  place and were not modified.
 
 ## Milestone 4: Add transactional configuration history
 

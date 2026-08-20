@@ -1515,6 +1515,15 @@ Milestone 3 is `verified` only when:
 - Every M2 unclassified path in the real rc.1 source was beneath
   `update_logs/` and resolved through reviewed archive-only rule
   `legacy-update-logs-v1`. No unmatched/prohibited ownership decision passed.
+- The Pi evidence set was copied before cleanup to the ignored local directory
+  `verification_reports/milestone3_pi_08d41bc2_20260819`. It includes the six
+  canonical metadata files, active pointer, canonical/restored Settings,
+  diagnostic logs, Pi safety-test output, closeout hashes, and the explicitly
+  labeled missing-baseline exception.
+- The detached validation worktree was removed using Git and the exact
+  disposable directory `/tmp/labcraft-m3-first-start.vfMfeu` was then deleted.
+  The Pi primary checkout was clean at documentation commit `9dcf4936`; the
+  independent Desktop Milestone 0 backup and `VERSION` copy remain untouched.
 - All exit criteria are satisfied; Milestone 3 is verified at `08d41bc2`.
 
 ## Findings discovered during planning
@@ -1596,3 +1605,4 @@ Milestone 3 is `verified` only when:
 | 2026-08-19 | Revised the plan against verified M2 commit `157db800`: immutable M2 provenance, separate activation receipt/journal, fixed phase inventories, public published-evidence APIs, installed-backup distinction, and workspace-absent recovery. |
 | 2026-08-19 | Implemented all eight slices, added exact first-start/operator guidance, and recorded focused/full/host-SIL automated evidence in the dedicated Milestone 3 commit; status is `implementation_complete` pending manual Pi validation. |
 | 2026-08-19 | Recorded production commit `b3cf12ad`, Pi worker-shutdown fix `08d41bc2`, complete automated/target-Pi evidence, the transparent missing-baseline exception, and marked Milestone 3 `verified`. |
+| 2026-08-19 | Recorded the post-qualification evidence copy, reviewed disposal of the temporary validation root/worktree, clean Pi checkout, and continued preservation of the independent Milestone 0 backup. |
