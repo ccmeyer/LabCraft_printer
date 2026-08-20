@@ -520,6 +520,11 @@ def test_pi_shell_is_private_device_only_and_never_launches_production_app():
         "--aggregate",
     ):
         assert required in source
+    private_tmp = source.index("--tmpfs /tmp")
+    readonly_repo = source.index('--ro-bind "$REPO_ROOT" "$REPO_ROOT"')
+    writable_output = source.index('--bind "$OUTPUT_ROOT" "$OUTPUT_ROOT"')
+    assert private_tmp < readonly_repo < writable_output
+    assert '--bind "$REPO_ROOT" "$REPO_ROOT"' not in source
     assert "FreeRTOS-interface/App.py" not in source
     assert "--unsafe" not in source
     for forbidden in (

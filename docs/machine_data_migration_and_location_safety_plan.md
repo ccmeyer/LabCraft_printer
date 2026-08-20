@@ -58,8 +58,8 @@ For every milestone update:
 | 3 | Activate first-launch migration and verification | `verified` | Production cutover commit `b3cf12ad`; Qt worker-shutdown fix `08d41bc2` | Original and fix automated gates passed; target-Pi rc.1 migration, fail-closed corruption, cross-worktree reuse, restored reopen, and 10 zero-command safety tests passed |
 | 4 | Add transactional configuration history | `verified` | Implementation `6925d029`; exact-restore correction `f6d65fd9` | 5,363 full-suite tests, contained 96-well SIL, and fresh target-Pi no-hardware qualification passed |
 | 5 | Add guarded location and calibration changes | `verified` | Commit `8b50872d` | 5,377 full-suite tests; clean target-Pi guarded transaction/reopen gate; 168 focused Pi tests; two 96/96 contained/traced SIL journeys; exact baseline-byte restoration; sealed evidence passed |
-| 6 | Protect future updates and controlled rollback | `planned` | Not started | Not started |
-| 7 | Qualify, release, and stage deployment | `planned` | Not started | Not started |
+| 6 | Protect future updates and controlled rollback | `verified` | Implementation `9e666291`; verification record `0ee3e50a` | 5,402 full-suite tests; clean target-Pi real-Git online/offline preservation, legacy profile/export/return focused tests, contained SIL, and sealed evidence passed |
+| 7 | Qualify, release, and stage deployment | `in_progress` | Concrete plan plus untagged rc.2 metadata and in-progress completion record prepared | Software traceability and read-only LC-001 backup preflight complete; Windows/Pi/attended/tag/rollout gates pending |
 
 No local `v1.3.0-rc.2` release tag may be created until Milestones 0 through 6
 are `verified` and the Milestone 7 pre-tag gates pass. Do not push or advertise
@@ -1705,7 +1705,10 @@ checks.
 
 ## Milestone 7: Qualify, release, and stage deployment
 
-Status: `planned`
+Status: `in_progress`
+
+Concrete implementation plan:
+`docs/machine_data_migration_milestone_7_implementation_plan.md`
 
 ### Objective
 
@@ -1831,11 +1834,24 @@ rollback procedure.
 
 ### Implementation record
 
-- Not started.
+- The concrete eight-slice coverage, candidate construction, Windows, SSH/Pi,
+  attended Camera/HIL, local-tag updater/rollback, publication, staged rollout,
+  evidence, stop-condition, and closeout plan was created on 2026-08-20.
+- Software traceability found direct existing tests for every required row; no
+  runtime or test-code change was required.
+- Read-only SSH preflight recorded matching LC-001 rc.1 backup/live Locations
+  evidence and retained exact values in ignored private evidence.
+- Untagged rc.2 version, changelog, index, manifest, and in-progress completion
+  record are prepared. Qualification, tagging, attended hardware work, and
+  rollout remain pending.
 
 ### Validation record
 
-- Not started.
+- Planning audited the startup/migration, update/rollback, guarded-change,
+  saved-location motion, release, firmware-pairing, and target-Pi SIL paths.
+- Read-only Pi preflight passed with a clean checkout, no running App, no data
+  root override, and matching backup/live Locations hashes.
+- Candidate Windows/Pi, hardware, tag, and rollout validation remain pending.
 
 ## End-to-end migration flows
 
@@ -2124,6 +2140,8 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-20 | 5 | Milestone 5 verified at implementation commit `8b50872d` | Clean target-Pi qualification from a verified M4 sequence-zero copy: 100 ms simulated cadence; ten guarded events; six backups; zero pending/commands; exact config/pointer restore; detached reopen; 168 focused tests; contained and traced SIL 96/96; archive SHA-256 `03c2de79...f95ff` | Create the concrete Milestone 6 updater-preservation and controlled-rollback plan |
 | 2026-08-20 | 6 | Update preservation and controlled rollback implemented; local validation passed | 331 focused; 5,402 full passed/156 skipped; metadata/compile/diff checks; contained SIL 96/96; no firmware/protocol/release metadata changes | Review and create the dedicated M6 commit, then run clean target-Pi disposable no-hardware qualification |
 | 2026-08-20 | 6 | Milestone 6 verified at implementation commit `9e666291` | Clean target-Pi qualification: copied M5 sequence-zero baseline; detached external-store reopen; real-Git online/offline exact-byte preservation and receipts; 331 focused; hardware-disabled SIL 96/96; sealed archive SHA-256 `25a8b06...d7a8` | Create the concrete Milestone 7 release and staged-deployment plan |
+| 2026-08-20 | 7 | Concrete qualification, release, and staged-deployment plan created | `docs/machine_data_migration_milestone_7_implementation_plan.md`; eight slices; Windows and SSH/Pi gates; attended Camera/HIL; local-tag updater/rollback; staged cohort rollout | Complete Slice 0 traceability and private operator/cohort/Camera-route records before editing release metadata |
+| 2026-08-20 | 7 | Candidate implementation started | Direct software coverage mapped; clean LC-001 rc.1 backup/live evidence inspected read-only over SSH; untagged rc.2 metadata and completion record prepared; no runtime/firmware/tag change | Run focused metadata/static/SIL gates, then the complete Windows suite before freezing a candidate commit |
 
 ## Definition of done for v1.3.0-rc.2
 
@@ -2170,3 +2188,5 @@ The work is complete only when:
 | 2026-08-20 | Recorded corrective commit `f6d65fd9`, the complete target-Pi no-hardware qualification and durable evidence checksum, added the Milestone 4 completion record, and marked Milestone 4 verified. |
 | 2026-08-20 | Added and linked the concrete Milestone 5 guarded location/calibration plan; recorded telemetry, override, reserved-name, threshold-fallback, audit, and no-hardware qualification decisions/findings. |
 | 2026-08-20 | Recorded Milestone 5 commit `8b50872d`, clean target-Pi guarded-change/cadence/reopen/safety-proof qualification, sealed evidence checksum, added the Milestone 5 completion record, and marked Milestone 5 verified. |
+| 2026-08-20 | Corrected the milestone summary to reflect verified Milestone 6 implementation `9e666291` and verification record `0ee3e50a`; added and linked the concrete Milestone 7 Windows, SSH/Pi, attended Camera/HIL, exact-tag updater/rollback, release, staged-rollout, and closeout plan. |
+| 2026-08-20 | Began Milestone 7 implementation: mapped every required automated scenario to existing coverage, recorded sanitized clean LC-001 backup preflight evidence, prepared untagged rc.2 release metadata and an in-progress completion record, and left attended approvals as explicit HIL/tag gates. |

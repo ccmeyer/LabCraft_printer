@@ -2889,10 +2889,20 @@ sudo apt-get install -y bubblewrap strace
 ```
 
 The wrapper fails closed if the sandbox cannot start. Bubblewrap presents a
-private `/dev`, mounts the repository read-only, makes only the report root and
-temporary Qt directories writable, and unshares the network. There is no
-unsandboxed Pi option. The output root remains on the Pi's normal filesystem,
-so persistence measurements still exercise its real storage.
+private `/dev`, mounts the repository read-only after creating its private
+`/tmp`, makes only the report root and temporary Qt directories writable, and
+unshares the network. Rebinding the repository after the private `/tmp` mount
+allows a disposable checkout below `/tmp` to remain visible without making it
+writable. There is no unsandboxed Pi option. The output root remains on the
+Pi's normal filesystem, so persistence measurements still exercise its real
+storage.
+
+If Bubblewrap reports that a repository or its Python launcher below `/tmp`
+does not exist, confirm the checkout contains this read-only repository
+rebind, the configured `RemoteRepo` is the intended disposable checkout, and
+the repository-local `venv`, `.venv`, or `env` launcher works before starting
+collection. Do not move the qualification checkout outside its approved
+temporary root to bypass the failure.
 
 Run preflight and the traced safety audit locally on the Pi:
 

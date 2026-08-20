@@ -143,6 +143,7 @@ sandbox_exec() {
     --dev /dev \
     --proc /proc \
     --tmpfs /tmp \
+    --ro-bind "$REPO_ROOT" "$REPO_ROOT" \
     --bind "$OUTPUT_ROOT" "$OUTPUT_ROOT" \
     --chdir "$REPO_ROOT" \
     --setenv QT_QPA_PLATFORM "$QT_PLATFORM" \

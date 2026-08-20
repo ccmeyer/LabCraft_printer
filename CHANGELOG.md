@@ -1,5 +1,45 @@
 # Changelog
 
+## v1.3.0-rc.2 - 2026-08-20
+
+### Added
+
+- Added checkout-independent external machine data shared by every checkout and worktree on an authorized machine.
+- Added fail-closed first-start migration for `v1.2.0-rc.6`, `v1.2.0`, and `v1.3.0-rc.1`, including verified backups, exact copy evidence, machine identity confirmation, Camera review, and per-target authorization.
+- Added immutable configuration history, exact restoration, and aggregate transactions for named locations, rack pairs, and four-corner plate calibrations.
+- Added guarded configuration previews with exact deltas, hard-invalid rejection, and stronger confirmation for policy-threshold changes.
+- Added external update-preservation transactions, deployment anchors, receipt-gated relaunch, exact post-update byte verification, and support-guided legacy compatibility export and rollback.
+
+### Safety
+
+- Missing checkout-local or external data no longer silently becomes motion-authorized tracked preset data.
+- Saved-location authorization is checked before any safe-height, dogleg, or final-target command is queued.
+- Preset-like Camera values require explicit review and service evidence; migration requires the selected source, verified backup, canonical destination, and confirmation to agree exactly.
+- Legacy rollback keeps canonical data frozen, verifies a target-specific checkout-local export before changing Git, and treats every legacy edit as an explicit re-upgrade conflict rather than silently copying it.
+
+### Firmware
+
+- The bundled firmware artifact is unchanged from `v1.3.0-rc.1`: SHA-256 `EDA070CE734D5167F0795FAF30DF461C8A07341E09CA698DE9D850315B0D5884`.
+- Machines updating directly from `v1.2.0-rc.6` or `v1.2.0` must install the required v1.3 firmware. Machines updating from `v1.3.0-rc.1` must verify matching firmware provenance or redeploy the artifact. The application updater does not flash firmware automatically.
+
+### Validation
+
+- Complete Python suite:
+  `.\env\Scripts\python.exe -m pytest -q`
+- Release metadata validation:
+  `.\env\Scripts\python.exe tools\validate_release_metadata.py`
+- Contained Windows and target-Pi `virtual_print_array_96_v1` qualification with hardware isolation.
+- Disposable target-Pi exact rc.6/rc.1 migration, update, rollback, re-upgrade, and cross-checkout qualification over SSH.
+- Attended LC-001 app/firmware, focused HIL, fail-closed target, guarded audit/restore, and machine-specific Camera-route qualification.
+- Static checks:
+  `git diff --check`
+  `Get-ChildItem releases\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }`
+
+### Rollback
+
+- The reviewed rollback target is `v1.2.0` with its matching firmware.
+- Because `v1.2.0` predates the external machine-data preservation contract, rollback is support-guided and must use the authorized compatibility-export procedure in `docs/machine_data_update_and_rollback_runbook.md`; do not run a shortened backend command.
+
 ## v1.3.0-rc.1 - 2026-08-18
 
 ### Changed
