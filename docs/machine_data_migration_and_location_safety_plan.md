@@ -1548,10 +1548,13 @@ writes, audit history, and unverified-target blocking remain.
 
 ## Milestone 6: Protect future updates and controlled rollback
 
-Status: `implemented; local validation passed; commit and target-Pi qualification pending`
+Status: `verified`
 
 Concrete plan:
 [Machine Data Migration Milestone 6: Update Preservation and Controlled Rollback](machine_data_migration_milestone_6_implementation_plan.md)
+
+Completion record:
+[Machine Data Migration Milestone 6 Completion Record](machine_data_migration_milestone_6_completion_record.md)
 
 ### Objective
 
@@ -1682,9 +1685,23 @@ checks.
   full-suite tests passed with 156 skipped; release metadata validation;
   changed-module compilation; `git diff --check`; and contained,
   hardware-disabled `virtual_print_array_96_v1` at 96/96.
-- The dedicated Milestone 6 commit, clean target-Pi disposable no-hardware
-  qualification, evidence sealing, completion record, and final `verified`
-  status remain pending.
+- Dedicated implementation commit
+  `9e666291bd3145c6073077c3d68a1a206da74710` was pushed and pulled into a clean
+  Pi checkout. A fresh disposable copy of the verified M5 sequence-zero store
+  passed constrained genesis enrollment, identical detached-checkout reopen,
+  and real-Git online/offline no-schema update preservation with exact
+  protected fingerprint `b60f95df...67c8` and no MVC/hardware imports.
+- The Pi then passed all 331 focused tests in 34.74 seconds and contained,
+  hardware-disabled `virtual_print_array_96_v1` at 96/96. Release metadata,
+  changed-module compilation, clean diff/worktree, unchanged production HEAD,
+  and zero running `App.py` processes were rechecked at closeout.
+- The clean 52-member archive contains 40 hash-manifested payload files plus
+  its manifest and recheck. The ignored local copy independently revalidated
+  at SHA-256
+  `25a8b06906bfb4c8208db046172476303ec68b681b7a35cecc8bd6d3b679d7a8`.
+- No firmware, protocol, physical hardware behavior, release metadata, or tag
+  changed. Milestone 6 is verified; release construction and attended
+  migration/physical qualification remain Milestone 7 work.
 
 ## Milestone 7: Qualify, release, and stage deployment
 
@@ -2106,6 +2123,7 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-20 | 5 | Guarded-change implementation and local qualification completed | 14 new focused; 66 combined focused; 5,377 full passed/156 skipped; 96/96 contained SIL; compilation/diff checks; policy SHA-256 `7f724af4...fa4274` | Review, create the dedicated Milestone 5 commit, pull it to the Pi, then run the clean no-hardware qualification and cadence gate |
 | 2026-08-20 | 5 | Milestone 5 verified at implementation commit `8b50872d` | Clean target-Pi qualification from a verified M4 sequence-zero copy: 100 ms simulated cadence; ten guarded events; six backups; zero pending/commands; exact config/pointer restore; detached reopen; 168 focused tests; contained and traced SIL 96/96; archive SHA-256 `03c2de79...f95ff` | Create the concrete Milestone 6 updater-preservation and controlled-rollback plan |
 | 2026-08-20 | 6 | Update preservation and controlled rollback implemented; local validation passed | 331 focused; 5,402 full passed/156 skipped; metadata/compile/diff checks; contained SIL 96/96; no firmware/protocol/release metadata changes | Review and create the dedicated M6 commit, then run clean target-Pi disposable no-hardware qualification |
+| 2026-08-20 | 6 | Milestone 6 verified at implementation commit `9e666291` | Clean target-Pi qualification: copied M5 sequence-zero baseline; detached external-store reopen; real-Git online/offline exact-byte preservation and receipts; 331 focused; hardware-disabled SIL 96/96; sealed archive SHA-256 `25a8b06...d7a8` | Create the concrete Milestone 7 release and staged-deployment plan |
 
 ## Definition of done for v1.3.0-rc.2
 

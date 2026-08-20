@@ -1,6 +1,6 @@
 # Machine Data Migration Milestone 6: Update Preservation and Controlled Rollback
 
-Status: `implemented; local validation passed; commit and target-Pi qualification pending`
+Status: `verified`
 
 Prepared: 2026-08-20
 
@@ -1261,9 +1261,9 @@ Milestone 6 is `verified` only when:
 - [x] Implement Slice 0 contracts and fixtures.
 - [x] Implement Slices 1-6 tests-first.
 - [x] Complete local Slice 7 validation.
-- [ ] Create dedicated Milestone 6 implementation commit.
-- [ ] Complete target-Pi no-hardware qualification and evidence preservation.
-- [ ] Create completion record and mark both plans `verified`.
+- [x] Create dedicated Milestone 6 implementation commit.
+- [x] Complete target-Pi no-hardware qualification and evidence preservation.
+- [x] Create completion record and mark both plans `verified`.
 
 ## Local implementation record
 
@@ -1298,9 +1298,11 @@ Local gates passed:
 - contained `virtual_print_array_96_v1`: 96/96, hardware-disabled; and
 - `git diff --check` (line-ending notices only on Windows).
 
-The milestone is not yet `verified`: it still requires the dedicated commit,
-a clean pull on the target Pi, the disposable no-hardware qualification, and
-sealed evidence/completion documentation.
+The dedicated implementation commit is
+`9e666291bd3145c6073077c3d68a1a206da74710`. The clean target Pi pulled that
+exact commit and completed the disposable no-hardware qualification described
+below. Milestone 6 is therefore `verified`; the rc.2 release metadata, tags,
+physical hardware qualification, and staged rollout remain Milestone 7 work.
 
 One discarded full-suite attempt placed pytest's base temporary directory
 inside the repository. Thirty-three SIL/session isolation tests correctly
@@ -1376,23 +1378,48 @@ validation.
 | Conflict adoption | Never automatic; governed changes use M5/M4, opaque changes remain support-reviewed |
 | Post-Git failure | Recovery-only; no automatic Git reset or machine-data overwrite |
 
-## Open implementation measurements
+## Qualification measurements
 
-These do not change the safety defaults and are resolved in Slice 0 or during
-qualification:
+These measurements do not relax the frozen safety defaults:
 
-- maximum archive file/count/total-size limits based on current canonical
-  fleet inventories with conservative headroom;
-- filesystem free-space headroom and retained-backup policy;
-- QLockFile behavior and directory fsync support on the deployed Pi filesystem;
-- exact rc.6/v1.2.0/rc.1 tag commit and release-manifest hashes recorded in the
-  tracked compatibility catalog;
-- same-filesystem rename behavior for the Pi checkout parent and Windows
-  development layout; and
-- final operator confirmation text and support service-record format.
+- the copied verified M5 baseline contained 19 files and 912,080 bytes;
+- verified online/offline pre-update archives were 939,492 and 939,494 bytes;
+- the archive policy remains capped at 100,000 files, 4 GiB per member, and
+  20 GiB total with a maximum compression ratio of 200;
+- the Pi filesystem reported about 160.4 GB free during qualification;
+- QLockFile acquisition/release, directory durability operations, atomic
+  publication, and same-filesystem rename paths completed on the Pi filesystem
+  in both real-Git lanes and their failure tests;
+- exact rc.6/v1.2.0/rc.1 tag commits and canonical manifest hashes matched the
+  tracked compatibility catalog on Windows and the Pi; and
+- operator confirmation and support-attestation fields are implemented and
+  covered by the focused UI/updater tests.
 
-If any measurement cannot be established, implementation keeps the relevant
-operation disabled rather than adding a bypass.
+Backups and audit evidence still have no automatic deletion policy. Any future
+retention policy requires separate review; lack of a measurement or policy
+continues to fail closed rather than enabling a bypass.
+
+## Target-Pi completion record
+
+The full completion record is
+[Machine Data Migration Milestone 6 Completion Record](machine_data_migration_milestone_6_completion_record.md).
+On 2026-08-20 the clean Pi checkout at implementation commit `9e666291` passed:
+
+- external genesis enrollment and identical reopen from two detached
+  checkouts with no MVC/hardware imports;
+- real-Git online and release-aware offline no-schema updates, exact protected
+  fingerprint `b60f95df...67c8`, verified backups, deployment anchors, immutable
+  terminal receipts, and authorized detached reopen;
+- the complete 331-test focused gate in 34.74 seconds;
+- the contained hardware-disabled `virtual_print_array_96_v1` workflow at
+  96/96; and
+- metadata validation, changed-module compilation, clean diff/worktree,
+  unchanged production HEAD, and zero running `App.py` processes.
+
+The clean 52-member evidence archive contains 40 hash-manifested payload files
+plus its manifest and recheck. It was copied to ignored
+`verification_reports/` and independently revalidated at SHA-256
+`25a8b06906bfb4c8208db046172476303ec68b681b7a35cecc8bd6d3b679d7a8`.
 
 ## Document change log
 
@@ -1400,3 +1427,4 @@ operation disabled rather than adding a bypass.
 | --- | --- |
 | 2026-08-20 | Created the concrete post-Milestone-5 update preservation, deployment anchor, schema-transition recovery, exact legacy compatibility export, conflict handling, eight-slice implementation, Windows/Pi qualification, and rollback plan. |
 | 2026-08-20 | Implemented Slices 0-6 and completed local Slice 7 gates: 331 focused, 5,402 full passed/156 skipped, metadata/compile/diff validation, and contained SIL 96/96. Dedicated commit and target-Pi qualification remain pending. |
+| 2026-08-20 | Committed implementation as `9e666291`; clean target-Pi disposable qualification passed real-Git online/offline preservation, detached reopen, 331 focused tests, hardware-disabled SIL 96/96, and sealed evidence SHA-256 `25a8b06...d7a8`. Milestone 6 marked `verified`. |
