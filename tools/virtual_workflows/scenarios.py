@@ -61,6 +61,11 @@ DISCONNECT_FIXTURE_PATH = (
     / "fixtures"
     / "print_array_disconnect_mid_array_24_v1.json"
 )
+NEW_EXPERIMENT_SESSION_FIXTURE_PATH = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "experiment_new_session_hardening_v1.json"
+)
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "verification_reports" / "virtual_workflows"
 WORKLOAD_ID = "virtual_print_array_96_v1"
 SMOKE_WORKLOAD_ID = "virtual_print_array_24_v1"
@@ -70,6 +75,7 @@ AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID = "authoritative_reload_resume_24_v1"
 MULTI_STOCK_WORKLOAD_ID = "print_array_multi_stock_24x2_v1"
 MIXED_MODE_WORKLOAD_ID = "print_array_mixed_mode_24x2_v1"
 DISCONNECT_WORKLOAD_ID = "print_array_disconnect_mid_array_24_v1"
+NEW_EXPERIMENT_SESSION_WORKLOAD_ID = "experiment_new_session_hardening_v1"
 SCENARIO_FIXTURES = {
     WORKLOAD_ID: FIXTURE_PATH,
     STRESS_WORKLOAD_ID: STRESS_FIXTURE_PATH,
@@ -79,6 +85,7 @@ SCENARIO_FIXTURES = {
     MULTI_STOCK_WORKLOAD_ID: MULTI_STOCK_FIXTURE_PATH,
     MIXED_MODE_WORKLOAD_ID: MIXED_MODE_FIXTURE_PATH,
     DISCONNECT_WORKLOAD_ID: DISCONNECT_FIXTURE_PATH,
+    NEW_EXPERIMENT_SESSION_WORKLOAD_ID: NEW_EXPERIMENT_SESSION_FIXTURE_PATH,
 }
 SCENARIO_COMPLETION_COUNTS = {
     WORKLOAD_ID: 96,
@@ -89,6 +96,7 @@ SCENARIO_COMPLETION_COUNTS = {
     MULTI_STOCK_WORKLOAD_ID: 48,
     MIXED_MODE_WORKLOAD_ID: 48,
     DISCONNECT_WORKLOAD_ID: 24,
+    NEW_EXPERIMENT_SESSION_WORKLOAD_ID: 24,
 }
 SCENARIO_WORKFLOW_STRATEGIES = {
     WORKLOAD_ID: "uninterrupted",
@@ -98,6 +106,7 @@ SCENARIO_WORKFLOW_STRATEGIES = {
     AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID: "authoritative_reload_resume",
     MULTI_STOCK_WORKLOAD_ID: "multi_stock_head_exchange",
     MIXED_MODE_WORKLOAD_ID: "mixed_droplet_stream",
+    NEW_EXPERIMENT_SESSION_WORKLOAD_ID: "new_experiment_session_hardening",
 }
 SCENARIO_NAME = "virtual_print_array"
 SCENARIO_VERSION = "1"
@@ -634,6 +643,21 @@ def load_virtual_print_array_fixture(
                 "disconnect_after_completion_count": 6,
                 "expected_canceled_intent_count": 2,
                 "quiescence_observation_ms": 250,
+            },
+            NEW_EXPERIMENT_SESSION_WORKLOAD_ID: {
+                "kind": "new_experiment_session_hardening",
+                "request_after_completion_count": 6,
+                "maximum_completion_catchup": 2,
+                "quiescence_observation_ms": 250,
+                "candidate_name": "Untitled-20300102_030405",
+                "collision_names": [
+                    "Untitled-20300102_030405",
+                    "Untitled-20300102_030405-2",
+                ],
+                "failed_candidate_name": "Untitled-20300102_030405-3",
+                "resume_success_name": "Untitled-20300102_030405-3",
+                "idle_success_name": "Untitled-20300102_030405-4",
+                "failure_stage": "validation",
             },
         }.get(str(payload.get("fixture_id")))
         if expected_lifecycle is None or lifecycle != expected_lifecycle:
@@ -5028,6 +5052,7 @@ __all__ = [
     "AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID",
     "MULTI_STOCK_WORKLOAD_ID",
     "MIXED_MODE_WORKLOAD_ID",
+    "NEW_EXPERIMENT_SESSION_WORKLOAD_ID",
     "SCENARIO_NAME",
     "SCENARIO_VERSION",
     "SCENARIO_FIXTURES",

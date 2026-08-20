@@ -164,6 +164,19 @@ _SCENARIO_DEFINITIONS = {
         supports_injected_stall=False,
         supports_report_sets=False,
     ),
+    "experiment_new_session_hardening_v1": ScenarioDefinition(
+        registry_id="experiment_new_session_hardening_v1",
+        workload_id="experiment_new_session_hardening_v1",
+        fixture_path=(
+            _FIXTURE_ROOT / "experiment_new_session_hardening_v1.json"
+        ),
+        expected_completion_count=24,
+        scenario_name="experiment_new_session_hardening",
+        runner_family="composed_journey",
+        supports_pi_evidence=False,
+        supports_injected_stall=False,
+        supports_report_sets=False,
+    ),
     "authoritative_reload_resume_24_v1": ScenarioDefinition(
         registry_id="authoritative_reload_resume_24_v1",
         workload_id="authoritative_reload_resume_24_v1",

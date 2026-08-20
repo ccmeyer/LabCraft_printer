@@ -90,6 +90,7 @@ def test_lifecycle_suite_preserves_manifest_order_and_per_scenario_timeouts():
         "experiment_editor_post_start_lock_v1",
         "legacy_experiment_read_only_v1",
         "print_array_soft_stop_resume_24_v1",
+        "experiment_new_session_hardening_v1",
         "authoritative_reload_resume_24_v1",
         "print_array_multi_stock_24x2_v1",
         "print_array_mixed_mode_24x2_v1",
@@ -103,9 +104,10 @@ def test_lifecycle_suite_preserves_manifest_order_and_per_scenario_timeouts():
         "calibration_storage_historical_conversion_contract_v1",
         "calibration_storage_new_store_only_contract_v1",
     ]
-    assert [row["order"] for row in plan["scenarios"]] == list(range(1, 18))
+    assert [row["order"] for row in plan["scenarios"]] == list(range(1, 19))
     assert {row["seed"] for row in plan["scenarios"]} == {7}
     assert [row["timeout_seconds"] for row in plan["scenarios"]] == [
+        60.0,
         60.0,
         60.0,
         60.0,

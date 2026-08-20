@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import math
 import time
 from pathlib import Path
@@ -688,6 +688,462 @@ class ExperimentEditorDriver(_QTestSurfaceDriver):
             copy_tolerance_nl=copy_tolerance_nl,
             action_runner=self.action_runner,
         )
+
+    def exercise_new_session_hardening(
+        self,
+        *,
+        source_dir: Path,
+        experiments_root: Path,
+        candidate_name: str,
+        failed_candidate_name: str,
+        resume_success_name: str,
+        idle_success_name: str,
+    ) -> dict[str, Any]:
+        """Drive cancel, failure, resume-success, and idle-success resets."""
+
+        import hashlib
+        import json
+        from unittest.mock import patch
+
+        import Model as model_module
+        from View import ExperimentDesignDialog
+        from tools.virtual_workflows.actions import capture_milestone
+
+        source_dir = Path(source_dir).resolve()
+        experiments_root = Path(experiments_root).resolve()
+        if source_dir.parent != experiments_root:
+            raise RuntimeError("new-session source is outside the SIL experiment root")
+
+        state: dict[str, Any] = {
+            "entered": False,
+            "finished": False,
+            "error": None,
+            "dialog": None,
+            "evidence": None,
+        }
+        load_events: list[bool] = []
+        generation_events: list[tuple[Any, ...]] = []
+        load_slot = lambda: load_events.append(True)
+        generation_slot = lambda *args: generation_events.append(tuple(args))
+        self.context.model.experiment_loaded.connect(load_slot)
+        self.context.experiment_model.experiment_generated.connect(generation_slot)
+
+        def file_hashes(directory: Path) -> dict[str, str]:
+            if not directory.is_dir():
+                return {}
+            return {
+                str(path.relative_to(directory)).replace("\\", "/"): hashlib.sha256(
+                    path.read_bytes()
+                ).hexdigest()
+                for path in sorted(directory.rglob("*"))
+                if path.is_file()
+            }
+
+        def runtime_state() -> dict[str, Any]:
+            model = self.context.model
+            rack = model.rack_model
+            head_manager = model.printer_head_manager
+            return {
+                "reaction_count": len(model.reaction_collection.reactions),
+                "assigned_well_count": sum(
+                    well.assigned_reaction is not None
+                    for well in model.well_plate.get_all_wells()
+                ),
+                "stock_count": len(model.stock_solutions.stock_solutions),
+                "rack_stock_head_count": sum(
+                    slot.printer_head is not None
+                    and not slot.printer_head.is_calibration_chip()
+                    for slot in rack.slots
+                ),
+                "non_calibration_head_count": sum(
+                    not head.is_calibration_chip()
+                    for head in head_manager.printer_heads
+                ),
+                "gripper_loaded": rack.get_gripper_printer_head() is not None,
+            }
+
+        def ui_state(dialog: ExperimentDesignDialog) -> dict[str, Any]:
+            controls = {
+                name: {
+                    "enabled": bool(getattr(dialog, name).isEnabled()),
+                    "read_only": (
+                        bool(getattr(dialog, name).isReadOnly())
+                        if hasattr(getattr(dialog, name), "isReadOnly")
+                        else None
+                    ),
+                }
+                for name in (
+                    "exp_name_edit",
+                    "rep_spin",
+                    "v_spin",
+                    "final_v_spin",
+                    "fill_name_edit",
+                    "fill_mode_combo",
+                    "fill_dv_spin",
+                    "subset_chk",
+                    "well_selection_btn",
+                    "add_reagent_btn",
+                    "upload_design_btn",
+                    "run_btn",
+                    "save_btn",
+                )
+            }
+            return {
+                "controls": controls,
+                "reset_upload_hidden": bool(dialog.reset_upload_btn.isHidden()),
+                "lifecycle_banner_hidden": bool(dialog.lifecycle_banner.isHidden()),
+                "stock_stale": bool(dialog._stock_table_stale_active),
+                "stock_status_hidden": bool(dialog.stock_table_status_lbl.isHidden()),
+                "stock_status_text": str(dialog.stock_table_status_lbl.text() or ""),
+                "uploaded_design_active": bool(dialog._uploaded_design_active),
+                "uploaded_design_path": dialog._uploaded_design_path,
+                "progress_protected": bool(dialog._progress_protected),
+                "optimization_dirty": bool(dialog._design_optimization_dirty),
+                "last_optimization_result": dialog._last_optimization_result,
+                "auto_update": bool(dialog.auto_update_chk.isChecked()),
+                "advanced_visible": bool(dialog.advanced_settings_panel.isVisible()),
+                "status_text": str(dialog.status_lbl.text() or ""),
+            }
+
+        def session_state(dialog: ExperimentDesignDialog) -> dict[str, Any]:
+            experiment = self.context.experiment_model
+            path = Path(experiment.experiment_dir_path).resolve()
+            design_path = path / "experiment_design.json"
+            progress_path = path / "progress.json"
+            design = (
+                json.loads(design_path.read_text(encoding="utf-8"))
+                if design_path.is_file()
+                else None
+            )
+            progress = (
+                json.loads(progress_path.read_text(encoding="utf-8"))
+                if progress_path.is_file()
+                else None
+            )
+            return {
+                "experiment_model_id": id(experiment),
+                "experiment_dir": str(path),
+                "experiment_name": str(experiment.metadata.get("name") or ""),
+                "array_state": self.context.controller.get_array_run_state(),
+                "array_context_id": (
+                    id(self.context.controller._array_context)
+                    if self.context.controller._array_context is not None
+                    else None
+                ),
+                "factor_count": len(experiment.factors),
+                "additional_condition_count": len(experiment.additional_conditions),
+                "uploaded_design": bool(experiment.has_uploaded_design()),
+                "uploaded_well_ids": getattr(experiment, "_uploaded_well_ids", None),
+                "progress": json.loads(json.dumps(experiment.progress_data)),
+                "execution_locked": bool(experiment.is_execution_design_locked()),
+                "runtime": runtime_state(),
+                "design": design,
+                "progress_file": progress,
+                "execution_plan_exists": (path / "execution_plan.json").exists(),
+                "execution_resume_exists": (path / "execution_resume.json").exists(),
+                "directory_hashes": file_hashes(path),
+                "load_signal_count": len(load_events),
+                "generation_signal_count": len(generation_events),
+                "ui": ui_state(dialog),
+            }
+
+        def record_dialog(widget: QtWidgets.QMessageBox, selected: str) -> dict[str, Any]:
+            default = widget.defaultButton()
+            escape = widget.escapeButton()
+            entry = {
+                "title": widget.windowTitle(),
+                "text": widget.text(),
+                "informative_text": widget.informativeText(),
+                "buttons": [button.text().replace("&", "") for button in widget.buttons()],
+                "default_button": (
+                    default.text().replace("&", "") if default is not None else None
+                ),
+                "escape_button": (
+                    escape.text().replace("&", "") if escape is not None else None
+                ),
+                "selected_button": selected,
+            }
+            self.context.dialogs.append(dict(entry))
+            self.context.record_event("dialog", **entry)
+            return entry
+
+        original_initialize = (
+            model_module.ExperimentModel.initialize_new_experiment_session
+        )
+
+        def deterministic_initialize(instance, base_dir=None):
+            instance.metadata["name"] = candidate_name
+            return original_initialize(instance, base_dir=base_dir)
+
+        def fail_validation(_instance):
+            raise OSError("synthetic new-session validation failure")
+
+        def run_new_action(
+            dialog: ExperimentDesignDialog,
+            *,
+            action_id: str,
+            choice: str,
+            expect_resume_prompt: bool,
+            inject_validation_failure: bool = False,
+            milestone: str,
+        ) -> dict[str, Any]:
+            before = session_state(dialog)
+            prompt_state: dict[str, Any] = {
+                "resume": None,
+                "failure": None,
+                "error": None,
+            }
+            handled: set[int] = set()
+            prompt_timer = QtCore.QTimer(self.app)
+            prompt_timer.setInterval(5)
+
+            def inspect_prompt() -> None:
+                widget = self.app.activeModalWidget()
+                if (
+                    not isinstance(widget, QtWidgets.QMessageBox)
+                    or id(widget) in handled
+                ):
+                    return
+                handled.add(id(widget))
+                try:
+                    title = widget.windowTitle()
+                    if title == "Start New Experiment?":
+                        if not expect_resume_prompt:
+                            raise RuntimeError(
+                                "idle New Experiment unexpectedly requested resume confirmation"
+                            )
+                        buttons = {
+                            button.text().replace("&", ""): button
+                            for button in widget.buttons()
+                        }
+                        target = buttons.get(choice)
+                        if target is None:
+                            raise RuntimeError(
+                                f"resume confirmation lacks {choice!r}: {sorted(buttons)}"
+                            )
+                        prompt_state["resume"] = record_dialog(widget, choice)
+                        capture_milestone(
+                            self.context,
+                            milestone + "_prompt",
+                            evidence=dict(prompt_state["resume"]),
+                            widget=widget,
+                        )
+                        self.click(target)
+                        return
+                    if title == "Cannot start new experiment":
+                        if not inject_validation_failure:
+                            raise RuntimeError(
+                                "unexpected New Experiment backend failure warning"
+                            )
+                        prompt_state["failure"] = record_dialog(widget, "OK")
+                        capture_milestone(
+                            self.context,
+                            "new_session_validation_failure",
+                            evidence=dict(prompt_state["failure"]),
+                            widget=widget,
+                        )
+                        button = widget.button(
+                            QtWidgets.QMessageBox.StandardButton.Ok
+                        )
+                        if button is None:
+                            raise RuntimeError("failure warning lacks an OK button")
+                        self.click(button)
+                        return
+                    raise RuntimeError(
+                        f"unexpected New Experiment message box: {title!r}"
+                    )
+                except BaseException as exc:
+                    prompt_state["error"] = exc
+                    widget.reject()
+
+            prompt_timer.timeout.connect(inspect_prompt)
+
+            def operation() -> Mapping[str, Any]:
+                prompt_timer.start()
+                try:
+                    with ExitStack() as stack:
+                        if choice == "Start New Experiment":
+                            stack.enter_context(
+                                patch.object(
+                                    model_module.ExperimentModel,
+                                    "initialize_new_experiment_session",
+                                    deterministic_initialize,
+                                )
+                            )
+                        if inject_validation_failure:
+                            stack.enter_context(
+                                patch.object(
+                                    model_module.ExperimentModel,
+                                    "_validate_new_experiment_session_files",
+                                    fail_validation,
+                                )
+                            )
+                        self.click(dialog.new_btn)
+                finally:
+                    prompt_timer.stop()
+                    prompt_timer.deleteLater()
+                if prompt_state["error"] is not None:
+                    raise prompt_state["error"]
+                if expect_resume_prompt and prompt_state["resume"] is None:
+                    raise RuntimeError("resume confirmation was not observed")
+                if not expect_resume_prompt and prompt_state["resume"] is not None:
+                    raise RuntimeError("idle reset displayed a resume confirmation")
+                if inject_validation_failure and prompt_state["failure"] is None:
+                    raise RuntimeError("injected validation failure warning was not observed")
+                after = session_state(dialog)
+                evidence = {
+                    "before": before,
+                    "after": after,
+                    "resume_prompt": prompt_state["resume"],
+                    "failure_warning": prompt_state["failure"],
+                    "failed_candidate_exists": (
+                        experiments_root / failed_candidate_name
+                    ).exists(),
+                    "source_hashes_after": file_hashes(source_dir),
+                }
+                capture_milestone(
+                    self.context,
+                    milestone,
+                    evidence={
+                        "array_state": after["array_state"],
+                        "experiment_name": after["experiment_name"],
+                        "load_signal_count": after["load_signal_count"],
+                    },
+                    widget=dialog,
+                )
+                return evidence
+
+            expected = [("Experiment Design (v2)", "ExperimentDesignDialog")]
+            if expect_resume_prompt:
+                expected.append(("Start New Experiment?", "QMessageBox"))
+            if inject_validation_failure:
+                expected.append(("Cannot start new experiment", "QMessageBox"))
+            with _expected_dialogs(self.app, *expected):
+                return self.action_runner(
+                    action_id,
+                    operation,
+                    allowed_dialogs=(dialog,),
+                )["evidence"]
+
+        driver_timer = QtCore.QTimer(self.app)
+        driver_timer.setInterval(5)
+
+        def drive_editor() -> None:
+            if state["entered"]:
+                return
+            active = self.app.activeModalWidget()
+            if not isinstance(active, ExperimentDesignDialog):
+                return
+            state["entered"] = True
+            driver_timer.stop()
+            dialog = active
+            state["dialog"] = dialog
+            try:
+                if not dialog.advanced_settings_toggle.isChecked():
+                    self.click(dialog.advanced_settings_toggle)
+                preferences = {
+                    "auto_update": bool(dialog.auto_update_chk.isChecked()),
+                    "advanced_visible": bool(
+                        dialog.advanced_settings_panel.isVisible()
+                    ),
+                }
+                opened = self.action_runner(
+                    "editor.open_resume_ready_via_ui",
+                    lambda: session_state(dialog),
+                    allowed_dialogs=(dialog,),
+                )["evidence"]
+                capture_milestone(
+                    self.context,
+                    "resume_ready_editor",
+                    evidence={
+                        "array_state": opened["array_state"],
+                        "experiment_name": opened["experiment_name"],
+                    },
+                    widget=dialog,
+                )
+                cancelled = run_new_action(
+                    dialog,
+                    action_id="editor.new_experiment_cancel_via_ui",
+                    choice="Cancel",
+                    expect_resume_prompt=True,
+                    milestone="new_session_cancelled",
+                )
+                failed = run_new_action(
+                    dialog,
+                    action_id="editor.new_experiment_fail_validation_via_ui",
+                    choice="Start New Experiment",
+                    expect_resume_prompt=True,
+                    inject_validation_failure=True,
+                    milestone="new_session_failure_preserved",
+                )
+                resumed = run_new_action(
+                    dialog,
+                    action_id="editor.new_experiment_accept_via_ui",
+                    choice="Start New Experiment",
+                    expect_resume_prompt=True,
+                    milestone="new_session_resume_created",
+                )
+                resume_dir = experiments_root / resume_success_name
+                resume_hashes_before_idle = file_hashes(resume_dir)
+                idle = run_new_action(
+                    dialog,
+                    action_id="editor.new_experiment_idle_via_ui",
+                    choice="Start New Experiment",
+                    expect_resume_prompt=False,
+                    milestone="new_session_idle_created",
+                )
+                state["evidence"] = {
+                    "preferences": preferences,
+                    "opened": opened,
+                    "cancelled": cancelled,
+                    "failed": failed,
+                    "resumed": resumed,
+                    "idle": idle,
+                    "source_hashes_final": file_hashes(source_dir),
+                    "resume_hashes_before_idle": resume_hashes_before_idle,
+                    "resume_hashes_after_idle": file_hashes(resume_dir),
+                    "load_signal_count": len(load_events),
+                    "generation_signal_count": len(generation_events),
+                    "expected_names": {
+                        "failed": failed_candidate_name,
+                        "resume": resume_success_name,
+                        "idle": idle_success_name,
+                    },
+                }
+                state["finished"] = True
+            except BaseException as exc:
+                state["error"] = exc
+            finally:
+                dialog._allow_close_without_prompt = True
+                dialog.reject()
+
+        driver_timer.timeout.connect(drive_editor)
+        button = self.view.well_plate_widget.design_experiment_button
+        try:
+            driver_timer.start()
+            with _expected_dialogs(
+                self.app,
+                ("Experiment Design (v2)", "ExperimentDesignDialog"),
+            ):
+                self.click(button)
+        finally:
+            driver_timer.stop()
+            driver_timer.deleteLater()
+            try:
+                self.context.model.experiment_loaded.disconnect(load_slot)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                self.context.experiment_model.experiment_generated.disconnect(
+                    generation_slot
+                )
+            except (RuntimeError, TypeError):
+                pass
+        if state["error"] is not None:
+            raise state["error"]
+        if not state["entered"] or not state["finished"]:
+            raise RuntimeError("New Experiment SIL editor sequence did not finish")
+        return dict(state["evidence"])
 
 
 def inspect_editor_lock_controls(dialog: Any) -> dict[str, Any]:

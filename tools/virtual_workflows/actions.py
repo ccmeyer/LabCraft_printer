@@ -125,6 +125,16 @@ COMPOSED_SOFT_STOP_ACTION_IDS = COMPOSED_SMOKE_ACTION_IDS | frozenset(
         "array.wait_for_state",
     }
 )
+NEW_EXPERIMENT_SESSION_ACTION_IDS = frozenset(
+    {
+        "fixture.prepare_new_session_collisions",
+        "editor.open_resume_ready_via_ui",
+        "editor.new_experiment_cancel_via_ui",
+        "editor.new_experiment_fail_validation_via_ui",
+        "editor.new_experiment_accept_via_ui",
+        "editor.new_experiment_idle_via_ui",
+    }
+)
 COMPOSED_DISCONNECT_ACTION_IDS = (
     COMPOSED_SMOKE_ACTION_IDS
     - frozenset({"array.wait_for_completions"})
@@ -181,6 +191,7 @@ ACTION_IDS = (
     | COMPOSED_MULTI_STOCK_ACTION_IDS
     | COMPOSED_MIXED_MODE_ACTION_IDS
     | COMPOSED_SOFT_STOP_ACTION_IDS
+    | NEW_EXPERIMENT_SESSION_ACTION_IDS
     | COMPOSED_DISCONNECT_ACTION_IDS
     | EDITOR_SAFEGUARD_ACTION_IDS
     | EXECUTION_PREFLIGHT_SAFEGUARD_ACTION_IDS
@@ -229,6 +240,11 @@ ACTION_INTERACTION_SURFACES.update(
             action_id: InteractionSurface.UI
             for action_id in COMPOSED_MIXED_MODE_ACTION_IDS
             if action_id.endswith("_via_ui")
+        },
+        **{
+            action_id: InteractionSurface.UI
+            for action_id in NEW_EXPERIMENT_SESSION_ACTION_IDS
+            if action_id.startswith("editor.")
         },
         **{
             action_id: InteractionSurface.UI
@@ -5286,6 +5302,7 @@ __all__ = [
     "EDITOR_LIFECYCLE_ACTION_IDS",
     "InteractionSurface",
     "MULTI_STOCK_LIFECYCLE_ACTION_IDS",
+    "NEW_EXPERIMENT_SESSION_ACTION_IDS",
     "PRINT_ARRAY_ACTION_IDS",
     "PRINT_ARRAY_LIFECYCLE_ACTION_IDS",
     "ActionResult",
