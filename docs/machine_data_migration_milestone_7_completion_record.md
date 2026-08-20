@@ -7,9 +7,9 @@
 > now owns correction qualification, exact recovery of the disposable target,
 > publication, and rollout.
 
-Status: `in_progress` - rc.4 corrective implementation is active; exact-commit
-refrozen exact-commit Windows/Pi, tag, attended recovery, publication, and
-rollout gates remain after adding direct plate-removal regression coverage.
+Status: `in_progress` - rc.4 correction commit `25d1b541` passed refrozen
+exact-commit Windows and disposable-Pi qualification. Tag authorization,
+attended recovery, publication, and rollout gates remain.
 
 Started: 2026-08-20
 
@@ -336,14 +336,32 @@ that removes an added calibrated plate. It verifies all four previewed corner
 removals, exact raw `Plates.json` restoration, target removal, and no pending
 transaction; the narrow group now passes 60 tests. Since this changes the
 tracked release tree, `3e451c01` is retained as passing evidence but is
-superseded as the tag target. The coverage-complete commit must repeat the
-exact-commit Windows/Pi gates before tag authorization.
+superseded as the tag target.
+
+Coverage-complete candidate
+`25d1b541f62de15dc6f8e09036b5d588fcc95920` repeated the exact-commit gates.
+Windows passed the 60-test narrow group, 5,435 full-suite tests with 156
+skipped, release/static/unchanged-firmware checks, and contained SIL 96/96.
+The two preceding full-suite attempts were environmental only: the default
+temporary tree denied access, while an in-repository base correctly violated
+simulation containment. The passing run used a unique external temporary
+base.
+
+The final disposable Pi checkout passed the same 60 tests, independent
+add/revoke/exact-location restoration with byte-identical original data and
+no pending transaction, and private-device contained SIL 96/96 with zero
+injected stalls. The retrieved SIL archive is 3,395,955 bytes with SHA-256
+`2309DA64...FCBC94E8`; focused/restore/postflight evidence is 3,773 bytes with
+SHA-256 `0FB89AD6...BEDCF561`. Postflight matched the active pointer,
+deployment anchor, and all 25 protected production files; rc.3 commit
+`d965927e`, PID 14283, audit sequence 4, and the no-pending state were
+unchanged. Rc.4 remains untagged pending explicit operator authorization.
 
 ## Local tag, updater, and rollback qualification
 
 Status: rc.2 and rc.3 tag-dependent gates passed through the successful
-attended rc.3 recovery update. Rc.4 remains untagged pending exact-candidate
-Windows and disposable-Pi qualification.
+attended rc.3 recovery update. Rc.4 exact-candidate Windows and disposable-Pi
+qualification passed; rc.4 remains untagged pending explicit authorization.
 
 Record peeled tag commit, metadata tag validation, release-aware bundle hash,
 exact rc.6/rc.1 old-updater lanes, offline equivalence, unchanged return, and
@@ -387,6 +405,7 @@ Final ignored evidence roots:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Froze coverage-complete rc.4 candidate `25d1b541`; passed exact-commit Windows 60-test/full-suite/release/SIL gates, Pi 60-test/independent exact-restore/private-device SIL gates, matching archives, and byte-identical production postflight; retained tag and attended update/restore as explicit authorization gates. |
 | 2026-08-20 | Added direct calibrated-plate removal/exact-restore regression coverage after the first rc.4 disposable qualification; retained `3e451c01` as passing runtime evidence but reopened the exact-candidate gate because the tracked release tree changed. |
 | 2026-08-20 | Froze rc.4 candidate `3e451c01`; passed exact-commit Windows and Pi focused tests, independent exact-restore, Windows/Pi contained SIL 96/96, private-device proof, matching evidence archives, and byte-identical production postflight; retained tag and attended recovery as explicit gates. |
 | 2026-08-20 | Recorded the successful rc.3 protected recovery update and normal reopen, the guarded cancellation/addition/revocation/no-command passes, and the safe exact-restore deletion rejection; began the narrow rc.4 source-event/backup-bound correction and recorded its first 59 passing focused tests. |

@@ -62,7 +62,7 @@ For every milestone update:
 | 4 | Add transactional configuration history | `verified` | Implementation `6925d029`; exact-restore correction `f6d65fd9` | 5,363 full-suite tests, contained 96-well SIL, and fresh target-Pi no-hardware qualification passed |
 | 5 | Add guarded location and calibration changes | `verified` | Commit `8b50872d` | 5,377 full-suite tests; clean target-Pi guarded transaction/reopen gate; 168 focused Pi tests; two 96/96 contained/traced SIL journeys; exact baseline-byte restoration; sealed evidence passed |
 | 6 | Protect future updates and controlled rollback | `verified` | Implementation `9e666291`; verification record `0ee3e50a` | 5,402 full-suite tests; clean target-Pi real-Git online/offline preservation, legacy profile/export/return focused tests, contained SIL, and sealed evidence passed |
-| 7 | Qualify, release, and stage deployment | `in_progress` | rc.2 and rc.3 are immutable; rc.3 corrected the protected update and enrolled LC-001; attended exact restore exposed a safe restore-only deletion defect; rc.4 correction is in progress | rc.3 protected update/reopen and no-command revocation passed; failed restore changed no configuration; rc.4 exact-candidate/Pi/tag/attended/rollout gates pending |
+| 7 | Qualify, release, and stage deployment | `in_progress` | rc.2 and rc.3 are immutable; rc.3 corrected the protected update and enrolled LC-001; rc.4 coverage-complete correction is qualified at untagged commit `25d1b541` | rc.4 exact-commit Windows/full/SIL and disposable-Pi focused/exact-restore/SIL/postflight gates passed; tag authorization, attended restore, and rollout remain |
 
 The immutable `v1.3.0-rc.2` and `v1.3.0-rc.3` tags record their qualified
 historical candidates and must not be moved, deleted, or retargeted. Do not
@@ -2177,6 +2177,7 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-20 | 7 | Concrete qualification, release, and staged-deployment plan created | `docs/machine_data_migration_milestone_7_implementation_plan.md`; eight slices; Windows and SSH/Pi gates; attended Camera/HIL; local-tag updater/rollback; staged cohort rollout | Complete Slice 0 traceability and private operator/cohort/Camera-route records before editing release metadata |
 | 2026-08-20 | 7 | Candidate implementation started | Direct software coverage mapped; clean LC-001 rc.1 backup/live evidence inspected read-only over SSH; untagged rc.2 metadata and completion record prepared; no runtime/firmware/tag change | Run focused metadata/static/SIL gates, then the complete Windows suite before freezing a candidate commit |
 | 2026-08-20 | 7 | Rc.4 runtime candidate `3e451c01` passed Windows/Pi gates; final coverage audit added a direct calibrated-plate removal restore test | First candidate: Windows 59/336/5,434 tests and 96/96 SIL; Pi 59 tests, exact location restore, SIL 96/96; all 25 production files unchanged. Coverage-complete narrow group: 60 passed | Refreeze and rerun exact-commit Windows/Pi gates before requesting tag/update authorization |
+| 2026-08-20 | 7 | Coverage-complete rc.4 candidate `25d1b541` passed exact-commit Windows and disposable-Pi qualification | Windows 60 focused, 5,435 full/156 skipped, release/firmware identity, SIL 96/96; Pi 60 focused, independent exact-byte restore, SIL 96/96; matching evidence archives; active pointer, anchor, and all 25 production files unchanged | Request explicit authorization for the immutable local rc.4 tag and attended protected rc.3 -> rc.4 update/restore |
 
 ## Definition of done for v1.3.0-rc.2
 
@@ -2209,6 +2210,7 @@ The work is complete only when:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Recorded coverage-complete rc.4 candidate `25d1b541`, passing refrozen Windows full/focused/SIL and disposable-Pi focused/exact-restore/private-device SIL/postflight gates; retained the local tag and attended update/restore as explicit authorization boundaries. |
 | 2026-08-20 | Recorded exact rc.4 candidate `3e451c01`, passing Windows and disposable-Pi focused/exact-restore/private-device SIL gates with matching evidence and unchanged production; retained tag and attended restore as authorization gates. |
 | 2026-08-20 | Advanced the target to rc.4 after successful rc.3 update/reopen and safe discovery of the exact-restore deletion defect; linked the source-event/backup-bound correction plan and recorded initial implementation evidence. |
 | 2026-08-20 | Recorded exact rc.3 candidate `d965927e`, passing final Windows and disposable-Pi focused/SIL/real-Git recovery gates, matching evidence archives, and unchanged production; retained local-tag and attended-recovery authorization gates. |

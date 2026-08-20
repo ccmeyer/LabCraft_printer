@@ -1,9 +1,9 @@
 # Milestone 7 rc.4 Exact-Restore Correction Plan
 
-Status: `implementation_complete` - runtime correction gates passed on
-`3e451c01`, but a direct plate-removal regression was added afterward; the
-refrozen exact-commit Windows/Pi gates, rc.4 tag, and attended LC-001 update
-remain.
+Status: `qualified_untagged` - the coverage-complete correction at
+`25d1b541` passed exact-commit Windows and disposable-Pi gates. The rc.4 tag
+and attended LC-001 protected update/restore remain explicit authorization
+gates.
 
 Prepared: 2026-08-20
 
@@ -210,7 +210,45 @@ narrow group passes 60 tests.
 
 Because tracked test coverage changes the release tree, `3e451c01` is no
 longer the tag target even though its runtime results remain valid evidence.
-Do not tag or update from this record alone. Freeze and rerun the exact-commit
-Windows/Pi gates on the coverage-complete commit, then request explicit
-operator authorization for the immutable rc.4 tag and normal protected rc.3
--> rc.4 update before retrying the attended restore.
+The coverage-complete candidate and its repeated gates are recorded next.
+
+## Coverage-complete final candidate qualification
+
+The final untagged rc.4 candidate is
+`25d1b541f62de15dc6f8e09036b5d588fcc95920`. It contains the runtime
+correction plus direct location- and calibrated-plate-removal exact-restore
+coverage. On that exact commit:
+
+- the Windows narrow group passed 60 tests, and the complete suite passed
+  5,435 tests with 156 skipped and 605 warnings;
+- an external unique pytest base was required because the default Windows
+  temporary tree was inaccessible and an in-repository base correctly
+  triggered simulation-containment failures; neither environmental attempt
+  is counted as a candidate failure;
+- release metadata validation, unchanged-firmware identity, clean-worktree
+  checks, and Windows contained SIL 96/96 passed;
+- the complete transport bundle verified at SHA-256
+  `4445AC03BD55890D67A22C02B6E5C6B801F20615A8BCA4735A4E97E9AEB9A6E4`;
+- a clean disposable Pi checkout at
+  `/tmp/labcraft-m7-rc4-final.zORGEp/candidate` passed the same 60 tests;
+- the independent Pi defect exercise added and revoked
+  `qualification-unverified`, previewed its removal from immutable
+  source-event/manifest evidence, restored exact original `Locations.json`
+  bytes at sequence 2, and left no pending transaction without constructing
+  hardware or the normal MVC;
+- Pi private-device contained SIL completed 96/96 with functional status
+  `pass`, acceptable noise, zero injected stalls, and a clean candidate;
+- the retrieved 3,395,955-byte SIL archive matched at SHA-256
+  `2309DA64E80AF7E7A6BA8D186A9401187B3B1B01CB669C0CAB3E82C3FCBC94E8`;
+- the retrieved 3,773-byte focused/restore/postflight archive matched at
+  SHA-256
+  `0FB89AD6B77514BDE625E0554A9C0F7A2E380BC6B4B220691D62000FBEDCF561`;
+  and
+- postflight matched the active pointer, deployment anchor, and every one of
+  the 25 protected production files. Production remained clean at rc.3
+  `d965927e`, app PID 14283 and audit sequence 4 were unchanged, and no
+  production pending transaction was created.
+
+The implementation and exact-candidate disposable gates are complete. Do not
+create the immutable rc.4 tag or perform the normal protected rc.3 -> rc.4
+update until the operator explicitly authorizes that attended next stage.
