@@ -7784,7 +7784,7 @@ class Machine(QObject):
         if self.sent_command is not None:
             print('Overriding command:',self.sent_command.get_command())
         print('Sending resume command')
-        self.send_command_to_board(new_command)
+        return self.send_command_to_board(new_command)
 
     def clear_command_queue(self, handler=None):
         print('Clearing command queue')

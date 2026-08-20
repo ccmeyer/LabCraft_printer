@@ -560,7 +560,12 @@ class SimulatedMachine(QtCore.QObject):
             self.state.transport_paused = True
             self.state.pause_watermark_reached = True
 
-        self._emit_status()
+        # Production command-number processing runs the completion handler
+        # before Controller.handle_status_update evaluates a reached watermark.
+        # Match that ordering so saved well progress is authoritative before
+        # the Controller clears lookahead.
+        if pause_request is None:
+            self._emit_status()
 
         handler_failed = False
         try:
@@ -570,6 +575,9 @@ class SimulatedMachine(QtCore.QObject):
             self._emit_error(
                 f"completion handler for command {command.command_number} failed: {exc}"
             )
+
+        if pause_request is not None:
+            self._emit_status()
 
         if pause_request is not None:
             callback = pause_request.get("on_success")
@@ -770,9 +778,15 @@ class SimulatedMachine(QtCore.QObject):
         return self.pause_commands()
 
     def resume_commands(self):
+        watermark_already_reached = bool(self.state.pause_watermark_reached)
         self.state.transport_paused = False
-        self.state.pause_after_seq32 = 0
-        self.state.pause_watermark_reached = False
+        if watermark_already_reached:
+            self._pause_after_request = None
+            self.state.pause_after_seq32 = 0
+            self.state.pause_watermark_reached = False
+        elif self._pause_after_request is None:
+            self.state.pause_after_seq32 = 0
+            self.state.pause_watermark_reached = False
         self._emit_status()
         self._pump()
         return True

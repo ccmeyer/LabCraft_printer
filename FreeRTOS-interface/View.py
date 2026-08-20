@@ -907,20 +907,68 @@ class PauseActionDialog(QMessageBox):
     RESUME = "resume"
     KEEP_PAUSED = "keep_paused"
     REQUEST_CLEAR = "request_clear"
+    REQUEST_SAFE_STOP = "request_safe_stop"
 
-    def __init__(self, parent=None, *, array_active=False):
+    def __init__(self, parent=None, *, array_active=False, array_action_state=None):
         super().__init__(parent)
-        self.array_active = bool(array_active)
+        self.array_action_state = dict(array_action_state or {})
+        self.array_active = bool(
+            self.array_action_state.get("array_active", array_active)
+        )
         self.setIcon(QMessageBox.Warning)
+        self.resume_button = None
+        self.safe_stop_button = None
 
         if self.array_active:
             self.setWindowTitle("Print Array Paused Immediately")
-            self.setText(
-                "The machine command queue is paused immediately, and the current well may be incomplete.\n\n"
-                "Resume Array continues the existing queue. Keep Paused makes no further command change. "
-                "Clearing the queue permanently aborts this experiment and it cannot be resumed."
+            safe_stop_action = self.array_action_state.get("safe_stop_action") or "finish"
+            if safe_stop_action == "retry":
+                safe_stop_text = "Retry Safe Stop"
+                safe_stop_explanation = (
+                    "The watermark state is uncertain. Retry Safe Stop reconciles the same frozen "
+                    "well boundary; full-array resume is unavailable because a latent watermark may exist."
+                )
+            elif safe_stop_action == "finalize":
+                safe_stop_text = "Resume Safe-Stop Finalization"
+                safe_stop_explanation = (
+                    "Well work and lookahead clearing are complete. Resume Safe-Stop Finalization "
+                    "continues only the existing park and finalization sequence."
+                )
+            elif safe_stop_action == "continue":
+                safe_stop_text = "Continue Safe Stop"
+                safe_stop_explanation = (
+                    "Continue Safe Stop reconciles the frozen well boundary and resumes only as "
+                    "needed to finish that safe-stop sequence."
+                )
+            else:
+                safe_stop_text = "Finish Current Well and Stop"
+                safe_stop_explanation = (
+                    "Finish Current Well and Stop arms the current well boundary while paused, "
+                    "briefly resumes only through that boundary, clears lookahead, parks, and leaves "
+                    "the experiment resumable."
+                )
+            can_resume_entire_array = bool(
+                self.array_action_state.get("can_resume_entire_array", True)
             )
-            resume_text = "Resume Array"
+            resume_explanation = (
+                " Resume Entire Array continues the existing full queue."
+                if can_resume_entire_array
+                else ""
+            )
+            self.setText(
+                "The command queue is paused immediately, and the current well may be incomplete.\n\n"
+                f"{safe_stop_explanation}{resume_explanation} Keep Paused makes no further command "
+                "change. Clearing the queue permanently aborts this experiment and it cannot be resumed."
+            )
+            self.safe_stop_button = self.addButton(
+                safe_stop_text,
+                QMessageBox.ActionRole,
+            )
+            if can_resume_entire_array:
+                self.resume_button = self.addButton(
+                    "Resume Entire Array",
+                    QMessageBox.ActionRole,
+                )
             clear_text = "Abort Array and Clear Queue…"
         else:
             self.setWindowTitle("Machine Paused")
@@ -929,16 +977,20 @@ class PauseActionDialog(QMessageBox):
                 "Keep Paused makes no further command change. Clearing the command queue cancels "
                 "queued commands and they cannot be resumed."
             )
-            resume_text = "Resume Commands"
             clear_text = "Clear Command Queue…"
+            self.resume_button = self.addButton(
+                "Resume Commands",
+                QMessageBox.ActionRole,
+            )
 
-        self.resume_button = self.addButton(resume_text, QMessageBox.ActionRole)
         self.keep_paused_button = self.addButton("Keep Paused", QMessageBox.RejectRole)
         self.clear_queue_button = self.addButton(clear_text, QMessageBox.DestructiveRole)
         self.setDefaultButton(self.keep_paused_button)
         self.setEscapeButton(self.keep_paused_button)
 
     def action_for_button(self, button):
+        if button is self.safe_stop_button:
+            return self.REQUEST_SAFE_STOP
         if button is self.resume_button:
             return self.RESUME
         if button is self.clear_queue_button:
@@ -2241,13 +2293,46 @@ class MainWindow(QMainWindow):
         try:
             machine_model = getattr(self.model, "machine_model", None)
             if not bool(getattr(machine_model, "paused", False)):
-                self.controller.pause_commands()
+                if self.controller.pause_commands() is False:
+                    self.popup_message(
+                        "Pause Unavailable",
+                        "The pause command could not be sent. The machine state was not changed.",
+                    )
+                    return
 
             array_active = self._active_print_array_is_running()
-            action_dialog = PauseActionDialog(self, array_active=array_active)
+            action_state_getter = getattr(
+                self.controller,
+                "get_array_pause_action_state",
+                None,
+            )
+            if callable(action_state_getter):
+                try:
+                    array_action_state = dict(action_state_getter() or {})
+                except Exception:
+                    array_action_state = {}
+            else:
+                array_action_state = {}
+            action_dialog = PauseActionDialog(
+                self,
+                array_active=array_active,
+                array_action_state=array_action_state,
+            )
             self._pause_action_dialog = action_dialog
             action = action_dialog.exec_action()
 
+            if action == PauseActionDialog.REQUEST_SAFE_STOP:
+                request_safe_stop = getattr(
+                    self.controller,
+                    "request_paused_array_soft_stop",
+                    None,
+                )
+                if not callable(request_safe_stop) or request_safe_stop() is False:
+                    self.popup_message(
+                        "Safe Stop Unavailable",
+                        "The finish-current-well safe stop could not be started. The machine remains paused.",
+                    )
+                return
             if action == PauseActionDialog.RESUME:
                 self.controller.resume_commands()
                 return

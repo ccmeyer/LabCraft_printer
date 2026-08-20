@@ -48,6 +48,7 @@ ARRAY_AXIS_ACCEL_DEFAULT = 140000
 ARRAY_PRINT_SERPENTINE = True
 ARRAY_GENTLE_ACCEL_ENABLED = False
 ARRAY_ROW_START_OVERSHOOT_STEPS = 0
+PAUSED_ARRAY_SOFT_STOP_PHASE_TIMEOUT_MS = 4_000
 PLATE_DOCK_SAFE_Z = 500
 PLATE_DOCK_X_OFFSET = -5000
 PLATE_SEATED_LOCATIONS = {"pause", "plate"}
@@ -1291,6 +1292,9 @@ class Controller(QObject):
         self.model.update_state(status_dict)
         context = getattr(self, "_array_context", None) or {}
         if self.get_array_run_state() == "stop_requested" and context.get("soft_stop_pending"):
+            if context.get("soft_stop_origin") == "immediate_pause":
+                self._advance_paused_array_soft_stop_from_status()
+                return
             soft_stop_phase = context.get("soft_stop_phase", "waiting_watermark")
             if (
                 soft_stop_phase == "waiting_watermark"
@@ -4194,16 +4198,56 @@ class Controller(QObject):
 
     def pause_commands(self):
         """Pause the machine."""
-        self.machine.pause_commands()
+        sent = self.machine.pause_commands()
+        if sent is False:
+            return False
         self.model.machine_model.pause_commands()
+        context = getattr(self, "_array_context", None)
+        if (
+            isinstance(context, dict)
+            and context.get("soft_stop_origin") == "immediate_pause"
+            and context.get("soft_stop_pending")
+        ):
+            phase = context.get("soft_stop_phase")
+            if phase == "parking":
+                context["soft_stop_phase_before_pause"] = phase
+                context["soft_stop_phase"] = "paused_finalization"
+                context["soft_stop_recovery_reason"] = "paused_during_finalization"
+                self._invalidate_paused_array_soft_stop_attempt(context)
+            elif phase == "clearing":
+                # The CLEAR transaction must finish authoritatively. Its
+                # callback will stop before queuing park/finalization work.
+                context["soft_stop_pause_during_clearing"] = True
+            elif phase in {
+                "arming_watermark_from_pause",
+                "resuming_to_watermark",
+                "waiting_watermark",
+            }:
+                machine_model = getattr(self.model, "machine_model", None)
+                if not bool(getattr(machine_model, "pause_watermark_reached", False)):
+                    context["soft_stop_phase_before_pause"] = phase
+                    context["soft_stop_phase"] = "paused_safe_stop_recovery"
+                    context["soft_stop_recovery_reason"] = "operator_repaused"
+                    self._invalidate_paused_array_soft_stop_attempt(context)
+                    self._record_print_array_audit_event(
+                        "print_array_safe_stop_repaused",
+                        "Print array safe stop paused again",
+                        details={"previous_phase": phase},
+                        level="warning",
+                    )
+        return True
 
     def resume_commands(self):
         """Resume the machine commands."""
-        self.machine.resume_commands()
+        sent = self.machine.resume_commands()
+        if sent is False:
+            return False
         self.model.machine_model.resume_commands()
+        return True
 
     def clear_command_queue(self):
         """Clear the command queue."""
+        self._invalidate_paused_array_soft_stop_attempt()
         self._clear_machine_and_model_command_queues(
             reason="queue_clear_requested",
             notify_user=True,
@@ -4513,6 +4557,7 @@ class Controller(QObject):
         has_remaining = self._array_has_remaining_wells_for_loaded_stock()
         next_state = "resume_ready" if has_progress and has_remaining is not False else "idle"
 
+        self._invalidate_paused_array_soft_stop_attempt(context)
         self._array_context = None
         self._soft_stop_clear_uncertain = False
         self._set_array_run_state(next_state)
@@ -4555,6 +4600,7 @@ class Controller(QObject):
         has_remaining = self._array_has_remaining_wells_for_loaded_stock()
         next_state = "resume_ready" if has_progress and has_remaining is not False else "idle"
 
+        self._invalidate_paused_array_soft_stop_attempt(context)
         self._array_context = None
         self._soft_stop_clear_uncertain = False
         self._set_array_run_state(next_state)
@@ -4650,6 +4696,7 @@ class Controller(QObject):
         next_state = "resume_ready" if has_progress and has_remaining is not False else "idle"
 
         self._mark_evap_plate_dock_check_required("machine_disconnect")
+        self._invalidate_paused_array_soft_stop_attempt(context)
         self._array_context = None
         self._soft_stop_clear_uncertain = False
         self._set_array_run_state(next_state)
@@ -4775,6 +4822,10 @@ class Controller(QObject):
             "finalize_reason": context.get("finalize_reason"),
             "soft_stop_pending": bool(context.get("soft_stop_pending", False)),
             "soft_stop_phase": context.get("soft_stop_phase"),
+            "soft_stop_origin": context.get("soft_stop_origin"),
+            "soft_stop_frozen_barrier_seq32": context.get("soft_stop_frozen_barrier_seq32"),
+            "soft_stop_attempt_token": context.get("soft_stop_attempt_token"),
+            "soft_stop_recovery_reason": context.get("soft_stop_recovery_reason"),
             "soft_stop_clear_uncertain": bool(getattr(self, "_soft_stop_clear_uncertain", False)),
             "serpentine": bool(getattr(self, "_array_print_serpentine", ARRAY_PRINT_SERPENTINE)),
             "expected_volume_uL": context.get("expected_volume"),
@@ -4824,6 +4875,473 @@ class Controller(QObject):
             details={"barrier_seq32": current_barrier},
         )
         return True
+
+    def get_array_pause_action_state(self):
+        """Describe the safe actions available while the machine is paused."""
+        array_state = self.get_array_run_state()
+        context = getattr(self, "_array_context", None)
+        context = context if isinstance(context, dict) else {}
+        phase = context.get("soft_stop_phase")
+        origin = context.get("soft_stop_origin")
+
+        action = None
+        can_resume_entire_array = False
+        if array_state == "running":
+            action = "finish"
+            can_resume_entire_array = True
+        elif array_state == "stop_requested":
+            if phase == "paused_safe_stop_recovery":
+                action = "retry"
+            elif phase == "paused_finalization":
+                action = "finalize"
+            else:
+                action = "continue"
+
+        return {
+            "array_active": array_state in {"running", "stop_requested"},
+            "array_state": array_state,
+            "safe_stop_action": action,
+            "can_resume_entire_array": bool(can_resume_entire_array),
+            "soft_stop_phase": phase,
+            "soft_stop_origin": origin,
+            "watermark_uncertain": bool(
+                origin == "immediate_pause"
+                and phase == "paused_safe_stop_recovery"
+            ),
+        }
+
+    def request_paused_array_soft_stop(self):
+        """Convert an immediate array pause into a frozen-boundary soft stop."""
+        array_state = self.get_array_run_state()
+        context = getattr(self, "_array_context", None)
+        if array_state not in {"running", "stop_requested"} or not isinstance(context, dict):
+            return False
+
+        phase = context.get("soft_stop_phase")
+        if phase == "paused_finalization":
+            previous_phase = context.get("soft_stop_phase_before_pause") or "parking"
+            if previous_phase == "post_clear_parking":
+                context["soft_stop_phase_before_pause"] = None
+                context["soft_stop_recovery_reason"] = None
+                context["soft_stop_pause_during_clearing"] = False
+                return self._continue_soft_stop_parking_after_clear(context)
+            if previous_phase == "final_well_completion":
+                if self.resume_commands() is False:
+                    context["soft_stop_recovery_reason"] = "finalization_resume_write_failed"
+                    return False
+                context["soft_stop_phase"] = "done"
+                context["soft_stop_phase_before_pause"] = None
+                context["soft_stop_recovery_reason"] = None
+                return self._enqueue_array_finalize("completed") is not False
+            if self.resume_commands() is False:
+                context["soft_stop_recovery_reason"] = "finalization_resume_write_failed"
+                return False
+            context["soft_stop_phase"] = previous_phase
+            context["soft_stop_phase_before_pause"] = None
+            context["soft_stop_recovery_reason"] = None
+            self._record_print_array_audit_event(
+                "print_array_safe_stop_finalization_resumed",
+                "Print array safe-stop finalization resumed",
+            )
+            return True
+
+        if (
+            context.get("soft_stop_origin") == "immediate_pause"
+            and phase in {
+                "waiting_pause_confirmation",
+                "arming_watermark_from_pause",
+                "resuming_to_watermark",
+                "waiting_watermark",
+                "waiting_completion_catchup",
+                "clearing",
+                "parking",
+                "done",
+            }
+        ):
+            # The conversion is already in flight. Status is authoritative;
+            # repeated button presses must not emit another arm or Resume.
+            self._advance_paused_array_soft_stop_from_status()
+            return True
+
+        if array_state == "running":
+            try:
+                self._update_current_array_barrier()
+            except Exception:
+                pass
+            frozen_barrier = self._coerce_positive_seq32(
+                context.get("current_barrier_seq32")
+            )
+            if frozen_barrier is None:
+                return False
+            context["soft_stop_origin"] = "immediate_pause"
+            context["soft_stop_frozen_barrier_seq32"] = frozen_barrier
+            context["soft_stop_barrier_seq32"] = frozen_barrier
+            context["soft_stop_pending"] = True
+            context["soft_stop_resume_sent"] = False
+            context["soft_stop_recovery_reason"] = None
+            context["soft_stop_phase_before_pause"] = None
+            self._set_array_run_state("stop_requested")
+        elif context.get("soft_stop_origin") != "immediate_pause":
+            # A second immediate pause may interrupt the ordinary Stop After
+            # Well path. Adopt its already-selected barrier, then freeze it so
+            # recovery can never retarget a later well.
+            frozen_barrier = self._coerce_positive_seq32(
+                context.get("soft_stop_barrier_seq32")
+                or context.get("current_barrier_seq32")
+            )
+            if frozen_barrier is None:
+                return False
+            context["soft_stop_origin"] = "immediate_pause"
+            context["soft_stop_frozen_barrier_seq32"] = frozen_barrier
+            context["soft_stop_barrier_seq32"] = frozen_barrier
+            context["soft_stop_pending"] = True
+
+        frozen_barrier = self._coerce_positive_seq32(
+            context.get("soft_stop_frozen_barrier_seq32")
+        )
+        if frozen_barrier is None:
+            return False
+
+        context["soft_stop_pending"] = True
+        context["soft_stop_barrier_seq32"] = frozen_barrier
+        context["soft_stop_phase"] = "waiting_pause_confirmation"
+        context["soft_stop_recovery_reason"] = None
+        context["soft_stop_resume_sent"] = False
+        token = self._new_paused_array_soft_stop_attempt(context)
+        self._schedule_paused_array_soft_stop_timeout(
+            "waiting_pause_confirmation",
+            token,
+        )
+        self._record_print_array_audit_event(
+            "print_array_paused_safe_stop_requested",
+            "Finish-current-well safe stop requested from immediate pause",
+            details={"frozen_barrier_seq32": frozen_barrier},
+        )
+        self._advance_paused_array_soft_stop_from_status()
+
+        active_context = getattr(self, "_array_context", None)
+        if not isinstance(active_context, dict):
+            return self.get_array_run_state() in {"resume_ready", "idle"}
+        if self.get_array_run_state() == "running":
+            return False
+        return active_context.get("soft_stop_origin") == "immediate_pause"
+
+    def _new_paused_array_soft_stop_attempt(self, context):
+        token = int(context.get("soft_stop_attempt_token") or 0) + 1
+        context["soft_stop_attempt_token"] = token
+        return token
+
+    def _invalidate_paused_array_soft_stop_attempt(self, context=None):
+        if context is None:
+            context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return None
+        return self._new_paused_array_soft_stop_attempt(context)
+
+    def _schedule_paused_array_soft_stop_timeout(self, phase, token):
+        QtCore.QTimer.singleShot(
+            PAUSED_ARRAY_SOFT_STOP_PHASE_TIMEOUT_MS,
+            lambda expected_phase=str(phase), expected_token=int(token): self._handle_paused_array_soft_stop_timeout(
+                expected_phase,
+                expected_token,
+            ),
+        )
+
+    def _paused_array_soft_stop_callback_is_current(self, phase, token):
+        context = getattr(self, "_array_context", None)
+        return bool(
+            isinstance(context, dict)
+            and self.get_array_run_state() == "stop_requested"
+            and context.get("soft_stop_origin") == "immediate_pause"
+            and context.get("soft_stop_phase") == phase
+            and int(context.get("soft_stop_attempt_token") or 0) == int(token)
+        )
+
+    def _handle_paused_array_soft_stop_timeout(self, phase, token):
+        if not self._paused_array_soft_stop_callback_is_current(phase, token):
+            return
+        if phase == "waiting_pause_confirmation":
+            self._return_paused_soft_stop_to_running("pause_confirmation_timeout")
+            return
+        self._enter_paused_array_soft_stop_recovery(f"{phase}_timeout")
+
+    def _advance_paused_array_soft_stop_from_status(self):
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return False
+        if (
+            self.get_array_run_state() != "stop_requested"
+            or context.get("soft_stop_origin") != "immediate_pause"
+            or not context.get("soft_stop_pending")
+        ):
+            return False
+
+        phase = context.get("soft_stop_phase")
+        if phase in {
+            "paused_safe_stop_recovery",
+            "paused_finalization",
+            "clearing",
+            "parking",
+            "done",
+        }:
+            return False
+
+        machine_model = getattr(self.model, "machine_model", None)
+        transport_paused = bool(getattr(machine_model, "transport_paused", False))
+        watermark_reached = bool(getattr(machine_model, "pause_watermark_reached", False))
+        frozen_barrier = self._coerce_positive_seq32(
+            context.get("soft_stop_frozen_barrier_seq32")
+        )
+        if frozen_barrier is None:
+            self._enter_paused_array_soft_stop_recovery("missing_frozen_barrier")
+            return False
+
+        if watermark_reached and transport_paused:
+            if self._paused_array_frozen_well_finished_array(context):
+                return self._finish_paused_array_final_well(context)
+            context["soft_stop_phase"] = "waiting_watermark"
+            self._invalidate_paused_array_soft_stop_attempt(context)
+            return self._begin_soft_stop_clear_and_park()
+
+        if phase == "waiting_completion_catchup":
+            return self._maybe_complete_array_soft_stop_after_catchup()
+
+        if phase == "waiting_pause_confirmation":
+            if not transport_paused:
+                return False
+            if self._latest_retired_command_number() >= frozen_barrier:
+                context["soft_stop_phase"] = "waiting_completion_catchup"
+                token = self._new_paused_array_soft_stop_attempt(context)
+                self._schedule_paused_array_soft_stop_timeout(
+                    "waiting_completion_catchup",
+                    token,
+                )
+                return self._maybe_complete_array_soft_stop_after_catchup()
+            reported_barrier = self._coerce_positive_seq32(
+                getattr(machine_model, "pause_after_seq32", 0)
+            )
+            if reported_barrier == frozen_barrier:
+                return self._resume_paused_array_to_frozen_watermark(context)
+            return self._arm_paused_array_frozen_watermark(context, frozen_barrier)
+
+        if phase == "arming_watermark_from_pause":
+            reported_barrier = self._coerce_positive_seq32(
+                getattr(machine_model, "pause_after_seq32", 0)
+            )
+            if transport_paused and reported_barrier == frozen_barrier:
+                return self._resume_paused_array_to_frozen_watermark(context)
+            return False
+
+        if phase == "resuming_to_watermark":
+            if not transport_paused:
+                context["soft_stop_phase"] = "waiting_watermark"
+                self._invalidate_paused_array_soft_stop_attempt(context)
+                self._record_print_array_audit_event(
+                    "print_array_safe_stop_resumed",
+                    "Print array resumed toward the frozen safe-stop watermark",
+                    details={"frozen_barrier_seq32": frozen_barrier},
+                )
+                return True
+            return False
+
+        if phase == "waiting_watermark":
+            return False
+        return False
+
+    def _paused_array_frozen_well_finished_array(self, context):
+        if context.get("queued_wells"):
+            return False
+        try:
+            return not bool(
+                self._get_array_remaining_wells(context.get("stock_id"))
+            )
+        except Exception:
+            return False
+
+    def _finish_paused_array_final_well(self, context):
+        self._invalidate_paused_array_soft_stop_attempt(context)
+        context["soft_stop_pending"] = False
+        if self.resume_commands() is False:
+            context["soft_stop_phase_before_pause"] = "final_well_completion"
+            context["soft_stop_phase"] = "paused_finalization"
+            context["soft_stop_recovery_reason"] = "final_well_resume_write_failed"
+            return False
+        context["soft_stop_phase"] = "done"
+        self._record_print_array_audit_event(
+            "print_array_safe_stop_final_well_completed",
+            "Frozen safe-stop well completed the print array",
+        )
+        return self._enqueue_array_finalize("completed") is not False
+
+    def _arm_paused_array_frozen_watermark(self, context, frozen_barrier):
+        context["soft_stop_phase"] = "arming_watermark_from_pause"
+        token = self._new_paused_array_soft_stop_attempt(context)
+        self._schedule_paused_array_soft_stop_timeout(
+            "arming_watermark_from_pause",
+            token,
+        )
+        try:
+            sent = self.machine.request_pause_after_seq32(
+                frozen_barrier,
+                on_success=lambda payload, expected_token=token, barrier=frozen_barrier: self._handle_paused_array_watermark_ack(
+                    payload,
+                    expected_token,
+                    barrier,
+                ),
+                on_failure=lambda payload, expected_token=token, barrier=frozen_barrier: self._handle_paused_array_watermark_failure(
+                    payload,
+                    expected_token,
+                    barrier,
+                ),
+            )
+        except Exception as exc:
+            self._handle_paused_array_watermark_failure(
+                {"reason": "write_failed", "error": str(exc)},
+                token,
+                frozen_barrier,
+            )
+            return False
+        if sent is False and self._paused_array_soft_stop_callback_is_current(
+            "arming_watermark_from_pause",
+            token,
+        ):
+            self._handle_paused_array_watermark_failure(
+                {"reason": "write_failed"},
+                token,
+                frozen_barrier,
+            )
+        return sent is not False
+
+    def _handle_paused_array_watermark_ack(self, payload, token, barrier):
+        if not self._paused_array_soft_stop_callback_is_current(
+            "arming_watermark_from_pause",
+            token,
+        ):
+            return
+        self._record_print_array_audit_event(
+            "print_array_safe_stop_watermark_acknowledged",
+            "Frozen safe-stop watermark acknowledged; waiting for status confirmation",
+            details={
+                "frozen_barrier_seq32": barrier,
+                "ack": dict(payload or {}),
+            },
+        )
+
+    def _handle_paused_array_watermark_failure(self, payload, token, barrier):
+        if not self._paused_array_soft_stop_callback_is_current(
+            "arming_watermark_from_pause",
+            token,
+        ):
+            return
+        payload = dict(payload or {})
+        reason = str(payload.get("reason") or "unknown")
+        ack_result = str(payload.get("ack_result") or "")
+        if reason == "ack_rejected" and ack_result == "watermark_rejected":
+            context = getattr(self, "_array_context", None)
+            if not isinstance(context, dict):
+                return
+            context["soft_stop_phase"] = "waiting_completion_catchup"
+            context["soft_stop_recovery_reason"] = "frozen_barrier_already_retired"
+            next_token = self._new_paused_array_soft_stop_attempt(context)
+            self._schedule_paused_array_soft_stop_timeout(
+                "waiting_completion_catchup",
+                next_token,
+            )
+            self._record_print_array_audit_event(
+                "print_array_safe_stop_frozen_barrier_retired",
+                "Frozen safe-stop barrier had already retired; catching up completion",
+                details={"frozen_barrier_seq32": barrier},
+                level="warning",
+            )
+            self._maybe_complete_array_soft_stop_after_catchup()
+            return
+        if reason in {"write_failed", "invalid_barrier", "ack_rejected"}:
+            self._return_paused_soft_stop_to_running(reason)
+            return
+        self._enter_paused_array_soft_stop_recovery(reason)
+
+    def _resume_paused_array_to_frozen_watermark(self, context):
+        if context.get("soft_stop_resume_sent"):
+            return False
+        context["soft_stop_resume_sent"] = True
+        self._record_print_array_audit_event(
+            "print_array_safe_stop_watermark_armed",
+            "Frozen safe-stop watermark confirmed in machine status",
+            details={
+                "frozen_barrier_seq32": context.get(
+                    "soft_stop_frozen_barrier_seq32"
+                )
+            },
+        )
+        context["soft_stop_phase"] = "resuming_to_watermark"
+        token = self._new_paused_array_soft_stop_attempt(context)
+        self._schedule_paused_array_soft_stop_timeout(
+            "resuming_to_watermark",
+            token,
+        )
+        if self.resume_commands() is False:
+            if self._paused_array_soft_stop_callback_is_current(
+                "resuming_to_watermark",
+                token,
+            ):
+                self._enter_paused_array_soft_stop_recovery("resume_write_failed")
+            return False
+        return True
+
+    def _return_paused_soft_stop_to_running(self, reason):
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return False
+        self._invalidate_paused_array_soft_stop_attempt(context)
+        context["soft_stop_pending"] = False
+        context["soft_stop_phase"] = None
+        context["soft_stop_origin"] = None
+        context["soft_stop_frozen_barrier_seq32"] = None
+        context["soft_stop_barrier_seq32"] = None
+        context["soft_stop_resume_sent"] = False
+        context["soft_stop_recovery_reason"] = str(reason or "unarmed_failure")
+        self._set_array_run_state("running")
+        self.error_occurred_signal.emit(
+            "Safe Stop Not Armed",
+            "The finish-current-well stop could not be armed. The machine remains paused; "
+            "you may retry, resume the entire array, or abort it.",
+        )
+        return False
+
+    def _enter_paused_array_soft_stop_recovery(self, reason):
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return False
+        previous_phase = context.get("soft_stop_phase")
+        self._invalidate_paused_array_soft_stop_attempt(context)
+        context["soft_stop_phase_before_pause"] = previous_phase
+        context["soft_stop_phase"] = "paused_safe_stop_recovery"
+        context["soft_stop_pending"] = True
+        context["soft_stop_recovery_reason"] = str(reason or "uncertain_state")
+        context["soft_stop_resume_sent"] = False
+
+        try:
+            sent = self.machine.pause_commands()
+        except Exception:
+            sent = False
+        if sent is not False:
+            self.model.machine_model.pause_commands()
+        self._record_print_array_audit_event(
+            "print_array_safe_stop_recovery_required",
+            "Print array safe stop requires operator recovery",
+            details={
+                "previous_phase": previous_phase,
+                "recovery_reason": context.get("soft_stop_recovery_reason"),
+            },
+            level="warning",
+        )
+        self.error_occurred_signal.emit(
+            "Safe Stop Needs Attention",
+            "The safe-stop watermark or resume state could not be confirmed. The machine "
+            "has been told to pause again. Retry the safe stop or abort the array; full-array "
+            "resume is unavailable because a watermark may still be armed.",
+        )
+        return False
 
     @staticmethod
     def _coerce_positive_seq32(value):
@@ -4981,7 +5499,23 @@ class Controller(QObject):
             return False
         if context.get("finalize_reason") is not None:
             return False
-        if context.get("queued_wells"):
+
+        queued_wells = list(context.get("queued_wells") or [])
+        if context.get("soft_stop_origin") == "immediate_pause":
+            frozen_barrier = self._coerce_positive_seq32(
+                context.get("soft_stop_frozen_barrier_seq32")
+            )
+            for well_info in queued_wells:
+                dispense_seq32 = self._coerce_positive_seq32(
+                    well_info.get("dispense_seq32") if isinstance(well_info, dict) else None
+                )
+                if (
+                    frozen_barrier is not None
+                    and dispense_seq32 is not None
+                    and dispense_seq32 <= frozen_barrier
+                ):
+                    return False
+        elif queued_wells:
             return False
 
         stock_id = context.get("stock_id")
@@ -4990,10 +5524,21 @@ class Controller(QObject):
         except Exception:
             remaining_wells = []
 
+        if not remaining_wells and not queued_wells:
+            if context.get("soft_stop_origin") == "immediate_pause":
+                return self._finish_paused_array_final_well(context)
+            context["soft_stop_pending"] = False
+            context["soft_stop_phase"] = "done"
+            return self._enqueue_array_finalize("completed")
+
+        if context.get("soft_stop_origin") == "immediate_pause":
+            context["soft_stop_phase"] = "waiting_watermark"
+            self._invalidate_paused_array_soft_stop_attempt(context)
+            return self._begin_soft_stop_clear_and_park()
+
         context["soft_stop_pending"] = False
         context["soft_stop_phase"] = "done"
-        reason = "soft_stop" if remaining_wells else "completed"
-        return self._enqueue_array_finalize(reason)
+        return self._enqueue_array_finalize("soft_stop")
 
     def _clear_command_queue_for_soft_stop(self, on_cleared=None):
         self._clear_machine_and_model_command_queues(
@@ -5008,6 +5553,7 @@ class Controller(QObject):
         if context.get("soft_stop_phase", "waiting_watermark") != "waiting_watermark":
             return False
 
+        self._invalidate_paused_array_soft_stop_attempt(context)
         context["soft_stop_phase"] = "clearing"
         context["finalize_reason"] = "soft_stop"
         context["soft_stop_transport_was_paused"] = bool(
@@ -5100,20 +5646,42 @@ class Controller(QObject):
             pass
 
         self._soft_stop_clear_uncertain = False
+        if context.pop("soft_stop_pause_during_clearing", False):
+            context["soft_stop_phase_before_pause"] = "post_clear_parking"
+            context["soft_stop_phase"] = "paused_finalization"
+            context["soft_stop_recovery_reason"] = "paused_after_queue_clear"
+            return
+
+        self._continue_soft_stop_parking_after_clear(context)
+
+    def _continue_soft_stop_parking_after_clear(self, context):
+        if not isinstance(context, dict) or context is not getattr(self, "_array_context", None):
+            return False
         if context.get("soft_stop_transport_was_paused"):
             try:
-                self.resume_commands()
+                resumed = self.resume_commands()
             except Exception:
+                resumed = False
+            if resumed is False:
+                if context.get("soft_stop_origin") == "immediate_pause":
+                    context["soft_stop_phase_before_pause"] = "post_clear_parking"
+                    context["soft_stop_phase"] = "paused_finalization"
+                    context["soft_stop_recovery_reason"] = "park_resume_write_failed"
+                    self._warn_soft_stop_post_watermark(
+                        "Soft stop reached the watermark and cleared the queue, but transport could not be resumed for parking. The machine remains paused."
+                    )
+                    return False
                 context["soft_stop_phase"] = "done"
                 self._mark_evap_plate_dock_check_required("soft_stop_park_failed")
                 self._warn_soft_stop_post_watermark(
                     "Soft stop reached the watermark and cleared the queue, but transport could not be resumed for parking. Preserving resume state without parking."
                 )
                 self._complete_array_finalize("soft_stop")
-                return
+                return False
 
         self._queue_array_profile_disable_once(clear_on_failure=False)
         context["soft_stop_phase"] = "parking"
+        context["soft_stop_recovery_reason"] = None
 
         def _finish_after_park():
             active_context = getattr(self, "_array_context", None)
@@ -5128,6 +5696,8 @@ class Controller(QObject):
                 "Soft stop reached the watermark, but the machine could not be parked. Preserving resume state without parking."
             )
             self._complete_array_finalize("soft_stop")
+            return False
+        return True
 
     def _queue_pause_park_sequence(self, on_complete=None):
         if self.move_to_location('pause') is False:
@@ -6946,6 +7516,13 @@ class Controller(QObject):
             "current_barrier_seq32": None,
             "soft_stop_pending": False,
             "soft_stop_phase": None,
+            "soft_stop_origin": None,
+            "soft_stop_frozen_barrier_seq32": None,
+            "soft_stop_attempt_token": 0,
+            "soft_stop_recovery_reason": None,
+            "soft_stop_phase_before_pause": None,
+            "soft_stop_resume_sent": False,
+            "soft_stop_pause_during_clearing": False,
             "pause_departure_pending": True,
             "pause_departure_accel": int(
                 getattr(self, "_array_pause_departure_accel", ARRAY_PAUSE_DEPARTURE_ACCEL)
@@ -7360,7 +7937,15 @@ class Controller(QObject):
         stock_id = context.get("stock_id", stock_id)
         remaining_wells = self._get_array_remaining_wells(stock_id)
         if not remaining_wells and not context.get("queued_wells"):
-            self._enqueue_array_finalize("completed")
+            if (
+                self.get_array_run_state() == "stop_requested"
+                and context.get("soft_stop_origin") == "immediate_pause"
+            ):
+                # The watermark status that follows this completion owns the
+                # one transport resume and final park sequence.
+                context["soft_stop_pending"] = True
+            else:
+                self._enqueue_array_finalize("completed")
         elif self.get_array_run_state() == "stop_requested":
             context["soft_stop_pending"] = True
             self._maybe_complete_array_soft_stop_after_catchup()
@@ -7483,6 +8068,9 @@ class Controller(QObject):
                 "Review the saved progress before printing again.",
             )
             print(f"Could not synchronize final experiment state: {exc}")
+        self._invalidate_paused_array_soft_stop_attempt(
+            getattr(self, "_array_context", None)
+        )
         self._array_context = None
 
         if reason in {"soft_stop", "refill_required"}:

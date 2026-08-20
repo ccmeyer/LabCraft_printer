@@ -192,7 +192,10 @@ def _make_controller(
             get_current_refuel_pressure=lambda: 0.30,
             get_target_refuel_pressure=lambda: 0.30,
             transport_paused=False,
+            paused=False,
+            pause_after_seq32=0,
             pause_watermark_reached=False,
+            last_retired_command_num=0,
             pause_commands=Mock(),
             resume_commands=Mock(),
         ),
@@ -1256,6 +1259,253 @@ def test_request_array_soft_stop_sends_pause_after_current_barrier():
     args, kwargs = c.machine.request_pause_after_seq32.call_args
     assert args == (123,)
     assert callable(kwargs["on_failure"])
+
+
+def _paused_array_conversion_controller(*, barrier=123):
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5), FakeWell("A2", 2)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+    c._schedule_paused_array_soft_stop_timeout = Mock()
+    c._array_context = {
+        "stock_id": "stock-a",
+        "queued_wells": [
+            {"well_id": "A1", "target_droplets": 5, "dispense_seq32": barrier},
+            {"well_id": "A2", "target_droplets": 2, "dispense_seq32": barrier + 7},
+        ],
+        "current_barrier_seq32": barrier,
+        "soft_stop_pending": False,
+        "soft_stop_phase": None,
+        "soft_stop_attempt_token": 0,
+    }
+    c.model.machine_model.transport_paused = True
+    c.model.machine_model.paused = True
+    return c
+
+
+def test_paused_array_safe_stop_waits_for_authoritative_watermark_before_resume():
+    c = _paused_array_conversion_controller()
+
+    assert Controller.request_paused_array_soft_stop(c) is True
+
+    assert c.get_array_run_state() == "stop_requested"
+    assert c._array_context["soft_stop_frozen_barrier_seq32"] == 123
+    assert c._array_context["soft_stop_phase"] == "arming_watermark_from_pause"
+    c.machine.resume_commands.assert_not_called()
+
+    _, kwargs = c.machine.request_pause_after_seq32.call_args
+    kwargs["on_success"]({"ack_result": "watermark_set"})
+    c.machine.resume_commands.assert_not_called()
+
+    c.model.machine_model.pause_after_seq32 = 123
+    Controller.handle_status_update(
+        c,
+        {"Pause_after_seq32": 123, "Transport_paused": 1},
+    )
+
+    c.machine.resume_commands.assert_called_once_with()
+
+
+def test_repeated_paused_array_safe_stop_request_does_not_duplicate_arm_or_resume():
+    c = _paused_array_conversion_controller()
+
+    assert Controller.request_paused_array_soft_stop(c) is True
+    assert Controller.request_paused_array_soft_stop(c) is True
+    c.machine.request_pause_after_seq32.assert_called_once()
+    c.machine.resume_commands.assert_not_called()
+
+    c.model.machine_model.pause_after_seq32 = 123
+    Controller.handle_status_update(c, {"Pause_after_seq32": 123})
+    assert Controller.request_paused_array_soft_stop(c) is True
+    c.machine.request_pause_after_seq32.assert_called_once()
+    c.machine.resume_commands.assert_called_once_with()
+    assert c._array_context["soft_stop_phase"] == "resuming_to_watermark"
+
+    c.model.machine_model.transport_paused = False
+    Controller.handle_status_update(c, {"Transport_paused": 0})
+    Controller.handle_status_update(c, {"Transport_paused": 0})
+
+    assert c._array_context["soft_stop_phase"] == "waiting_watermark"
+    c.machine.resume_commands.assert_called_once_with()
+
+
+def test_paused_array_safe_stop_definite_arm_failure_stays_paused_and_allows_resume():
+    c = _paused_array_conversion_controller()
+    c.machine.request_pause_after_seq32 = Mock(return_value=False)
+
+    assert Controller.request_paused_array_soft_stop(c) is False
+
+    assert c.get_array_run_state() == "running"
+    assert c.model.machine_model.paused is True
+    action_state = Controller.get_array_pause_action_state(c)
+    assert action_state["safe_stop_action"] == "finish"
+    assert action_state["can_resume_entire_array"] is True
+    c.machine.clear_command_queue.assert_not_called()
+
+
+def test_paused_array_safe_stop_indeterminate_arm_failure_requires_recovery():
+    c = _paused_array_conversion_controller()
+
+    def _fail_indeterminately(_barrier, on_success=None, on_failure=None):
+        on_failure({"reason": "not_confirmed", "barrier_seq32": 123})
+        return True
+
+    c.machine.request_pause_after_seq32 = Mock(side_effect=_fail_indeterminately)
+
+    assert Controller.request_paused_array_soft_stop(c) is True
+
+    assert c.get_array_run_state() == "stop_requested"
+    assert c._array_context["soft_stop_phase"] == "paused_safe_stop_recovery"
+    assert c._array_context["soft_stop_frozen_barrier_seq32"] == 123
+    assert Controller.get_array_pause_action_state(c)["safe_stop_action"] == "retry"
+    assert Controller.get_array_pause_action_state(c)["can_resume_entire_array"] is False
+    c.machine.pause_commands.assert_called_once_with()
+    c.machine.resume_commands.assert_not_called()
+    c.machine.clear_command_queue.assert_not_called()
+
+
+def test_paused_array_safe_stop_pause_confirmation_timeout_is_definitely_unarmed():
+    c = _paused_array_conversion_controller()
+    c.model.machine_model.transport_paused = False
+
+    assert Controller.request_paused_array_soft_stop(c) is True
+    token = c._array_context["soft_stop_attempt_token"]
+    assert c._array_context["soft_stop_phase"] == "waiting_pause_confirmation"
+
+    Controller._handle_paused_array_soft_stop_timeout(
+        c,
+        "waiting_pause_confirmation",
+        token,
+    )
+
+    assert c.get_array_run_state() == "running"
+    c.machine.request_pause_after_seq32.assert_not_called()
+    c.machine.clear_command_queue.assert_not_called()
+
+
+def test_late_paused_array_timeout_after_abort_cannot_restart_transport():
+    c = _paused_array_conversion_controller()
+
+    assert Controller.request_paused_array_soft_stop(c) is True
+    token = c._array_context["soft_stop_attempt_token"]
+    Controller.clear_command_queue(c)
+    pause_count = c.machine.pause_commands.call_count
+    resume_count = c.machine.resume_commands.call_count
+
+    Controller._handle_paused_array_soft_stop_timeout(
+        c,
+        "arming_watermark_from_pause",
+        token,
+    )
+
+    assert c.machine.pause_commands.call_count == pause_count
+    assert c.machine.resume_commands.call_count == resume_count
+
+
+def test_paused_array_stale_frozen_barrier_never_retargets_later_well():
+    c = _paused_array_conversion_controller()
+
+    def _reject_frozen(_barrier, on_success=None, on_failure=None):
+        on_failure(
+            {
+                "reason": "ack_rejected",
+                "ack_result": "watermark_rejected",
+                "barrier_seq32": 123,
+            }
+        )
+        return True
+
+    c.machine.request_pause_after_seq32 = Mock(side_effect=_reject_frozen)
+
+    assert Controller.request_paused_array_soft_stop(c) is True
+    assert [call_args.args[0] for call_args in c.machine.request_pause_after_seq32.call_args_list] == [123]
+    assert c._array_context["soft_stop_phase"] == "waiting_completion_catchup"
+
+    c._array_context["queued_wells"] = [
+        {"well_id": "A2", "target_droplets": 2, "dispense_seq32": 130}
+    ]
+    c.model.machine_model.last_retired_command_num = 123
+    assert Controller._maybe_complete_array_soft_stop_after_catchup(c) is True
+
+    assert [call_args.args[0] for call_args in c.machine.request_pause_after_seq32.call_args_list] == [123]
+    assert c._array_context["soft_stop_barrier_seq32"] == 123
+    assert c._array_context["soft_stop_phase"] == "clearing"
+    c.machine.clear_command_queue.assert_called_once()
+
+
+def test_second_immediate_pause_enters_recovery_and_continues_same_barrier():
+    c = _paused_array_conversion_controller()
+    c._array_state = "stop_requested"
+    c._array_context.update(
+        {
+            "soft_stop_origin": "immediate_pause",
+            "soft_stop_frozen_barrier_seq32": 123,
+            "soft_stop_barrier_seq32": 123,
+            "soft_stop_pending": True,
+            "soft_stop_phase": "waiting_watermark",
+        }
+    )
+
+    assert Controller.pause_commands(c) is True
+    assert c._array_context["soft_stop_phase"] == "paused_safe_stop_recovery"
+    assert Controller.get_array_pause_action_state(c)["safe_stop_action"] == "retry"
+
+    c.model.machine_model.pause_after_seq32 = 123
+    c.model.machine_model.transport_paused = True
+    assert Controller.request_paused_array_soft_stop(c) is True
+
+    assert c._array_context["soft_stop_frozen_barrier_seq32"] == 123
+    c.machine.request_pause_after_seq32.assert_not_called()
+    c.machine.resume_commands.assert_called_once_with()
+
+
+def test_paused_array_safe_stop_final_well_finishes_idle_without_clear():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 0, target=5)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    c._schedule_paused_array_soft_stop_timeout = Mock()
+    c._array_context = {
+        "stock_id": "stock-a",
+        "queued_wells": [],
+        "planned_well_ids": set(),
+        "soft_stop_origin": "immediate_pause",
+        "soft_stop_frozen_barrier_seq32": 123,
+        "soft_stop_barrier_seq32": 123,
+        "soft_stop_pending": True,
+        "soft_stop_phase": "waiting_watermark",
+        "soft_stop_attempt_token": 1,
+    }
+    c.model.machine_model.transport_paused = True
+    c.model.machine_model.pause_watermark_reached = True
+
+    Controller.handle_status_update(
+        c,
+        {"Pause_watermark_reached": 1, "Transport_paused": 1},
+    )
+
+    assert c._array_context["finalize_reason"] == "completed"
+    assert c._array_context["soft_stop_phase"] == "done"
+    c.machine.resume_commands.assert_called_once_with()
+    c.machine.clear_command_queue.assert_not_called()
+
+    park_callback = c.move_to_location.call_args_list[-1].kwargs["on_complete"]
+    park_callback()
+    assert c.get_array_run_state() == "idle"
+
+
+def test_pause_and_resume_only_update_model_after_successful_transport_write():
+    c = _paused_array_conversion_controller()
+    c.machine.pause_commands = Mock(return_value=False)
+    c.machine.resume_commands = Mock(return_value=False)
+
+    assert Controller.pause_commands(c) is False
+    assert Controller.resume_commands(c) is False
+
+    c.model.machine_model.pause_commands.assert_not_called()
+    c.model.machine_model.resume_commands.assert_not_called()
 
 
 def test_request_array_soft_stop_watermark_rejection_retries_next_queued_well():

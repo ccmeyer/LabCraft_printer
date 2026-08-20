@@ -2079,6 +2079,11 @@ def _validate_soft_stop_paused_scenario(
         request_evidence.get("maximum_completion_catchup", 0)
     )
     catchup = int(completed_count) - trigger_count
+    minimum_catchup = (
+        0
+        if request_evidence.get("soft_stop_origin") == "immediate_pause"
+        else 1
+    )
     soft_stop_events = list(intent_lifecycle.get("soft_stop_events", ()))
     watermark = next(
         (
@@ -2102,7 +2107,7 @@ def _validate_soft_stop_paused_scenario(
     checks = {
         "request_trigger_exact": request_evidence.get("clicked_count")
         == trigger_count,
-        "completion_catchup_bounded": 1 <= catchup <= maximum_catchup,
+        "completion_catchup_bounded": minimum_catchup <= catchup <= maximum_catchup,
         "plan_remains_active": plan.state is ExecutionPlanState.ACTIVE,
         "plan_identity_unchanged": plan.plan_id == fixture_info["plan_id"],
         "authoritative_bundle_valid": bool(bundle.valid),
@@ -2116,14 +2121,20 @@ def _validate_soft_stop_paused_scenario(
         "clear_certain": not bool(clear.get("soft_stop_uncertain")),
         "resume_ready": controller.get_array_run_state() == "resume_ready",
         "simulator_queue_empty": bool(machine.check_if_all_completed()),
-        "audit_boundary_ordered": _contains_ordered_subsequence(
-            audit_types,
-            (
-                "print_array_requested",
-                "print_array_started",
+        "audit_boundary_ordered": any(
+            _contains_ordered_subsequence(
+                audit_types,
+                (
+                    "print_array_requested",
+                    "print_array_started",
+                    request_event,
+                    "print_array_paused",
+                ),
+            )
+            for request_event in (
                 "print_array_soft_stop_requested",
-                "print_array_paused",
-            ),
+                "print_array_paused_safe_stop_requested",
+            )
         ),
         "no_errors": not errors,
         "no_unexpected_dialogs": not unexpected_dialogs,
@@ -2300,18 +2311,24 @@ def _validate_soft_stop_completed_scenario(
         == fixture_info["plan_id"],
         "array_completed_once": array_complete_count == 1,
         "ui_resumed_once": array_states.count("running") == 2,
-        "audit_lifecycle_ordered": _contains_ordered_subsequence(
-            audit_types,
-            (
-                "print_array_requested",
-                "print_array_started",
+        "audit_lifecycle_ordered": any(
+            _contains_ordered_subsequence(
+                audit_types,
+                (
+                    "print_array_requested",
+                    "print_array_started",
+                    request_event,
+                    "print_array_paused",
+                    "print_array_requested",
+                    "print_array_resumed",
+                    "print_array_started",
+                    "print_array_completed",
+                ),
+            )
+            for request_event in (
                 "print_array_soft_stop_requested",
-                "print_array_paused",
-                "print_array_requested",
-                "print_array_resumed",
-                "print_array_started",
-                "print_array_completed",
-            ),
+                "print_array_paused_safe_stop_requested",
+            )
         ),
         "paused_boundary_valid": all(
             paused_validation.get("checks", {}).values()

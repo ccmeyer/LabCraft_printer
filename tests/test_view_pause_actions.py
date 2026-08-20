@@ -12,12 +12,14 @@ class _PauseDialogStub:
     RESUME = PauseActionDialog.RESUME
     KEEP_PAUSED = PauseActionDialog.KEEP_PAUSED
     REQUEST_CLEAR = PauseActionDialog.REQUEST_CLEAR
+    REQUEST_SAFE_STOP = PauseActionDialog.REQUEST_SAFE_STOP
     next_action = KEEP_PAUSED
     instances = []
 
-    def __init__(self, parent=None, *, array_active=False):
+    def __init__(self, parent=None, *, array_active=False, array_action_state=None):
         self.parent = parent
         self.array_active = bool(array_active)
+        self.array_action_state = dict(array_action_state or {})
         self.exec_action = Mock(return_value=self.next_action)
         self.show = Mock()
         self.raise_ = Mock()
@@ -57,6 +59,15 @@ def _make_main_window(*, array_state="idle", connected=True, paused=False):
         resume_commands=Mock(side_effect=lambda: setattr(machine_model, "paused", False)),
         clear_command_queue=Mock(side_effect=lambda: setattr(machine_model, "paused", False)),
         get_array_run_state=Mock(return_value=array_state),
+        get_array_pause_action_state=Mock(
+            return_value={
+                "array_active": array_state in {"running", "stop_requested"},
+                "array_state": array_state,
+                "safe_stop_action": "finish" if array_state == "running" else "continue",
+                "can_resume_entire_array": array_state == "running",
+            }
+        ),
+        request_paused_array_soft_stop=Mock(return_value=True),
     )
     main_window = MainWindow.__new__(MainWindow)
     main_window.model = SimpleNamespace(machine_model=machine_model)
@@ -184,13 +195,55 @@ def test_array_pause_dialog_copy_and_safe_defaults(qapp):
     assert dialog.windowTitle() == "Print Array Paused Immediately"
     assert "current well may be incomplete" in dialog.text()
     assert "permanently aborts this experiment" in dialog.text()
-    assert dialog.resume_button.text() == "Resume Array"
+    assert dialog.safe_stop_button.text() == "Finish Current Well and Stop"
+    assert dialog.resume_button.text() == "Resume Entire Array"
     assert dialog.keep_paused_button.text() == "Keep Paused"
     assert dialog.clear_queue_button.text() == "Abort Array and Clear Queue…"
     assert dialog.defaultButton() is dialog.keep_paused_button
     assert dialog.escapeButton() is dialog.keep_paused_button
     assert dialog.buttonRole(dialog.clear_queue_button) == QMessageBox.DestructiveRole
     assert dialog.action_for_button(None) == PauseActionDialog.KEEP_PAUSED
+
+
+@pytest.mark.parametrize(
+    ("safe_stop_action", "button_text"),
+    [
+        ("continue", "Continue Safe Stop"),
+        ("retry", "Retry Safe Stop"),
+        ("finalize", "Resume Safe-Stop Finalization"),
+    ],
+)
+def test_in_progress_safe_stop_dialog_blocks_full_array_resume(
+    qapp,
+    safe_stop_action,
+    button_text,
+):
+    dialog = PauseActionDialog(
+        array_active=True,
+        array_action_state={
+            "array_active": True,
+            "safe_stop_action": safe_stop_action,
+            "can_resume_entire_array": False,
+        },
+    )
+
+    assert dialog.safe_stop_button.text() == button_text
+    assert dialog.resume_button is None
+    assert dialog.action_for_button(dialog.safe_stop_button) == PauseActionDialog.REQUEST_SAFE_STOP
+    assert dialog.defaultButton() is dialog.keep_paused_button
+
+
+def test_finish_current_well_action_dispatches_controller_conversion(monkeypatch):
+    _install_dialog_stubs(monkeypatch)
+    _PauseDialogStub.next_action = _PauseDialogStub.REQUEST_SAFE_STOP
+    main_window = _make_main_window(array_state="running")
+
+    MainWindow.pause_machine(main_window)
+
+    main_window.controller.pause_commands.assert_called_once_with()
+    main_window.controller.request_paused_array_soft_stop.assert_called_once_with()
+    main_window.controller.resume_commands.assert_not_called()
+    main_window.controller.clear_command_queue.assert_not_called()
 
 
 def test_non_array_pause_dialog_copy_and_safe_defaults(qapp):
