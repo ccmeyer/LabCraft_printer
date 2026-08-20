@@ -273,7 +273,22 @@ pre-commit gates: 602 focused tests with one skip, 5,430 complete-suite tests
 with 156 skips, contained SIL at 96/96, changed-file compilation, release
 metadata/JSON validation, static diff checks, and unchanged firmware SHA-256
 `EDA070CE...B0D5884`. The candidate remains untagged and has not changed
-LC-001. Its exact commit and disposable Pi results are pending.
+LC-001. Its exact commit and disposable Pi results are recorded below.
+
+The exact candidate is now
+`d965927e88a9ce10217a0bf56a69789e9b0bd9f0`. Disposable Pi qualification
+passed 270 focused tests, contained 96/96 SIL with private-device isolation,
+and a fresh real-Git rc.2 recovery update that preserved 19 protected members
+and 63,616 bytes, wrote a full rc.3 target anchor/stage chain, authorized
+relaunch, and reopened rc.3. The retrieved Pi SIL archive is 3,402,813 bytes
+with SHA-256 `992EFE5A...99CD2AB8`; the separate 110,492-byte focused/recovery
+evidence archive matched at `0447F9BC...81C1AC`.
+
+Production postflight remained clean at `5f54a4a1`; active-pointer hash
+`392C8AA8...646AC80` and deployment-anchor hash
+`627EAD96...9046F2` were unchanged. The original rc.2 error updater remains
+open and no rc.3 tag exists. No production protected file, Git ref, hardware,
+or firmware state changed during this qualification.
 
 No-command probe, audit/restore, firmware provenance or flash, SAFE/HIL, and
 the machine-specific Camera route remain pending.
@@ -326,6 +341,7 @@ Final ignored evidence roots:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Froze exact rc.3 candidate `d965927e`; passed 270 affected Pi tests, 96/96 private-device SIL, and a fresh disposable real-Git short-anchor rc.2 recovery/full-anchor rc.3 reopen; rechecked unchanged production and sealed two matching evidence archives. |
 | 2026-08-20 | Implemented the rc.3 full-commit binding, exact rc.2 prefix compatibility, candidate-side recovery updater, exact-evidence rc.3 genesis enrollment, release metadata, and runbook; final Windows gates passed 602 focused/1 skipped, 5,430 full/156 skipped, and 96/96 contained SIL. |
 | 2026-08-20 | Recorded the immutable rc.2 tag and fail-safe attended `source_binding_mismatch`, proved no Git/protected-data mutation, and began the rc.3 full-commit compatibility and attended recovery correction plan. |
 | 2026-08-20 | Froze correction candidate `d59f73be`; passed exact-commit Windows focused/full/static/release/SIL and affected target-Pi focused/private-device SIL gates; proved production remained unchanged; stopped the enrolled update at the intentional release-tag boundary. |

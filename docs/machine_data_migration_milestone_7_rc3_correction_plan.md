@@ -1,6 +1,7 @@
 # Milestone 7 rc.3 Protected-Update Correction Plan
 
-Status: `in_progress`
+Status: `implementation_complete` — exact candidate qualified on Windows and
+the disposable target Pi; local tag and attended LC-001 recovery remain.
 
 Prepared: 2026-08-20
 
@@ -110,8 +111,8 @@ unexpected hardware access stops the sequence and preserves all evidence.
 
 ## Implementation and Windows validation record
 
-Implementation is complete pending the dedicated candidate commit and
-disposable Pi qualification.
+Implementation is frozen at exact candidate
+`d965927e88a9ce10217a0bf56a69789e9b0bd9f0`.
 
 - New app-generated bindings use full 40-character Git commits.
 - Historical compatibility accepts only the exact 12-lowercase-hex prefix and
@@ -140,3 +141,43 @@ Final pre-commit Windows gates on this code/release tree passed:
 The complete suite and SIL were rerun after adding the direct rc.3 genesis
 evidence gate; earlier passing runs are diagnostic only and are not counted as
 the final candidate gate.
+
+## Disposable target-Pi validation record
+
+The exact candidate was transported in a complete Git bundle of 52,105,622
+bytes, SHA-256 `E2118048...25DCB34`, and checked out detached/clean below
+`/tmp/labcraft-m7-rc3-qualification.N7g6CX`. This was Git transport evidence,
+not an offline updater package.
+
+- The affected app-version, deployment-anchor, migration/bootstrap,
+  preservation/recovery, updater, Controller request, and updater-window group
+  passed 270 tests in 12.65 seconds.
+- Contained Pi SIL passed 96/96 at exact commit `d965927e`, with a clean
+  candidate, private `/dev`, unshared network, read-only root, and all serial,
+  GPIO, MCU, camera, balance, and firmware-update interfaces disabled.
+- The retrieved 3,402,813-byte Pi SIL archive has SHA-256
+  `992EFE5A...99CD2AB8`.
+- A fresh disposable real-Git source at exact enrolled rc.2 commit `5f54a4a1`
+  used the separate rc.3 candidate updater, derived its full source binding
+  from a synthetic authorized short-anchor store, created/reopened the verified
+  backup, fast-forwarded to `d965927e`, preserved all 19 protected members and
+  63,616 bytes, wrote a full target anchor and immutable stage chain,
+  authorized relaunch, and reopened through rc.3 bootstrap with exit 0.
+- The first rehearsal stopped before fixture creation because the harness CWD
+  did not expose tracked test fixtures. The second completed the actual update
+  and reopen assertions but its final informational print used
+  `total_size` instead of `total_bytes`. The final counted rehearsal used a
+  fresh source checkout/store and passed with exit 0; neither preliminary run
+  touched production or hardware.
+- The sealed 110,492-byte focused/recovery evidence archive matched on Pi and
+  Windows at SHA-256 `0447F9BC...81C1AC`.
+
+Production remained clean at `5f54a4a174cd50f145e1bfa98aa61535b7aa59e9`.
+The active-pointer SHA-256 remained `392C8AA8...646AC80`, the rc.2 genesis
+deployment-anchor SHA-256 remained `627EAD96...9046F2`, and the retained rc.2
+error updater process remained open. No production machine-data file, Git ref,
+app process, firmware, or hardware state was changed by disposable
+qualification.
+
+The rc.3 tag does not yet exist. Tag creation and the attended LC-001 recovery
+remain explicit downstream authorization gates.

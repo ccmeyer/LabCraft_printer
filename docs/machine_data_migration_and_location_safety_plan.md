@@ -1857,6 +1857,13 @@ rollback procedure.
   SIL, unchanged production pre/post state, and independent archive rechecks.
 - Tagging, attended hardware work, exact tag-dependent updater/rollback lanes,
   publication, pilots, and rollout remain pending.
+- The later immutable rc.2 tag exposed a fail-safe short-versus-full commit
+  mismatch during its first enrolled protected update. Exact rc.3 correction
+  candidate `d965927e` passed 602 focused/5,430 full Windows tests, 96/96
+  Windows SIL, 270 affected Pi tests, 96/96 private-device Pi SIL, and a fresh
+  disposable real-Git rc.2 recovery/full-anchor rc.3 reopen. Production
+  remained clean at `5f54a4a1` with unchanged pointer/anchor hashes. The rc.3
+  tag and attended recovery remain pending.
 
 ### Validation record
 
@@ -2199,6 +2206,7 @@ The work is complete only when:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Recorded exact rc.3 candidate `d965927e`, passing final Windows and disposable-Pi focused/SIL/real-Git recovery gates, matching evidence archives, and unchanged production; retained local-tag and attended-recovery authorization gates. |
 | 2026-08-20 | Preserved immutable rc.2 after its enrolled update failed safely on short-versus-full source commit identity; advanced the Milestone 7 target to rc.3 and linked the concrete correction/recovery plan. |
 | 2026-08-19 | Created the living Milestones 0-7 migration, audit, safety, updater, rollback, qualification, and rollout plan for `v1.3.0-rc.2`. |
 | 2026-08-19 | Marked Milestone 0 verified from the target Pi backup attestation and linked the concrete Milestone 1 implementation plan. |
