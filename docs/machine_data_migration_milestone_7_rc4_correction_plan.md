@@ -1,8 +1,9 @@
 # Milestone 7 rc.4 Exact-Restore Correction Plan
 
-Status: `implementation_complete` - exact candidate Windows and disposable-Pi
-gates pass; the rc.4 tag and attended LC-001 protected update/restore remain
-explicit authorization gates.
+Status: `implementation_complete` - runtime correction gates passed on
+`3e451c01`, but a direct plate-removal regression was added afterward; the
+refrozen exact-commit Windows/Pi gates, rc.4 tag, and attended LC-001 update
+remain.
 
 Prepared: 2026-08-20
 
@@ -153,9 +154,9 @@ The exact-candidate and disposable-Pi results are recorded below. Tag and
 attended recovery results remain pending and will be appended without
 rewriting this finding.
 
-## Exact candidate and disposable-Pi validation record
+## First candidate and disposable-Pi validation record
 
-The frozen rc.4 release candidate is
+The first frozen rc.4 candidate was
 `3e451c01e23f2957d12c8242c9c664bf8974aeae` (`fix: bind exact restore target
 removal`). It is clean and untagged. On that exact commit:
 
@@ -199,7 +200,17 @@ event was not created by disposable qualification. Production remains at
 sequence 4, with `qualification-unverified` still present and revoked, no
 pending transaction, unchanged Camera evidence, and no rc.4 tag.
 
-Do not tag or update from this record alone. The next step is explicit operator
-authorization to create the immutable local rc.4 tag at `3e451c01`, validate
-it with `--check-tags`, stage it without moving production `HEAD`, and run the
-normal protected rc.3 -> rc.4 update before retrying the attended restore.
+The post-qualification coverage review found that the correction's location
+removal had a direct regression, while its parallel added-plate calibration
+removal relied only on shared implementation and broader tests. A new focused
+test now commits a calibrated disposable plate, verifies four explicit corner
+removals in the bound restore preview, restores exact raw `Plates.json` bytes,
+removes its authorization target, and leaves no pending transaction. The
+narrow group passes 60 tests.
+
+Because tracked test coverage changes the release tree, `3e451c01` is no
+longer the tag target even though its runtime results remain valid evidence.
+Do not tag or update from this record alone. Freeze and rerun the exact-commit
+Windows/Pi gates on the coverage-complete commit, then request explicit
+operator authorization for the immutable rc.4 tag and normal protected rc.3
+-> rc.4 update before retrying the attended restore.

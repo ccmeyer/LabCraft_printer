@@ -8,8 +8,8 @@
 > publication, and rollout.
 
 Status: `in_progress` - rc.4 corrective implementation is active; exact-commit
-tag, attended recovery, publication, and rollout gates remain; exact-candidate
-Windows and disposable-Pi rc.4 gates pass.
+refrozen exact-commit Windows/Pi, tag, attended recovery, publication, and
+rollout gates remain after adding direct plate-removal regression coverage.
 
 Started: 2026-08-20
 
@@ -315,8 +315,8 @@ gates passed 59 narrow tests, 336 broader affected tests, 5,434 full-suite
 tests with 156 skips, and contained SIL 96/96, plus release/static/firmware
 identity checks.
 
-The exact candidate is `3e451c01e23f2957d12c8242c9c664bf8974aeae`.
-Its clean-commit 59-test and Windows 96/96 gates passed. A detached clean Pi
+Candidate `3e451c01e23f2957d12c8242c9c664bf8974aeae` passed
+clean-commit 59-test and Windows 96/96 gates. A detached clean Pi
 checkout passed the same 59 tests, an independent add/revoke/exact-restore
 exercise with exact original bytes and no pending transaction, and
 private-device contained SIL 96/96. The retrieved SIL archive SHA-256 is
@@ -330,6 +330,14 @@ the preflight snapshot and is the operator-cancelled restore preview after the
 sequence-3 rejection; disposable qualification created no production event.
 The disposable target remains revoked and no production pending transaction
 exists. Rc.4 remains untagged.
+
+A final coverage audit then added a direct regression for exact restoration
+that removes an added calibrated plate. It verifies all four previewed corner
+removals, exact raw `Plates.json` restoration, target removal, and no pending
+transaction; the narrow group now passes 60 tests. Since this changes the
+tracked release tree, `3e451c01` is retained as passing evidence but is
+superseded as the tag target. The coverage-complete commit must repeat the
+exact-commit Windows/Pi gates before tag authorization.
 
 ## Local tag, updater, and rollback qualification
 
@@ -379,6 +387,7 @@ Final ignored evidence roots:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Added direct calibrated-plate removal/exact-restore regression coverage after the first rc.4 disposable qualification; retained `3e451c01` as passing runtime evidence but reopened the exact-candidate gate because the tracked release tree changed. |
 | 2026-08-20 | Froze rc.4 candidate `3e451c01`; passed exact-commit Windows and Pi focused tests, independent exact-restore, Windows/Pi contained SIL 96/96, private-device proof, matching evidence archives, and byte-identical production postflight; retained tag and attended recovery as explicit gates. |
 | 2026-08-20 | Recorded the successful rc.3 protected recovery update and normal reopen, the guarded cancellation/addition/revocation/no-command passes, and the safe exact-restore deletion rejection; began the narrow rc.4 source-event/backup-bound correction and recorded its first 59 passing focused tests. |
 | 2026-08-20 | Froze exact rc.3 candidate `d965927e`; passed 270 affected Pi tests, 96/96 private-device SIL, and a fresh disposable real-Git short-anchor rc.2 recovery/full-anchor rc.3 reopen; rechecked unchanged production and sealed two matching evidence archives. |

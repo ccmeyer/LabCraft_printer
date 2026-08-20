@@ -189,6 +189,76 @@ def test_import_deletion_remains_rejected_and_restore_requires_bound_backup(tmp_
         context.close()
 
 
+def test_exact_restore_can_remove_plate_calibration_added_by_source_transaction(tmp_path):
+    _base, context = _active_context(tmp_path)
+    try:
+        service = context.configuration_transactions
+        service.require_configuration_guard_evidence = True
+        plates_path = context.paths.config_root / "Plates.json"
+        original_bytes = plates_path.read_bytes()
+        before = read_governed_documents(context.paths)
+        imported_plates = copy.deepcopy(before["Plates.json"])
+        calibrated = next(plate for plate in imported_plates if plate.get("calibrations"))
+        added_plate = copy.deepcopy(calibrated)
+        added_plate["name"] = "qualification-plate"
+        added_plate["default"] = False
+        imported_plates.append(added_plate)
+        state = service.refresh(allow_pending=False)
+        import_assessment = context.configuration_safety_guard.assess(
+            before_documents=before,
+            proposed_documents={"Plates.json": imported_plates},
+            workflow="governed_configuration_import",
+            target_keys=("Plates.json",),
+            hardware_profile="current",
+            governed_file_sha256=state.config_sha256,
+        )
+        added = service.commit_documents(
+            {"Plates.json": imported_plates},
+            operator="Alice",
+            reason="add disposable plate calibration",
+            workflow="governed_configuration_import",
+            event_type="import",
+            expected_config_sha256=state.config_sha256,
+            guard_evidence=import_assessment,
+        )
+
+        proposal, restore_precondition = service.read_restore_preview(
+            added.transaction_id
+        )
+        restore_state = service.refresh(allow_pending=False)
+        assessment = context.configuration_safety_guard.assess(
+            before_documents=read_governed_documents(context.paths),
+            proposed_documents=proposal,
+            workflow="configuration_restore",
+            target_keys=("Plates.json",),
+            hardware_profile="current",
+            preconditions={"captures": [], "restore": restore_precondition},
+            governed_file_sha256=restore_state.config_sha256,
+        )
+        removals = [change for change in assessment["changes"] if change["proposed"] is None]
+        assert {change["target_key"] for change in removals} == {
+            "top_left",
+            "top_right",
+            "bottom_right",
+            "bottom_left",
+        }
+        assert assessment["result"] == "strong_confirmation"
+
+        restored = service.restore_transaction(
+            added.transaction_id,
+            operator="Alice",
+            reason="restore exact pre-plate bytes",
+            machine_id_confirmation=context.identity.machine_id,
+            expected_config_sha256=restore_state.config_sha256,
+            guard_evidence=assessment,
+        )
+        assert plates_path.read_bytes() == original_bytes
+        assert "plate:qualification-plate" not in restored.state.authorization
+        assert not list(context.paths.pending_transactions_root.glob("*"))
+    finally:
+        context.close()
+
+
 def test_restore_commit_rejects_preview_bound_to_different_manifest(tmp_path):
     _base, context = _active_context(tmp_path)
     try:
