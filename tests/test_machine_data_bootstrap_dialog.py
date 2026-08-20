@@ -2,7 +2,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from PySide6 import QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 import MachineDataBootstrap
 import MachineDataBootstrapDialog
@@ -60,6 +60,17 @@ def _inspect_now(dialog):
     dialog._candidate_inspected(
         dialog.bootstrap.inspect_candidate(dialog._selection())
     )
+
+
+def _wait_until(qapp, predicate, timeout_ms=3000):
+    deadline = QtCore.QDeadlineTimer(timeout_ms)
+    while not deadline.hasExpired():
+        qapp.processEvents(QtCore.QEventLoop.AllEvents, 5)
+        if predicate():
+            return
+        QtCore.QThread.msleep(1)
+    qapp.processEvents(QtCore.QEventLoop.AllEvents, 5)
+    assert predicate(), "condition did not become true before timeout"
 
 
 def test_current_checkout_candidate_is_visible_but_not_silently_confirmed(
@@ -282,6 +293,94 @@ def test_worker_cancel_requests_checkpoint_cancellation_without_terminating_thre
     assert bootstrap.cancel_calls == 1
     assert not dialog.cancel_work_button.isEnabled()
     assert "next durable checkpoint" in dialog.progress_label.text()
+
+
+def test_worker_success_accepts_only_after_qthread_has_stopped(qapp, tmp_path):
+    bootstrap = FakeBootstrap(
+        _inspection(
+            tmp_path,
+            MachineDataBootstrap.BootstrapState.CANDIDATE_SELECTION_REQUIRED,
+        )
+    )
+    dialog = MachineDataBootstrapDialog.MachineDataBootstrapDialog(bootstrap)
+    accepted_after_stop = []
+    dialog.accepted.connect(
+        lambda: accepted_after_stop.append(
+            dialog._thread is None or dialog._thread.isFinished()
+        )
+    )
+
+    dialog._start_worker(
+        lambda: SimpleNamespace(kind="authorized"),
+        mode="activate",
+    )
+
+    _wait_until(qapp, lambda: bool(accepted_after_stop))
+    assert accepted_after_stop == [True]
+    assert dialog.context.kind == "authorized"
+    assert dialog._busy is False
+    assert dialog._thread is None
+    assert dialog._worker is None
+
+
+def test_worker_failure_shows_error_only_after_qthread_has_stopped(
+    qapp, monkeypatch, tmp_path
+):
+    bootstrap = FakeBootstrap(
+        _inspection(
+            tmp_path,
+            MachineDataBootstrap.BootstrapState.CANDIDATE_SELECTION_REQUIRED,
+        )
+    )
+    dialog = MachineDataBootstrapDialog.MachineDataBootstrapDialog(bootstrap)
+    errors_after_stop = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "critical",
+        lambda *_args: errors_after_stop.append(
+            dialog._thread is None or dialog._thread.isFinished()
+        ),
+    )
+
+    def fail():
+        raise RuntimeError("injected failure")
+
+    dialog._start_worker(fail, mode="activate")
+
+    _wait_until(qapp, lambda: bool(errors_after_stop))
+    assert errors_after_stop == [True]
+    assert dialog.failure_code == "bootstrap_failed"
+    assert dialog.failure_message == "injected failure"
+    assert dialog._busy is False
+
+
+def test_worker_cancellation_rejects_only_after_qthread_has_stopped(qapp, tmp_path):
+    bootstrap = FakeBootstrap(
+        _inspection(
+            tmp_path,
+            MachineDataBootstrap.BootstrapState.CANDIDATE_SELECTION_REQUIRED,
+        )
+    )
+    dialog = MachineDataBootstrapDialog.MachineDataBootstrapDialog(bootstrap)
+    rejected_after_stop = []
+    dialog.rejected.connect(
+        lambda: rejected_after_stop.append(
+            dialog._thread is None or dialog._thread.isFinished()
+        )
+    )
+
+    def cancel():
+        raise MachineDataBootstrap.BootstrapError(
+            "bootstrap_cancelled", "injected cancellation"
+        )
+
+    dialog._start_worker(cancel, mode="activate")
+
+    _wait_until(qapp, lambda: bool(rejected_after_stop))
+    assert rejected_after_stop == [True]
+    assert dialog.failure_code is None
+    assert dialog.failure_message is None
+    assert dialog._busy is False
 
 
 def test_dialog_module_has_no_production_hardware_or_mvc_imports():

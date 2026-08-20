@@ -64,6 +64,8 @@ class MachineDataBootstrapDialog(QtWidgets.QDialog):
         self._thread = None
         self._worker = None
         self._worker_mode: str | None = None
+        self._worker_thread_stopped = True
+        self._pending_worker_outcome = None
         self._busy = False
         self.failure_code: str | None = None
         self.failure_message: str | None = None
@@ -396,6 +398,8 @@ class MachineDataBootstrapDialog(QtWidgets.QDialog):
         self.failure_message = None
         self._busy = True
         self._worker_mode = str(mode)
+        self._worker_thread_stopped = False
+        self._pending_worker_outcome = None
         self.dialog_buttons.setEnabled(False)
         thread = QtCore.QThread(self)
         worker = BootstrapWorker(operation)
@@ -405,7 +409,9 @@ class MachineDataBootstrapDialog(QtWidgets.QDialog):
         worker.failed.connect(self._worker_failed)
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(self._worker_thread_finished)
         thread.finished.connect(thread.deleteLater)
         self._thread = thread
         self._worker = worker
@@ -413,24 +419,43 @@ class MachineDataBootstrapDialog(QtWidgets.QDialog):
 
     @QtCore.Slot(object)
     def _worker_finished(self, context):
+        self._pending_worker_outcome = ("finished", context)
+        self._finalize_worker_if_stopped()
+
+    @QtCore.Slot(str, str)
+    def _worker_failed(self, code, message):
+        self._pending_worker_outcome = ("failed", str(code), str(message))
+        self._finalize_worker_if_stopped()
+
+    @QtCore.Slot()
+    def _worker_thread_finished(self):
+        self._worker_thread_stopped = True
+        self._thread = None
+        self._worker = None
+        self._finalize_worker_if_stopped()
+
+    def _finalize_worker_if_stopped(self):
+        if not self._worker_thread_stopped or self._pending_worker_outcome is None:
+            return
+        outcome = self._pending_worker_outcome
+        self._pending_worker_outcome = None
         self._busy = False
         mode = self._worker_mode
         self._worker_mode = None
         self.dialog_buttons.setEnabled(True)
+        if outcome[0] == "failed":
+            self._apply_worker_failure(mode, outcome[1], outcome[2])
+            return
+        context = outcome[1]
         if mode == "inspect_candidate":
             self._candidate_inspected(context)
             return
         self.context = context
         self.accept()
 
-    @QtCore.Slot(str, str)
-    def _worker_failed(self, code, message):
-        self._busy = False
-        mode = self._worker_mode
-        self._worker_mode = None
+    def _apply_worker_failure(self, mode, code, message):
         self.failure_code = str(code)
         self.failure_message = str(message)
-        self.dialog_buttons.setEnabled(True)
         if code == "bootstrap_cancelled":
             self.failure_code = None
             self.failure_message = None
