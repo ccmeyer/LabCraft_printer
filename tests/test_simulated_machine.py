@@ -542,6 +542,39 @@ def test_pause_after_barrier_stops_and_stale_barrier_fails(
     assert failures[-1]["ack_result"] == "watermark_rejected"
 
 
+def test_resume_preserves_armed_unreached_watermark(qapp, test_profile):
+    config = SimulationConfig(
+        timing=SimulationTimingPolicy(
+            speed_multiplier=1.0,
+            duration_overrides={"WAIT": 30},
+        )
+    )
+    machine = _make_machine(qapp, test_profile, config=config)
+    completed = []
+    commands = [
+        machine.wait_ms(5, handler=lambda n=number: completed.append(n))
+        for number in range(3)
+    ]
+
+    assert machine.pause_commands() is True
+    assert machine.request_pause_after_seq32(commands[1].command_number) is True
+    assert machine.state.transport_paused is True
+    assert machine.state.pause_after_seq32 == commands[1].command_number
+
+    assert machine.resume_commands() is True
+    assert machine.state.transport_paused is False
+    assert machine.state.pause_after_seq32 == commands[1].command_number
+
+    _wait_until(
+        qapp,
+        lambda: machine.state.pause_watermark_reached
+        and machine.state.transport_paused,
+    )
+
+    assert completed == [0, 1]
+    assert machine.get_remaining_commands() == 1
+
+
 def test_clear_cancels_without_handlers_and_confirms_once(qapp, test_profile):
     config = SimulationConfig(
         timing=SimulationTimingPolicy(

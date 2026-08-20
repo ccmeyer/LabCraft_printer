@@ -1,4 +1,5 @@
 import json
+from types import MappingProxyType
 
 import pytest
 
@@ -54,6 +55,49 @@ def _write_calibration_memory_seed(root, *, marker="template"):
         path.write_text(text + "\n", encoding="utf-8")
 
 
+def test_machine_config_contract_inventory_is_public_and_read_only():
+    inventory = LocalConfig.machine_config_top_level_types()
+
+    assert isinstance(inventory, MappingProxyType)
+    assert dict(inventory) == {
+        "Settings.json": dict,
+        "Plates.json": list,
+        "Locations.json": dict,
+        "Obstacles.json": dict,
+        "RegulatorProfiles.json": dict,
+    }
+    with pytest.raises(TypeError):
+        inventory["Locations.json"] = list
+    assert LocalConfig.machine_config_top_level_types()["Locations.json"] is dict
+
+
+def test_calibration_memory_contract_inventory_is_public_and_read_only():
+    inventory = LocalConfig.calibration_memory_seed_top_level_types()
+
+    assert isinstance(inventory, MappingProxyType)
+    assert dict(inventory) == LocalConfig._CALIBRATION_MEMORY_SEED_TYPES
+    with pytest.raises(TypeError):
+        inventory["schema.json"] = list
+    assert LocalConfig.calibration_memory_seed_top_level_types()["schema.json"] is dict
+
+
+def test_public_machine_config_validator_reuses_current_contract(tmp_path):
+    path = tmp_path / "Locations.json"
+    payload = {"Camera": {"X": 1, "Y": 2, "Z": 3}}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert LocalConfig.validate_machine_config_file(path, "Locations.json") == payload
+
+    path.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="expected top-level dict"):
+        LocalConfig.validate_machine_config_file(path, "Locations.json")
+
+
+def test_public_machine_config_validator_rejects_unsupported_filename(tmp_path):
+    with pytest.raises(ValueError, match="Unsupported machine config"):
+        LocalConfig.validate_machine_config_file(tmp_path / "Other.json", "Other.json")
+
+
 def test_get_machine_config_path_seeds_missing_local_from_current_preset(monkeypatch, tmp_path):
     presets_dir, local_dir = _configure_paths(monkeypatch, tmp_path)
     preset_text = '{\n  "HARDWARE_PROFILE": "legacy",\n  "machine": "bench-a"\n}\n'
@@ -104,6 +148,42 @@ def test_get_machine_config_path_rejects_wrong_top_level_type(monkeypatch, tmp_p
         LocalConfig.get_machine_config_path("Obstacles.json")
 
     assert not (local_dir / "Obstacles.json").exists()
+
+
+def test_existing_machine_config_never_seeds_missing_canonical_file(
+    monkeypatch, tmp_path
+):
+    presets_dir, _local_dir = _configure_paths(monkeypatch, tmp_path)
+    (presets_dir / "Settings.json").write_text(
+        '{"HARDWARE_PROFILE": "current"}\n', encoding="utf-8"
+    )
+    canonical = tmp_path / "external" / "machine" / "config"
+    canonical.mkdir(parents=True)
+
+    with pytest.raises(FileNotFoundError, match="Canonical machine config is missing"):
+        LocalConfig.get_existing_machine_config_path(
+            "Settings.json", config_root=canonical
+        )
+
+    assert not (canonical / "Settings.json").exists()
+
+
+def test_existing_machine_config_rejects_invalid_file_without_repair(
+    monkeypatch, tmp_path
+):
+    presets_dir, _local_dir = _configure_paths(monkeypatch, tmp_path)
+    (presets_dir / "Locations.json").write_text("{}\n", encoding="utf-8")
+    canonical = tmp_path / "external" / "machine" / "config"
+    canonical.mkdir(parents=True)
+    target = canonical / "Locations.json"
+    target.write_text("{ invalid", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Invalid machine config"):
+        LocalConfig.get_existing_machine_config_path(
+            "Locations.json", config_root=canonical
+        )
+
+    assert target.read_text(encoding="utf-8") == "{ invalid"
 
 
 def test_get_calibration_memory_root_seeds_missing_local_files_from_templates(monkeypatch, tmp_path):
@@ -169,3 +249,22 @@ def test_get_calibration_memory_root_seeds_missing_files_in_partial_local_root(m
     assert json.loads(local_config_path.read_text(encoding="utf-8"))["marker"] == "local"
     assert (local_root / "schema.json").exists()
     assert (local_root / "entities" / "reagents.json").exists()
+
+
+def test_existing_calibration_memory_rejects_partial_root_without_seeding(
+    monkeypatch, tmp_path
+):
+    _presets_dir, _local_dir = _configure_paths(monkeypatch, tmp_path)
+    _write_calibration_memory_seed(
+        LocalConfig.CALIBRATION_MEMORY_TEMPLATE_DIR,
+        marker="template_marker",
+    )
+    canonical = tmp_path / "external" / "machine" / "CalibrationMemory"
+    canonical.mkdir(parents=True)
+    (canonical / "config.json").write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="baseline is missing"):
+        LocalConfig.get_existing_calibration_memory_root(root=canonical)
+
+    assert not (canonical / "schema.json").exists()
+    assert not (canonical / "entities").exists()

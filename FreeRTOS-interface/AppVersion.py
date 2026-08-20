@@ -61,3 +61,11 @@ def get_app_version(repo_root: str | Path, command_runner=None) -> str:
     if short_sha:
         return f"commit {short_sha}"
     return "unknown"
+
+
+def get_app_commit(repo_root: str | Path, command_runner=None) -> str:
+    """Return the installed Git commit evidence or ``unknown``."""
+
+    return _git_short_sha(
+        Path(repo_root), command_runner or _default_command_runner
+    ) or "unknown"

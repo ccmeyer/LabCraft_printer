@@ -55,6 +55,12 @@ v1.2.0-rc.7
   "previous_version": "v1.2.0-rc.6",
   "rollback_version": "v1.1.17",
   "requires_firmware": null,
+  "machine_data": {
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "data_schema_version": 1,
+    "transition": "none",
+    "transition_id": null
+  },
   "summary": "Short release summary.",
   "notes": ["Operator-facing release note."],
   "validation": [
@@ -77,6 +83,14 @@ firmware artifact. If firmware changed, use:
   "note": "Firmware was updated on this release line."
 }
 ```
+
+Starting with `v1.3.0-rc.2`, every release manifest must include the exact
+`machine_data` declaration shown above. Use `transition: "none"` unless the
+release includes and qualifies a target-side hardware-free schema adapter.
+An intentional transition uses `transition: "bootstrap_recovery"` and an
+exact reviewed `transition_id`; it must pass the Milestone 6 transition and
+recovery gates before tagging. Never omit the declaration to make an update
+compatible with an older updater.
 
 `releases/latest.json` is the app's release index. Stable machines read this
 from their upstream branch during online update checks.
@@ -458,7 +472,13 @@ Stable releases normally roll back to the previous stable release.
 Release candidates normally roll back to the current stable release, not to the
 previous RC, unless support specifically wants RC-to-RC rollback.
 
-Support-only backend rollback command:
+For M6-capable releases, do not run a shortened backend rollback command. It
+lacks the authorized machine/root binding and will fail closed. Normal
+M6-to-M6 rollback is launched by the authorized app UI. Rollback to a legacy
+checkout-local release requires the exact-profile support procedure in
+`docs/machine_data_update_and_rollback_runbook.md`.
+
+Pre-M6 backend rollback command (legacy documentation only):
 
 ```powershell
 .\env\Scripts\python.exe tools\update_and_restart.py --repo-root . --rollback --no-relaunch --record-result
@@ -480,6 +500,8 @@ Restore From Offline Rollback Bundle
 
 `Check Rollback` tries the online configured rollback target first. If online
 tag fetch fails, it scans removable drives for `LabCraftUpdates/*.json`.
+When the resolved target has no M6 preservation contract, the check remains
+read-only and the normal restore button is disabled with support required.
 
 ## Validation Checklist
 
@@ -571,3 +593,8 @@ git fetch origin --tags
   --record-result \
   --target-release <version>
 ```
+
+That shortened command applies only to pre-M6 development/recovery contexts.
+For rc.2 and later, use the authorized app-generated command or follow
+`docs/machine_data_update_and_rollback_runbook.md`; direct apply requires all
+machine-data binding fields and has no force bypass.

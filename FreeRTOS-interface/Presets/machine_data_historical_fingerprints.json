@@ -1,0 +1,36 @@
+{
+  "schema_name": "labcraft.historical_machine_preset_fingerprints",
+  "schema_version": 1,
+  "cohorts": [
+    {
+      "cohort": "v1.2.0-rc.6",
+      "declared_versions": [
+        "v1.2.0-rc.6",
+        "1.2.0-rc.6"
+      ],
+      "config_semantic_sha256": {
+        "Locations.json": "d893fffbac98b9b8c8749b544bb0ade656b8c64f2362844945d9f7617631c904",
+        "Obstacles.json": "218f208cfbf37e8fafbde33ce65f1985b7214b5762d31a85dffe616227ce3f1b",
+        "Plates.json": "1a937bfdf7a80fa6b1bf696a628913e769c38439c46b3c776959f3538e327b1c",
+        "RegulatorProfiles.json": "8680fb22773989bc6a9df2adde84b62a35265b1a0b23e871655d7591035d9712",
+        "Settings.json": "8abe64d6b94836d15847f3f3f356a0dd739671e3ed8536e52e5683698a110f84"
+      },
+      "camera_semantic_sha256": "6f7d1b08d0a0723701fb7998433a1699fc642f5b08359a79cdb7073a327cc760"
+    },
+    {
+      "cohort": "v1.3.0-rc.1",
+      "declared_versions": [
+        "v1.3.0-rc.1",
+        "1.3.0-rc.1"
+      ],
+      "config_semantic_sha256": {
+        "Locations.json": "d893fffbac98b9b8c8749b544bb0ade656b8c64f2362844945d9f7617631c904",
+        "Obstacles.json": "218f208cfbf37e8fafbde33ce65f1985b7214b5762d31a85dffe616227ce3f1b",
+        "Plates.json": "1a937bfdf7a80fa6b1bf696a628913e769c38439c46b3c776959f3538e327b1c",
+        "RegulatorProfiles.json": "8680fb22773989bc6a9df2adde84b62a35265b1a0b23e871655d7591035d9712",
+        "Settings.json": "56335282f7fb7245fd0e05f2c19fa5a3cccb875c3483ee971f6eb02a7a87adf3"
+      },
+      "camera_semantic_sha256": "6f7d1b08d0a0723701fb7998433a1699fc642f5b08359a79cdb7073a327cc760"
+    }
+  ]
+}

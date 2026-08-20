@@ -195,6 +195,44 @@ def test_runtime_config_updates_local_config_not_template(monkeypatch, tmp_path)
     assert template_config_path.read_text(encoding="utf-8") == template_before
 
 
+def test_strict_store_refuses_missing_baseline_without_creating_root(tmp_path):
+    canonical = tmp_path / "external" / "machine" / "CalibrationMemory"
+
+    with pytest.raises(FileNotFoundError, match="Canonical CalibrationMemory root"):
+        CalibrationMemoryStore(
+            root_dir=canonical,
+            require_existing_baseline=True,
+        )
+
+    assert not canonical.exists()
+
+
+def test_strict_store_opens_complete_baseline_and_only_creates_runtime_dirs(
+    monkeypatch, tmp_path
+):
+    _template_root, canonical = _configure_local_calibration_memory(
+        monkeypatch, tmp_path
+    )
+    LocalConfig.get_calibration_memory_root(local_root=canonical)
+    baseline = {
+        relative: (canonical / relative).read_bytes()
+        for relative in LocalConfig.calibration_memory_seed_top_level_types()
+    }
+
+    store = CalibrationMemoryStore(
+        root_dir=canonical,
+        require_existing_baseline=True,
+    )
+    store.ensure_initialized()
+
+    assert (canonical / "indices").is_dir()
+    assert (canonical / "runs").is_dir()
+    assert baseline == {
+        relative: (canonical / relative).read_bytes()
+        for relative in LocalConfig.calibration_memory_seed_top_level_types()
+    }
+
+
 def test_completed_run_and_aggregation_write_under_local_root(monkeypatch, tmp_path):
     template_root, local_root = _configure_local_calibration_memory(monkeypatch, tmp_path)
     model = _make_dummy_model(tmp_path)

@@ -506,6 +506,251 @@ def authoritative_reload_terminal_assertions(
     ))
 
 
+def new_experiment_session_assertions(
+    *,
+    boundary: Mapping[str, Any],
+    collision_evidence: Mapping[str, Any],
+) -> tuple[AssertionResult, ...]:
+    """Evaluate the composed Milestone 2 New Experiment boundaries."""
+
+    opened = dict(boundary["opened"])
+    cancelled = dict(boundary["cancelled"])
+    failed = dict(boundary["failed"])
+    resumed = dict(boundary["resumed"])
+    idle = dict(boundary["idle"])
+    expected = dict(boundary["expected_names"])
+
+    def core(state: Mapping[str, Any], *, include_status: bool = True) -> dict[str, Any]:
+        ui = dict(state["ui"])
+        if not include_status:
+            ui.pop("status_text", None)
+        return {
+            "experiment_model_id": state["experiment_model_id"],
+            "experiment_dir": state["experiment_dir"],
+            "experiment_name": state["experiment_name"],
+            "array_state": state["array_state"],
+            "array_context_id": state["array_context_id"],
+            "factor_count": state["factor_count"],
+            "additional_condition_count": state["additional_condition_count"],
+            "uploaded_design": state["uploaded_design"],
+            "uploaded_well_ids": state["uploaded_well_ids"],
+            "progress": state["progress"],
+            "execution_locked": state["execution_locked"],
+            "runtime": state["runtime"],
+            "directory_hashes": state["directory_hashes"],
+            "load_signal_count": state["load_signal_count"],
+            "generation_signal_count": state["generation_signal_count"],
+            "ui": ui,
+        }
+
+    cancel_prompt = dict(cancelled.get("resume_prompt") or {})
+    cancel_checks = {
+        "resume_prompt_title": cancel_prompt.get("title") == "Start New Experiment?",
+        "resume_prompt_explains_preservation": (
+            "will not be deleted" in str(cancel_prompt.get("informative_text") or "")
+            and "loaded again" in str(cancel_prompt.get("informative_text") or "")
+        ),
+        "cancel_is_default": cancel_prompt.get("default_button") == "Cancel",
+        "cancel_is_escape": cancel_prompt.get("escape_button") == "Cancel",
+        "cancel_selected": cancel_prompt.get("selected_button") == "Cancel",
+        "active_state_unchanged": core(cancelled["before"]) == core(cancelled["after"]),
+        "source_unchanged": (
+            cancelled["before"]["directory_hashes"]
+            == cancelled["source_hashes_after"]
+        ),
+        "no_load_signal": cancelled["after"]["load_signal_count"] == 0,
+        "controller_resume_ready": cancelled["after"]["array_state"] == "resume_ready",
+    }
+
+    failure_warning = dict(failed.get("failure_warning") or {})
+    failure_checks = {
+        "resume_accept_selected": (
+            dict(failed.get("resume_prompt") or {}).get("selected_button")
+            == "Start New Experiment"
+        ),
+        "failure_warning_shown": (
+            failure_warning.get("title") == "Cannot start new experiment"
+            and "synthetic new-session validation failure"
+            in str(failure_warning.get("text") or "")
+        ),
+        "active_state_preserved": (
+            core(failed["before"], include_status=False)
+            == core(failed["after"], include_status=False)
+        ),
+        "error_status_reported": "New experiment failed" in str(
+            failed["after"]["ui"]["status_text"]
+        ),
+        "source_unchanged": (
+            failed["before"]["directory_hashes"] == failed["source_hashes_after"]
+        ),
+        "failed_candidate_cleaned": not bool(failed["failed_candidate_exists"]),
+        "no_load_signal": failed["after"]["load_signal_count"] == 0,
+        "controller_resume_ready": failed["after"]["array_state"] == "resume_ready",
+        "array_context_preserved": (
+            failed["before"]["array_context_id"]
+            == failed["after"]["array_context_id"]
+        ),
+    }
+
+    resumed_after = dict(resumed["after"])
+    runtime = dict(resumed_after["runtime"])
+    resume_checks = {
+        "resume_accept_selected": (
+            dict(resumed.get("resume_prompt") or {}).get("selected_button")
+            == "Start New Experiment"
+        ),
+        "expected_suffix_allocated": resumed_after["experiment_name"] == expected["resume"],
+        "active_model_adopted": (
+            resumed_after["experiment_model_id"] == opened["experiment_model_id"]
+        ),
+        "controller_idle": resumed_after["array_state"] == "idle",
+        "array_context_cleared": resumed_after["array_context_id"] is None,
+        "design_state_empty": all(
+            (
+                resumed_after["factor_count"] == 0,
+                resumed_after["additional_condition_count"] == 0,
+                resumed_after["uploaded_design"] is False,
+                resumed_after["uploaded_well_ids"] is None,
+                resumed_after["progress"] == {},
+                resumed_after["execution_locked"] is False,
+            )
+        ),
+        "runtime_state_empty": all(
+            (
+                runtime["reaction_count"] == 0,
+                runtime["assigned_well_count"] == 0,
+                runtime["stock_count"] == 0,
+                runtime["rack_stock_head_count"] == 0,
+                runtime["non_calibration_head_count"] == 0,
+                runtime["gripper_loaded"] is False,
+            )
+        ),
+        "load_signal_once": resumed_after["load_signal_count"] == 1,
+        "source_unchanged": opened["directory_hashes"] == resumed["source_hashes_after"],
+    }
+
+    idle_after = dict(idle["after"])
+    collision_checks = {
+        "collision_sentinels_unchanged": (
+            collision_evidence.get("hashes_before")
+            == collision_evidence.get("hashes_after")
+        ),
+        "failed_suffix_reused_after_cleanup": (
+            resumed_after["experiment_name"] == expected["failed"] == expected["resume"]
+        ),
+        "idle_suffix_allocated": idle_after["experiment_name"] == expected["idle"],
+        "idle_prompt_absent": idle.get("resume_prompt") is None,
+        "idle_controller_before_and_after": (
+            idle["before"]["array_state"] == "idle"
+            and idle_after["array_state"] == "idle"
+        ),
+        "resume_session_unchanged": (
+            boundary["resume_hashes_before_idle"]
+            == boundary["resume_hashes_after_idle"]
+        ),
+        "source_session_unchanged": (
+            opened["directory_hashes"] == boundary["source_hashes_final"]
+        ),
+        "two_success_signals": boundary["load_signal_count"] == 2,
+        "no_optimization_generation": boundary["generation_signal_count"] == 0,
+    }
+
+    preferences = dict(boundary["preferences"])
+    fresh_ui = dict(idle_after["ui"])
+    controls = dict(fresh_ui["controls"])
+    design = idle_after.get("design")
+    fresh_checks = {
+        "valid_design_object": (
+            isinstance(design, Mapping)
+            and isinstance(design.get("metadata"), Mapping)
+            and design["metadata"].get("name") == expected["idle"]
+        ),
+        "empty_progress_file": idle_after["progress_file"] == {},
+        "execution_artifacts_absent": (
+            idle_after["execution_plan_exists"] is False
+            and idle_after["execution_resume_exists"] is False
+        ),
+        "primary_controls_editable": all(
+            row["enabled"] and row["read_only"] is not True
+            for row in controls.values()
+        ),
+        "import_and_lifecycle_banners_hidden": (
+            fresh_ui["reset_upload_hidden"]
+            and fresh_ui["lifecycle_banner_hidden"]
+        ),
+        "stale_warning_cleared": (
+            fresh_ui["stock_stale"] is False
+            and fresh_ui["stock_status_hidden"]
+            and not fresh_ui["stock_status_text"]
+        ),
+        "fresh_optimization_state": (
+            fresh_ui["optimization_dirty"]
+            and fresh_ui["last_optimization_result"] is None
+        ),
+        "success_status_names_experiment": expected["idle"]
+        in str(fresh_ui["status_text"]),
+        "preferences_preserved": (
+            fresh_ui["auto_update"] == preferences["auto_update"]
+            and fresh_ui["advanced_visible"] == preferences["advanced_visible"]
+        ),
+    }
+
+    def result(
+        assertion_id: str,
+        checkpoint: str,
+        checks: Mapping[str, bool],
+        evidence: Mapping[str, Any],
+        sources: tuple[str, ...],
+    ) -> AssertionResult:
+        passed = bool(checks) and all(checks.values())
+        return AssertionResult(
+            assertion_id,
+            checkpoint,
+            "pass" if passed else "fail",
+            sources,
+            {"checks": dict(checks), **dict(evidence)},
+            None if passed else "New Experiment SIL boundary failed",
+        )
+
+    return (
+        result(
+            "experiment.new_session_cancel_preserves_active",
+            "resume_cancelled",
+            cancel_checks,
+            cancelled,
+            ("ui", "controller", "model", "persistence"),
+        ),
+        result(
+            "experiment.new_session_failure_atomic",
+            "validation_failure",
+            failure_checks,
+            failed,
+            ("ui", "controller", "model", "persistence"),
+        ),
+        result(
+            "experiment.new_session_resume_detaches_cleanly",
+            "resume_session_created",
+            resume_checks,
+            resumed,
+            ("ui", "controller", "model", "persistence", "simulator"),
+        ),
+        result(
+            "experiment.new_session_collision_safe",
+            "idle_session_created",
+            collision_checks,
+            {"boundary": boundary, "collisions": collision_evidence},
+            ("ui", "controller", "model", "persistence"),
+        ),
+        result(
+            "experiment.new_session_fresh_editor",
+            "idle_session_created",
+            fresh_checks,
+            idle_after,
+            ("ui", "model", "persistence"),
+        ),
+    )
+
+
 def simulation_identity_assertion(context: Any) -> AssertionResult:
     def inspect() -> tuple[bool, Mapping[str, Any]]:
         banner = getattr(context.view, "simulation_identity_banner", None)
@@ -5760,6 +6005,7 @@ __all__ = [
     "multi_stock_terminal_assertions",
     "mixed_mode_lifecycle_assertions",
     "matrix_case_assertions",
+    "new_experiment_session_assertions",
     "prepared_execution_assertion",
     "rack_head_assertion",
     "real_application_assertion",

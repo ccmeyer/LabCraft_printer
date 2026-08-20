@@ -123,7 +123,12 @@ from CalibrationPersistencePolicy import (
     new_experiment_policy,
 )
 
-from LocalConfig import get_calibration_memory_root, get_machine_config_path
+from LocalConfig import (
+    get_calibration_memory_root,
+    get_existing_calibration_memory_root,
+    get_existing_machine_config_path,
+    get_machine_config_path,
+)
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 
 
@@ -7545,6 +7550,96 @@ class ExperimentModel(QObject):
             if hasattr(self._calibration_manager, "begin_session"):
                 self._calibration_manager.begin_session(self.calibration_file_path)
 
+    def _reserve_new_experiment_directory(
+        self,
+        base_dir: Optional[str] = None,
+    ) -> tuple[Path, Path]:
+        """Atomically reserve a collision-free directory for a fresh session."""
+        root = (
+            Path(base_dir).expanduser().resolve()
+            if base_dir is not None
+            else Path(self.experiments_root).expanduser().resolve()
+        )
+        root.mkdir(parents=True, exist_ok=True)
+
+        base_name = self.sanitize_experiment_name(
+            self.metadata.get("name"),
+            fallback="Untitled-" + time.strftime("%Y%m%d_%H%M%S"),
+        )
+        suffix = 1
+        while True:
+            name = base_name if suffix == 1 else f"{base_name}-{suffix}"
+            destination = root / name
+            try:
+                destination.mkdir(exist_ok=False)
+            except FileExistsError:
+                suffix += 1
+                continue
+            return root, destination
+
+    def _validate_new_experiment_session_files(self) -> None:
+        """Validate the two seed files required by a fresh editor session."""
+        with open(self.experiment_file_path, "r", encoding="utf-8") as handle:
+            design = json.load(handle)
+        with open(self.progress_file_path, "r", encoding="utf-8") as handle:
+            progress = json.load(handle)
+
+        if not isinstance(design, dict):
+            raise RuntimeError("The new experiment design file must contain an object.")
+        metadata = design.get("metadata")
+        expected_name = Path(self.experiment_dir_path).name
+        if not isinstance(metadata, dict) or metadata.get("name") != expected_name:
+            raise RuntimeError(
+                "The new experiment design name does not match its folder."
+            )
+        if progress != {}:
+            raise RuntimeError("The new experiment progress file must be empty.")
+
+    @staticmethod
+    def _remove_failed_new_experiment_directory(
+        destination: Path,
+        root: Path,
+    ) -> None:
+        """Remove only the directory exclusively reserved by this creation attempt."""
+        resolved_root = root.resolve()
+        resolved_destination = destination.resolve()
+        if resolved_destination.parent != resolved_root:
+            raise RuntimeError(
+                "Refusing to clean up a new-experiment folder outside its root."
+            )
+        shutil.rmtree(resolved_destination)
+
+    def initialize_new_experiment_session(
+        self,
+        base_dir: Optional[str] = None,
+    ) -> str:
+        """Create and validate a collision-free fresh session on a detached model."""
+        if self._calibration_manager is not None:
+            raise RuntimeError(
+                "A fresh experiment candidate must not use the live calibration manager."
+            )
+
+        root, destination = self._reserve_new_experiment_directory(base_dir)
+        self.metadata["name"] = destination.name
+        self.experiment_dir_path = str(destination)
+        self.update_all_paths()
+
+        try:
+            self.save_experiment()
+            self.create_progress_file()
+            self._validate_new_experiment_session_files()
+        except Exception as creation_error:
+            try:
+                self._remove_failed_new_experiment_directory(destination, root)
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "New experiment creation failed and its incomplete folder could "
+                    f"not be removed: {destination}. Cleanup error: {cleanup_error}"
+                ) from creation_error
+            raise
+
+        return str(destination)
+
     def update_all_paths(self):
         """Update file paths based on current experiment_dir_path."""
         import os
@@ -12735,6 +12830,7 @@ class ExperimentModel(QObject):
         self._pending_authoritative_print_preflight = None
         self._last_authoritative_pass_preparation = None
         self._last_authoritative_calibration_transition = None
+        self._last_authoritative_terminal_transition = None
         self._progress_execution_reference = None
         self._prepared_execution_replacement_context = None
 
@@ -13231,6 +13327,7 @@ class WellPlate(QObject):
 
         self.calibration_applied = False
         self.temp_calibration_data = {}
+        self.canonical_transaction_required = False
     
         self.apply_calibration_data()
 
@@ -13469,9 +13566,49 @@ class WellPlate(QObject):
     
     def update_calibration_data(self):
         """Run the full update of all calibration data."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical plate calibration must use the configuration transaction service."
+            )
         self.store_calibrations()
         self.save_calibrations_to_file()
         self.apply_calibration_data()
+
+    def proposed_calibration_document(self):
+        """Return a complete plate document without changing active plate state."""
+
+        required = {"top_left", "top_right", "bottom_right", "bottom_left"}
+        if set(self.temp_calibration_data) != required:
+            raise ValueError("All four temporary plate corners are required.")
+        proposed = copy.deepcopy(self.all_plate_data)
+        current_name = self.get_current_plate_name()
+        for plate in proposed:
+            if plate.get("name") == current_name:
+                plate["calibrations"] = copy.deepcopy(self.temp_calibration_data)
+                return proposed
+        raise ValueError(f"Plate format {current_name!r} was not found.")
+
+    def install_committed_document(self, all_plate_data):
+        """Install a complete already-persisted Plates snapshot."""
+
+        current_name = self.get_current_plate_name()
+        proposed = copy.deepcopy(all_plate_data)
+        selected = next(
+            (plate for plate in proposed if plate.get("name") == current_name),
+            None,
+        )
+        if selected is None:
+            raise ValueError(f"Committed plates omit current format {current_name!r}.")
+        self.all_plate_data = proposed
+        self.current_plate_data = selected
+        self.rows = selected["rows"]
+        self.cols = selected["columns"]
+        self.calibrations = selected["calibrations"]
+        self.calibration_applied = False
+        self.normalize_excluded_wells()
+        self.apply_calibration_data()
+        self.plate_format_changed_signal.emit()
+        self.plate_summary_changed_signal.emit(current_name, self.rows, self.cols)
 
     def get_plate_data_by_name(self, plate_name):
         for plate_data in self.all_plate_data:
@@ -13481,6 +13618,10 @@ class WellPlate(QObject):
 
     def store_calibrations(self):
         """Save the temporary calibration data to the main calibration data."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical plate calibration cannot change active memory before commit."
+            )
         plate_name = self.get_current_plate_name()
         for plate_data in self.all_plate_data:
             if plate_data['name'] == plate_name:
@@ -13494,6 +13635,10 @@ class WellPlate(QObject):
 
     def save_calibrations_to_file(self, file_path=None):
         """Save the current calibration data to a JSON file."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical Plates.json writes require a configuration transaction."
+            )
         path = file_path or self.plates_path
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp_path = path + ".tmp"
@@ -14321,6 +14466,7 @@ class RackModel(QObject):
 
         self.calibration_applied = False
         self.temp_calibration_data = {}
+        self.canonical_transaction_required = False
     
         self.apply_calibration_data()
 
@@ -14407,6 +14553,10 @@ class RackModel(QObject):
 
     def store_calibrations(self):
         """Save the temporary calibration data to the main calibration data."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical rack calibration cannot change active memory before commit."
+            )
         for position_name, coords in self.temp_calibration_data.items():
             self.calibrations[position_name] = coords
         self.temp_calibration_data.clear()
@@ -14417,6 +14567,10 @@ class RackModel(QObject):
 
     def update_calibration_data(self):
         """Run the full update of all calibration data."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical rack calibration must use the configuration transaction service."
+            )
         self.store_calibrations()
         self.save_calibrations_to_file()
         self.apply_calibration_data()
@@ -14805,6 +14959,7 @@ class LocationModel(QObject):
         self.locations = {}
         self.boundaries = []
         self.obstacles = []
+        self.canonical_transaction_required = False
 
     # === Atomic file utility ===
     def _atomic_write_json(self, path: str, obj: dict) -> None:
@@ -14834,11 +14989,21 @@ class LocationModel(QObject):
 
     def save_locations(self):
         """Save locations to a JSON file atomically."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical Locations.json writes require a configuration transaction."
+            )
         try:
             self._atomic_write_json(self.json_file_path, self.locations)
         except Exception as e:
             print(f"Failed to save locations '{self.json_file_path}': {e}")
             # consider re-raising if you want calling code to handle it
+
+    def install_committed_locations(self, locations):
+        """Install a complete already-persisted Locations snapshot."""
+
+        self.locations = copy.deepcopy(dict(locations))
+        self.locations_updated.emit()
 
     # === Obstacles / Boundaries ===
     def load_obstacles(self):
@@ -14864,12 +15029,20 @@ class LocationModel(QObject):
 
     def add_location(self, name, x, y, z):
         """Add a new location or update an existing one."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical locations cannot change active memory before commit."
+            )
         self.locations[name] = {'X': x, 'Y': y, 'Z': z}
         self.locations_updated.emit()
         #print(f"Location '{name}' added/updated.")
 
     def update_location(self, name, x, y, z):
         """Update an existing location by name."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical locations cannot change active memory before commit."
+            )
         if name in self.locations:
             self.locations[name] = {'X': x, 'Y': y, 'Z': z}
             self.current_location_updated.emit(name)
@@ -14889,6 +15062,10 @@ class LocationModel(QObject):
 
     def update_location_coords(self, name, coords):
         """Update an existing location by name."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical locations cannot change active memory before commit."
+            )
         if name in self.locations:
             self.locations[name] = coords
             self.locations_updated.emit()
@@ -14899,6 +15076,10 @@ class LocationModel(QObject):
 
     def remove_location(self, name):
         """Remove a location by name."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical locations cannot change active memory before commit."
+            )
         if name in self.locations:
             del self.locations[name]
             self.locations_updated.emit()
@@ -14979,6 +15160,11 @@ class MachineModel(QObject):
         self.current_x = 0
         self.current_y = 0
         self.current_z = 0
+        # Position capture evidence is host-monotonic and per-axis.  Values are
+        # refreshed only when that axis is present in an MCU status payload.
+        self._position_received_monotonic = {axis: None for axis in ("X", "Y", "Z")}
+        self._position_generation = {axis: 0 for axis in ("X", "Y", "Z")}
+        self._motion_trust_epoch = 0
         self.current_p = 0
         self.current_r = 0
 
@@ -15051,10 +15237,12 @@ class MachineModel(QObject):
 
     def connect_machine(self):
         print("Model connect")
+        self._advance_motion_trust_epoch()
         self.machine_connected = True
         self.machine_state_updated.emit(self.machine_connected)
 
     def disconnect_machine(self):
+        self._advance_motion_trust_epoch()
         self.machine_connected = False
         self.machine_state_updated.emit(self.machine_connected)
         self.motors_enabled = False
@@ -15065,6 +15253,7 @@ class MachineModel(QObject):
         self.clear_last_reset_report()
 
     def recover_after_board_reset(self):
+        self._advance_motion_trust_epoch()
         self.machine_connected = False
         self.machine_state_updated.emit(self.machine_connected)
         self.motors_enabled = False
@@ -15300,6 +15489,47 @@ class MachineModel(QObject):
         self.current_y = int(y)
         self.current_z = int(z)
 
+    def update_reported_position(self, status, *, received_monotonic=None):
+        """Install only axes actually present in one received status payload."""
+
+        if not isinstance(status, dict):
+            raise TypeError("status must be a dict")
+        received = time.monotonic() if received_monotonic is None else float(received_monotonic)
+        if not math.isfinite(received):
+            raise ValueError("received_monotonic must be finite")
+        for axis, attribute in (("X", "current_x"), ("Y", "current_y"), ("Z", "current_z")):
+            if axis not in status:
+                continue
+            setattr(self, attribute, int(status[axis]))
+            self._position_received_monotonic[axis] = received
+            self._position_generation[axis] += 1
+
+    def get_position_telemetry_snapshot(self, *, now_monotonic=None):
+        now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+        axes = {}
+        values = self.get_current_position_dict()
+        for axis in ("X", "Y", "Z"):
+            received = self._position_received_monotonic[axis]
+            age_ms = None if received is None else max(0.0, (now - received) * 1000.0)
+            axes[axis] = {
+                "value": values[axis],
+                "generation": self._position_generation[axis],
+                "received_monotonic": received,
+                "age_ms": age_ms,
+            }
+        return {
+            "trust_epoch": self._motion_trust_epoch,
+            "axes": axes,
+        }
+
+    def get_motion_trust_epoch(self):
+        return self._motion_trust_epoch
+
+    def _advance_motion_trust_epoch(self):
+        self._motion_trust_epoch += 1
+        self._position_received_monotonic = {axis: None for axis in ("X", "Y", "Z")}
+        return self._motion_trust_epoch
+
     def update_current_p_motor(self, p):
         self.current_p = int(p)
 
@@ -15493,12 +15723,14 @@ class MachineModel(QObject):
         return {"X": self.current_x, "Y": self.current_y, "Z": self.current_z}
 
     def handle_home_complete(self):
+        self._advance_motion_trust_epoch()
         self.motors_homed = True
         self.current_location = "Home"
         self.home_status_signal.emit()
         print("Motors homed.")
 
     def reset_home_status(self):
+        self._advance_motion_trust_epoch()
         self.motors_homed = False
         self.current_location = "Unknown"
 
@@ -15527,9 +15759,12 @@ class Model(QObject):
         config_root=None,
         experiments_root=None,
         calibration_memory_root=None,
+        droplet_imager_optics_path=None,
+        canonical_existing_only=False,
     ):
         super().__init__()
         self.profile = profile
+        self.canonical_existing_only = bool(canonical_existing_only)
         self.script_dir = os.path.dirname(os.path.abspath(__file__))
         self.config_root = (
             Path(config_root).expanduser().resolve()
@@ -15546,19 +15781,31 @@ class Model(QObject):
             if calibration_memory_root is not None
             else None
         )
+        self.droplet_imager_optics_path = (
+            Path(droplet_imager_optics_path).expanduser().resolve()
+            if droplet_imager_optics_path is not None
+            else None
+        )
+        config_path = (
+            lambda filename: get_existing_machine_config_path(
+                filename, config_root=self.config_root
+            )
+            if self.canonical_existing_only
+            else get_machine_config_path(filename, local_root=self.config_root)
+        )
         self.locations_path = str(
-            get_machine_config_path('Locations.json', local_root=self.config_root)
+            config_path('Locations.json')
         )
         self.plates_path = str(
-            get_machine_config_path('Plates.json', local_root=self.config_root)
+            config_path('Plates.json')
         )
         self.colors_path = os.path.join(self.script_dir, 'Presets','Printer_head_colors.json')
         self.settings_path = str(
-            get_machine_config_path('Settings.json', local_root=self.config_root)
+            config_path('Settings.json')
         )
         self.print_profiles_path = os.path.join(self.script_dir, 'Presets','PrintProfiles.json')
         self.obstacles_path = str(
-            get_machine_config_path('Obstacles.json', local_root=self.config_root)
+            config_path('Obstacles.json')
         )
         self.predictive_model_dir = os.path.join(self.script_dir, 'Presets','Predictive_models')
         self.pixel_step_conv_path = os.path.join(self.script_dir, 'Presets','step_conv_250813.json')
@@ -15578,6 +15825,9 @@ class Model(QObject):
         self.location_model.load_obstacles()
         self.all_plate_data = self.load_all_plate_data(self.plates_path)
         self.well_plate = WellPlate(self.all_plate_data,self.plates_path)
+        self.location_model.canonical_transaction_required = self.canonical_existing_only
+        self.rack_model.canonical_transaction_required = self.canonical_existing_only
+        self.well_plate.canonical_transaction_required = self.canonical_existing_only
         self.stock_solutions = StockSolutionManager()
         self.reaction_collection = ReactionCollection()
         self.printer_head_manager = PrinterHeadManager(self.printer_head_colors,self.rack_model)
@@ -15587,7 +15837,10 @@ class Model(QObject):
         # self.calibration_model = MassCalibrationModel(self.machine_model,self.printer_head_manager,self.rack_model,self.predictive_model_dir)
         self.experiment_file_path = None
         self.refuel_camera_model = CalibrationClasses.RefuelCameraModel()
-        self.droplet_camera_model = CalibrationClasses.DropletCameraModel(self.pixel_step_conv_path)
+        self.droplet_camera_model = CalibrationClasses.DropletCameraModel(
+            self.pixel_step_conv_path,
+            optics_config_path=self.droplet_imager_optics_path,
+        )
         self.calibration_manager = CalibrationClasses.CalibrationManager(self)
         # self.experiment_model = ExperimentModel(self.well_plate,self.calibration_manager)
         self.experiment_model = ExperimentModel(
@@ -15637,15 +15890,27 @@ class Model(QObject):
             else:
                 root_dir = None
                 if self.calibration_memory_root is not None:
-                    root_dir = get_calibration_memory_root(
-                        local_root=self.calibration_memory_root
+                    root_dir = (
+                        get_existing_calibration_memory_root(
+                            root=self.calibration_memory_root
+                        )
+                        if self.canonical_existing_only
+                        else get_calibration_memory_root(
+                            local_root=self.calibration_memory_root
+                        )
                     )
-                store = CalibrationMemoryStore(model=self, root_dir=root_dir)
+                store = CalibrationMemoryStore(
+                    model=self,
+                    root_dir=root_dir,
+                    require_existing_baseline=self.canonical_existing_only,
+                )
             store.ensure_initialized()
             self.calibration_memory_store = store
         except Exception as e:
             print(f"[CalibrationMemory] Failed to initialize store: {e}")
             self.calibration_memory_store = None
+            if getattr(self, "canonical_existing_only", False):
+                raise
 
     def _initialize_regulator_profile_store(self):
         config_root = getattr(self, "config_root", None)
@@ -15654,9 +15919,12 @@ class Model(QObject):
             self.regulator_profile_store = RegulatorProfileStore()
         else:
             self.regulator_profiles_path = str(
-                get_machine_config_path(
-                    'RegulatorProfiles.json',
-                    local_root=config_root,
+                get_existing_machine_config_path(
+                    'RegulatorProfiles.json', config_root=config_root
+                )
+                if self.canonical_existing_only
+                else get_machine_config_path(
+                    'RegulatorProfiles.json', local_root=config_root
                 )
             )
             self.regulator_profile_store = RegulatorProfileStore(
@@ -15671,6 +15939,8 @@ class Model(QObject):
             self.regulator_profiles = factory_default_document()
             self.regulator_profile_store.document = self.regulator_profiles
             print(f"[RegulatorProfiles] Failed to load profile store: {e}")
+            if getattr(self, "canonical_existing_only", False):
+                raise
 
     def _get_experiment_audit_log(self):
         log = getattr(self, "experiment_audit_log", None)
@@ -16242,14 +16512,33 @@ class Model(QObject):
         self.location_model.update_location_coords('rack_position_Right',self.rack_model.get_calibration_by_name('rack_position_Right'))
         self.location_model.save_locations()
 
+    def install_committed_locations(self, locations):
+        """Refresh every in-memory consumer from one committed Locations document."""
+
+        snapshot = copy.deepcopy(dict(locations))
+        self.location_model.install_committed_locations(snapshot)
+        self.location_data = copy.deepcopy(snapshot)
+        self.rack_model.process_location_data(snapshot)
+        self.rack_model.apply_calibration_data()
+
+    def install_committed_plates(self, plates):
+        """Refresh the active well-plate transform from committed disk truth."""
+
+        self.all_plate_data = copy.deepcopy(list(plates))
+        self.well_plate.install_committed_document(self.all_plate_data)
+
+    def install_committed_regulator_profiles(self, document):
+        """Refresh regulator profiles after an audited repository commit."""
+
+        validated = self.regulator_profile_store.set_document_from_repository(document)
+        self.regulator_profiles = copy.deepcopy(validated)
+
     def update_state(self, status_dict):
         '''
         Update the state of the machine model
         '''
         status_keys = status_dict.keys()
-        self.machine_model.update_current_position(status_dict.get('X', self.machine_model.current_x),
-                                                   status_dict.get('Y', self.machine_model.current_y),
-                                                   status_dict.get('Z', self.machine_model.current_z))
+        self.machine_model.update_reported_position(status_dict)
         
         self.machine_model.update_current_p_motor(status_dict.get('P', self.machine_model.current_p))
         self.machine_model.update_current_r_motor(status_dict.get('R', self.machine_model.current_r))   
@@ -17003,12 +17292,43 @@ class Model(QObject):
             raise RuntimeError("A new experiment cannot start while commands are queued.")
         if self.rack_model.get_gripper_printer_head() is not None:
             raise RuntimeError("Remove the printer head from the gripper before starting a new experiment.")
-        self._clear_runtime_experiment_without_signal()
-        self.experiment_model.reset_experiment_model()
-        self.experiment_model.set_calibration_manager(self.calibration_manager)
-        self.experiment_model.initialize_experiment(base_dir=base_dir)
+
+        active_experiment = self.experiment_model
+        fresh_experiment = ExperimentModel(
+            prof=getattr(self, "profile", None),
+            experiments_root=getattr(
+                active_experiment,
+                "experiments_root",
+                getattr(self, "experiments_root", None),
+            ),
+        )
+        new_experiment_path = fresh_experiment.initialize_new_experiment_session(
+            base_dir=base_dir
+        )
+
+        try:
+            self._clear_runtime_experiment_without_signal()
+        except Exception:
+            destination = Path(new_experiment_path).resolve()
+            fresh_experiment._remove_failed_new_experiment_directory(
+                destination,
+                destination.parent,
+            )
+            raise
+
+        active_experiment.reset_experiment_model()
+        active_experiment.metadata = copy.deepcopy(fresh_experiment.metadata)
+        active_experiment.experiment_dir_path = new_experiment_path
+        active_experiment.update_all_paths()
+        active_experiment.progress_data = {}
+        active_experiment.unsaved_changes = False
+        active_experiment.set_calibration_manager(self.calibration_manager)
+        if hasattr(self.calibration_manager, "begin_session"):
+            self.calibration_manager.begin_session(
+                active_experiment.calibration_file_path
+            )
         self.experiment_loaded.emit()
-        return str(self.experiment_model.experiment_dir_path)
+        return new_experiment_path
 
     def _default_rack_stock_ids_for_execution(self, plan) -> tuple[str, ...]:
         """Return the stock order produced by normal experiment finalization."""

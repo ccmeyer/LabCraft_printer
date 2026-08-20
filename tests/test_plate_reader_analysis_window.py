@@ -711,6 +711,7 @@ def test_right_panel_exposes_plate_reader_analysis_button(qapp):
     layout = QtWidgets.QVBoxLayout(host)
     main_window = SimpleNamespace(
         show_experiment_audit=lambda: None,
+        show_configuration_history=lambda: None,
         show_plate_reader_analysis=lambda: None,
         show_keyboard_shortcuts=lambda: None,
     )

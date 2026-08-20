@@ -210,10 +210,12 @@ def test_unique_conditions_button_count_refreshes_after_new_experiment(qapp):
     dialog._progress_reset_confirmed = False
     dialog._set_progress_protection = lambda protected, status=None: None
     dialog._load_factors_into_table = lambda: None
-    dialog._sync_controls_from_model = lambda: None
+    dialog._sync_controls_from_model = lambda **_kwargs: None
     dialog._refresh_stock_table = lambda: None
     dialog._update_summary_labels = lambda: None
     dialog._refresh_all_prior_availability = lambda: None
+    dialog._set_stock_table_stale = lambda _stale, _message="": None
+    dialog._refresh_all_lock_states = lambda: None
     dialog._set_status = lambda message, severity="info": setattr(dialog, "_last_status", message)
 
     ExperimentDesignDialog._update_unique_conditions_button_label(dialog)

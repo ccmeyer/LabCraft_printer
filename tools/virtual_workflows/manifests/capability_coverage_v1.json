@@ -9,7 +9,7 @@
       "owner_role": "verification maintainers",
       "status": "covered",
       "required_verification_layers": ["contract", "host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "randomized_calibration_reload_execution_v1", "optimizer_360_calibration_reload_execution_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_stress_384x10_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1", "experiment_new_session_hardening_v1", "authoritative_reload_resume_24_v1", "randomized_calibration_reload_execution_v1", "optimizer_360_calibration_reload_execution_v1"],
       "required_assertion_ids": ["sil.host_hardware_disabled"],
       "related_source_areas": ["tools/virtual_workflows/scenarios.py", "FreeRTOS-interface/App.py"],
       "limitations": ["In-process isolation does not prove firmware or physical-device behavior."],
@@ -33,7 +33,7 @@
       "owner_role": "application verification maintainers",
       "status": "covered",
       "required_verification_layers": ["host_sil"],
-      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "randomized_calibration_reload_execution_v1", "optimizer_360_calibration_reload_execution_v1"],
+      "active_scenario_ids": ["print_array_regression_96_v1", "print_array_smoke_24_v1", "print_array_soft_stop_resume_24_v1", "experiment_new_session_hardening_v1", "authoritative_reload_resume_24_v1", "randomized_calibration_reload_execution_v1", "optimizer_360_calibration_reload_execution_v1"],
       "required_assertion_ids": ["ui.real_app_constructed"],
       "related_source_areas": ["FreeRTOS-interface/App.py", "FreeRTOS-interface/View.py"],
       "limitations": ["Offscreen Qt composition does not validate a native compositor."],
@@ -205,6 +205,18 @@
       "required_assertion_ids": ["execution.soft_stop_requested", "execution.soft_stop_boundary_valid", "execution.stopped_boundary_quiescent", "execution.resume_exactly_once"],
       "related_source_areas": ["FreeRTOS-interface/Controller.py", "tools/virtual_workflows/scenarios.py"],
       "limitations": ["The composed scenario uses the in-process simulator and does not prove firmware or physical motion behavior."],
+      "max_evidence_age_days": 2
+    },
+    {
+      "id": "experiment.new_session_transactional",
+      "risk": "Starting a new experiment could mutate a resumable run, overwrite a colliding folder, or expose a partially created session.",
+      "owner_role": "experiment lifecycle maintainers",
+      "status": "covered",
+      "required_verification_layers": ["contract", "host_sil"],
+      "active_scenario_ids": ["experiment_new_session_hardening_v1"],
+      "required_assertion_ids": ["experiment.new_session_cancel_preserves_active", "experiment.new_session_failure_atomic", "experiment.new_session_resume_detaches_cleanly", "experiment.new_session_collision_safe", "experiment.new_session_fresh_editor"],
+      "related_source_areas": ["FreeRTOS-interface/View.py", "FreeRTOS-interface/Controller.py", "FreeRTOS-interface/Model.py", "tools/virtual_workflows/page_drivers.py"],
+      "limitations": ["The host SIL uses isolated files and simulated hardware; exhaustive failure stages and non-quiescent controller interlocks remain focused unit coverage."],
       "max_evidence_age_days": 2
     },
     {
@@ -638,6 +650,26 @@
       "pi_safety_evidence": []
     },
     {
+      "id": "experiment_new_session_hardening_v1",
+      "version": 1,
+      "status": "active",
+      "registry_id": "experiment_new_session_hardening_v1",
+      "workload_fixture_id": "experiment_new_session_hardening_v1",
+      "workload_fixture_path": "tools/virtual_workflows/fixtures/experiment_new_session_hardening_v1.json",
+      "tier": "lifecycle",
+      "suite_ids": ["lifecycle"],
+      "supported_platforms": ["windows_sil"],
+      "timeout_seconds": 60,
+      "action_ids": ["app.launch_simulated", "machine.connect_via_ui", "machine.enable_motors_via_ui", "machine.home_via_ui", "editor.open_via_ui", "editor.new_experiment_via_ui", "editor.configure_design_via_ui", "editor.optimize_generate_via_ui", "editor.finish_via_ui", "machine.configure_print_settings_via_ui", "head.set_volume_via_ui", "head.stage_via_ui", "pressure.enable_regulation_via_ui", "calibration.open_via_ui", "calibration.generate_via_ui", "calibration.select_via_ui", "calibration.apply_via_ui", "array.start_via_ui", "array.request_soft_stop_via_ui", "array.wait_for_state", "array.observe_stopped_quiescence", "head.return_via_ui", "fixture.prepare_new_session_collisions", "editor.open_resume_ready_via_ui", "editor.new_experiment_cancel_via_ui", "editor.new_experiment_fail_validation_via_ui", "editor.new_experiment_accept_via_ui", "editor.new_experiment_idle_via_ui", "artifact.capture_milestone", "scenario.teardown"],
+      "assertion_ids": ["sil.host_hardware_disabled", "ui.real_app_constructed", "execution.soft_stop_requested", "execution.soft_stop_boundary_valid", "execution.stopped_boundary_quiescent", "experiment.new_session_cancel_preserves_active", "experiment.new_session_failure_atomic", "experiment.new_session_resume_detaches_cleanly", "experiment.new_session_collision_safe", "experiment.new_session_fresh_editor", "artifacts.required_present"],
+      "capability_ids": ["sil.hardware_isolation.host", "ui.real_app_construction", "experiment.new_session_transactional"],
+      "required_artifacts": ["report_json", "summary_text", "event_trace", "action_ledger", "assertion_ledger", "evidence_manifest", "screenshots", "scenario_root"],
+      "expected_outcome": "pass",
+      "limitations": ["The scenario validates the composed application with simulated hardware and one injected validation failure; exhaustive filesystem stages remain in focused backend tests."],
+      "test_node_ids": ["tests/system/test_virtual_workflow_new_experiment_session.py::test_new_experiment_session_fixture_contract_is_exact", "tests/system/test_virtual_workflow_new_experiment_session.py::test_new_experiment_session_hardening_report", "tests/system/test_virtual_workflow_new_experiment_session.py::test_new_experiment_session_driver_failure_retains_evidence"],
+      "pi_safety_evidence": []
+    },
+    {
       "id": "authoritative_reload_resume_24_v1",
       "version": 1,
       "status": "active",
@@ -1032,7 +1064,7 @@
       "status": "active",
       "kind": "lifecycle",
       "platform": "windows_sil",
-      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "legacy_experiment_read_only_v1", "print_array_soft_stop_resume_24_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1", "print_array_mixed_mode_24x2_v1", "print_array_disconnect_mid_array_24_v1", "randomized_calibration_reload_execution_v1", "calibration_storage_contract_v1", "calibration_storage_shadow_contract_v1", "calibration_storage_authoritative_contract_v1", "calibration_storage_primary_reader_contract_v1", "calibration_storage_secondary_reader_contract_v1", "calibration_storage_historical_conversion_contract_v1", "calibration_storage_new_store_only_contract_v1"],
+      "scenario_ids": ["experiment_editor_create_finalize_v1", "experiment_editor_prestart_rename_refinalize_v1", "experiment_editor_post_start_lock_v1", "legacy_experiment_read_only_v1", "print_array_soft_stop_resume_24_v1", "experiment_new_session_hardening_v1", "authoritative_reload_resume_24_v1", "print_array_multi_stock_24x2_v1", "print_array_mixed_mode_24x2_v1", "print_array_disconnect_mid_array_24_v1", "randomized_calibration_reload_execution_v1", "calibration_storage_contract_v1", "calibration_storage_shadow_contract_v1", "calibration_storage_authoritative_contract_v1", "calibration_storage_primary_reader_contract_v1", "calibration_storage_secondary_reader_contract_v1", "calibration_storage_historical_conversion_contract_v1", "calibration_storage_new_store_only_contract_v1"],
       "requires_pi_safety_evidence": []
     },
     {
@@ -1295,6 +1327,42 @@
         "id": "editor.new_experiment_via_ui",
         "implementation_status": "reusable",
         "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "fixture.prepare_new_session_collisions",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/actions.py",
+        "interaction_surface": "harness"
+      },
+      {
+        "id": "editor.open_resume_ready_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "editor.new_experiment_cancel_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "editor.new_experiment_fail_validation_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "editor.new_experiment_accept_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
+        "interaction_surface": "ui"
+      },
+      {
+        "id": "editor.new_experiment_idle_via_ui",
+        "implementation_status": "reusable",
+        "source_path": "tools/virtual_workflows/page_drivers.py",
         "interaction_surface": "ui"
       },
       {
@@ -1868,6 +1936,36 @@
         "evidence_kind": "report_path",
         "evidence_path": "metrics.persistence.values.soft_stop_resume.intent_reconciliation",
         "test_node_ids": ["tests/system/test_virtual_workflow_soft_stop_composed.py::test_composed_soft_stop_resume_report"]
+      },
+      {
+        "id": "experiment.new_session_cancel_preserves_active",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.new_session.cancelled",
+        "test_node_ids": ["tests/system/test_virtual_workflow_new_experiment_session.py::test_new_experiment_session_hardening_report"]
+      },
+      {
+        "id": "experiment.new_session_failure_atomic",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.new_session.failed",
+        "test_node_ids": ["tests/system/test_virtual_workflow_new_experiment_session.py::test_new_experiment_session_hardening_report"]
+      },
+      {
+        "id": "experiment.new_session_resume_detaches_cleanly",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.new_session.resumed",
+        "test_node_ids": ["tests/system/test_virtual_workflow_new_experiment_session.py::test_new_experiment_session_hardening_report"]
+      },
+      {
+        "id": "experiment.new_session_collision_safe",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.collisions",
+        "test_node_ids": ["tests/system/test_virtual_workflow_new_experiment_session.py::test_new_experiment_session_hardening_report"]
+      },
+      {
+        "id": "experiment.new_session_fresh_editor",
+        "evidence_kind": "report_path",
+        "evidence_path": "metrics.persistence.values.new_session.idle.after.ui",
+        "test_node_ids": ["tests/system/test_virtual_workflow_new_experiment_session.py::test_new_experiment_session_hardening_report"]
       },
       {
         "id": "ui.fresh_application_session_constructed",

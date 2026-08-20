@@ -4208,7 +4208,7 @@ To launch the user interface manually once the virtual environment is active, us
 ```bash
 python FreeRTOS-interface/App.py
 ```
-Inside `FreeRTOS-interface/Presets`, JSON files are tracked starter templates. On first launch, machine-specific templates for `Settings.json`, `Plates.json`, `Locations.json`, and `Obstacles.json` are copied into ignored `local/` files, and the app reads/writes those local copies after that. Calibration-memory starter files under `FreeRTOS-interface/CalibrationMemory` are also seeded into ignored `local/CalibrationMemory/` files before runtime writes. This preserves existing machine calibrations and reagent memory while keeping future app updates from editing tracked templates.
+Inside `FreeRTOS-interface/Presets`, JSON files are tracked starter templates. Legacy releases through `v1.3.0-rc.1` copied machine-specific data into checkout-local ignored `local/`. Starting with `v1.3.0-rc.2`, an authorized machine uses the checkout-independent external machine-data store established by the first-start migration; tracked presets and checkout-local files are not runtime fallback sources. Calibration memory, machine configuration, update evidence, and the active-machine pointer remain bound to that external store across checkouts and worktrees.
 
 ## Application updates
 
@@ -4228,6 +4228,7 @@ Expected flow:
 - Click `Update App`; the app confirms that application code will update and firmware will not be flashed.
 - If the machine is connected, the normal disconnect/close flow runs first.
 - A `LabCraft Updater` window appears after the main app closes, resolves the same confirmed release, and applies it with a fast-forward merge of the release tag.
+- For rc.2 and later, the updater first binds the exact external machine/root, acquires the update and configuration locks, and reopens a verified external backup. It verifies exact protected bytes and the target commit before authorizing relaunch.
 - On success, the updater shows the status, installed release, commit range, installed commit summaries, and log path.
 - Close the updater window, then launch LabCraft again using the normal shortcut or launch command.
 
@@ -4246,10 +4247,10 @@ Release-candidate series discovery is opt-in metadata. A stable release can allo
 If the update is blocked or fails, the updater window stays open and shows the log path. Support should ask for the path shown in the updater window, usually under:
 
 ```text
-local/update_logs/
+<machine-data-root>/machines/<machine-uuid>/update_history/updater_logs/
 ```
 
-For dirty worktrees, network failures, credential failures, or non-fast-forward Git state, the updater does not stash, reset, clean, or overwrite local changes. Use `Reopen Current Version` to relaunch the installed app version and contact support with the updater log.
+For dirty worktrees, network failures, credential failures, or non-fast-forward Git state, the updater does not stash, reset, clean, or overwrite local changes. `Reopen Current Version` is shown only when the current deployment can still be reopened safely. A failure after Git mutation or ambiguous machine-data verification enters recovery and offers no normal relaunch.
 
 Offline operator flow:
 
@@ -4307,11 +4308,17 @@ local/LabCraftUpdates/
 
 Copy the generated `.bundle` and `.json` files, or the full `LabCraftUpdates` folder, to the USB drive that will be sent to the operator. This workflow packages application code only; it does not flash firmware.
 
-For backend/manual validation on the target checkout, run the updater against the manifest JSON:
+Pre-M6 development checkouts can invoke an offline updater directly. On rc.2
+and later, use the authorized app flow because direct apply also requires the
+exact external machine-data launch binding:
 
 ```powershell
 .\env\Scripts\python.exe tools/update_and_restart.py --repo-root . --offline-manifest path\to\labcraft-stable-....json --no-relaunch
 ```
+
+The shortened example intentionally fails closed on an M6-capable production
+apply. See `docs/machine_data_update_and_rollback_runbook.md` for support and
+recovery procedures.
 
 ### Controlled release rollback
 
@@ -4322,11 +4329,14 @@ Expected UI flow:
 - Click `Check Rollback`.
 - If the installed release defines a rollback target, the app shows the exact path such as `v1.2.0 -> v1.1.2`.
 - If the online rollback check cannot fetch release tags, the app scans removable drives for `LabCraftUpdates/*.json` release-aware rollback manifests.
-- Click `Restore Previous App Version`; the app confirms that application code will move backward and firmware will not be flashed.
+- For an M6-capable rollback target, click `Restore Previous App Version`; the app confirms that application code will move backward and firmware will not be flashed.
+- If the target is a legacy checkout-local release, the normal restore button remains disabled and LabCraft support is required.
 - A `LabCraft Rollback` window appears after the main app closes, verifies the same target again, and applies it.
 - For explicit support-provided bundles, click `Restore From Offline Rollback Bundle` and select a release-aware manifest directly.
 
-The backend command remains available for support cases where the main app cannot launch.
+M6-capable backend apply/rollback requires the full authorized binding. Do not
+reconstruct it from guessed paths when the main app cannot launch; preserve
+evidence and follow the recovery runbook.
 
 Online rollback uses the installed `VERSION`, reads that release tag's manifest, and resets to its configured `rollback_version`:
 
@@ -4340,7 +4350,7 @@ Offline rollback requires a selected release-aware bundle manifest for the targe
 .\env\Scripts\python.exe tools/update_and_restart.py --repo-root . --rollback --offline-manifest path\to\labcraft-stable-....json --no-relaunch --record-result
 ```
 
-The rollback command checks for a dirty worktree before fetching or resetting, verifies the target release metadata first, then applies the verified target with `git reset --hard`. If validation fails, the checkout is left at the current commit. After rollback, relaunch LabCraft normally and review the startup rollback result message or `local/update_logs/latest_update_result.json`.
+The rollback command checks for a dirty worktree before fetching or resetting and verifies target release metadata. For M6-to-M6 rollback it also verifies an external pre-change backup and protected bytes before authorizing relaunch. Legacy rollback is exact-profile-only, requires explicit operator/service/firmware attestations, and creates a verified checkout-local compatibility export before Git reset. Review external evidence under `<machine-data-root>/machines/<machine-uuid>/update_history/`; see `docs/machine_data_update_and_rollback_runbook.md`.
 
 ## Pi setup status
 

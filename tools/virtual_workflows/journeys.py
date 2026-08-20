@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tools.virtual_workflows.actions import (
+    InteractionSurface,
     capture_execution_preflight_boundary,
     capture_milestone,
     drive_execution_preflight_safeguard,
@@ -46,6 +47,7 @@ from tools.virtual_workflows.assertions import (
     experiment_prepared_runtime_reconstructed_assertion,
     machine_ready_assertion,
     matrix_case_assertions,
+    new_experiment_session_assertions,
     m13_compact_prepared_assertion,
     m13_illegal_recovery_sequence_assertion,
     m13_legal_sequence_assertion,
@@ -113,6 +115,7 @@ from tools.virtual_workflows.journey_phases import (
     run_stock_calibration_only,
     normalized_stock_pass_steps,
     run_soft_stop_resume,
+    run_soft_stop_boundary,
     run_disconnect_fail_closed_boundary,
     run_authoritative_reload_resume_boundary,
     run_clean_authoritative_session_rotation_boundary,
@@ -120,6 +123,7 @@ from tools.virtual_workflows.journey_phases import (
 )
 from tools.virtual_workflows.page_drivers import (
     CalibrationDialogDriver,
+    ExperimentEditorDriver,
     ExperimentLoaderDriver,
     MachineControlsDriver,
     RackDriver,
@@ -200,6 +204,9 @@ STRESS_FIXED_CALIBRATION_PULSE_WIDTH_US = 1355
 SOFT_STOP_WORKLOAD_ID = "print_array_soft_stop_resume_24_v1"
 SOFT_STOP_SCENARIO_NAME = "print_array_soft_stop_resume"
 SOFT_STOP_SCENARIO_VERSION = "1"
+NEW_EXPERIMENT_SESSION_WORKLOAD_ID = "experiment_new_session_hardening_v1"
+NEW_EXPERIMENT_SESSION_SCENARIO_NAME = "experiment_new_session_hardening"
+NEW_EXPERIMENT_SESSION_SCENARIO_VERSION = "1"
 AUTHORITATIVE_RELOAD_WORKLOAD_ID = "authoritative_reload_resume_24_v1"
 AUTHORITATIVE_RELOAD_SCENARIO_NAME = "authoritative_reload_resume"
 AUTHORITATIVE_RELOAD_SCENARIO_VERSION = "1"
@@ -452,6 +459,19 @@ SOFT_STOP_REQUIRED_ASSERTIONS = (
     "execution.terminal_bundle_valid",
     "artifacts.required_present",
 )
+NEW_EXPERIMENT_SESSION_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "execution.soft_stop_requested",
+    "execution.soft_stop_boundary_valid",
+    "execution.stopped_boundary_quiescent",
+    "experiment.new_session_cancel_preserves_active",
+    "experiment.new_session_failure_atomic",
+    "experiment.new_session_resume_detaches_cleanly",
+    "experiment.new_session_collision_safe",
+    "experiment.new_session_fresh_editor",
+    "artifacts.required_present",
+)
 AUTHORITATIVE_RELOAD_REQUIRED_ASSERTIONS = (
     "sil.host_hardware_disabled",
     "ui.real_app_constructed",
@@ -568,6 +588,20 @@ MIXED_MODE_REQUIRED_UI_ACTIONS = MULTI_STOCK_REQUIRED_UI_ACTIONS | frozenset(
 SOFT_STOP_REQUIRED_UI_ACTIONS = SMOKE_REQUIRED_UI_ACTIONS | frozenset(
     {"array.request_soft_stop_via_ui", "array.resume_via_ui"}
 )
+NEW_EXPERIMENT_SESSION_REQUIRED_UI_ACTIONS = (
+    SMOKE_REQUIRED_UI_ACTIONS
+    | frozenset(
+        {
+            "array.request_soft_stop_via_ui",
+            "head.return_via_ui",
+            "editor.open_resume_ready_via_ui",
+            "editor.new_experiment_cancel_via_ui",
+            "editor.new_experiment_fail_validation_via_ui",
+            "editor.new_experiment_accept_via_ui",
+            "editor.new_experiment_idle_via_ui",
+        }
+    )
+)
 AUTHORITATIVE_RELOAD_REQUIRED_UI_ACTIONS = SOFT_STOP_REQUIRED_UI_ACTIONS | frozenset({
     "experiment.load_authoritative_via_ui", "experiment.activate_authoritative_via_ui"})
 DISCONNECT_REQUIRED_UI_ACTIONS = SMOKE_REQUIRED_UI_ACTIONS | frozenset(
@@ -652,6 +686,25 @@ SOFT_STOP_REQUIRED_SCREENSHOTS = frozenset(
         "stopped",
         "resumed",
         "completed",
+    }
+)
+NEW_EXPERIMENT_SESSION_REQUIRED_SCREENSHOTS = frozenset(
+    {
+        "editor_opened",
+        "generated",
+        "ready",
+        "printing",
+        "stop_requested",
+        "stopped",
+        "resume_ready_editor",
+        "new_session_cancelled_prompt",
+        "new_session_cancelled",
+        "new_session_failure_preserved_prompt",
+        "new_session_validation_failure",
+        "new_session_failure_preserved",
+        "new_session_resume_created_prompt",
+        "new_session_resume_created",
+        "new_session_idle_created",
     }
 )
 AUTHORITATIVE_RELOAD_REQUIRED_SCREENSHOTS = frozenset({
@@ -816,6 +869,10 @@ def _stress_fixture() -> tuple[dict[str, Any], Path]:
 
 def _soft_stop_fixture() -> tuple[dict[str, Any], Path]:
     return _print_fixture(SOFT_STOP_WORKLOAD_ID)
+
+
+def _new_experiment_session_fixture() -> tuple[dict[str, Any], Path]:
+    return _print_fixture(NEW_EXPERIMENT_SESSION_WORKLOAD_ID)
 
 
 def _authoritative_reload_fixture() -> tuple[dict[str, Any], Path]:
@@ -3981,6 +4038,187 @@ def _soft_stop_body(runtime: JourneyRuntime) -> None:
         runtime.add_assertion(result)
 
 
+def _new_experiment_session_body(runtime: JourneyRuntime) -> None:
+    context = runtime.context
+    fixture = runtime.fixture
+    lifecycle = dict(fixture["lifecycle"])
+    expected_wells = _well_ids(fixture)
+    stock_ids = tuple(_stock_id(stock) for stock in fixture["stocks"])
+    runtime.observations.update(
+        {
+            "expected_wells": expected_wells,
+            "starvation_events": [],
+            "current_pass": {"index": -1, "starting_count": 0, "stock_id": None},
+        }
+    )
+    _connect_execution_signals(runtime, array_complete=True, machine_errors=True)
+    runtime.add_assertion(simulation_identity_assertion(context))
+    runtime.add_assertion(real_application_assertion(context))
+    runtime.run_steps(machine_startup_steps())
+    run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(_editor_specification(fixture, expected_wells)),
+    )
+
+    plan = context.experiment_model.get_execution_plan_snapshot()
+    expectation = SoftStopResumeExpectation(
+        experiment_dir=Path(context.experiment_model.experiment_dir_path),
+        plan_id=str(plan.plan_id),
+        well_ids=expected_wells,
+        stock_ids=stock_ids,
+        target_dispenses_per_stock=int(
+            fixture["workload"]["target_dispenses_per_stock_per_well"]
+        ),
+    )
+    observer = ExecutionObserver(
+        context,
+        experiment_dir=expectation.experiment_dir,
+        completed_count=lambda: len(runtime.observations["completed_wells"]),
+        pass_context=lambda: _current_pass_context(runtime),
+    )
+    runtime.observations["execution_observer"] = observer
+    runtime.register_restorable("execution", observer)
+    observer.install()
+
+    def collision_hashes(root: Path, names: list[str]) -> dict[str, str]:
+        hashes: dict[str, str] = {}
+        for name in names:
+            sentinel = root / name / "collision-sentinel.txt"
+            hashes[name] = (
+                hashlib.sha256(sentinel.read_bytes()).hexdigest()
+                if sentinel.is_file()
+                else "missing"
+            )
+        return hashes
+
+    def exercise_rotation(_runtime: JourneyRuntime, _spec: StockPassSpec) -> None:
+        run_soft_stop_boundary(runtime, _soft_stop_spec(runtime))
+        paused_snapshot = runtime.observations["paused_execution_snapshot"]
+        paused_results = soft_stop_paused_assertions(
+            context,
+            expectation=expectation,
+            request_evidence=runtime.observations["soft_stop_request"],
+            completed_count=len(runtime.observations["completed_wells"]),
+            intent_lifecycle=paused_snapshot["lifecycle"],
+            quiescence=runtime.observations["stopped_quiescence"],
+        )
+        runtime.observations["paused_validation"] = dict(
+            paused_results[1].evidence
+        )
+        for result in paused_results:
+            runtime.add_assertion(result)
+        runtime.restore_all()
+
+        rack_driver = RackDriver(context)
+
+        def return_paused_head() -> Mapping[str, Any]:
+            rack = context.model.rack_model
+            active = rack.get_gripper_printer_head()
+            if active is None:
+                raise RuntimeError("resume-ready New Experiment has no staged head")
+            unload_slots = [
+                index
+                for index, (_label, _volume, button, _combo) in enumerate(
+                    context.view.rack_box.slot_widgets
+                )
+                if button.text() == "Unload"
+            ]
+            if len(unload_slots) != 1:
+                raise RuntimeError(
+                    "resume-ready New Experiment requires exactly one Unload control"
+                )
+            stock_id = str(active.get_stock_id())
+            printer_head_id = str(active.printer_head_id)
+            rack_driver.unload(unload_slots[0])
+            rack_driver.wait_until(
+                context.machine.check_if_all_completed,
+                "resume-ready head-return queue drain",
+            )
+            if context.controller.get_array_run_state() != "resume_ready":
+                raise RuntimeError("head return changed the resume-ready state")
+            return {
+                "slot": unload_slots[0],
+                "stock_id": stock_id,
+                "printer_head_id": printer_head_id,
+                "array_state": context.controller.get_array_run_state(),
+                "queue_drained": bool(context.machine.check_if_all_completed()),
+                "returned": rack.get_gripper_printer_head() is None,
+            }
+
+        runtime.harness.run_action(
+            "head.return_via_ui",
+            return_paused_head,
+            surface=InteractionSurface.UI,
+        )
+
+        experiments_root = Path(
+            context.experiment_model.experiments_root
+        ).resolve()
+        if not experiments_root.is_relative_to(Path(context.scenario_root).resolve()):
+            raise RuntimeError("New Experiment SIL root escaped the scenario root")
+        collision_names = [str(name) for name in lifecycle["collision_names"]]
+
+        def prepare_collisions() -> Mapping[str, Any]:
+            for name in collision_names:
+                directory = experiments_root / name
+                directory.mkdir(exist_ok=False)
+                (directory / "collision-sentinel.txt").write_text(
+                    f"preserve:{name}\n",
+                    encoding="utf-8",
+                )
+            evidence = {
+                "experiments_root": str(experiments_root),
+                "collision_names": list(collision_names),
+                "hashes_before": collision_hashes(
+                    experiments_root, collision_names
+                ),
+            }
+            runtime.observations["new_session_collisions"] = evidence
+            return evidence
+
+        runtime.harness.run_action(
+            "fixture.prepare_new_session_collisions",
+            prepare_collisions,
+            surface=InteractionSurface.HARNESS,
+        )
+
+        boundary = ExperimentEditorDriver(
+            context,
+            action_runner=runtime.harness.run_action,
+        ).exercise_new_session_hardening(
+            source_dir=expectation.experiment_dir,
+            experiments_root=experiments_root,
+            candidate_name=str(lifecycle["candidate_name"]),
+            failed_candidate_name=str(lifecycle["failed_candidate_name"]),
+            resume_success_name=str(lifecycle["resume_success_name"]),
+            idle_success_name=str(lifecycle["idle_success_name"]),
+        )
+        runtime.observations["new_session_boundary"] = boundary
+        collisions = dict(runtime.observations["new_session_collisions"])
+        collisions["hashes_after"] = collision_hashes(
+            experiments_root, collision_names
+        )
+        runtime.observations["new_session_collisions"] = collisions
+        for result in new_experiment_session_assertions(
+            boundary=boundary,
+            collision_evidence=collisions,
+        ):
+            runtime.add_assertion(result)
+
+    interrupted_pass = replace(
+        _smoke_pass(runtime),
+        completed_milestone=None,
+        return_head=False,
+        validate_pass_boundary=False,
+        await_terminal_boundary=False,
+    )
+    run_stock_passes(
+        runtime,
+        (interrupted_pass,),
+        active_phase=exercise_rotation,
+    )
+
+
 def _disconnect_body(runtime: JourneyRuntime) -> None:
     context, fixture = runtime.context, runtime.fixture
     expected_wells = _well_ids(fixture)
@@ -4941,6 +5179,69 @@ def _soft_stop_payload(
     )
 
 
+def _new_experiment_session_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    observed = runtime.observations
+    decisions = _decisions(runtime)
+    passed = all(
+        decisions.get(assertion_id) == "pass"
+        for assertion_id in NEW_EXPERIMENT_SESSION_REQUIRED_ASSERTIONS
+    )
+    status = "measured" if passed else "partial"
+    boundary = dict(observed.get("new_session_boundary") or {})
+    collisions = dict(observed.get("new_session_collisions") or {})
+    completed = list(observed.get("completed_wells") or ())
+    return ComposedReportPayload(
+        workload={
+            **_single_stock_workload(runtime),
+            "paused_completion_count": len(completed),
+            "candidate_name": runtime.fixture["lifecycle"]["candidate_name"],
+        },
+        workflow_status=status,
+        workflow_values={
+            "expected_well_count": len(observed.get("expected_wells") or ()),
+            "completed_well_count": len(completed),
+            "completed_well_ids": completed,
+            "array_states": list(runtime.context.array_states),
+            "array_complete_count": len(observed.get("array_completions") or ()),
+            "new_session_load_signal_count": boundary.get("load_signal_count"),
+            "new_session_generation_signal_count": boundary.get(
+                "generation_signal_count"
+            ),
+            "cleanup_results": [dict(teardown)],
+        },
+        queue={
+            "status": status,
+            "values": {
+                "queue_drained_before_rotation": bool(
+                    observed.get("stopped_quiescence", {}).get(
+                        "simulator_queue_empty"
+                    )
+                ),
+                "final_controller_state": (
+                    boundary.get("idle", {}).get("after", {}).get("array_state")
+                ),
+            },
+        },
+        persistence={
+            "status": status,
+            "values": {
+                "assertion_decisions": decisions,
+                "paused_boundary": dict(observed.get("paused_validation") or {}),
+                "quiescence": dict(observed.get("stopped_quiescence") or {}),
+                "new_session": boundary,
+                "collisions": collisions,
+            },
+        },
+        limitations=(
+            "The scenario validates host-side UI, controller, model, and filesystem behavior with simulated hardware only.",
+            "The representative injected validation failure does not duplicate every failure stage covered by backend unit tests.",
+            "The detached paused session is proven readable and byte-preserved but is not authoritatively reloaded in this scenario.",
+        ),
+    )
+
+
 def _disconnect_payload(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> ComposedReportPayload:
@@ -5528,6 +5829,16 @@ def _soft_stop_artifact(
     )
 
 
+def _new_experiment_session_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return multi_stock_artifacts_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(NEW_EXPERIMENT_SESSION_REQUIRED_SCREENSHOTS),
+        teardown=teardown,
+    )
+
+
 def _disconnect_artifact(
     runtime: JourneyRuntime, teardown: Mapping[str, Any]
 ) -> Any:
@@ -5746,6 +6057,20 @@ def _soft_stop_summary(report: Mapping[str, Any], runtime: JourneyRuntime) -> st
         "Milestone 7 composed 24-well soft-stop/resume lifecycle\n"
         f"Status: {report['classification']['status']}\n"
         f"Completions: {len(runtime.observations['completed_wells'])} / 24\n"
+        f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _new_experiment_session_summary(
+    report: Mapping[str, Any], runtime: JourneyRuntime
+) -> str:
+    boundary = dict(runtime.observations.get("new_session_boundary") or {})
+    return (
+        "Milestone 2 New Experiment session-hardening SIL lifecycle\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Paused completions: {len(runtime.observations.get('completed_wells') or ())} / 24\n"
+        f"Successful new sessions: {boundary.get('load_signal_count', 0)}\n"
         f"Seed: {report['run']['seed']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
     )
@@ -6083,6 +6408,39 @@ SOFT_STOP_DEFINITION = JourneyDefinition(
     payload_builder=_soft_stop_payload,
     summary_builder=_soft_stop_summary,
 )
+NEW_EXPERIMENT_SESSION_DEFINITION = JourneyDefinition(
+    registry_id=NEW_EXPERIMENT_SESSION_WORKLOAD_ID,
+    scenario_name=NEW_EXPERIMENT_SESSION_SCENARIO_NAME,
+    scenario_version=NEW_EXPERIMENT_SESSION_SCENARIO_VERSION,
+    workload_id=NEW_EXPERIMENT_SESSION_WORKLOAD_ID,
+    required_action_ids=(
+        _COMMON_ACTIONS
+        | _EDITOR_ACTIONS
+        | (_PRINT_ACTIONS - frozenset({"array.wait_for_completions"}))
+        | frozenset(
+            {
+                "array.request_soft_stop_via_ui",
+                "array.wait_for_state",
+                "array.observe_stopped_quiescence",
+                "head.return_via_ui",
+                "fixture.prepare_new_session_collisions",
+                "editor.open_resume_ready_via_ui",
+                "editor.new_experiment_cancel_via_ui",
+                "editor.new_experiment_fail_validation_via_ui",
+                "editor.new_experiment_accept_via_ui",
+                "editor.new_experiment_idle_via_ui",
+            }
+        )
+    ),
+    required_ui_action_ids=NEW_EXPERIMENT_SESSION_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=NEW_EXPERIMENT_SESSION_REQUIRED_ASSERTIONS,
+    required_screenshots=NEW_EXPERIMENT_SESSION_REQUIRED_SCREENSHOTS,
+    fixture_loader=_new_experiment_session_fixture,
+    body=_new_experiment_session_body,
+    artifact_assertion=_new_experiment_session_artifact,
+    payload_builder=_new_experiment_session_payload,
+    summary_builder=_new_experiment_session_summary,
+)
 AUTHORITATIVE_RELOAD_DEFINITION = JourneyDefinition(
     registry_id=AUTHORITATIVE_RELOAD_WORKLOAD_ID,
     scenario_name=AUTHORITATIVE_RELOAD_SCENARIO_NAME,
@@ -6171,6 +6529,7 @@ JOURNEY_DEFINITIONS = {
         MIXED_MODE_DEFINITION,
         STRESS_DEFINITION,
         SOFT_STOP_DEFINITION,
+        NEW_EXPERIMENT_SESSION_DEFINITION,
         AUTHORITATIVE_RELOAD_DEFINITION,
         DISCONNECT_DEFINITION,
         RANDOMIZED_CALIBRATION_DEFINITION,
@@ -6790,6 +7149,10 @@ __all__ = [
     "MIXED_MODE_WORKLOAD_ID",
     "MIXED_MODE_REQUIRED_ASSERTIONS",
     "MIXED_MODE_REQUIRED_UI_ACTIONS",
+    "NEW_EXPERIMENT_SESSION_REQUIRED_ASSERTIONS",
+    "NEW_EXPERIMENT_SESSION_REQUIRED_SCREENSHOTS",
+    "NEW_EXPERIMENT_SESSION_REQUIRED_UI_ACTIONS",
+    "NEW_EXPERIMENT_SESSION_WORKLOAD_ID",
     "STRESS_REQUIRED_ASSERTIONS",
     "STRESS_REQUIRED_SCREENSHOTS",
     "STRESS_WORKLOAD_ID",

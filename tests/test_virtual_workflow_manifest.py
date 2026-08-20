@@ -26,6 +26,7 @@ from tools.virtual_workflows.registry import (
 from tools.virtual_workflows.scenarios import (
             AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
             DISCONNECT_WORKLOAD_ID,
+            NEW_EXPERIMENT_SESSION_WORKLOAD_ID,
             MULTI_STOCK_WORKLOAD_ID,
             MIXED_MODE_WORKLOAD_ID,
             STRESS_WORKLOAD_ID,
@@ -97,6 +98,7 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         EDITOR_RENAME_WORKLOAD_ID,
         EDITOR_POST_START_WORKLOAD_ID,
         SOFT_STOP_RESUME_WORKLOAD_ID,
+        NEW_EXPERIMENT_SESSION_WORKLOAD_ID,
         AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
         MULTI_STOCK_WORKLOAD_ID,
         LEGACY_READ_ONLY_WORKLOAD_ID,
@@ -187,6 +189,7 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         "experiment_editor_post_start_lock_v1",
         LEGACY_READ_ONLY_WORKLOAD_ID,
         "print_array_soft_stop_resume_24_v1",
+            NEW_EXPERIMENT_SESSION_WORKLOAD_ID,
             AUTHORITATIVE_RELOAD_RESUME_WORKLOAD_ID,
             MULTI_STOCK_WORKLOAD_ID,
             MIXED_MODE_WORKLOAD_ID,
@@ -235,6 +238,19 @@ def test_tracked_manifest_validates_and_describes_current_truth():
         "evidence_manifest",
         "screenshots",
         "scenario_root",
+    ]
+    new_session = _row(
+        payload,
+        "scenarios",
+        NEW_EXPERIMENT_SESSION_WORKLOAD_ID,
+    )
+    assert new_session["status"] == "active"
+    assert new_session["suite_ids"] == ["lifecycle"]
+    assert new_session["registry_id"] == NEW_EXPERIMENT_SESSION_WORKLOAD_ID
+    assert new_session["capability_ids"] == [
+        "sil.hardware_isolation.host",
+        "ui.real_app_construction",
+        "experiment.new_session_transactional",
     ]
     authoritative_reload = _row(
         payload,
@@ -425,6 +441,12 @@ def test_tracked_manifest_validates_and_describes_current_truth():
     assert capabilities["experiment.active_edit_lock"]["status"] == "covered"
     assert capabilities["experiment.editable_copy"]["status"] == "covered"
     assert capabilities["execution.soft_stop_resume"]["status"] == "covered"
+    assert capabilities["experiment.new_session_transactional"]["status"] == (
+        "covered"
+    )
+    assert capabilities["experiment.new_session_transactional"][
+        "active_scenario_ids"
+    ] == [NEW_EXPERIMENT_SESSION_WORKLOAD_ID]
     assert (
         capabilities["execution.authoritative_reload_resume"]["status"]
         == "covered"

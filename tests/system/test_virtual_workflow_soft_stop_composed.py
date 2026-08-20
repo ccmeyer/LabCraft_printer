@@ -107,6 +107,95 @@ def test_composed_soft_stop_resume_report(qapp, tmp_path):
 
 
 @pytest.mark.sil_lifecycle
+def test_composed_soft_stop_can_begin_with_immediate_pause(
+    qapp,
+    tmp_path,
+    monkeypatch,
+):
+    from tools.virtual_workflows.page_drivers import ArrayDriver
+
+    def request_immediate_pause_safe_stop(driver):
+        array_button = driver.control
+        before = array_button.text()
+        pause_button = driver.view.connection_widget.pause_machine_button
+        dialogs = driver.click_with_message_boxes(
+            pause_button,
+            [
+                (
+                    "Print Array Paused Immediately",
+                    "Finish Current Well and Stop",
+                )
+            ],
+        )
+        driver.wait_until(
+            lambda: (
+                driver.context.controller.get_array_run_state() == "stop_requested"
+                and array_button.text() == "Stop Pending"
+                and not array_button.isEnabled()
+            ),
+            "immediate-pause safe stop pending control",
+        )
+        context = dict(
+            getattr(driver.context.controller, "_array_context", {}) or {}
+        )
+        if (
+            context.get("soft_stop_origin") != "immediate_pause"
+            or int(context.get("soft_stop_frozen_barrier_seq32") or 0) <= 0
+        ):
+            raise RuntimeError(
+                "immediate pause did not establish a frozen safe-stop boundary"
+            )
+        return {
+            "button_text_before": before,
+            "button_text_after": array_button.text(),
+            "button_enabled_after": bool(array_button.isEnabled()),
+            "pause_dialogs": dialogs,
+            "soft_stop_origin": context.get("soft_stop_origin"),
+            "frozen_barrier_seq32": int(
+                context.get("soft_stop_frozen_barrier_seq32") or 0
+            ),
+        }
+
+    monkeypatch.setattr(
+        ArrayDriver,
+        "request_soft_stop",
+        request_immediate_pause_safe_stop,
+    )
+    report = run_registered_scenario(
+        SOFT_STOP_RESUME_WORKLOAD_ID,
+        output_root=tmp_path,
+        speed_multiplier=1.0,
+        timeout_seconds=60.0,
+        run_id="composed-immediate-pause-soft-stop",
+        seed=19,
+    )
+
+    validate_report_v1(report)
+    workflow = report["metrics"]["workflow"]["values"]
+    assert report["classification"]["status"] == "pass", json.dumps(
+        {
+            "classification": report["classification"],
+            "failed_actions": [
+                row for row in workflow["action_results"] if row["status"] == "fail"
+            ],
+            "assertions": workflow["assertion_results"],
+            "errors": workflow.get("errors"),
+        },
+        indent=2,
+    )
+    assert "Print Array Paused Immediately" in [
+        row["title"] for row in workflow["dialogs"]
+    ]
+    request_action = next(
+        row
+        for row in workflow["action_results"]
+        if row["action_id"] == "array.request_soft_stop_via_ui"
+    )
+    assert request_action["evidence"]["soft_stop_origin"] == "immediate_pause"
+    assert request_action["evidence"]["frozen_barrier_seq32"] > 0
+
+
+@pytest.mark.sil_lifecycle
 def test_soft_stop_composed_matches_legacy_oracle(qapp, tmp_path):
     composed = run_registered_scenario(
         SOFT_STOP_RESUME_WORKLOAD_ID,

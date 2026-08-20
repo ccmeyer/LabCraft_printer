@@ -10,6 +10,7 @@ def test_connect_board_retry_does_not_leak_reader_or_serial(qapp, test_profile, 
 
     machine.connect_board("COM_TEST")
     assert len(factory.instances) == 1
+    assert factory.open_calls[0]["exclusive"] is True
     first = factory.instances[0]
     assert first.is_open is True
 
@@ -21,6 +22,7 @@ def test_connect_board_retry_does_not_leak_reader_or_serial(qapp, test_profile, 
 
     machine._hello_timeout()
     assert len(factory.instances) == 3
+    assert all(call["exclusive"] is True for call in factory.open_calls)
     third = factory.instances[2]
     assert second.is_open is False
     assert third.is_open is True

@@ -45,6 +45,9 @@ STATUS_ROLLBACK_NOT_CONFIGURED = "rollback_not_configured"
 STATUS_ROLLED_BACK = "rolled_back"
 STATUS_ROLLBACK_TARGET_INVALID = "rollback_target_invalid"
 STATUS_ROLLBACK_FAILED = "rollback_failed"
+STATUS_MACHINE_DATA_PROTECTION_FAILED = "machine_data_protection_failed"
+STATUS_RECOVERY_REQUIRED = "recovery_required"
+STATUS_LEGACY_SUPPORT_REQUIRED = "legacy_support_required"
 
 OPERATION_UPDATE = "update"
 OPERATION_ROLLBACK = "rollback"
@@ -80,6 +83,9 @@ EXIT_CODES = {
     STATUS_ROLLED_BACK: 0,
     STATUS_ROLLBACK_TARGET_INVALID: 9,
     STATUS_ROLLBACK_FAILED: 10,
+    STATUS_MACHINE_DATA_PROTECTION_FAILED: 11,
+    STATUS_RECOVERY_REQUIRED: 12,
+    STATUS_LEGACY_SUPPORT_REQUIRED: 13,
 }
 
 CHECK_EXIT_CODES = {
@@ -94,6 +100,7 @@ CHECK_EXIT_CODES = {
     STATUS_FETCH_FAILED: 9,
     STATUS_OFFLINE_BUNDLE_INVALID: 10,
     STATUS_ROLLBACK_TARGET_INVALID: 11,
+    STATUS_LEGACY_SUPPORT_REQUIRED: 12,
 }
 
 DEFAULT_APP_PATH = Path("FreeRTOS-interface") / "App.py"
@@ -133,6 +140,13 @@ class UpdateResult:
     operation: str = OPERATION_UPDATE
     before_release_version: str = ""
     after_release_version: str = ""
+    relaunch_authorized: bool = True
+    safe_to_reopen_current: bool = True
+    machine_data_update_id: str = ""
+    machine_data_evidence_path: Path | None = None
+    release_manifest_sha256: str = ""
+    machine_data_contract: Mapping[str, object] | None = None
+    requires_firmware: object = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +175,10 @@ class UpdateCheckResult:
     operation: str = OPERATION_UPDATE
     before_release_version: str = ""
     after_release_version: str = ""
+    legacy_support_required: bool = False
+    release_manifest_sha256: str = ""
+    machine_data_contract: Mapping[str, object] | None = None
+    requires_firmware: object = None
 
 
 @dataclass(frozen=True)
@@ -192,6 +210,22 @@ class UpdaterConfig:
     target_release: str | None = None
     release_channel: str = RELEASE_CHANNEL_STABLE
     rollback: bool = False
+    machine_data_required: bool = False
+    machine_data_root: Path | None = None
+    machine_uuid: str = ""
+    machine_id: str = ""
+    activation_id: str = ""
+    migration_id: str = ""
+    active_pointer_sha256: str = ""
+    source_app_version: str = ""
+    source_commit: str = ""
+    update_request_id: str = ""
+    allow_legacy_rollback: bool = False
+    support_operator: str = ""
+    support_reason: str = ""
+    support_reference: str = ""
+    machine_id_confirmation: str = ""
+    firmware_attestation: str = ""
 
 
 CommandRunner = Callable[[Sequence[str], Path, float, Mapping[str, str] | None], CommandResult]
@@ -212,6 +246,7 @@ class OfflineBundleInfo:
     source_ref: str
     head_sha: str
     release_info: ReleaseTargetInfo | None = None
+    merge_ref = ""
 
 
 @dataclass(frozen=True)
@@ -222,6 +257,9 @@ class ReleaseTargetInfo:
     summary: str = ""
     notes: tuple[str, ...] = ()
     rollback_version: str = ""
+    release_manifest_sha256: str = ""
+    machine_data_contract: Mapping[str, object] | None = None
+    requires_firmware: object = None
 
 
 class OfflineBundleError(RuntimeError):
@@ -555,6 +593,43 @@ def _validate_release_manifest(
         raise ReleaseMetadataError("Release manifest channel must be stable or release_candidate.")
     if expected_channel is not None and channel != expected_channel:
         raise ReleaseMetadataError(f"Release manifest channel must be {expected_channel}.")
+    machine_data_contract = manifest.get("machine_data")
+    if machine_data_contract is not None:
+        if not isinstance(machine_data_contract, dict):
+            raise ReleaseMetadataError("Release manifest machine_data must be an object.")
+        expected_machine_data_keys = {
+            "preservation_contract",
+            "data_schema_version",
+            "transition",
+            "transition_id",
+        }
+        if set(machine_data_contract) != expected_machine_data_keys:
+            raise ReleaseMetadataError("Release manifest machine_data fields are invalid.")
+        if machine_data_contract.get("preservation_contract") != "labcraft.machine_data_update.v1":
+            raise ReleaseMetadataError("Release manifest preservation_contract is unsupported.")
+        data_schema_version = machine_data_contract.get("data_schema_version")
+        if type(data_schema_version) is not int or data_schema_version <= 0:
+            raise ReleaseMetadataError("Release manifest data_schema_version must be a positive integer.")
+        transition = machine_data_contract.get("transition")
+        transition_id = machine_data_contract.get("transition_id")
+        if transition == "none":
+            if transition_id is not None:
+                raise ReleaseMetadataError("Release manifest transition_id must be null for transition none.")
+        elif transition == "bootstrap_recovery":
+            if not isinstance(transition_id, str) or not transition_id.strip():
+                raise ReleaseMetadataError("Release manifest bootstrap_recovery requires transition_id.")
+        else:
+            raise ReleaseMetadataError("Release manifest machine-data transition is unsupported.")
+        machine_data_contract = dict(machine_data_contract)
+    manifest_sha = hashlib.sha256(
+        json.dumps(
+            manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
     return ReleaseTargetInfo(
         version=version,
         tag=tag,
@@ -562,6 +637,9 @@ def _validate_release_manifest(
         summary=str(manifest.get("summary") or "").strip(),
         notes=_release_notes_from_manifest(manifest),
         rollback_version=_rollback_version_from_manifest(manifest),
+        release_manifest_sha256=manifest_sha,
+        machine_data_contract=machine_data_contract,
+        requires_firmware=manifest.get("requires_firmware"),
     )
 
 
@@ -742,6 +820,9 @@ def _release_fields(info: ReleaseTargetInfo | None) -> dict:
         "release_summary": info.summary,
         "release_notes": info.notes,
         "rollback_version": info.rollback_version,
+        "release_manifest_sha256": info.release_manifest_sha256,
+        "machine_data_contract": info.machine_data_contract,
+        "requires_firmware": info.requires_firmware,
     }
 
 
@@ -1352,6 +1433,21 @@ def update_result_payload(result: UpdateResult, *, commits: Sequence[str] = ()) 
         "operation": result.operation,
         "before_release_version": result.before_release_version,
         "after_release_version": result.after_release_version,
+        "relaunch_authorized": result.relaunch_authorized,
+        "safe_to_reopen_current": result.safe_to_reopen_current,
+        "machine_data_update_id": result.machine_data_update_id,
+        "machine_data_evidence_path": (
+            str(result.machine_data_evidence_path)
+            if result.machine_data_evidence_path is not None
+            else ""
+        ),
+        "release_manifest_sha256": result.release_manifest_sha256,
+        "machine_data_contract": (
+            dict(result.machine_data_contract)
+            if result.machine_data_contract is not None
+            else None
+        ),
+        "requires_firmware": result.requires_firmware,
     }
 
 
@@ -1461,6 +1557,13 @@ def _make_result(
     operation: str = OPERATION_UPDATE,
     before_release_version: str = "",
     after_release_version: str = "",
+    relaunch_authorized: bool = True,
+    safe_to_reopen_current: bool = True,
+    machine_data_update_id: str = "",
+    machine_data_evidence_path: Path | None = None,
+    release_manifest_sha256: str = "",
+    machine_data_contract: Mapping[str, object] | None = None,
+    requires_firmware: object = None,
 ) -> UpdateResult:
     return UpdateResult(
         status=status,
@@ -1482,6 +1585,13 @@ def _make_result(
         operation=operation,
         before_release_version=before_release_version,
         after_release_version=after_release_version,
+        relaunch_authorized=bool(relaunch_authorized),
+        safe_to_reopen_current=bool(safe_to_reopen_current),
+        machine_data_update_id=machine_data_update_id,
+        machine_data_evidence_path=machine_data_evidence_path,
+        release_manifest_sha256=release_manifest_sha256,
+        machine_data_contract=machine_data_contract,
+        requires_firmware=requires_firmware,
     )
 
 
@@ -1510,6 +1620,10 @@ def _make_check_result(
     operation: str = OPERATION_UPDATE,
     before_release_version: str = "",
     after_release_version: str = "",
+    legacy_support_required: bool = False,
+    release_manifest_sha256: str = "",
+    machine_data_contract: Mapping[str, object] | None = None,
+    requires_firmware: object = None,
 ) -> UpdateCheckResult:
     return UpdateCheckResult(
         status=status,
@@ -1536,7 +1650,149 @@ def _make_check_result(
         operation=operation,
         before_release_version=before_release_version,
         after_release_version=after_release_version,
+        legacy_support_required=bool(legacy_support_required),
+        release_manifest_sha256=release_manifest_sha256,
+        machine_data_contract=machine_data_contract,
+        requires_firmware=requires_firmware,
     )
+
+
+def _machine_data_import_root(repo_root: Path) -> Path:
+    return Path(repo_root).resolve(strict=False) / "FreeRTOS-interface"
+
+
+def _begin_machine_data_protection(
+    config: UpdaterConfig,
+    *,
+    repo_root: Path,
+    before_release_version: str,
+    before_sha: str,
+    target_info: ReleaseTargetInfo | None,
+    operation: str,
+    update_source: str,
+):
+    """Prepare external preservation and return its live locked transaction."""
+
+    if not config.machine_data_required:
+        return None
+    interface_root = _machine_data_import_root(repo_root)
+    if str(interface_root) not in sys.path:
+        sys.path.insert(0, str(interface_root))
+
+    from MachineData import build_machine_data_paths, resolve_machine_data_base
+    from MachineDataCompatibility import (
+        create_legacy_compatibility_export,
+        load_compatibility_catalog,
+    )
+    from MachineDataUpdate import (
+        MachineDataUpdateError,
+        UpdateLaunchBinding,
+        UpdateTarget,
+        begin_update_preservation,
+        load_deployment_anchor,
+    )
+
+    if target_info is None:
+        raise MachineDataUpdateError(
+            "target_contract_missing",
+            "The resolved update target has no verified release manifest.",
+        )
+    if config.machine_data_root is None:
+        raise MachineDataUpdateError("invalid_binding", "--machine-data-root is required.")
+    if config.source_app_version != before_release_version or config.source_commit != before_sha:
+        raise MachineDataUpdateError(
+            "source_binding_mismatch",
+            "The running app version/commit differs from the checkout being updated.",
+        )
+    binding = UpdateLaunchBinding(
+        machine_data_root=config.machine_data_root,
+        machine_id=config.machine_id,
+        machine_uuid=config.machine_uuid,
+        activation_id=config.activation_id,
+        migration_id=config.migration_id,
+        active_pointer_sha256=config.active_pointer_sha256,
+        source_app_version=config.source_app_version,
+        source_commit=config.source_commit,
+        request_id=config.update_request_id,
+    )
+
+    target_contract = target_info.machine_data_contract
+    legacy_profile = None
+    if target_contract is None:
+        if operation != OPERATION_ROLLBACK:
+            raise MachineDataUpdateError(
+                "target_contract_missing",
+                "Forward updates require the target machine-data preservation contract.",
+            )
+        if not config.allow_legacy_rollback:
+            raise MachineDataUpdateError(
+                "legacy_support_required",
+                "This legacy rollback requires the reviewed support workflow and attestations.",
+            )
+        legacy_profile = load_compatibility_catalog().match(
+            tag=target_info.tag,
+            commit_sha=target_info.sha,
+            release_manifest_sha256=target_info.release_manifest_sha256,
+        )
+        base = resolve_machine_data_base(
+            app_local_data_root=binding.machine_data_root.parent,
+            repo_root=repo_root,
+            explicit_root=binding.machine_data_root,
+        )
+        paths = build_machine_data_paths(base, binding.machine_uuid)
+        target_contract = dict(load_deployment_anchor(paths.deployment_anchor_path)["release_contract"])
+
+    target = UpdateTarget(
+        operation=operation,
+        version=target_info.version,
+        tag=target_info.tag,
+        commit=target_info.sha,
+        update_source=update_source,
+        release_manifest_sha256=target_info.release_manifest_sha256,
+        machine_data_contract=target_contract,
+        requires_firmware=target_info.requires_firmware,
+    )
+    prepared = begin_update_preservation(binding, target, repo_root=repo_root)
+    try:
+        if legacy_profile is not None:
+            create_legacy_compatibility_export(
+                prepared,
+                repo_root=repo_root,
+                operator=config.support_operator,
+                reason=config.support_reason,
+                machine_id_confirmation=config.machine_id_confirmation,
+                service_record_reference=config.support_reference,
+                firmware_attestation=config.firmware_attestation,
+            )
+        return prepared
+    except Exception:
+        prepared.close()
+        raise
+
+
+def _checkout_is_unchanged_after_failed_git(
+    repo_root: Path,
+    *,
+    before_sha: str,
+    config: UpdaterConfig,
+    command_runner: CommandRunner,
+    log: _LogBuffer,
+    progress_callback: ProgressCallback | None,
+) -> tuple[bool, str]:
+    """Prove a failed destructive Git command left HEAD and worktree exact."""
+
+    head = _run_git(repo_root, ["rev-parse", "HEAD"], config.git_timeout_s, command_runner)
+    _record_command(log, head, progress_callback)
+    status = _run_git(repo_root, ["status", "--porcelain"], config.git_timeout_s, command_runner)
+    _record_command(log, status, progress_callback)
+    observed_head = head.stdout.strip() if head.returncode == 0 else ""
+    unchanged = (
+        bool(observed_head)
+        and observed_head == before_sha
+        and status.returncode == 0
+        and not status.stdout.strip()
+    )
+    return unchanged, observed_head
 
 
 def _parse_rev_list_counts(text: str) -> tuple[int, int] | None:
@@ -2176,6 +2432,7 @@ def run_rollback_check(
             )
 
         target_info = offline_info.release_info
+        legacy_support_required = target_info.machine_data_contract is None
         return _finish_check_result(
             _make_check_result(
                 STATUS_ROLLBACK_AVAILABLE,
@@ -2192,6 +2449,7 @@ def run_rollback_check(
                 operation=OPERATION_ROLLBACK,
                 before_release_version=before_release_version,
                 after_release_version=target_info.version,
+                legacy_support_required=legacy_support_required,
                 **_release_fields(target_info),
             ),
             log,
@@ -2283,6 +2541,7 @@ def run_rollback_check(
             log_path,
         )
 
+    legacy_support_required = target_info.machine_data_contract is None
     return _finish_check_result(
         _make_check_result(
             STATUS_ROLLBACK_AVAILABLE,
@@ -2295,6 +2554,7 @@ def run_rollback_check(
             operation=OPERATION_ROLLBACK,
             before_release_version=before_release_version,
             after_release_version=target_info.version,
+            legacy_support_required=legacy_support_required,
             **_release_fields(target_info),
         ),
         log,
@@ -2534,6 +2794,45 @@ def run_rollback(
             return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
         reset_ref = release_info.tag
 
+    prepared = None
+    if config.machine_data_required:
+        try:
+            _emit_progress(
+                progress_callback,
+                "protecting_machine_data",
+                "Creating and verifying the external machine-data backup...",
+                log_path=log_path,
+            )
+            prepared = _begin_machine_data_protection(
+                config,
+                repo_root=repo_root,
+                before_release_version=before_release_version,
+                before_sha=before_sha,
+                target_info=release_info,
+                operation=OPERATION_ROLLBACK,
+                update_source=update_source,
+            )
+        except Exception as exc:
+            code = str(getattr(exc, "code", "machine_data_protection_failed"))
+            status = STATUS_LEGACY_SUPPORT_REQUIRED if code == "legacy_support_required" else STATUS_MACHINE_DATA_PROTECTION_FAILED
+            result = _make_result(
+                status,
+                f"Rollback stopped before changing Git because machine-data protection failed ({code}): {exc}",
+                repo_root=repo_root,
+                branch=branch,
+                before_sha=before_sha,
+                after_sha=before_sha,
+                log_path=log_path,
+                update_source=update_source,
+                offline_manifest_path=offline_manifest_path,
+                operation=OPERATION_ROLLBACK,
+                before_release_version=before_release_version,
+                relaunch_authorized=False,
+                safe_to_reopen_current=True,
+                **_release_fields(release_info),
+            )
+            return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
+
     _emit_progress(
         progress_callback,
         "applying_rollback",
@@ -2543,18 +2842,46 @@ def run_rollback(
     reset_result = _run_git(repo_root, ["reset", "--hard", reset_ref], config.git_timeout_s, command_runner)
     _record_command(log, reset_result, progress_callback)
     if reset_result.returncode != 0:
+        checkout_unchanged = True
+        observed_head = before_sha
+        if prepared is not None:
+            checkout_unchanged, observed_head = _checkout_is_unchanged_after_failed_git(
+                repo_root,
+                before_sha=before_sha,
+                config=config,
+                command_runner=command_runner,
+                log=log,
+                progress_callback=progress_callback,
+            )
+        evidence_path = None
+        update_id = ""
+        if prepared is not None:
+            update_id = prepared.update_id
+            evidence_path = prepared.fail(
+                f"git reset --hard {reset_ref} failed; checkout unchanged={checkout_unchanged}.",
+                recovery_required=not checkout_unchanged,
+            )
+            prepared.close()
         result = _make_result(
-            STATUS_ROLLBACK_FAILED,
-            f"Rollback cannot continue because git reset --hard {reset_ref} failed. The current app version was not changed.",
+            STATUS_RECOVERY_REQUIRED if prepared is not None and not checkout_unchanged else STATUS_ROLLBACK_FAILED,
+            (
+                f"Rollback cannot continue because git reset --hard {reset_ref} failed. The current checkout was revalidated unchanged."
+                if checkout_unchanged
+                else f"Rollback failed while changing Git and the checkout could not be proven unchanged; recovery is required."
+            ),
             repo_root=repo_root,
             branch=branch,
             before_sha=before_sha,
-            after_sha=before_sha,
+            after_sha=observed_head,
             log_path=log_path,
             update_source=update_source,
             offline_manifest_path=offline_manifest_path,
             operation=OPERATION_ROLLBACK,
             before_release_version=before_release_version,
+            relaunch_authorized=False if prepared is not None else True,
+            safe_to_reopen_current=checkout_unchanged,
+            machine_data_update_id=update_id,
+            machine_data_evidence_path=evidence_path,
             **_release_fields(release_info),
         )
         return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
@@ -2562,6 +2889,17 @@ def run_rollback(
     after_result = _run_git(repo_root, ["rev-parse", "HEAD"], config.git_timeout_s, command_runner)
     _record_command(log, after_result, progress_callback)
     if after_result.returncode != 0 or not after_result.stdout.strip():
+        evidence_path = None
+        update_id = ""
+        if prepared is not None:
+            update_id = prepared.update_id
+            try:
+                evidence_path = prepared.fail(
+                    "Git changed the checkout but the resulting commit could not be resolved.",
+                    recovery_required=True,
+                )
+            finally:
+                prepared.close()
         result = _make_result(
             STATUS_ROLLBACK_FAILED,
             "Rollback completed, but the resulting commit could not be resolved.",
@@ -2573,10 +2911,56 @@ def run_rollback(
             offline_manifest_path=offline_manifest_path,
             operation=OPERATION_ROLLBACK,
             before_release_version=before_release_version,
+            relaunch_authorized=False if prepared is not None else True,
+            safe_to_reopen_current=False if prepared is not None else True,
+            machine_data_update_id=update_id,
+            machine_data_evidence_path=evidence_path,
             **_release_fields(release_info),
         )
         return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
     after_sha = after_result.stdout.strip()
+    evidence_path = None
+    update_id = prepared.update_id if prepared is not None else ""
+    if prepared is not None:
+        try:
+            prepared.record_git_result(
+                before_commit=before_sha,
+                after_commit=after_sha,
+                command=("git", "reset", "--hard", reset_ref),
+            )
+            prepared.verify_after()
+            if release_info.machine_data_contract is None:
+                from MachineDataCompatibility import compare_legacy_session
+
+                if not compare_legacy_session(prepared.paths).unchanged:
+                    raise RuntimeError("The activated legacy compatibility export changed during rollback.")
+            evidence_path = prepared.authorize_relaunch()
+        except Exception as exc:
+            try:
+                evidence_path = prepared.fail(str(exc), recovery_required=True)
+            finally:
+                prepared.close()
+            result = _make_result(
+                STATUS_RECOVERY_REQUIRED,
+                f"The rollback changed the app revision, but post-verification did not authorize relaunch: {exc}",
+                repo_root=repo_root,
+                branch=branch,
+                before_sha=before_sha,
+                after_sha=after_sha,
+                log_path=log_path,
+                update_source=update_source,
+                offline_manifest_path=offline_manifest_path,
+                operation=OPERATION_ROLLBACK,
+                before_release_version=before_release_version,
+                after_release_version=release_info.version,
+                relaunch_authorized=False,
+                safe_to_reopen_current=False,
+                machine_data_update_id=update_id,
+                machine_data_evidence_path=evidence_path,
+                **_release_fields(release_info),
+            )
+            return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
+        prepared.close()
     if after_sha.lower() != release_info.sha.lower():
         result = _make_result(
             STATUS_ROLLBACK_FAILED,
@@ -2590,6 +2974,10 @@ def run_rollback(
             offline_manifest_path=offline_manifest_path,
             operation=OPERATION_ROLLBACK,
             before_release_version=before_release_version,
+            relaunch_authorized=False if prepared is not None else True,
+            safe_to_reopen_current=False if prepared is not None else True,
+            machine_data_update_id=update_id,
+            machine_data_evidence_path=evidence_path,
             **_release_fields(release_info),
         )
         return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
@@ -2613,6 +3001,10 @@ def run_rollback(
         operation=OPERATION_ROLLBACK,
         before_release_version=before_release_version,
         after_release_version=release_info.version,
+        relaunch_authorized=True,
+        safe_to_reopen_current=True,
+        machine_data_update_id=update_id,
+        machine_data_evidence_path=evidence_path,
         **_release_fields(release_info),
     )
     _maybe_write_latest_update_result(config, result, repo_root, command_runner)
@@ -2640,6 +3032,10 @@ def run_rollback(
                 operation=OPERATION_ROLLBACK,
                 before_release_version=before_release_version,
                 after_release_version=release_info.version,
+                relaunch_authorized=result.relaunch_authorized,
+                safe_to_reopen_current=result.safe_to_reopen_current,
+                machine_data_update_id=result.machine_data_update_id,
+                machine_data_evidence_path=result.machine_data_evidence_path,
                 **_release_fields(release_info),
             )
             log.add(f"status: {result.status}")
@@ -2799,24 +3195,7 @@ def run_update(
             )
             return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
 
-        _emit_progress(progress_callback, "applying_update", "Applying offline update...", log_path=log_path)
-        offline_target_ref = _offline_update_target_ref()
-        pull_result = _run_git(repo_root, ["merge", "--ff-only", offline_target_ref], config.git_timeout_s, command_runner)
-        _record_command(log, pull_result, progress_callback)
-        if pull_result.returncode != 0:
-            result = _make_result(
-                STATUS_OFFLINE_UPDATE_FAILED,
-                f"Update cannot continue because git merge --ff-only {offline_target_ref} failed. The current app version was not changed.",
-                repo_root=repo_root,
-                branch=branch,
-                before_sha=before_sha,
-                after_sha=before_sha,
-                log_path=log_path,
-                update_source=UPDATE_SOURCE_OFFLINE,
-                offline_manifest_path=offline_manifest_path,
-                **_release_fields(release_info),
-            )
-            return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
+        merge_ref = _offline_update_target_ref()
     else:
         channel_label = _release_channel_label(config.release_channel)
         _emit_progress(progress_callback, "resolving_release", f"Resolving {channel_label} release target...", log_path=log_path)
@@ -2871,25 +3250,121 @@ def run_update(
             )
             return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
 
-        _emit_progress(progress_callback, "applying_update", f"Applying LabCraft {release_info.version}...", log_path=log_path)
-        merge_result = _run_git(repo_root, ["merge", "--ff-only", release_info.tag], config.git_timeout_s, command_runner)
-        _record_command(log, merge_result, progress_callback)
-        if merge_result.returncode != 0:
+        merge_ref = release_info.tag
+
+    prepared = None
+    before_release_version = ""
+    if config.machine_data_required:
+        try:
+            before_release_version = _read_worktree_release_version(repo_root)
+            _emit_progress(
+                progress_callback,
+                "protecting_machine_data",
+                "Creating and verifying the external machine-data backup...",
+                log_path=log_path,
+            )
+            prepared = _begin_machine_data_protection(
+                config,
+                repo_root=repo_root,
+                before_release_version=before_release_version,
+                before_sha=before_sha,
+                target_info=release_info,
+                operation=OPERATION_UPDATE,
+                update_source=update_source,
+            )
+        except Exception as exc:
+            code = str(getattr(exc, "code", "machine_data_protection_failed"))
+            status = STATUS_LEGACY_SUPPORT_REQUIRED if code == "legacy_support_required" else STATUS_MACHINE_DATA_PROTECTION_FAILED
             result = _make_result(
-                STATUS_GIT_PULL_FAILED,
-                f"Update cannot continue because git merge --ff-only {release_info.tag} failed. The current app version was not changed.",
+                status,
+                f"Update stopped before changing Git because machine-data protection failed ({code}): {exc}",
                 repo_root=repo_root,
                 branch=branch,
                 before_sha=before_sha,
                 after_sha=before_sha,
                 log_path=log_path,
+                update_source=update_source,
+                offline_manifest_path=offline_manifest_path,
+                operation=OPERATION_UPDATE,
+                before_release_version=before_release_version,
+                relaunch_authorized=False,
+                safe_to_reopen_current=True,
                 **_release_fields(release_info),
             )
             return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
 
+    _emit_progress(
+        progress_callback,
+        "applying_update",
+        "Applying offline update..." if update_source == UPDATE_SOURCE_OFFLINE else f"Applying LabCraft {release_info.version}...",
+        log_path=log_path,
+    )
+    merge_result = _run_git(repo_root, ["merge", "--ff-only", merge_ref], config.git_timeout_s, command_runner)
+    _record_command(log, merge_result, progress_callback)
+    if merge_result.returncode != 0:
+        checkout_unchanged = True
+        observed_head = before_sha
+        if prepared is not None:
+            checkout_unchanged, observed_head = _checkout_is_unchanged_after_failed_git(
+                repo_root,
+                before_sha=before_sha,
+                config=config,
+                command_runner=command_runner,
+                log=log,
+                progress_callback=progress_callback,
+            )
+        evidence_path = None
+        update_id = ""
+        if prepared is not None:
+            evidence_path = prepared.fail(
+                f"git merge --ff-only {merge_ref} failed; checkout unchanged={checkout_unchanged}.",
+                recovery_required=not checkout_unchanged,
+            )
+            update_id = prepared.update_id
+            prepared.close()
+        result = _make_result(
+            (
+                STATUS_RECOVERY_REQUIRED
+                if prepared is not None and not checkout_unchanged
+                else STATUS_OFFLINE_UPDATE_FAILED
+                if update_source == UPDATE_SOURCE_OFFLINE
+                else STATUS_GIT_PULL_FAILED
+            ),
+            (
+                f"Update cannot continue because git merge --ff-only {merge_ref} failed. The current checkout was revalidated unchanged."
+                if checkout_unchanged
+                else "Update failed while changing Git and the checkout could not be proven unchanged; recovery is required."
+            ),
+            repo_root=repo_root,
+            branch=branch,
+            before_sha=before_sha,
+            after_sha=observed_head,
+            log_path=log_path,
+            update_source=update_source,
+            offline_manifest_path=offline_manifest_path,
+            operation=OPERATION_UPDATE,
+            before_release_version=before_release_version,
+            relaunch_authorized=False if prepared is not None else True,
+            safe_to_reopen_current=checkout_unchanged,
+            machine_data_update_id=update_id,
+            machine_data_evidence_path=evidence_path,
+            **_release_fields(release_info),
+        )
+        return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
+
+    evidence_path = None
+    update_id = prepared.update_id if prepared is not None else ""
     after_result = _run_git(repo_root, ["rev-parse", "HEAD"], config.git_timeout_s, command_runner)
     _record_command(log, after_result, progress_callback)
     if after_result.returncode != 0 or not after_result.stdout.strip():
+        if prepared is not None:
+            try:
+                evidence_path = prepared.fail(
+                    "Git changed the checkout but the resulting commit could not be resolved.",
+                    recovery_required=True,
+                )
+            finally:
+                prepared.close()
         result = _make_result(
             STATUS_OFFLINE_UPDATE_FAILED if update_source == UPDATE_SOURCE_OFFLINE else STATUS_GIT_PULL_FAILED,
             "Update completed, but the resulting commit could not be resolved.",
@@ -2899,10 +3374,66 @@ def run_update(
             log_path=log_path,
             update_source=update_source,
             offline_manifest_path=offline_manifest_path,
+            operation=OPERATION_UPDATE,
+            before_release_version=before_release_version,
+            relaunch_authorized=False if prepared is not None else True,
+            safe_to_reopen_current=False if prepared is not None else True,
+            machine_data_update_id=update_id,
+            machine_data_evidence_path=evidence_path,
             **_release_fields(release_info),
         )
         return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
     after_sha = after_result.stdout.strip()
+
+    evidence_path = None
+    update_id = ""
+    if prepared is not None:
+        update_id = prepared.update_id
+        try:
+            prepared.record_git_result(
+                before_commit=before_sha,
+                after_commit=after_sha,
+                command=("git", "merge", "--ff-only", merge_ref),
+            )
+            prepared.verify_after()
+            if prepared.target.machine_data_contract["transition"] != "none":
+                _emit_progress(
+                    progress_callback,
+                    "schema_transition_recovery",
+                    "Running the declared hardware-free machine-data transition...",
+                    log_path=log_path,
+                )
+                from MachineDataSchemaTransition import complete_prepared_schema_transition
+
+                evidence_path = complete_prepared_schema_transition(prepared)
+            else:
+                evidence_path = prepared.authorize_relaunch()
+        except Exception as exc:
+            try:
+                evidence_path = prepared.fail(str(exc), recovery_required=True)
+            finally:
+                prepared.close()
+            result = _make_result(
+                STATUS_RECOVERY_REQUIRED,
+                f"The app revision changed, but machine-data post-verification did not authorize relaunch: {exc}",
+                repo_root=repo_root,
+                branch=branch,
+                before_sha=before_sha,
+                after_sha=after_sha,
+                log_path=log_path,
+                update_source=update_source,
+                offline_manifest_path=offline_manifest_path,
+                operation=OPERATION_UPDATE,
+                before_release_version=before_release_version,
+                after_release_version=release_info.version,
+                relaunch_authorized=False,
+                safe_to_reopen_current=False,
+                machine_data_update_id=update_id,
+                machine_data_evidence_path=evidence_path,
+                **_release_fields(release_info),
+            )
+            return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
+        prepared.close()
 
     status = STATUS_ALREADY_CURRENT if after_sha == before_sha else STATUS_UPDATED
     message = "LabCraft is already current." if status == STATUS_ALREADY_CURRENT else "LabCraft was updated successfully."
@@ -2917,6 +3448,13 @@ def run_update(
         log_path=log_path,
         update_source=update_source,
         offline_manifest_path=offline_manifest_path,
+        operation=OPERATION_UPDATE,
+        before_release_version=before_release_version,
+        after_release_version=release_info.version if release_info is not None else "",
+        relaunch_authorized=True,
+        safe_to_reopen_current=True,
+        machine_data_update_id=update_id,
+        machine_data_evidence_path=evidence_path,
         **_release_fields(release_info),
     )
     _maybe_write_latest_update_result(config, result, repo_root, command_runner)
@@ -2941,6 +3479,13 @@ def run_update(
                 log_path=log_path,
                 update_source=update_source,
                 offline_manifest_path=offline_manifest_path,
+                operation=OPERATION_UPDATE,
+                before_release_version=before_release_version,
+                after_release_version=release_info.version if release_info is not None else "",
+                relaunch_authorized=result.relaunch_authorized,
+                safe_to_reopen_current=result.safe_to_reopen_current,
+                machine_data_update_id=result.machine_data_update_id,
+                machine_data_evidence_path=result.machine_data_evidence_path,
                 **_release_fields(release_info),
             )
             log.add(f"status: {result.status}")
@@ -2974,7 +3519,7 @@ def _finish_failure_result(
     progress_callback: ProgressCallback | None = None,
 ) -> UpdateResult:
     final_result = result
-    if config.relaunch_on_failure:
+    if config.relaunch_on_failure and result.safe_to_reopen_current:
         log.add(f"failure_status: {result.status}")
         relaunch_error = _attempt_relaunch(
             config,
@@ -3004,6 +3549,13 @@ def _finish_failure_result(
                 operation=result.operation,
                 before_release_version=result.before_release_version,
                 after_release_version=result.after_release_version,
+                relaunch_authorized=result.relaunch_authorized,
+                safe_to_reopen_current=result.safe_to_reopen_current,
+                machine_data_update_id=result.machine_data_update_id,
+                machine_data_evidence_path=result.machine_data_evidence_path,
+                release_manifest_sha256=result.release_manifest_sha256,
+                machine_data_contract=result.machine_data_contract,
+                requires_firmware=result.requires_firmware,
             )
 
     log.add(f"status: {final_result.status}")
@@ -3047,6 +3599,21 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
         help="Release channel to use when resolving latest.json without --target-release.",
     )
     parser.add_argument("--rollback", action="store_true", help="Support-only rollback to a verified release target.")
+    parser.add_argument("--machine-data-root", default=None, help="Authorized external machine-data root.")
+    parser.add_argument("--machine-uuid", default="")
+    parser.add_argument("--machine-id", default="")
+    parser.add_argument("--activation-id", default="")
+    parser.add_argument("--migration-id", default="")
+    parser.add_argument("--active-pointer-sha256", default="")
+    parser.add_argument("--source-app-version", default="")
+    parser.add_argument("--source-commit", default="")
+    parser.add_argument("--update-request-id", default="")
+    parser.add_argument("--allow-legacy-rollback", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--support-operator", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--support-reason", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--support-reference", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--machine-id-confirmation", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--firmware-attestation", default="", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     return UpdaterConfig(
@@ -3066,6 +3633,22 @@ def parse_args(argv: Sequence[str] | None = None) -> UpdaterConfig:
         target_release=str(args.target_release).strip() if args.target_release else None,
         release_channel=str(args.release_channel).strip() if args.release_channel else RELEASE_CHANNEL_STABLE,
         rollback=bool(args.rollback),
+        machine_data_required=True,
+        machine_data_root=Path(args.machine_data_root) if args.machine_data_root else None,
+        machine_uuid=str(args.machine_uuid).strip(),
+        machine_id=str(args.machine_id).strip(),
+        activation_id=str(args.activation_id).strip(),
+        migration_id=str(args.migration_id).strip(),
+        active_pointer_sha256=str(args.active_pointer_sha256).strip(),
+        source_app_version=str(args.source_app_version).strip(),
+        source_commit=str(args.source_commit).strip(),
+        update_request_id=str(args.update_request_id).strip(),
+        allow_legacy_rollback=bool(args.allow_legacy_rollback),
+        support_operator=str(args.support_operator).strip(),
+        support_reason=str(args.support_reason).strip(),
+        support_reference=str(args.support_reference).strip(),
+        machine_id_confirmation=str(args.machine_id_confirmation).strip(),
+        firmware_attestation=str(args.firmware_attestation).strip(),
     )
 
 

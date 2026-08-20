@@ -55,6 +55,27 @@ class _FakeExperimentalBalanceService(QtCore.QObject):
         )
 
 
+class _FakeAuthorizedMachineContext:
+    def __init__(self, root):
+        root = Path(root)
+        self.paths = SimpleNamespace(
+            config_root=root / "config",
+            calibration_memory_root=root / "calibration-memory",
+            droplet_imager_optics_path=(
+                root / "calibration" / "droplet_imager_optics.json"
+            ),
+            regulator_optimization_root=(
+                root / "calibration" / "regulator_optimization"
+            ),
+            identity_path=root / "metadata" / "machine_identity.json",
+        )
+        self.saved_target_authorizer = None
+        self.close_calls = 0
+
+    def close(self):
+        self.close_calls += 1
+
+
 class _DeferredUiSignal(QtCore.QObject):
     committed = QtCore.Signal()
 
@@ -170,7 +191,81 @@ def _production_safe_dependencies(tmp_path, experimental_factory):
         simulation,
         runtime_context=composition.PRODUCTION_RUNTIME_CONTEXT,
         experimental_balance_factory=experimental_factory,
+        authorized_machine_context=_FakeAuthorizedMachineContext(tmp_path),
     )
+
+
+def test_verified_production_context_injects_one_canonical_root_set(qapp, tmp_path):
+    import MachineDataBootstrap
+    import MachineDataMigration
+    from machine_data_migration_helpers import (
+        FIXED_TIME,
+        MACHINE_ID,
+        MACHINE_UUID,
+        inspect_wrapper,
+        machine_data_paths,
+        write_wrapper,
+    )
+
+    wrapper, _local = write_wrapper(tmp_path / "source", custom_camera=True)
+    candidate = inspect_wrapper(wrapper)
+    base, expected_paths = machine_data_paths(tmp_path / "external-state")
+    ids = iter(
+        (
+            MACHINE_UUID,
+            "00000000-0000-0000-0000-000000000003",
+            "00000000-0000-0000-0000-000000000004",
+        )
+    )
+    bootstrap = MachineDataBootstrap.MachineDataBootstrap(
+        base,
+        app_version="v1.3.0-rc.2",
+        app_commit="test-commit",
+        clock=lambda: FIXED_TIME,
+        uuid_factory=lambda: next(ids),
+    )
+    context = bootstrap.bootstrap_from_candidate(
+        MachineDataBootstrap.BootstrapSubmission(
+            selection=MachineDataMigration.CandidateSelection(
+                MachineDataMigration.CandidateSourceKind.OPERATOR_SELECTED_WRAPPER,
+                wrapper,
+                "pre-update backup",
+            ),
+            machine_id=MACHINE_ID,
+            operator="Operator",
+            source_reason="pre-update backup",
+            camera_confirmation=candidate.safety_snapshot["locations"]["camera"],
+        )
+    )
+    dependencies = replace(
+        composition.production_dependencies(context),
+        machine_factory=_safe_machine_factory,
+    )
+
+    components = composition.build_application_components(
+        CURRENT_PROFILE,
+        dependencies,
+    )
+    try:
+        assert dependencies.roots.load_policy is composition.RootLoadPolicy.CANONICAL_EXISTING_ONLY
+        assert dependencies.roots.config_root == expected_paths.config_root
+        assert components.model.config_root == expected_paths.config_root
+        assert Path(components.model.settings_path) == expected_paths.config_root / "Settings.json"
+        assert Path(components.model.locations_path) == expected_paths.config_root / "Locations.json"
+        assert Path(components.model.plates_path) == expected_paths.config_root / "Plates.json"
+        assert Path(components.model.calibration_memory_store.root_dir) == (
+            expected_paths.calibration_memory_root
+        )
+        assert components.model.droplet_camera_model.optics_config_path() == (
+            expected_paths.droplet_imager_optics_path
+        )
+        assert components.controller.machine_data_paths == expected_paths
+        assert components.controller.qualification_identity_path() == expected_paths.identity_path
+        assert components.controller.regulator_calibration_output_root() == (
+            expected_paths.regulator_optimization_root
+        )
+    finally:
+        assert components.close() is True
 
 
 @pytest.mark.parametrize(
@@ -398,7 +493,7 @@ def test_simulation_requires_an_explicit_machine_factory(tmp_path):
         )
 
 
-def test_production_machine_factory_selects_machine_class_lazily(monkeypatch):
+def test_production_machine_factory_selects_machine_class_lazily(monkeypatch, tmp_path):
     captured = {}
 
     class _ProductionMachine:
@@ -410,7 +505,9 @@ def test_production_machine_factory_selects_machine_class_lazily(monkeypatch):
     fake_module.Machine = _ProductionMachine
     monkeypatch.setitem(sys.modules, "Machine_FreeRTOS", fake_module)
 
-    dependencies = composition.production_dependencies()
+    dependencies = composition.production_dependencies(
+        _FakeAuthorizedMachineContext(tmp_path / "machine")
+    )
     model = object()
     machine = dependencies.machine_factory(
         model,
@@ -601,6 +698,9 @@ def test_production_runtime_does_not_show_simulation_identity(qapp, tmp_path):
         balance_factory=simulation.balance_factory,
         experimental_balance_factory=simulation.experimental_balance_factory,
         legacy_calibration_model_factory=simulation.legacy_calibration_model_factory,
+        authorized_machine_context=_FakeAuthorizedMachineContext(
+            tmp_path / "production-ui"
+        ),
     )
     components = composition.build_application_components(
         CURRENT_PROFILE,

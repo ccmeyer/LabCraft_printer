@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 
 from CalibrationMemoryAggregator import CalibrationMemoryAggregator
 from CalibrationIdentity import CalibrationIdentityRegistry
-from LocalConfig import get_calibration_memory_root
+from LocalConfig import (
+    get_calibration_memory_root,
+    get_existing_calibration_memory_root,
+)
 
 
 def _json_default(obj):
@@ -332,9 +335,12 @@ class CalibrationMemoryStore:
         OBSERVATION_CAPTURE_VERBOSE,
     )
 
-    def __init__(self, model=None, root_dir=None):
+    def __init__(self, model=None, root_dir=None, require_existing_baseline=False):
         self.model = model
         base_dir = root_dir or get_calibration_memory_root()
+        self.require_existing_baseline = bool(require_existing_baseline)
+        if self.require_existing_baseline:
+            base_dir = get_existing_calibration_memory_root(root=base_dir)
         self.root_dir = os.path.abspath(base_dir)
         self.entities_dir = os.path.join(self.root_dir, "entities")
         self.indices_dir = os.path.join(self.root_dir, "indices")
@@ -461,6 +467,8 @@ class CalibrationMemoryStore:
 
     def ensure_initialized(self):
         with self._lock:
+            if self.require_existing_baseline:
+                get_existing_calibration_memory_root(root=self.root_dir)
             os.makedirs(self.root_dir, exist_ok=True)
             os.makedirs(self.entities_dir, exist_ok=True)
             os.makedirs(self.indices_dir, exist_ok=True)
@@ -468,6 +476,10 @@ class CalibrationMemoryStore:
             self.identity_registry.ensure_initialized()
             self.aggregator.ensure_initialized()
             if not os.path.exists(self.schema_path):
+                if self.require_existing_baseline:
+                    raise FileNotFoundError(
+                        f"Canonical CalibrationMemory schema is missing: {self.schema_path}"
+                    )
                 payload = {
                     "schema_family": self.SCHEMA_FAMILY,
                     "schema_version": int(self.SCHEMA_VERSION),
@@ -475,6 +487,10 @@ class CalibrationMemoryStore:
                 }
                 self._write_json_atomic(self.schema_path, payload)
             if not os.path.exists(self.runtime_config_path):
+                if self.require_existing_baseline:
+                    raise FileNotFoundError(
+                        f"Canonical CalibrationMemory config is missing: {self.runtime_config_path}"
+                    )
                 self._write_json_atomic(self.runtime_config_path, self._default_runtime_config())
 
     @staticmethod

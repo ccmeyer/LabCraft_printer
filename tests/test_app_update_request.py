@@ -85,6 +85,59 @@ def test_controller_builds_update_command_without_auto_relaunch(tmp_path, monkey
     ]
 
 
+def test_controller_binds_updater_to_authorized_external_machine_store(tmp_path, monkeypatch):
+    controller = _make_controller(tmp_path)
+    controller.authorized_machine_context = object()
+    controller._resolve_app_update_python = lambda: "python-under-test"
+    machine_root = (tmp_path / "external-machine-data").resolve()
+    binding = SimpleNamespace(
+        machine_data_root=machine_root,
+        machine_uuid="00000000-0000-0000-0000-000000000001",
+        machine_id="LC-001",
+        activation_id="00000000-0000-0000-0000-000000000002",
+        migration_id="00000000-0000-0000-0000-000000000003",
+        active_pointer_sha256="a" * 64,
+        source_app_version="v1.3.0-rc.2",
+        source_commit="b" * 40,
+        request_id="00000000-0000-0000-0000-000000000004",
+    )
+    controller.machine_data_paths = SimpleNamespace(
+        latest_update_ui_result_path=(
+            machine_root
+            / "machines"
+            / binding.machine_uuid
+            / "update_history"
+            / "latest_ui_result.json"
+        )
+    )
+    monkeypatch.setattr(controller_mod, "read_app_version", lambda _root: binding.source_app_version)
+    monkeypatch.setattr(controller_mod, "get_app_commit", lambda _root: binding.source_commit)
+    import MachineDataUpdate
+
+    monkeypatch.setattr(MachineDataUpdate, "build_update_launch_binding", lambda *args, **kwargs: binding)
+
+    command = controller.build_app_update_command(wait_pid=1234)
+
+    expected_pairs = {
+        "--machine-data-root": str(machine_root),
+        "--machine-uuid": binding.machine_uuid,
+        "--machine-id": binding.machine_id,
+        "--activation-id": binding.activation_id,
+        "--migration-id": binding.migration_id,
+        "--active-pointer-sha256": binding.active_pointer_sha256,
+        "--source-app-version": binding.source_app_version,
+        "--source-commit": binding.source_commit,
+        "--update-request-id": binding.request_id,
+    }
+    for flag, value in expected_pairs.items():
+        index = command.index(flag)
+        assert command[index + 1] == value
+    log_path = Path(command[command.index("--log-path") + 1])
+    latest_path = Path(command[command.index("--latest-result-path") + 1])
+    assert machine_root in log_path.parents
+    assert machine_root in latest_path.parents
+
+
 def test_controller_builds_update_command_with_offline_manifest(tmp_path, monkeypatch):
     controller = _make_controller(tmp_path)
     manifest_path = tmp_path / "LabCraftUpdates" / "update.json"

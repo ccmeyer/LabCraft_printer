@@ -42,8 +42,10 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime
 from pathlib import Path
 import cv2
+import copy
 from utilities import ShortcutManager, apply_pressure_plot_style
 from ExperimentAuditReader import ExperimentAuditReader, build_audit_markdown
+from ConfigurationHistoryReader import ConfigurationHistoryReader
 import CalibrationClasses
 from typing import Mapping, Sequence, Optional, Any, List, Dict, Tuple, Set
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
@@ -496,6 +498,401 @@ class AuditTimelineWindow(QtWidgets.QDialog):
 
         self.status_label.setText(f"Exported audit markdown to {file_path}")
 
+
+class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
+    """Modal, assessment-driven preview for guarded coordinate changes."""
+
+    def __init__(self, assessment, parent=None):
+        super().__init__(parent)
+        self.assessment = copy.deepcopy(dict(assessment))
+        self.outcome = "cancelled"
+        self.setWindowTitle("Review Configuration Change")
+        self.resize(860, 680)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        result = self.assessment.get("result", "reject")
+        target = ", ".join(self.assessment.get("target_keys", []))
+        heading = QtWidgets.QLabel(
+            f"{result.replace('_', ' ').title()}: {target}\n"
+            f"Policy {self.assessment.get('policy_id')} "
+            f"({str(self.assessment.get('policy_sha256', ''))[:12]})\n"
+            f"Proposal {str(self.assessment.get('proposal_sha256', ''))[:12]}"
+        )
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        self.table = QtWidgets.QTableWidget(0, 8, self)
+        self.table.setHorizontalHeaderLabels(
+            ["Target", "Old X/Y/Z", "Proposed X/Y/Z", "Delta X", "Delta Y", "Delta Z", "Largest", "Rule"]
+        )
+        rows = self.assessment.get("changes", [])
+        self.table.setRowCount(len(rows))
+        rules = self.assessment.get("threshold_results", [])
+        for row_index, change in enumerate(rows):
+            before = change.get("before")
+            proposed = change.get("proposed") or {}
+            signed = change.get("signed_delta") or {}
+            absolute = change.get("absolute_delta") or {}
+            numeric = [value for value in absolute.values() if isinstance(value, int)]
+            rule = next(
+                (item.get("rule", "") for item in rules if item.get("target_key") == change.get("target_key")),
+                "",
+            )
+            values = (
+                change.get("target_key", ""),
+                "new" if before is None else f"{before.get('X')}/{before.get('Y')}/{before.get('Z')}",
+                f"{proposed.get('X')}/{proposed.get('Y')}/{proposed.get('Z')}",
+                signed.get("X"), signed.get("Y"), signed.get("Z"),
+                max(numeric) if numeric else "new",
+                rule,
+            )
+            for column, value in enumerate(values):
+                self.table.setItem(row_index, column, QtWidgets.QTableWidgetItem(str(value)))
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+        checks = QtWidgets.QPlainTextEdit(self)
+        checks.setReadOnly(True)
+        checks.setMaximumHeight(150)
+        checks.setPlainText(
+            "\n".join(
+                f"{'PASS' if item.get('passed') else 'REJECT'} — {item.get('code')}: {item.get('message')}"
+                for item in self.assessment.get("hard_checks", [])
+            )
+        )
+        layout.addWidget(checks)
+
+        notice = QtWidgets.QLabel(
+            "Saving does not verify this target. The changed value remains motion-blocked "
+            "until a separate exact-value physical or service-record verification is audited."
+        )
+        notice.setWordWrap(True)
+        layout.addWidget(notice)
+
+        form = QtWidgets.QFormLayout()
+        self.operator_edit = QtWidgets.QLineEdit(self)
+        self.reason_edit = QtWidgets.QLineEdit(self)
+        self.acknowledge = QtWidgets.QCheckBox("I reviewed every displayed coordinate and delta.", self)
+        form.addRow("Operator:", self.operator_edit)
+        form.addRow("Reason:", self.reason_edit)
+        form.addRow("", self.acknowledge)
+        self.phrase_edit = QtWidgets.QLineEdit(self)
+        required_phrase = self.assessment.get("required_confirmation_phrase")
+        if required_phrase:
+            form.addRow(f"Type exactly: {required_phrase}", self.phrase_edit)
+        else:
+            self.phrase_edit.hide()
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addStretch()
+        self.cancel_button = QtWidgets.QPushButton("Cancel", self)
+        self.action_button = QtWidgets.QPushButton(
+            "Record Rejection and Close" if result == "reject" else "Save and Revoke",
+            self,
+        )
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.action_button)
+        layout.addLayout(buttons)
+        self.cancel_button.clicked.connect(self.reject)
+        self.action_button.clicked.connect(self._finish)
+
+    def _finish(self):
+        operator = self.operator_edit.text().strip()
+        reason = self.reason_edit.text().strip()
+        if not operator or not reason:
+            QMessageBox.warning(self, "Information Required", "Operator and reason are required for the audit event.")
+            return
+        if self.assessment.get("result") != "reject":
+            if not self.acknowledge.isChecked():
+                QMessageBox.warning(self, "Review Required", "Acknowledge the displayed coordinate deltas.")
+                return
+            expected = self.assessment.get("required_confirmation_phrase")
+            if expected and self.phrase_edit.text() != expected:
+                QMessageBox.warning(self, "Phrase Does Not Match", "The strong confirmation phrase must match exactly.")
+                return
+            self.outcome = "accepted"
+        else:
+            self.outcome = "rejected"
+        self.accept()
+
+    def review_result(self):
+        self.exec()
+        return {
+            "outcome": self.outcome,
+            "operator": self.operator_edit.text().strip(),
+            "reason": self.reason_edit.text().strip(),
+            "confirmation": {
+                "proposal_sha256": self.assessment.get("proposal_sha256"),
+                "acknowledged": self.acknowledge.isChecked(),
+                "typed_phrase": self.phrase_edit.text(),
+            },
+        }
+
+
+class ConfigurationHistoryWindow(QtWidgets.QDialog):
+    """Read-only configuration audit with explicit verify/restore actions."""
+
+    def __init__(self, parent=None, controller=None):
+        super().__init__(parent)
+        self.controller = controller if controller is not None else getattr(parent, "controller", None)
+        self.rows = []
+        self.setWindowTitle("Configuration History")
+        self.resize(1050, 650)
+        layout = QtWidgets.QVBoxLayout(self)
+        toolbar = QtWidgets.QHBoxLayout()
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.export_button = QtWidgets.QPushButton("Export Markdown")
+        self.import_button = QtWidgets.QPushButton("Import Governed File...")
+        self.verify_button = QtWidgets.QPushButton("Verify Current Target...")
+        self.restore_button = QtWidgets.QPushButton("Restore Selected Backup...")
+        self.status_label = QtWidgets.QLabel("")
+        toolbar.addWidget(self.refresh_button)
+        toolbar.addWidget(self.export_button)
+        toolbar.addWidget(self.import_button)
+        toolbar.addWidget(self.verify_button)
+        toolbar.addWidget(self.restore_button)
+        toolbar.addStretch()
+        toolbar.addWidget(self.status_label)
+        layout.addLayout(toolbar)
+
+        self.table = QtWidgets.QTableWidget(0, 7, self)
+        self.table.setHorizontalHeaderLabels(
+            ["#", "Time", "Operator", "Type", "Outcome", "Workflow", "Summary"]
+        )
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.details = QtWidgets.QPlainTextEdit(self)
+        self.details.setReadOnly(True)
+        splitter = QtWidgets.QSplitter(Qt.Vertical, self)
+        splitter.addWidget(self.table)
+        splitter.addWidget(self.details)
+        layout.addWidget(splitter)
+
+        self.refresh_button.clicked.connect(self.refresh)
+        self.export_button.clicked.connect(self.export_markdown)
+        self.import_button.clicked.connect(self.import_governed_file)
+        self.verify_button.clicked.connect(self.verify_current_target)
+        self.restore_button.clicked.connect(self.restore_selected)
+        self.table.itemSelectionChanged.connect(self._show_selected)
+        self.refresh()
+
+    def _reader(self):
+        service = getattr(self.controller, "configuration_transactions", None)
+        return ConfigurationHistoryReader(service)
+
+    def refresh(self):
+        try:
+            self.rows = self._reader().read_rows()
+        except Exception as exc:
+            self.rows = []
+            self.table.setRowCount(0)
+            self.details.setPlainText(str(exc))
+            self.status_label.setText("Integrity check failed")
+            self.import_button.setEnabled(False)
+            self.verify_button.setEnabled(False)
+            self.restore_button.setEnabled(False)
+            return
+        self.table.setRowCount(len(self.rows))
+        for index, row in enumerate(self.rows):
+            values = (
+                row.sequence,
+                row.created_at_utc,
+                row.operator,
+                row.event_type,
+                row.outcome,
+                row.workflow,
+                row.summary,
+            )
+            for column, value in enumerate(values):
+                self.table.setItem(index, column, QtWidgets.QTableWidgetItem(str(value)))
+        self.status_label.setText(f"Integrity verified: {len(self.rows)} event(s)")
+        self.import_button.setEnabled(True)
+        self.verify_button.setEnabled(True)
+        self.restore_button.setEnabled(bool(self.rows))
+        if self.rows:
+            self.table.selectRow(len(self.rows) - 1)
+        else:
+            self.details.setPlainText("No post-activation configuration events.")
+
+    def _selected_row(self):
+        selected = self.table.selectionModel().selectedRows()
+        if not selected:
+            return None
+        index = selected[0].row()
+        return self.rows[index] if 0 <= index < len(self.rows) else None
+
+    def _show_selected(self):
+        row = self._selected_row()
+        if row is None:
+            return
+        self.details.setPlainText(
+            json.dumps(row.payload, indent=2, sort_keys=True, ensure_ascii=False)
+        )
+        self.restore_button.setEnabled(row.payload.get("backup_manifest") is not None)
+
+    def export_markdown(self):
+        selected = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export Configuration History",
+            "configuration-history.md",
+            "Markdown files (*.md);;All files (*)",
+        )
+        path = selected[0] if isinstance(selected, tuple) else selected
+        if not path:
+            return
+        try:
+            self._reader().export_markdown(path)
+        except Exception as exc:
+            self.status_label.setText(f"Export failed: {exc}")
+            return
+        self.status_label.setText(f"Exported to {path}")
+
+    def verify_current_target(self):
+        try:
+            reader = self._reader()
+            values = reader.current_target_values()
+            state = self.controller.configuration_transactions.refresh(allow_pending=False)
+            targets = [
+                key for key in sorted(values)
+                if state.authorization[key]["state"] == "revoked_pending_verification"
+            ]
+        except Exception as exc:
+            self.status_label.setText(f"Could not load targets: {exc}")
+            return
+        if not targets:
+            self.status_label.setText("No current target requires verification")
+            return
+        target, ok = QtWidgets.QInputDialog.getItem(
+            self, "Verify Configuration Target", "Target:", targets, 0, False
+        )
+        if not ok:
+            return
+        value = values[target]
+        expected_text = json.dumps(value, indent=2, sort_keys=True)
+        confirmation_text, ok = QtWidgets.QInputDialog.getMultiLineText(
+            self,
+            "Exact Target Verification",
+            "Physically verify the target, then enter or paste the exact JSON shown "
+            f"below. Camera is always verified as its own target.\n\nTarget: {target}\n"
+            f"Expected value:\n{expected_text}\n\nExact confirmation JSON:",
+            "",
+        )
+        if not ok:
+            return
+        try:
+            confirmed_value = json.loads(confirmation_text)
+        except json.JSONDecodeError as exc:
+            self.status_label.setText(f"Confirmation is not valid JSON: {exc}")
+            return
+        if confirmed_value != value:
+            self.status_label.setText("Exact confirmation differs; target remains unverified")
+            return
+        operator, ok = QtWidgets.QInputDialog.getText(self, "Target Verification", "Operator name:")
+        if not ok or not operator.strip():
+            return
+        reason, ok = QtWidgets.QInputDialog.getText(self, "Target Verification", "Verification reason/method:")
+        if not ok or not reason.strip():
+            return
+        result = self.controller.verify_configuration_targets(
+            {target: confirmed_value}, operator=operator.strip(), reason=reason.strip()
+        )
+        if result:
+            self.refresh()
+
+    def import_governed_file(self):
+        supported = ["Locations.json", "Plates.json", "RegulatorProfiles.json"]
+        filename, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Import Governed Configuration",
+            "Document to replace:",
+            supported,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        selected = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            f"Select reviewed {filename}",
+            "",
+            "JSON files (*.json);;All files (*)",
+        )
+        source_path = selected[0] if isinstance(selected, tuple) else selected
+        if not source_path:
+            return
+        parent = self.parent()
+        prepare = getattr(self.controller, "prepare_configuration_import", None)
+        reviewer = getattr(parent, "review_guarded_configuration_proposal", None)
+        if callable(prepare) and callable(reviewer) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+            proposal = prepare({filename: source_path})
+            if proposal is False:
+                return
+            if proposal is not None:
+                if reviewer(proposal, title="Import Governed Configuration"):
+                    self.refresh()
+                return
+        identity_getter = getattr(parent, "request_configuration_identity", None)
+        if not callable(identity_getter):
+            return
+        identity = identity_getter(
+            "Import Governed Configuration",
+            f"Replace {filename} with the reviewed file:\n{source_path}",
+        )
+        if identity is None:
+            return
+        result = self.controller.import_configuration_files(
+            {filename: source_path},
+            operator=identity[0],
+            reason=identity[1],
+        )
+        if result:
+            self.refresh()
+
+    def restore_selected(self):
+        row = self._selected_row()
+        if row is None or row.payload.get("backup_manifest") is None:
+            return
+        parent = self.parent()
+        machine_id, ok = QtWidgets.QInputDialog.getText(
+            self, "Confirm Physical Machine", "Enter the exact machine ID:"
+        )
+        if not ok:
+            return
+        prepare = getattr(self.controller, "prepare_configuration_restore", None)
+        reviewer = getattr(parent, "review_guarded_configuration_proposal", None)
+        if callable(prepare) and callable(reviewer) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+            proposal = prepare(
+                row.transaction_id,
+                machine_id_confirmation=machine_id.strip(),
+            )
+            if proposal is False:
+                return
+            if proposal is not None:
+                if reviewer(proposal, title="Restore Configuration Backup"):
+                    self.refresh()
+                return
+        identity_getter = getattr(parent, "request_configuration_identity", None)
+        if not callable(identity_getter):
+            return
+        identity = identity_getter(
+            "Restore Configuration Backup",
+            f"Restore the exact pre-change files from transaction {row.transaction_id}?",
+        )
+        if identity is None:
+            return
+        result = self.controller.restore_configuration_transaction(
+            row.transaction_id,
+            operator=identity[0],
+            reason=identity[1],
+            machine_id_confirmation=machine_id.strip(),
+        )
+        if result:
+            self.refresh()
+
 # class ShortcutManager:
 #     """Manage application shortcuts and their descriptions."""
 #     def __init__(self, parent):
@@ -662,6 +1059,140 @@ class XyMotionRecoveryDialog(QtWidgets.QDialog):
                     "then try again."
                 )
 
+class PauseActionDialog(QMessageBox):
+    RESUME = "resume"
+    KEEP_PAUSED = "keep_paused"
+    REQUEST_CLEAR = "request_clear"
+    REQUEST_SAFE_STOP = "request_safe_stop"
+
+    def __init__(self, parent=None, *, array_active=False, array_action_state=None):
+        super().__init__(parent)
+        self.array_action_state = dict(array_action_state or {})
+        self.array_active = bool(
+            self.array_action_state.get("array_active", array_active)
+        )
+        self.setIcon(QMessageBox.Warning)
+        self.resume_button = None
+        self.safe_stop_button = None
+
+        if self.array_active:
+            self.setWindowTitle("Print Array Paused Immediately")
+            safe_stop_action = self.array_action_state.get("safe_stop_action") or "finish"
+            if safe_stop_action == "retry":
+                safe_stop_text = "Retry Safe Stop"
+                safe_stop_explanation = (
+                    "The watermark state is uncertain. Retry Safe Stop reconciles the same frozen "
+                    "well boundary; full-array resume is unavailable because a latent watermark may exist."
+                )
+            elif safe_stop_action == "finalize":
+                safe_stop_text = "Resume Safe-Stop Finalization"
+                safe_stop_explanation = (
+                    "Well work and lookahead clearing are complete. Resume Safe-Stop Finalization "
+                    "continues only the existing park and finalization sequence."
+                )
+            elif safe_stop_action == "continue":
+                safe_stop_text = "Continue Safe Stop"
+                safe_stop_explanation = (
+                    "Continue Safe Stop reconciles the frozen well boundary and resumes only as "
+                    "needed to finish that safe-stop sequence."
+                )
+            else:
+                safe_stop_text = "Finish Current Well and Stop"
+                safe_stop_explanation = (
+                    "Finish Current Well and Stop arms the current well boundary while paused, "
+                    "briefly resumes only through that boundary, clears lookahead, parks, and leaves "
+                    "the experiment resumable."
+                )
+            can_resume_entire_array = bool(
+                self.array_action_state.get("can_resume_entire_array", True)
+            )
+            resume_explanation = (
+                " Resume Entire Array continues the existing full queue."
+                if can_resume_entire_array
+                else ""
+            )
+            self.setText(
+                "The command queue is paused immediately, and the current well may be incomplete.\n\n"
+                f"{safe_stop_explanation}{resume_explanation} Keep Paused makes no further command "
+                "change. Clearing the queue permanently aborts this experiment and it cannot be resumed."
+            )
+            self.safe_stop_button = self.addButton(
+                safe_stop_text,
+                QMessageBox.ActionRole,
+            )
+            if can_resume_entire_array:
+                self.resume_button = self.addButton(
+                    "Resume Entire Array",
+                    QMessageBox.ActionRole,
+                )
+            clear_text = "Abort Array and Clear Queue…"
+        else:
+            self.setWindowTitle("Machine Paused")
+            self.setText(
+                "Machine commands are paused. Resume Commands continues queued work. "
+                "Keep Paused makes no further command change. Clearing the command queue cancels "
+                "queued commands and they cannot be resumed."
+            )
+            clear_text = "Clear Command Queue…"
+            self.resume_button = self.addButton(
+                "Resume Commands",
+                QMessageBox.ActionRole,
+            )
+
+        self.keep_paused_button = self.addButton("Keep Paused", QMessageBox.RejectRole)
+        self.clear_queue_button = self.addButton(clear_text, QMessageBox.DestructiveRole)
+        self.setDefaultButton(self.keep_paused_button)
+        self.setEscapeButton(self.keep_paused_button)
+
+    def action_for_button(self, button):
+        if button is self.safe_stop_button:
+            return self.REQUEST_SAFE_STOP
+        if button is self.resume_button:
+            return self.RESUME
+        if button is self.clear_queue_button:
+            return self.REQUEST_CLEAR
+        return self.KEEP_PAUSED
+
+    def exec_action(self):
+        self.exec()
+        return self.action_for_button(self.clickedButton())
+
+
+class ClearQueueConfirmationDialog(QMessageBox):
+    def __init__(self, parent=None, *, array_active=False):
+        super().__init__(parent)
+        self.array_active = bool(array_active)
+        self.setIcon(QMessageBox.Critical)
+
+        if self.array_active:
+            self.setWindowTitle("Abort Print Array?")
+            self.setText(
+                "Clearing the command queue will permanently abort this print-array experiment. "
+                "The current well may be incomplete or uncertain, and this experiment cannot be resumed.\n\n"
+                "Abort the array and clear the queue?"
+            )
+            confirm_text = "Abort Array and Clear Queue"
+        else:
+            self.setWindowTitle("Clear Command Queue?")
+            self.setText(
+                "Clearing the command queue cancels all queued commands. They cannot be resumed.\n\n"
+                "Clear the command queue?"
+            )
+            confirm_text = "Clear Command Queue"
+
+        self.keep_paused_button = self.addButton("Keep Paused", QMessageBox.RejectRole)
+        self.confirm_button = self.addButton(confirm_text, QMessageBox.DestructiveRole)
+        self.setDefaultButton(self.keep_paused_button)
+        self.setEscapeButton(self.keep_paused_button)
+
+    def confirmed_for_button(self, button):
+        return button is self.confirm_button
+
+    def exec_confirmed(self):
+        self.exec()
+        return self.confirmed_for_button(self.clickedButton())
+
+
 class MainWindow(QMainWindow):
     CLOSE_DISCONNECT_TIMEOUT_MS = 5000
 
@@ -685,11 +1216,14 @@ class MainWindow(QMainWindow):
         self.color_dict = self.load_colors(self.color_dict_path)
         self._startup_focus_initialized = False
         self.audit_timeline_window = None
+        self.configuration_history_window = None
         self._plate_reader_analysis_window = None
         self._app_update_close_requested = False
         self._xy_motion_recovery_dialog = None
         self._xy_motion_recovery_report = {}
         self._xy_motion_recovery_state = "idle"
+        self._pause_action_flow_active = False
+        self._pause_action_dialog = None
 
         base_title = "Droplet Printer Interface v1.0.3"
         if self.runtime_context.is_simulation:
@@ -951,6 +1485,10 @@ class MainWindow(QMainWindow):
         self.audit_timeline_button.clicked.connect(self.show_experiment_audit)
         action_row.addWidget(self.audit_timeline_button, 1)
 
+        self.configuration_history_button = QtWidgets.QPushButton("Configuration History")
+        self.configuration_history_button.clicked.connect(self.show_configuration_history)
+        action_row.addWidget(self.configuration_history_button, 1)
+
         self.plate_reader_analysis_button = QtWidgets.QPushButton("Analyze Plate Reader...")
         self.plate_reader_analysis_button.setObjectName("plateReaderAnalysisButton")
         self.plate_reader_analysis_button.setToolTip("Associate plate-reader data with the concentration key and run analysis")
@@ -1090,7 +1628,7 @@ class MainWindow(QMainWindow):
         value = 1.5696
         source = "default"
         step_source = "preset"
-        config_path = "local/droplet_imager_optics.json"
+        config_path = "not configured"
         if cam is not None:
             getter = getattr(cam, "get_um_per_pixel", None)
             source_getter = getattr(cam, "get_um_per_pixel_source", None)
@@ -1422,6 +1960,59 @@ class MainWindow(QMainWindow):
         else:
             return None
 
+    def request_configuration_identity(self, title, summary):
+        """Collect the operator attestation used by a configuration event."""
+
+        operator = self.popup_input(title, "Operator name:")
+        if operator is None or not operator.strip():
+            return None
+        reason = self.popup_input(title, "Reason for this configuration change:")
+        if reason is None or not reason.strip():
+            return None
+        response = self.popup_yes_no(
+            title,
+            f"{summary}\n\nSave this change and record it in Configuration History?",
+        )
+        if not self._is_yes_response(response):
+            return None
+        return operator.strip(), reason.strip()
+
+    def review_guarded_configuration_proposal(self, proposal, *, title):
+        """Review, audit, and if authorized commit one frozen guarded proposal."""
+
+        if not proposal:
+            return False
+        assessment = proposal["assessment"]
+        dialog = ConfigurationChangePreviewDialog(assessment, self)
+        reviewed = dialog.review_result()
+        service = getattr(self.controller, "configuration_transactions", None)
+        actor = reviewed["operator"] or getattr(service, "os_account", "application operator")
+        reason = reviewed["reason"] or f"Operator closed {title} preview"
+        if reviewed["outcome"] != "accepted":
+            event_type = "rejected" if reviewed["outcome"] == "rejected" else "cancelled"
+            recorded = self.controller.record_configuration_attempt(
+                event_type=event_type,
+                operator=actor,
+                reason=reason,
+                workflow=assessment["workflow"],
+                details={
+                    "stage": "guard_preview",
+                    "guard_assessment": assessment,
+                },
+            )
+            if recorded is False:
+                self.popup_message("Configuration Audit Failed", "The cancellation or rejection could not be audited.")
+            discard = getattr(self.controller, "discard_configuration_capture_evidence", None)
+            if callable(discard):
+                discard(assessment["workflow"])
+            return False
+        return self.controller.commit_guarded_configuration_proposal(
+            proposal,
+            operator=reviewed["operator"],
+            reason=reviewed["reason"],
+            confirmation=reviewed["confirmation"],
+        )
+
     def request_app_update(self):
         """Launch the standalone updater, then close through the normal path."""
         check_result = None
@@ -1614,6 +2205,16 @@ class MainWindow(QMainWindow):
         if getattr(check_result, "status", "") != "rollback_available":
             self.popup_message("No Rollback Available", getattr(check_result, "message", "No app rollback is available."))
             return False
+        if bool(getattr(check_result, "legacy_support_required", False)):
+            self.popup_message(
+                "LabCraft Support Required",
+                getattr(
+                    check_result,
+                    "message",
+                    "This legacy rollback requires the reviewed support workflow.",
+                ),
+            )
+            return False
 
         update_source = str(getattr(check_result, "update_source", "") or "")
         if update_source == "offline":
@@ -1664,6 +2265,9 @@ class MainWindow(QMainWindow):
         return True
 
     def _latest_app_update_result_path(self):
+        machine_data_paths = getattr(self.controller, "machine_data_paths", None)
+        if machine_data_paths is not None:
+            return machine_data_paths.latest_update_ui_result_path
         repo_root = getattr(self.controller, "_repo_root", None)
         if repo_root is None:
             repo_root = Path(self.script_dir).parent
@@ -1765,7 +2369,25 @@ class MainWindow(QMainWindow):
         else:
             window.model = self.model
             window.refresh()
+        window.show()
+        window.raise_()
+        window.activateWindow()
 
+    def show_configuration_history(self):
+        """Open the integrity-checked machine configuration history."""
+
+        if getattr(self.controller, "configuration_transactions", None) is None:
+            self.popup_message(
+                "Configuration History Unavailable",
+                "This runtime does not have an authorized external machine-data store.",
+            )
+            return
+        window = getattr(self, "configuration_history_window", None)
+        if window is None:
+            window = ConfigurationHistoryWindow(self, controller=self.controller)
+            self.configuration_history_window = window
+        else:
+            window.refresh()
         window.show()
         window.raise_()
         window.activateWindow()
@@ -1831,36 +2453,200 @@ class MainWindow(QMainWindow):
         if self._is_yes_response(response):
             self.controller.reset_all_arrays()
     
-    def pause_machine(self):
-        """Pause the machine."""
-        self.controller.pause_commands()
-        response = self.popup_yes_no('Pause','Printing paused. Do you want to resume?')
-        if self._is_yes_response(response):
-            print('Resuming printing')
-            self.controller.resume_commands()
+    def _machine_is_connected(self):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        is_connected = getattr(machine_model, "is_connected", None)
+        if callable(is_connected):
+            try:
+                return bool(is_connected())
+            except Exception:
+                return False
+        return bool(getattr(machine_model, "machine_connected", False))
+
+    def _active_print_array_is_running(self):
+        state_getter = getattr(getattr(self, "controller", None), "get_array_run_state", None)
+        if not callable(state_getter):
+            return False
+        try:
+            return str(state_getter() or "idle") in {"running", "stop_requested"}
+        except Exception:
+            return False
+
+    def _focus_active_pause_dialog(self):
+        dialog = getattr(self, "_pause_action_dialog", None)
+        if dialog is None:
             return
-        else:
-            print('Clearing Queue')
-            self.controller.clear_command_queue()
-            # self.controller.reset_acceleration()
+        for method_name in ("show", "raise_", "activateWindow"):
+            method = getattr(dialog, method_name, None)
+            if callable(method):
+                method()
+
+    def pause_machine(self):
+        """Pause commands and present explicit, fail-safe follow-up actions."""
+        if getattr(self, "_pause_action_flow_active", False):
+            self._focus_active_pause_dialog()
+            return
+
+        if not self._machine_is_connected():
+            self.popup_message(
+                "Pause Unavailable",
+                "The machine is not connected, so there are no machine commands to pause.",
+            )
+            return
+
+        self._pause_action_flow_active = True
+        try:
+            machine_model = getattr(self.model, "machine_model", None)
+            if not bool(getattr(machine_model, "paused", False)):
+                if self.controller.pause_commands() is False:
+                    self.popup_message(
+                        "Pause Unavailable",
+                        "The pause command could not be sent. The machine state was not changed.",
+                    )
+                    return
+
+            array_active = self._active_print_array_is_running()
+            action_state_getter = getattr(
+                self.controller,
+                "get_array_pause_action_state",
+                None,
+            )
+            if callable(action_state_getter):
+                try:
+                    array_action_state = dict(action_state_getter() or {})
+                except Exception:
+                    array_action_state = {}
+            else:
+                array_action_state = {}
+            action_dialog = PauseActionDialog(
+                self,
+                array_active=array_active,
+                array_action_state=array_action_state,
+            )
+            self._pause_action_dialog = action_dialog
+            action = action_dialog.exec_action()
+
+            if action == PauseActionDialog.REQUEST_SAFE_STOP:
+                request_safe_stop = getattr(
+                    self.controller,
+                    "request_paused_array_soft_stop",
+                    None,
+                )
+                if not callable(request_safe_stop) or request_safe_stop() is False:
+                    self.popup_message(
+                        "Safe Stop Unavailable",
+                        "The finish-current-well safe stop could not be started. The machine remains paused.",
+                    )
+                return
+            if action == PauseActionDialog.RESUME:
+                self.controller.resume_commands()
+                return
+            if action != PauseActionDialog.REQUEST_CLEAR:
+                return
+
+            # Use the stronger warning if the array was active when paused or is
+            # still active when the destructive action is requested.
+            array_active = array_active or self._active_print_array_is_running()
+            confirmation_dialog = ClearQueueConfirmationDialog(
+                self,
+                array_active=array_active,
+            )
+            self._pause_action_dialog = confirmation_dialog
+            if confirmation_dialog.exec_confirmed():
+                self.controller.clear_command_queue()
+        finally:
+            self._pause_action_dialog = None
+            self._pause_action_flow_active = False
 
     def add_new_location(self):
         """Save the current location information."""
         name = self.popup_input("Save Location","Enter the name of the location")
-        if name is not None:
-            self.controller.add_new_location(name)
-        ansewer = self.popup_yes_no("Write to file","Would you like to write the location to a file?")
-        if self._is_yes_response(ansewer):
-            self.controller.save_locations()
+        if name is None or not name.strip():
+            return
+        prepare = getattr(self.controller, "prepare_named_location_change", None)
+        if callable(prepare) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+            proposal = prepare(name.strip(), require_existing=False)
+            if proposal and self.review_guarded_configuration_proposal(proposal, title="Save Location"):
+                self.popup_message(
+                    "Location Saved",
+                    "The location was saved and audited. Movement to the new value is blocked until its exact coordinates are verified.",
+                )
+            return
+        try:
+            x, y, z = self.model.machine_model.get_current_position()
+        except Exception as exc:
+            self.popup_message("Location Not Saved", f"Current position is invalid: {exc}")
+            return
+        identity = self.request_configuration_identity(
+            "Save Location",
+            f"Location: {name.strip()}\nCurrent position: X={x}, Y={y}, Z={z}",
+        )
+        if identity is None:
+            service = getattr(self.controller, "configuration_transactions", None)
+            actor = getattr(service, "os_account", "application operator")
+            self.controller.record_configuration_attempt(
+                event_type="cancelled",
+                operator=actor,
+                reason="Operator cancelled named-location save",
+                workflow="named_location_add",
+                details={"location_name": name.strip(), "stage": "confirmation"},
+            )
+            return
+        operator, reason = identity
+        result = self.controller.commit_named_location(
+            name.strip(), operator=operator, reason=reason, require_existing=False
+        )
+        if result:
+            self.popup_message(
+                "Location Saved",
+                "The location was saved and audited. Movement to the new value is "
+                "blocked until its exact coordinates are verified.",
+            )
 
     def modify_location(self):
         """Modify a saved location."""
         name = self.popup_options("Modify Location","Select a location to modify",self.model.location_model.get_location_names())
-        if name is not None:
-            self.controller.modify_location(name)
-        ansewer = self.popup_yes_no("Write to file","Would you like to write the location to a file?")
-        if self._is_yes_response(ansewer):
-            self.controller.save_locations()
+        if name is None:
+            return
+        prepare = getattr(self.controller, "prepare_named_location_change", None)
+        if callable(prepare) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+            proposal = prepare(name, require_existing=True)
+            if proposal and self.review_guarded_configuration_proposal(proposal, title="Modify Location"):
+                self.popup_message(
+                    "Location Saved",
+                    "The location was saved and audited. Movement to the changed value is blocked until its exact coordinates are verified.",
+                )
+            return
+        try:
+            x, y, z = self.model.machine_model.get_current_position()
+        except Exception as exc:
+            self.popup_message("Location Not Saved", f"Current position is invalid: {exc}")
+            return
+        identity = self.request_configuration_identity(
+            "Modify Location",
+            f"Location: {name}\nCurrent position: X={x}, Y={y}, Z={z}",
+        )
+        if identity is None:
+            service = getattr(self.controller, "configuration_transactions", None)
+            actor = getattr(service, "os_account", "application operator")
+            self.controller.record_configuration_attempt(
+                event_type="cancelled",
+                operator=actor,
+                reason="Operator cancelled named-location update",
+                workflow="named_location_modify",
+                details={"location_name": name, "stage": "confirmation"},
+            )
+            return
+        operator, reason = identity
+        result = self.controller.commit_named_location(
+            name, operator=operator, reason=reason, require_existing=True
+        )
+        if result:
+            self.popup_message(
+                "Location Saved",
+                "The location was saved and audited. Movement to the changed value is "
+                "blocked until its exact coordinates are verified.",
+            )
 
     def move_to_location(self,location=False,direct=True,safe_y=False,manual=False):
         """Move the machine to a saved location."""
@@ -2056,6 +2842,9 @@ class ConnectionWidget(QGroupBox):
         self.model.machine_model.machine_state_updated.connect(
             self.update_machine_connect_button
         )
+        machine_paused = getattr(self.model.machine_model, "machine_paused", None)
+        if machine_paused is not None:
+            machine_paused.connect(self._refresh_pause_machine_button)
         self.controller.machine.disconnect_complete_signal.connect(
             self._handle_machine_disconnect_complete
         )
@@ -2117,6 +2906,13 @@ class ConnectionWidget(QGroupBox):
         layout.addWidget(QLabel("Device"), 0, 0)
         layout.addWidget(QLabel("Port"),   0, 1)
         layout.addWidget(QLabel("Connect"),0, 2)
+        layout.addWidget(QLabel("Safety"), 0, 3)
+
+        self.pause_machine_button = QPushButton("Pause Machine Now")
+        self.pause_machine_button.setObjectName("pauseMachineButton")
+        self.pause_machine_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.pause_machine_button.clicked.connect(self.main_window.pause_machine)
+        layout.addWidget(self.pause_machine_button, 1, 3)
 
         if not self.legacy_mode:
             # ----- CURRENT MODE (unchanged behavior) -----
@@ -2302,6 +3098,55 @@ class ConnectionWidget(QGroupBox):
             self.port_label.setToolTip("Contained simulator target; no serial hardware is opened.")
         self.update_machine_connect_button(self.model.machine_model.machine_connected)
 
+    @QtCore.Slot()
+    def _refresh_pause_machine_button(self, *_args):
+        machine_model = self.model.machine_model
+        machine_connected = bool(getattr(machine_model, "machine_connected", False))
+        unavailable = (
+            not machine_connected
+            or self._machine_connect_pending
+            or self._machine_disconnect_pending
+        )
+        if self.simulation_mode:
+            simulation_bound = bool(
+                self._simulation_target == "SIMULATED"
+                and callable(self._simulation_connect_callback)
+                and callable(self._simulation_disconnect_callback)
+            )
+            unavailable = unavailable or not simulation_bound
+
+        if unavailable:
+            color = self.color_dict.get(
+                "mid_gray",
+                self.color_dict.get("dark_gray", "#6e6e6e"),
+            )
+            self.pause_machine_button.setText("Pause Machine Now")
+            self.pause_machine_button.setEnabled(False)
+            self.pause_machine_button.setStyleSheet(
+                f"background-color: {color}; color: white;"
+            )
+            self.pause_machine_button.setToolTip(
+                "Connect the machine before pausing commands."
+            )
+            return
+
+        if bool(getattr(machine_model, "paused", False)):
+            color = self.color_dict.get("orange", "#f4743b")
+            self.pause_machine_button.setText("Paused — Actions…")
+            self.pause_machine_button.setToolTip(
+                "Machine commands are paused. Reopen the resume, keep paused, or clear choices."
+            )
+        else:
+            color = self.color_dict.get("dark_red", "#8a0303")
+            self.pause_machine_button.setText("Pause Machine Now")
+            self.pause_machine_button.setToolTip(
+                "Immediately pause machine commands and open explicit pause actions."
+            )
+        self.pause_machine_button.setEnabled(True)
+        self.pause_machine_button.setStyleSheet(
+            f"background-color: {color}; color: white;"
+        )
+
     # def update_machine_connect_button(self, machine_connected: bool):
     #     """Set button text/color based on connection state."""
     #     if machine_connected:
@@ -2362,6 +3207,7 @@ class ConnectionWidget(QGroupBox):
                 )
             if self.legacy_mode:
                 self.machine_port_combo.setEnabled(False)
+            self._refresh_pause_machine_button()
             return
         if not machine_connected and self._machine_disconnect_pending:
             self._machine_disconnect_pending = False
@@ -2379,6 +3225,7 @@ class ConnectionWidget(QGroupBox):
             )
             if self.legacy_mode:
                 self.machine_port_combo.setEnabled(False)
+            self._refresh_pause_machine_button()
             return
 
         self.machine_connect_button.setEnabled(True)
@@ -2398,6 +3245,7 @@ class ConnectionWidget(QGroupBox):
             )
             if self.legacy_mode:
                 self.machine_port_combo.setEnabled(True)
+        self._refresh_pause_machine_button()
 
     # --------- Balance connect/disconnect ----------
     def request_balance_connect_change(self):
@@ -5670,11 +6518,6 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.start_print_array_button.clicked.connect(self.start_print_array)
         self.bottom_layout.addWidget(self.start_print_array_button)
 
-        self.pause_machine_button = QPushButton("Pause Now")
-        self.pause_machine_button.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
-        self.pause_machine_button.clicked.connect(self.main_window.pause_machine)
-        self.bottom_layout.addWidget(self.pause_machine_button)
-
         self.reagent_selection = QComboBox()
         self._populate_reagent_selection()
         self.reagent_selection.currentIndexChanged.connect(self.update_well_colors)
@@ -6289,7 +7132,29 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         # Execute the dialog and check if the user completes the calibration
         if plate_calibration_dialog.exec() == QDialog.Accepted:
             print("Calibration completed successfully.")
-            self.model.well_plate.update_calibration_data()
+            commit = getattr(self.controller, "commit_plate_calibration", None)
+            identity_getter = getattr(self.main_window, "request_configuration_identity", None)
+            prepare = getattr(self.controller, "prepare_plate_calibration_change", None)
+            reviewer = getattr(self.main_window, "review_guarded_configuration_proposal", None)
+            if callable(prepare) and callable(reviewer) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+                proposal = prepare()
+                if not proposal or not reviewer(proposal, title="Save Plate Calibration"):
+                    self.model.well_plate.discard_temp_calibrations()
+                    return
+                self.model.well_plate.discard_temp_calibrations()
+            elif callable(commit) and callable(identity_getter):
+                identity = identity_getter(
+                    "Save Plate Calibration",
+                    f"Save all four corners for plate {self.model.well_plate.get_current_plate_name()}?",
+                )
+                if identity is None:
+                    self.model.well_plate.discard_temp_calibrations()
+                    return
+                if not commit(operator=identity[0], reason=identity[1]):
+                    self.model.well_plate.discard_temp_calibrations()
+                    return
+            else:
+                self.model.well_plate.update_calibration_data()
 
         else:
             print("Calibration was canceled or failed.")
@@ -7011,7 +7876,9 @@ class SpeedProfilesTab(QtWidgets.QWidget):
             blockers = blockers_getter() if callable(blockers_getter) else []
             rollback_button = getattr(self, "app_rollback_button", None)
             if rollback_button is not None:
-                can_rollback = not blockers
+                can_rollback = not blockers and not bool(
+                    getattr(result, "legacy_support_required", False)
+                )
                 rollback_button.setEnabled(can_rollback)
                 self._set_app_action_highlight(rollback_button, can_rollback)
 
@@ -7738,6 +8605,7 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         )
 
 class BaseCalibrationDialog(QDialog):
+    configuration_capture_workflow = None
     def __init__(self, main_window, model, controller, title, steps, name_dict,offsets):
         super().__init__()
         self.main_window = main_window
@@ -7892,9 +8760,18 @@ class BaseCalibrationDialog(QDialog):
 
         if self.current_step < len(self.steps):
             # Save the current position as the calibration for this step
-            current_position = self.model.machine_model.get_current_position_dict_capital()
             step_name = self.steps[self.current_step]
             converted_step_name = self.name_dict[step_name]
+            capture = getattr(self.controller, "capture_configuration_point", None)
+            if callable(capture) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+                current_position = capture(
+                    converted_step_name,
+                    workflow=self.configuration_capture_workflow,
+                )
+                if current_position is False:
+                    return
+            else:
+                current_position = self.model.machine_model.get_current_position_dict_capital()
             self.set_calibration_position(converted_step_name, current_position)
 
             #print(f"Calibrating {self.steps[self.current_step]} position...")
@@ -7995,6 +8872,7 @@ class BaseCalibrationDialog(QDialog):
         raise NotImplementedError
 
 class PlateCalibrationDialog(BaseCalibrationDialog):
+    configuration_capture_workflow = "plate_calibration"
     def __init__(self, main_window, model, controller):
         steps = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
         name_dict = {
@@ -8067,6 +8945,7 @@ class PlateCalibrationDialog(BaseCalibrationDialog):
 
 class RackCalibrationDialog(BaseCalibrationDialog):
     RACK_MOVE_ERROR_TITLE = "Rack Calibration Move Error"
+    configuration_capture_workflow = "rack_calibration"
 
     def __init__(self, main_window, model, controller):
         steps = ["Left","Right"]
@@ -8216,9 +9095,18 @@ class RackCalibrationDialog(BaseCalibrationDialog):
                     "Cannot move between rack calibration positions because home Z is unavailable.",
                 )
 
-            current_position = self.model.machine_model.get_current_position_dict_capital()
             step_name = self.steps[self.current_step]
             converted_step_name = self.name_dict[step_name]
+            capture = getattr(self.controller, "capture_configuration_point", None)
+            if callable(capture) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+                current_position = capture(
+                    converted_step_name,
+                    workflow=self.configuration_capture_workflow,
+                )
+                if current_position is False:
+                    return False
+            else:
+                current_position = self.model.machine_model.get_current_position_dict_capital()
             self.set_calibration_position(converted_step_name, current_position)
 
             if next_step_index < len(self.steps):
@@ -8692,7 +9580,27 @@ class RackBox(QGroupBox):
 
         if rack_calibration_dialog.exec() == QDialog.Accepted:
             print("Rack calibration completed successfully.")
-            self.model.rack_model.update_calibration_data()
+            commit = getattr(self.controller, "commit_rack_calibration", None)
+            identity_getter = getattr(self.main_window, "request_configuration_identity", None)
+            prepare = getattr(self.controller, "prepare_rack_calibration_change", None)
+            reviewer = getattr(self.main_window, "review_guarded_configuration_proposal", None)
+            if callable(prepare) and callable(reviewer) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+                proposal = prepare()
+                if not proposal or not reviewer(proposal, title="Save Rack Calibration"):
+                    self.model.rack_model.discard_temp_calibrations()
+                else:
+                    self.model.rack_model.discard_temp_calibrations()
+            elif callable(commit) and callable(identity_getter):
+                identity = identity_getter(
+                    "Save Rack Calibration",
+                    "Save the Left and Right rack anchors as one audited change?",
+                )
+                if identity is None:
+                    self.model.rack_model.discard_temp_calibrations()
+                elif not commit(operator=identity[0], reason=identity[1]):
+                    self.model.rack_model.discard_temp_calibrations()
+            else:
+                self.model.rack_model.update_calibration_data()
         else:
             print("Rack calibration was canceled or failed.")
             self.model.rack_model.discard_temp_calibrations()
@@ -15908,7 +16816,7 @@ class ExperimentDesignDialog(QDialog):
         )
         self._update_well_selection_summary()
     
-    def _sync_controls_from_model(self):
+    def _sync_controls_from_model(self, *, recompute: bool = True):
         md = self.model.metadata
 
         blockers = []
@@ -15981,7 +16889,8 @@ class ExperimentDesignDialog(QDialog):
                 if idx >= 0:
                     self.plate_format_combo.setCurrentIndex(idx)
 
-        self._recompute_silent()
+        if recompute:
+            self._recompute_silent()
         self._update_well_selection_summary()
         self._apply_manual_assignment_lock_state()
         self._refresh_conditional_design_option_states()
@@ -16005,6 +16914,38 @@ class ExperimentDesignDialog(QDialog):
                 QMessageBox.warning(self, "Rename failed",
                                     f"A folder named '{name}' already exists. Keeping the current folder.")
 
+    def _confirm_resume_ready_new_experiment(self) -> bool:
+        """Confirm detaching a safely paused execution before starting fresh."""
+        controller = getattr(getattr(self, "main_window", None), "controller", None)
+        state_getter = getattr(controller, "get_array_run_state", None)
+        if not callable(state_getter):
+            return True
+        try:
+            array_state = str(state_getter() or "idle")
+        except Exception:
+            return True
+        if array_state != "resume_ready":
+            return True
+
+        prompt = QMessageBox(self)
+        prompt.setWindowTitle("Start New Experiment?")
+        prompt.setIcon(QMessageBox.Warning)
+        prompt.setText(
+            "This experiment has unfinished printing progress."
+        )
+        prompt.setInformativeText(
+            "Starting a new experiment will detach it from the printer. Its saved "
+            "files and progress will not be deleted and can be loaded again."
+        )
+        start_button = prompt.addButton(
+            "Start New Experiment", QMessageBox.DestructiveRole
+        )
+        cancel_button = prompt.addButton("Cancel", QMessageBox.RejectRole)
+        prompt.setDefaultButton(cancel_button)
+        prompt.setEscapeButton(cancel_button)
+        prompt.exec()
+        return prompt.clickedButton() is start_button
+
     def _on_new_experiment(self):
         """
         Reset the experiment to a fresh state (like app launch):
@@ -16014,6 +16955,8 @@ class ExperimentDesignDialog(QDialog):
         - Refresh UI
         """
         if not self._confirm_unsaved_changes("starting a new experiment"):
+            return False
+        if not self._confirm_resume_ready_new_experiment():
             return False
         self._set_tip("")
         main_window = getattr(self, "main_window", None)
@@ -16075,8 +17018,19 @@ class ExperimentDesignDialog(QDialog):
                 self._set_status(f"New experiment failed (fallback): {e}", severity="error")
                 return
 
+        timer = getattr(self, "_auto_timer", None)
+        if timer is not None:
+            timer.stop()
+
+        self._uploaded_design_active = bool(self.model.has_uploaded_design())
+        self._uploaded_design_path = getattr(
+            self.model, "_uploaded_design_source", None
+        )
         self._progress_reset_confirmed = False
         self._set_progress_protection(False)
+        self._apply_requested = False
+        self._design_optimization_dirty = True
+        self._last_optimization_result = None
 
         # Repaint UI from the fresh model (avoid auto-update churn while setting)
         blockers = [
@@ -16091,16 +17045,19 @@ class ExperimentDesignDialog(QDialog):
 
         self.choice_groups = set()
         self._load_factors_into_table()
-        self._sync_controls_from_model()
+        self._sync_controls_from_model(recompute=False)
         self._refresh_stock_table()
         self._update_summary_labels()
         self._update_well_selection_summary()
         self._update_unique_conditions_button_label()
         self._refresh_all_prior_availability()
-        self._refresh_editor_lifecycle_state()
-        self._refresh_editable_copy_availability()
-        self._apply_requested = False
+        self._clear_target_color_state()
+        self._apply_volume_input_issue_state({})
+        self._apply_stock_input_issue_state({})
+        self._set_stock_table_stale(False, "")
+        self._update_run_button_dirty_state()
         self._reset_draft_dirty_from_model()
+        self._refresh_all_lock_states()
 
         self._set_status(
             f"New experiment created: {getattr(self.model, 'experiment_dir_path', '(unsaved yet)')}",

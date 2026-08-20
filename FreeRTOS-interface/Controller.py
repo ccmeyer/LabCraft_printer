@@ -5,7 +5,7 @@ from Model import Model,PrinterHead,Slot
 from dfu_update import reset_board
 from dfu_update_worker import DfuUpdateWorker
 from ResetDebugBundle import export_reset_debug_bundle
-from AppVersion import get_app_version as read_app_version
+from AppVersion import get_app_commit, get_app_version as read_app_version
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import Counter, deque
@@ -22,6 +22,7 @@ import math
 import json
 import uuid
 import inspect
+import copy
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
@@ -34,6 +35,17 @@ from simulation import SIMULATED_PORT
 from CaptureCoordinator import CaptureCoordinator
 from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
 from ApplicationComposition import ExperimentalFeatures, PRODUCTION_RUNTIME_CONTEXT
+from MachineDataVerification import SavedTargetAuthorizationRequest
+from MachineDataTransactions import (
+    ConfigurationRecoveryRequired,
+    ConfigurationTransactionError,
+    ConfigurationValidationError,
+    read_governed_documents,
+)
+from ConfigurationSafetyPolicy import (
+    ConfigurationSafetyError,
+    parse_guard_assessment,
+)
 
 ARRAY_PAUSE_DEPARTURE_ACCEL = 32000
 ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
@@ -41,6 +53,7 @@ ARRAY_AXIS_ACCEL_DEFAULT = 140000
 ARRAY_PRINT_SERPENTINE = True
 ARRAY_GENTLE_ACCEL_ENABLED = False
 ARRAY_ROW_START_OVERSHOOT_STEPS = 0
+PAUSED_ARRAY_SOFT_STOP_PHASE_TIMEOUT_MS = 4_000
 PLATE_DOCK_SAFE_Z = 500
 PLATE_DOCK_X_OFFSET = -5000
 PLATE_SEATED_LOCATIONS = {"pause", "plate"}
@@ -939,6 +952,11 @@ class Controller(QObject):
         runtime_context=None,
         experimental_features=None,
         experimental_balance_service=None,
+        saved_target_authorizer=None,
+        machine_data_paths=None,
+        authorized_machine_context=None,
+        configuration_transactions=None,
+        configuration_safety_guard=None,
     ):
         super().__init__()
 
@@ -946,6 +964,13 @@ class Controller(QObject):
         self.model = model
         self.profile = profile
         self.runtime_context = runtime_context or PRODUCTION_RUNTIME_CONTEXT
+        self.saved_target_authorizer = saved_target_authorizer
+        self.machine_data_paths = machine_data_paths
+        self.authorized_machine_context = authorized_machine_context
+        self.configuration_transactions = configuration_transactions
+        self.configuration_safety_guard = configuration_safety_guard
+        self._configuration_capture_evidence = {}
+        self._configuration_recovery_required = False
         self.experimental_features = (
             experimental_features or ExperimentalFeatures()
         )
@@ -1122,6 +1147,21 @@ class Controller(QObject):
         }
 
     def _reject_physical_action(self, action):
+        configuration_shutdown_actions = {
+            "machine disconnection",
+            "balance disconnection",
+            "refuel camera stop",
+        }
+        if (
+            getattr(self, "_configuration_recovery_required", False)
+            and action not in configuration_shutdown_actions
+        ):
+            message = (
+                "Configuration recovery is required. Restart the application and "
+                "resolve the startup diagnostic before using hardware."
+            )
+            self.error_occurred_signal.emit("Configuration Recovery Required", message)
+            return message
         runtime_context = getattr(
             self,
             "runtime_context",
@@ -1262,6 +1302,9 @@ class Controller(QObject):
         self.model.update_state(status_dict)
         context = getattr(self, "_array_context", None) or {}
         if self.get_array_run_state() == "stop_requested" and context.get("soft_stop_pending"):
+            if context.get("soft_stop_origin") == "immediate_pause":
+                self._advance_paused_array_soft_stop_from_status()
+                return
             soft_stop_phase = context.get("soft_stop_phase", "waiting_watermark")
             if (
                 soft_stop_phase == "waiting_watermark"
@@ -2752,6 +2795,9 @@ class Controller(QObject):
         safe_label = "".join(ch if ch.isalnum() else "_" for ch in str(operation_label or "updater")).strip("_")
         if not safe_label:
             safe_label = "updater"
+        paths = getattr(self, "machine_data_paths", None)
+        if paths is not None:
+            return paths.update_history_root / "launcher_logs" / f"app_update_launcher_{safe_label}_{stamp}.log"
         return self._repo_root / "local" / "update_logs" / f"app_update_launcher_{safe_label}_{stamp}.log"
 
     @staticmethod
@@ -2826,6 +2872,32 @@ class Controller(QObject):
         command.append("--gui")
         command.append("--no-relaunch")
         command.append("--record-result")
+        context = getattr(self, "authorized_machine_context", None)
+        if context is not None:
+            from MachineDataUpdate import build_update_launch_binding
+
+            binding = build_update_launch_binding(
+                context,
+                source_app_version=read_app_version(self._repo_root),
+                source_commit=get_app_commit(self._repo_root),
+            )
+            binding_args = (
+                ("--machine-data-root", binding.machine_data_root),
+                ("--machine-uuid", binding.machine_uuid),
+                ("--machine-id", binding.machine_id),
+                ("--activation-id", binding.activation_id),
+                ("--migration-id", binding.migration_id),
+                ("--active-pointer-sha256", binding.active_pointer_sha256),
+                ("--source-app-version", binding.source_app_version),
+                ("--source-commit", binding.source_commit),
+                ("--update-request-id", binding.request_id),
+            )
+            for name, value in binding_args:
+                command.extend([name, str(value)])
+            updater_log = binding.machine_data_root / "machines" / binding.machine_uuid / "update_history" / "updater_logs" / f"{binding.request_id}.log"
+            latest_result = self.machine_data_paths.latest_update_ui_result_path
+            command.extend(["--log-path", str(updater_log)])
+            command.extend(["--latest-result-path", str(latest_result)])
         return command
 
     def build_app_update_command(self, wait_pid):
@@ -3118,6 +3190,9 @@ class Controller(QObject):
         return self._repo_root / "hil_reports" / "qualification_campaigns"
 
     def qualification_identity_path(self):
+        machine_data_paths = getattr(self, "machine_data_paths", None)
+        if machine_data_paths is not None:
+            return machine_data_paths.identity_path
         return self._repo_root / "local" / "machine_identity.json"
 
     def qualification_default_machine_id(self):
@@ -3168,6 +3243,9 @@ class Controller(QObject):
 
         run_config = dict(config)
         run_config.setdefault("identity_path", self.qualification_identity_path())
+        run_config["require_explicit_identity_path"] = (
+            getattr(self, "machine_data_paths", None) is not None
+        )
         run_config.setdefault("output_root", self.qualification_output_root())
         run_config.setdefault("suite_output_root", self.qualification_output_root())
         run_config.setdefault("campaign_output_root", self.qualification_campaign_output_root())
@@ -3272,6 +3350,9 @@ class Controller(QObject):
         self._plate_reader_analysis_worker = None
 
     def regulator_calibration_output_root(self):
+        machine_data_paths = getattr(self, "machine_data_paths", None)
+        if machine_data_paths is not None:
+            return machine_data_paths.regulator_optimization_root
         return self._repo_root / "local" / "regulator_optimization"
 
     def is_regulator_calibration_running(self):
@@ -4156,16 +4237,56 @@ class Controller(QObject):
 
     def pause_commands(self):
         """Pause the machine."""
-        self.machine.pause_commands()
+        sent = self.machine.pause_commands()
+        if sent is False:
+            return False
         self.model.machine_model.pause_commands()
+        context = getattr(self, "_array_context", None)
+        if (
+            isinstance(context, dict)
+            and context.get("soft_stop_origin") == "immediate_pause"
+            and context.get("soft_stop_pending")
+        ):
+            phase = context.get("soft_stop_phase")
+            if phase == "parking":
+                context["soft_stop_phase_before_pause"] = phase
+                context["soft_stop_phase"] = "paused_finalization"
+                context["soft_stop_recovery_reason"] = "paused_during_finalization"
+                self._invalidate_paused_array_soft_stop_attempt(context)
+            elif phase == "clearing":
+                # The CLEAR transaction must finish authoritatively. Its
+                # callback will stop before queuing park/finalization work.
+                context["soft_stop_pause_during_clearing"] = True
+            elif phase in {
+                "arming_watermark_from_pause",
+                "resuming_to_watermark",
+                "waiting_watermark",
+            }:
+                machine_model = getattr(self.model, "machine_model", None)
+                if not bool(getattr(machine_model, "pause_watermark_reached", False)):
+                    context["soft_stop_phase_before_pause"] = phase
+                    context["soft_stop_phase"] = "paused_safe_stop_recovery"
+                    context["soft_stop_recovery_reason"] = "operator_repaused"
+                    self._invalidate_paused_array_soft_stop_attempt(context)
+                    self._record_print_array_audit_event(
+                        "print_array_safe_stop_repaused",
+                        "Print array safe stop paused again",
+                        details={"previous_phase": phase},
+                        level="warning",
+                    )
+        return True
 
     def resume_commands(self):
         """Resume the machine commands."""
-        self.machine.resume_commands()
+        sent = self.machine.resume_commands()
+        if sent is False:
+            return False
         self.model.machine_model.resume_commands()
+        return True
 
     def clear_command_queue(self):
         """Clear the command queue."""
+        self._invalidate_paused_array_soft_stop_attempt()
         self._clear_machine_and_model_command_queues(
             reason="queue_clear_requested",
             notify_user=True,
@@ -4264,11 +4385,19 @@ class Controller(QObject):
             return result
 
     def start_new_experiment_session(self, *, base_dir=None):
-        return self.model.start_new_experiment_session(
-            array_runner_idle=self.get_array_run_state() == "idle",
+        array_state = self.get_array_run_state()
+        array_runner_idle = (
+            array_state in {"idle", "resume_ready"}
+            and not bool(getattr(self, "_soft_stop_clear_uncertain", False))
+        )
+        experiment_path = self.model.start_new_experiment_session(
+            array_runner_idle=array_runner_idle,
             command_queue_empty=bool(self.check_if_all_completed()),
             base_dir=base_dir,
         )
+        self._array_context = None
+        self._set_array_run_state("idle")
+        return experiment_path
 
     def _emit_optional(self, signal_name, *args):
         signal = getattr(self, signal_name, None)
@@ -4467,6 +4596,7 @@ class Controller(QObject):
         has_remaining = self._array_has_remaining_wells_for_loaded_stock()
         next_state = "resume_ready" if has_progress and has_remaining is not False else "idle"
 
+        self._invalidate_paused_array_soft_stop_attempt(context)
         self._array_context = None
         self._soft_stop_clear_uncertain = False
         self._set_array_run_state(next_state)
@@ -4509,6 +4639,7 @@ class Controller(QObject):
         has_remaining = self._array_has_remaining_wells_for_loaded_stock()
         next_state = "resume_ready" if has_progress and has_remaining is not False else "idle"
 
+        self._invalidate_paused_array_soft_stop_attempt(context)
         self._array_context = None
         self._soft_stop_clear_uncertain = False
         self._set_array_run_state(next_state)
@@ -4604,6 +4735,7 @@ class Controller(QObject):
         next_state = "resume_ready" if has_progress and has_remaining is not False else "idle"
 
         self._mark_evap_plate_dock_check_required("machine_disconnect")
+        self._invalidate_paused_array_soft_stop_attempt(context)
         self._array_context = None
         self._soft_stop_clear_uncertain = False
         self._set_array_run_state(next_state)
@@ -4729,6 +4861,10 @@ class Controller(QObject):
             "finalize_reason": context.get("finalize_reason"),
             "soft_stop_pending": bool(context.get("soft_stop_pending", False)),
             "soft_stop_phase": context.get("soft_stop_phase"),
+            "soft_stop_origin": context.get("soft_stop_origin"),
+            "soft_stop_frozen_barrier_seq32": context.get("soft_stop_frozen_barrier_seq32"),
+            "soft_stop_attempt_token": context.get("soft_stop_attempt_token"),
+            "soft_stop_recovery_reason": context.get("soft_stop_recovery_reason"),
             "soft_stop_clear_uncertain": bool(getattr(self, "_soft_stop_clear_uncertain", False)),
             "serpentine": bool(getattr(self, "_array_print_serpentine", ARRAY_PRINT_SERPENTINE)),
             "expected_volume_uL": context.get("expected_volume"),
@@ -4778,6 +4914,473 @@ class Controller(QObject):
             details={"barrier_seq32": current_barrier},
         )
         return True
+
+    def get_array_pause_action_state(self):
+        """Describe the safe actions available while the machine is paused."""
+        array_state = self.get_array_run_state()
+        context = getattr(self, "_array_context", None)
+        context = context if isinstance(context, dict) else {}
+        phase = context.get("soft_stop_phase")
+        origin = context.get("soft_stop_origin")
+
+        action = None
+        can_resume_entire_array = False
+        if array_state == "running":
+            action = "finish"
+            can_resume_entire_array = True
+        elif array_state == "stop_requested":
+            if phase == "paused_safe_stop_recovery":
+                action = "retry"
+            elif phase == "paused_finalization":
+                action = "finalize"
+            else:
+                action = "continue"
+
+        return {
+            "array_active": array_state in {"running", "stop_requested"},
+            "array_state": array_state,
+            "safe_stop_action": action,
+            "can_resume_entire_array": bool(can_resume_entire_array),
+            "soft_stop_phase": phase,
+            "soft_stop_origin": origin,
+            "watermark_uncertain": bool(
+                origin == "immediate_pause"
+                and phase == "paused_safe_stop_recovery"
+            ),
+        }
+
+    def request_paused_array_soft_stop(self):
+        """Convert an immediate array pause into a frozen-boundary soft stop."""
+        array_state = self.get_array_run_state()
+        context = getattr(self, "_array_context", None)
+        if array_state not in {"running", "stop_requested"} or not isinstance(context, dict):
+            return False
+
+        phase = context.get("soft_stop_phase")
+        if phase == "paused_finalization":
+            previous_phase = context.get("soft_stop_phase_before_pause") or "parking"
+            if previous_phase == "post_clear_parking":
+                context["soft_stop_phase_before_pause"] = None
+                context["soft_stop_recovery_reason"] = None
+                context["soft_stop_pause_during_clearing"] = False
+                return self._continue_soft_stop_parking_after_clear(context)
+            if previous_phase == "final_well_completion":
+                if self.resume_commands() is False:
+                    context["soft_stop_recovery_reason"] = "finalization_resume_write_failed"
+                    return False
+                context["soft_stop_phase"] = "done"
+                context["soft_stop_phase_before_pause"] = None
+                context["soft_stop_recovery_reason"] = None
+                return self._enqueue_array_finalize("completed") is not False
+            if self.resume_commands() is False:
+                context["soft_stop_recovery_reason"] = "finalization_resume_write_failed"
+                return False
+            context["soft_stop_phase"] = previous_phase
+            context["soft_stop_phase_before_pause"] = None
+            context["soft_stop_recovery_reason"] = None
+            self._record_print_array_audit_event(
+                "print_array_safe_stop_finalization_resumed",
+                "Print array safe-stop finalization resumed",
+            )
+            return True
+
+        if (
+            context.get("soft_stop_origin") == "immediate_pause"
+            and phase in {
+                "waiting_pause_confirmation",
+                "arming_watermark_from_pause",
+                "resuming_to_watermark",
+                "waiting_watermark",
+                "waiting_completion_catchup",
+                "clearing",
+                "parking",
+                "done",
+            }
+        ):
+            # The conversion is already in flight. Status is authoritative;
+            # repeated button presses must not emit another arm or Resume.
+            self._advance_paused_array_soft_stop_from_status()
+            return True
+
+        if array_state == "running":
+            try:
+                self._update_current_array_barrier()
+            except Exception:
+                pass
+            frozen_barrier = self._coerce_positive_seq32(
+                context.get("current_barrier_seq32")
+            )
+            if frozen_barrier is None:
+                return False
+            context["soft_stop_origin"] = "immediate_pause"
+            context["soft_stop_frozen_barrier_seq32"] = frozen_barrier
+            context["soft_stop_barrier_seq32"] = frozen_barrier
+            context["soft_stop_pending"] = True
+            context["soft_stop_resume_sent"] = False
+            context["soft_stop_recovery_reason"] = None
+            context["soft_stop_phase_before_pause"] = None
+            self._set_array_run_state("stop_requested")
+        elif context.get("soft_stop_origin") != "immediate_pause":
+            # A second immediate pause may interrupt the ordinary Stop After
+            # Well path. Adopt its already-selected barrier, then freeze it so
+            # recovery can never retarget a later well.
+            frozen_barrier = self._coerce_positive_seq32(
+                context.get("soft_stop_barrier_seq32")
+                or context.get("current_barrier_seq32")
+            )
+            if frozen_barrier is None:
+                return False
+            context["soft_stop_origin"] = "immediate_pause"
+            context["soft_stop_frozen_barrier_seq32"] = frozen_barrier
+            context["soft_stop_barrier_seq32"] = frozen_barrier
+            context["soft_stop_pending"] = True
+
+        frozen_barrier = self._coerce_positive_seq32(
+            context.get("soft_stop_frozen_barrier_seq32")
+        )
+        if frozen_barrier is None:
+            return False
+
+        context["soft_stop_pending"] = True
+        context["soft_stop_barrier_seq32"] = frozen_barrier
+        context["soft_stop_phase"] = "waiting_pause_confirmation"
+        context["soft_stop_recovery_reason"] = None
+        context["soft_stop_resume_sent"] = False
+        token = self._new_paused_array_soft_stop_attempt(context)
+        self._schedule_paused_array_soft_stop_timeout(
+            "waiting_pause_confirmation",
+            token,
+        )
+        self._record_print_array_audit_event(
+            "print_array_paused_safe_stop_requested",
+            "Finish-current-well safe stop requested from immediate pause",
+            details={"frozen_barrier_seq32": frozen_barrier},
+        )
+        self._advance_paused_array_soft_stop_from_status()
+
+        active_context = getattr(self, "_array_context", None)
+        if not isinstance(active_context, dict):
+            return self.get_array_run_state() in {"resume_ready", "idle"}
+        if self.get_array_run_state() == "running":
+            return False
+        return active_context.get("soft_stop_origin") == "immediate_pause"
+
+    def _new_paused_array_soft_stop_attempt(self, context):
+        token = int(context.get("soft_stop_attempt_token") or 0) + 1
+        context["soft_stop_attempt_token"] = token
+        return token
+
+    def _invalidate_paused_array_soft_stop_attempt(self, context=None):
+        if context is None:
+            context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return None
+        return self._new_paused_array_soft_stop_attempt(context)
+
+    def _schedule_paused_array_soft_stop_timeout(self, phase, token):
+        QtCore.QTimer.singleShot(
+            PAUSED_ARRAY_SOFT_STOP_PHASE_TIMEOUT_MS,
+            lambda expected_phase=str(phase), expected_token=int(token): self._handle_paused_array_soft_stop_timeout(
+                expected_phase,
+                expected_token,
+            ),
+        )
+
+    def _paused_array_soft_stop_callback_is_current(self, phase, token):
+        context = getattr(self, "_array_context", None)
+        return bool(
+            isinstance(context, dict)
+            and self.get_array_run_state() == "stop_requested"
+            and context.get("soft_stop_origin") == "immediate_pause"
+            and context.get("soft_stop_phase") == phase
+            and int(context.get("soft_stop_attempt_token") or 0) == int(token)
+        )
+
+    def _handle_paused_array_soft_stop_timeout(self, phase, token):
+        if not self._paused_array_soft_stop_callback_is_current(phase, token):
+            return
+        if phase == "waiting_pause_confirmation":
+            self._return_paused_soft_stop_to_running("pause_confirmation_timeout")
+            return
+        self._enter_paused_array_soft_stop_recovery(f"{phase}_timeout")
+
+    def _advance_paused_array_soft_stop_from_status(self):
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return False
+        if (
+            self.get_array_run_state() != "stop_requested"
+            or context.get("soft_stop_origin") != "immediate_pause"
+            or not context.get("soft_stop_pending")
+        ):
+            return False
+
+        phase = context.get("soft_stop_phase")
+        if phase in {
+            "paused_safe_stop_recovery",
+            "paused_finalization",
+            "clearing",
+            "parking",
+            "done",
+        }:
+            return False
+
+        machine_model = getattr(self.model, "machine_model", None)
+        transport_paused = bool(getattr(machine_model, "transport_paused", False))
+        watermark_reached = bool(getattr(machine_model, "pause_watermark_reached", False))
+        frozen_barrier = self._coerce_positive_seq32(
+            context.get("soft_stop_frozen_barrier_seq32")
+        )
+        if frozen_barrier is None:
+            self._enter_paused_array_soft_stop_recovery("missing_frozen_barrier")
+            return False
+
+        if watermark_reached and transport_paused:
+            if self._paused_array_frozen_well_finished_array(context):
+                return self._finish_paused_array_final_well(context)
+            context["soft_stop_phase"] = "waiting_watermark"
+            self._invalidate_paused_array_soft_stop_attempt(context)
+            return self._begin_soft_stop_clear_and_park()
+
+        if phase == "waiting_completion_catchup":
+            return self._maybe_complete_array_soft_stop_after_catchup()
+
+        if phase == "waiting_pause_confirmation":
+            if not transport_paused:
+                return False
+            if self._latest_retired_command_number() >= frozen_barrier:
+                context["soft_stop_phase"] = "waiting_completion_catchup"
+                token = self._new_paused_array_soft_stop_attempt(context)
+                self._schedule_paused_array_soft_stop_timeout(
+                    "waiting_completion_catchup",
+                    token,
+                )
+                return self._maybe_complete_array_soft_stop_after_catchup()
+            reported_barrier = self._coerce_positive_seq32(
+                getattr(machine_model, "pause_after_seq32", 0)
+            )
+            if reported_barrier == frozen_barrier:
+                return self._resume_paused_array_to_frozen_watermark(context)
+            return self._arm_paused_array_frozen_watermark(context, frozen_barrier)
+
+        if phase == "arming_watermark_from_pause":
+            reported_barrier = self._coerce_positive_seq32(
+                getattr(machine_model, "pause_after_seq32", 0)
+            )
+            if transport_paused and reported_barrier == frozen_barrier:
+                return self._resume_paused_array_to_frozen_watermark(context)
+            return False
+
+        if phase == "resuming_to_watermark":
+            if not transport_paused:
+                context["soft_stop_phase"] = "waiting_watermark"
+                self._invalidate_paused_array_soft_stop_attempt(context)
+                self._record_print_array_audit_event(
+                    "print_array_safe_stop_resumed",
+                    "Print array resumed toward the frozen safe-stop watermark",
+                    details={"frozen_barrier_seq32": frozen_barrier},
+                )
+                return True
+            return False
+
+        if phase == "waiting_watermark":
+            return False
+        return False
+
+    def _paused_array_frozen_well_finished_array(self, context):
+        if context.get("queued_wells"):
+            return False
+        try:
+            return not bool(
+                self._get_array_remaining_wells(context.get("stock_id"))
+            )
+        except Exception:
+            return False
+
+    def _finish_paused_array_final_well(self, context):
+        self._invalidate_paused_array_soft_stop_attempt(context)
+        context["soft_stop_pending"] = False
+        if self.resume_commands() is False:
+            context["soft_stop_phase_before_pause"] = "final_well_completion"
+            context["soft_stop_phase"] = "paused_finalization"
+            context["soft_stop_recovery_reason"] = "final_well_resume_write_failed"
+            return False
+        context["soft_stop_phase"] = "done"
+        self._record_print_array_audit_event(
+            "print_array_safe_stop_final_well_completed",
+            "Frozen safe-stop well completed the print array",
+        )
+        return self._enqueue_array_finalize("completed") is not False
+
+    def _arm_paused_array_frozen_watermark(self, context, frozen_barrier):
+        context["soft_stop_phase"] = "arming_watermark_from_pause"
+        token = self._new_paused_array_soft_stop_attempt(context)
+        self._schedule_paused_array_soft_stop_timeout(
+            "arming_watermark_from_pause",
+            token,
+        )
+        try:
+            sent = self.machine.request_pause_after_seq32(
+                frozen_barrier,
+                on_success=lambda payload, expected_token=token, barrier=frozen_barrier: self._handle_paused_array_watermark_ack(
+                    payload,
+                    expected_token,
+                    barrier,
+                ),
+                on_failure=lambda payload, expected_token=token, barrier=frozen_barrier: self._handle_paused_array_watermark_failure(
+                    payload,
+                    expected_token,
+                    barrier,
+                ),
+            )
+        except Exception as exc:
+            self._handle_paused_array_watermark_failure(
+                {"reason": "write_failed", "error": str(exc)},
+                token,
+                frozen_barrier,
+            )
+            return False
+        if sent is False and self._paused_array_soft_stop_callback_is_current(
+            "arming_watermark_from_pause",
+            token,
+        ):
+            self._handle_paused_array_watermark_failure(
+                {"reason": "write_failed"},
+                token,
+                frozen_barrier,
+            )
+        return sent is not False
+
+    def _handle_paused_array_watermark_ack(self, payload, token, barrier):
+        if not self._paused_array_soft_stop_callback_is_current(
+            "arming_watermark_from_pause",
+            token,
+        ):
+            return
+        self._record_print_array_audit_event(
+            "print_array_safe_stop_watermark_acknowledged",
+            "Frozen safe-stop watermark acknowledged; waiting for status confirmation",
+            details={
+                "frozen_barrier_seq32": barrier,
+                "ack": dict(payload or {}),
+            },
+        )
+
+    def _handle_paused_array_watermark_failure(self, payload, token, barrier):
+        if not self._paused_array_soft_stop_callback_is_current(
+            "arming_watermark_from_pause",
+            token,
+        ):
+            return
+        payload = dict(payload or {})
+        reason = str(payload.get("reason") or "unknown")
+        ack_result = str(payload.get("ack_result") or "")
+        if reason == "ack_rejected" and ack_result == "watermark_rejected":
+            context = getattr(self, "_array_context", None)
+            if not isinstance(context, dict):
+                return
+            context["soft_stop_phase"] = "waiting_completion_catchup"
+            context["soft_stop_recovery_reason"] = "frozen_barrier_already_retired"
+            next_token = self._new_paused_array_soft_stop_attempt(context)
+            self._schedule_paused_array_soft_stop_timeout(
+                "waiting_completion_catchup",
+                next_token,
+            )
+            self._record_print_array_audit_event(
+                "print_array_safe_stop_frozen_barrier_retired",
+                "Frozen safe-stop barrier had already retired; catching up completion",
+                details={"frozen_barrier_seq32": barrier},
+                level="warning",
+            )
+            self._maybe_complete_array_soft_stop_after_catchup()
+            return
+        if reason in {"write_failed", "invalid_barrier", "ack_rejected"}:
+            self._return_paused_soft_stop_to_running(reason)
+            return
+        self._enter_paused_array_soft_stop_recovery(reason)
+
+    def _resume_paused_array_to_frozen_watermark(self, context):
+        if context.get("soft_stop_resume_sent"):
+            return False
+        context["soft_stop_resume_sent"] = True
+        self._record_print_array_audit_event(
+            "print_array_safe_stop_watermark_armed",
+            "Frozen safe-stop watermark confirmed in machine status",
+            details={
+                "frozen_barrier_seq32": context.get(
+                    "soft_stop_frozen_barrier_seq32"
+                )
+            },
+        )
+        context["soft_stop_phase"] = "resuming_to_watermark"
+        token = self._new_paused_array_soft_stop_attempt(context)
+        self._schedule_paused_array_soft_stop_timeout(
+            "resuming_to_watermark",
+            token,
+        )
+        if self.resume_commands() is False:
+            if self._paused_array_soft_stop_callback_is_current(
+                "resuming_to_watermark",
+                token,
+            ):
+                self._enter_paused_array_soft_stop_recovery("resume_write_failed")
+            return False
+        return True
+
+    def _return_paused_soft_stop_to_running(self, reason):
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return False
+        self._invalidate_paused_array_soft_stop_attempt(context)
+        context["soft_stop_pending"] = False
+        context["soft_stop_phase"] = None
+        context["soft_stop_origin"] = None
+        context["soft_stop_frozen_barrier_seq32"] = None
+        context["soft_stop_barrier_seq32"] = None
+        context["soft_stop_resume_sent"] = False
+        context["soft_stop_recovery_reason"] = str(reason or "unarmed_failure")
+        self._set_array_run_state("running")
+        self.error_occurred_signal.emit(
+            "Safe Stop Not Armed",
+            "The finish-current-well stop could not be armed. The machine remains paused; "
+            "you may retry, resume the entire array, or abort it.",
+        )
+        return False
+
+    def _enter_paused_array_soft_stop_recovery(self, reason):
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return False
+        previous_phase = context.get("soft_stop_phase")
+        self._invalidate_paused_array_soft_stop_attempt(context)
+        context["soft_stop_phase_before_pause"] = previous_phase
+        context["soft_stop_phase"] = "paused_safe_stop_recovery"
+        context["soft_stop_pending"] = True
+        context["soft_stop_recovery_reason"] = str(reason or "uncertain_state")
+        context["soft_stop_resume_sent"] = False
+
+        try:
+            sent = self.machine.pause_commands()
+        except Exception:
+            sent = False
+        if sent is not False:
+            self.model.machine_model.pause_commands()
+        self._record_print_array_audit_event(
+            "print_array_safe_stop_recovery_required",
+            "Print array safe stop requires operator recovery",
+            details={
+                "previous_phase": previous_phase,
+                "recovery_reason": context.get("soft_stop_recovery_reason"),
+            },
+            level="warning",
+        )
+        self.error_occurred_signal.emit(
+            "Safe Stop Needs Attention",
+            "The safe-stop watermark or resume state could not be confirmed. The machine "
+            "has been told to pause again. Retry the safe stop or abort the array; full-array "
+            "resume is unavailable because a watermark may still be armed.",
+        )
+        return False
 
     @staticmethod
     def _coerce_positive_seq32(value):
@@ -4935,7 +5538,23 @@ class Controller(QObject):
             return False
         if context.get("finalize_reason") is not None:
             return False
-        if context.get("queued_wells"):
+
+        queued_wells = list(context.get("queued_wells") or [])
+        if context.get("soft_stop_origin") == "immediate_pause":
+            frozen_barrier = self._coerce_positive_seq32(
+                context.get("soft_stop_frozen_barrier_seq32")
+            )
+            for well_info in queued_wells:
+                dispense_seq32 = self._coerce_positive_seq32(
+                    well_info.get("dispense_seq32") if isinstance(well_info, dict) else None
+                )
+                if (
+                    frozen_barrier is not None
+                    and dispense_seq32 is not None
+                    and dispense_seq32 <= frozen_barrier
+                ):
+                    return False
+        elif queued_wells:
             return False
 
         stock_id = context.get("stock_id")
@@ -4944,10 +5563,21 @@ class Controller(QObject):
         except Exception:
             remaining_wells = []
 
+        if not remaining_wells and not queued_wells:
+            if context.get("soft_stop_origin") == "immediate_pause":
+                return self._finish_paused_array_final_well(context)
+            context["soft_stop_pending"] = False
+            context["soft_stop_phase"] = "done"
+            return self._enqueue_array_finalize("completed")
+
+        if context.get("soft_stop_origin") == "immediate_pause":
+            context["soft_stop_phase"] = "waiting_watermark"
+            self._invalidate_paused_array_soft_stop_attempt(context)
+            return self._begin_soft_stop_clear_and_park()
+
         context["soft_stop_pending"] = False
         context["soft_stop_phase"] = "done"
-        reason = "soft_stop" if remaining_wells else "completed"
-        return self._enqueue_array_finalize(reason)
+        return self._enqueue_array_finalize("soft_stop")
 
     def _clear_command_queue_for_soft_stop(self, on_cleared=None):
         self._clear_machine_and_model_command_queues(
@@ -4962,6 +5592,7 @@ class Controller(QObject):
         if context.get("soft_stop_phase", "waiting_watermark") != "waiting_watermark":
             return False
 
+        self._invalidate_paused_array_soft_stop_attempt(context)
         context["soft_stop_phase"] = "clearing"
         context["finalize_reason"] = "soft_stop"
         context["soft_stop_transport_was_paused"] = bool(
@@ -5054,20 +5685,42 @@ class Controller(QObject):
             pass
 
         self._soft_stop_clear_uncertain = False
+        if context.pop("soft_stop_pause_during_clearing", False):
+            context["soft_stop_phase_before_pause"] = "post_clear_parking"
+            context["soft_stop_phase"] = "paused_finalization"
+            context["soft_stop_recovery_reason"] = "paused_after_queue_clear"
+            return
+
+        self._continue_soft_stop_parking_after_clear(context)
+
+    def _continue_soft_stop_parking_after_clear(self, context):
+        if not isinstance(context, dict) or context is not getattr(self, "_array_context", None):
+            return False
         if context.get("soft_stop_transport_was_paused"):
             try:
-                self.resume_commands()
+                resumed = self.resume_commands()
             except Exception:
+                resumed = False
+            if resumed is False:
+                if context.get("soft_stop_origin") == "immediate_pause":
+                    context["soft_stop_phase_before_pause"] = "post_clear_parking"
+                    context["soft_stop_phase"] = "paused_finalization"
+                    context["soft_stop_recovery_reason"] = "park_resume_write_failed"
+                    self._warn_soft_stop_post_watermark(
+                        "Soft stop reached the watermark and cleared the queue, but transport could not be resumed for parking. The machine remains paused."
+                    )
+                    return False
                 context["soft_stop_phase"] = "done"
                 self._mark_evap_plate_dock_check_required("soft_stop_park_failed")
                 self._warn_soft_stop_post_watermark(
                     "Soft stop reached the watermark and cleared the queue, but transport could not be resumed for parking. Preserving resume state without parking."
                 )
                 self._complete_array_finalize("soft_stop")
-                return
+                return False
 
         self._queue_array_profile_disable_once(clear_on_failure=False)
         context["soft_stop_phase"] = "parking"
+        context["soft_stop_recovery_reason"] = None
 
         def _finish_after_park():
             active_context = getattr(self, "_array_context", None)
@@ -5082,6 +5735,8 @@ class Controller(QObject):
                 "Soft stop reached the watermark, but the machine could not be parked. Preserving resume state without parking."
             )
             self._complete_array_finalize("soft_stop")
+            return False
+        return True
 
     def _queue_pause_park_sequence(self, on_complete=None):
         if self.move_to_location('pause') is False:
@@ -5092,8 +5747,11 @@ class Controller(QObject):
 
     def set_relative_X(self, x,manual=False,handler=None,override=False):
         """Set the relative X coordinate for the machine."""
+        target = {'X': self.expected_position['X'] + x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': self.expected_position['X'] + x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting relative X: {x}")
@@ -5103,8 +5761,11 @@ class Controller(QObject):
 
     def set_relative_Y(self, y,manual=False,handler=None, override=False):
         """Set the relative Y coordinate for the machine."""
+        target = {'X': self.expected_position['X'], 'Y': self.expected_position['Y'] + y, 'Z': self.expected_position['Z']}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': self.expected_position['Y'] + y, 'Z': self.expected_position['Z']}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting relative Y: {y}")
@@ -5114,8 +5775,11 @@ class Controller(QObject):
 
     def set_relative_Z(self, z,manual=False,handler=None, override=False):
         """Set the relative Z coordinate for the machine."""
+        target = {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z'] + z}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z'] + z}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting relative Z: {z}")
@@ -5125,8 +5789,11 @@ class Controller(QObject):
     
     def set_absolute_XY(self, x, y, manual=False, handler=None, override=False):
         """Set the absolute X and Y coordinates for the machine."""
+        target = {'X': x, 'Y': y, 'Z': self.expected_position['Z']}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': x, 'Y': y, 'Z': self.expected_position['Z']}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting absolute XY: {x}, {y}")
@@ -5137,8 +5804,11 @@ class Controller(QObject):
 
     def set_absolute_X(self, x,manual=False,handler=None, override=False):
         """Set the absolute X coordinate for the machine."""
+        target = {'X': x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting absolute X: {x}")
@@ -5149,8 +5819,11 @@ class Controller(QObject):
 
     def set_absolute_Y(self, y,manual=False,handler=None, override=False):
         """Set the absolute Y coordinate for the machine."""
+        target = {'X': self.expected_position['X'], 'Y': y, 'Z': self.expected_position['Z']}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': y, 'Z': self.expected_position['Z']}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting absolute Y: {y}")
@@ -5161,14 +5834,33 @@ class Controller(QObject):
     
     def set_absolute_Z(self, z,manual=False,handler=None, override=False):
         """Set the absolute Z coordinate for the machine."""
+        target = {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': z}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': z}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting absolute Z: {z}")
         if self.machine.set_absolute_Z(z,manual=manual,handler=handler) is False:
             return False
         self.update_expected_position(z=z)
+        return True
+
+    def _hard_endpoint_allowed(self, target_pos):
+        """Enforce numeric/global travel bounds even when obstacle override is used."""
+
+        guard = getattr(self, "configuration_safety_guard", None)
+        if guard is None:
+            return True
+        try:
+            guard.validate_endpoint(target_pos)
+        except ConfigurationSafetyError as exc:
+            print(f"Motion endpoint rejected: {exc}")
+            signal = getattr(self, "error_occurred_signal", None)
+            if signal is not None:
+                signal.emit("Motion Endpoint Rejected", str(exc))
+            return False
         return True
 
     def check_collision(self,current_pos, target_pos):
@@ -5207,13 +5899,15 @@ class Controller(QObject):
     
     def set_relative_coordinates(self, x, y, z, manual=False, handler=None,override=False):
         """Set the relative coordinates for the machine."""
+        new_position = {
+            'X': self.expected_position['X'] + x,
+            'Y': self.expected_position['Y'] + y,
+            'Z': self.expected_position['Z'] + z
+        }
+        if not self._hard_endpoint_allowed(new_position):
+            return False
         #print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
         if not override:
-            new_position = {
-                'X': self.expected_position['X'] + x,
-                'Y': self.expected_position['Y'] + y,
-                'Z': self.expected_position['Z'] + z
-            }
             if self.check_collision(self.expected_position, new_position):
                 print('Collision detected')
                 return False
@@ -5256,6 +5950,9 @@ class Controller(QObject):
     def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, kwargs=None, override=False):
         """Set absolute coordinates; always use XY for any X/Y movement."""
         new_position = {'X': x, 'Y': y, 'Z': z}
+
+        if not self._hard_endpoint_allowed(new_position):
+            return False
 
         # 1) collision check
         if not override and self.check_collision(self.expected_position, new_position):
@@ -5763,13 +6460,455 @@ class Controller(QObject):
         """Confirm that a reagent is present in a slot."""
         self.model.rack_model.confirm_slot(slot)
 
-    def add_new_location(self,name):
-        """Save the current location information."""
-        self.model.location_model.add_location(name,*self.model.machine_model.get_current_position())
+    def _install_committed_configuration(self, result):
+        try:
+            if "Locations.json" in result.documents:
+                self.model.install_committed_locations(result.documents["Locations.json"])
+            if "Plates.json" in result.documents:
+                self.model.install_committed_plates(result.documents["Plates.json"])
+            if "RegulatorProfiles.json" in result.documents:
+                self.model.install_committed_regulator_profiles(
+                    result.documents["RegulatorProfiles.json"]
+                )
+            self.saved_target_authorizer = (
+                self.configuration_transactions.saved_target_authorizer
+            )
+            return True
+        except Exception as exc:
+            self._configuration_recovery_required = True
+            # Machine_FreeRTOS rejects every newly queued command and stops
+            # pumping an existing queue while this latch is set.  Safe
+            # disconnection remains available through Controller.
+            if getattr(self, "machine", None) is not None:
+                try:
+                    self.machine._command_queue_blocked_reason = (
+                        "configuration_recovery_required"
+                    )
+                except Exception:
+                    pass
+            self.error_occurred_signal.emit(
+                "Configuration Restart Required",
+                "The configuration was durably committed, but runtime state could not "
+                f"be refreshed: {exc}. Restart before any hardware action.",
+            )
+            return False
 
-    def modify_location(self,name):
-        """Modify the location information."""
-        self.model.location_model.update_location(name,*self.model.machine_model.get_current_position())
+    def _configuration_capture_readiness(self):
+        """Return one JSON-safe, fail-closed current-position evidence snapshot."""
+
+        guard = getattr(self, "configuration_safety_guard", None)
+        if guard is None:
+            return {"ready": True, "reason_codes": [], "compatibility_mode": True}
+        machine_model = self.model.machine_model
+        now = float(self._monotonic_fn())
+        telemetry_getter = getattr(machine_model, "get_position_telemetry_snapshot", None)
+        telemetry = telemetry_getter(now_monotonic=now) if callable(telemetry_getter) else None
+        reasons = []
+        if not machine_model.is_connected():
+            reasons.append("not_connected")
+        if not machine_model.motors_are_enabled():
+            reasons.append("motors_disabled")
+        if not machine_model.motors_are_homed():
+            reasons.append("not_homed")
+        if self.get_xy_motion_recovery_state() != "idle":
+            reasons.append("motion_recovery_active")
+        if bool(getattr(machine_model, "paused", False)):
+            reasons.append("machine_paused")
+        if bool(getattr(machine_model, "transport_paused", False)):
+            reasons.append("transport_paused")
+        if self.get_array_run_state() not in {"idle", "resume_ready"}:
+            reasons.append("array_runner_active")
+        if str(getattr(self, "_seq_state", "idle")) != "idle":
+            reasons.append("sequence_runner_active")
+        try:
+            queue_empty = bool(self.check_if_all_completed())
+        except Exception:
+            queue_empty = False
+        if not queue_empty:
+            reasons.append("queue_not_empty")
+        if bool(machine_model.is_busy()):
+            reasons.append("machine_busy")
+        position = machine_model.get_current_position_dict_capital()
+        if telemetry is None:
+            reasons.append("position_telemetry_unavailable")
+            axes = {}
+            trust_epoch = None
+        else:
+            axes = telemetry.get("axes", {})
+            trust_epoch = telemetry.get("trust_epoch")
+            for axis in ("X", "Y", "Z"):
+                evidence = axes.get(axis, {})
+                age = evidence.get("age_ms")
+                if evidence.get("generation", 0) <= 0 or age is None:
+                    reasons.append(f"position_missing_{axis.lower()}")
+                elif age > guard.policy.position_telemetry_max_age_ms:
+                    reasons.append(f"position_stale_{axis.lower()}")
+        try:
+            guard.validate_endpoint(position)
+        except ConfigurationSafetyError:
+            reasons.append("position_outside_global_bounds")
+        expected = dict(self.expected_position)
+        if any(type(position.get(axis)) is not int for axis in ("X", "Y", "Z")):
+            reasons.append("position_invalid")
+        if any(expected.get(axis) != position.get(axis) for axis in ("X", "Y", "Z")):
+            reasons.append("expected_position_mismatch")
+        machine_uuid = getattr(getattr(self, "machine_data_paths", None), "machine_uuid", None)
+        if not machine_uuid:
+            reasons.append("authorized_machine_missing")
+        return {
+            "ready": not reasons,
+            "reason_codes": list(dict.fromkeys(reasons)),
+            "machine_uuid": machine_uuid,
+            "trust_epoch": trust_epoch,
+            "captured_position": {axis: int(position[axis]) for axis in ("X", "Y", "Z")},
+            "expected_position": copy.deepcopy(expected),
+            "telemetry": copy.deepcopy(axes),
+            "captured_monotonic": now,
+            "telemetry_max_age_ms": guard.policy.position_telemetry_max_age_ms,
+        }
+
+    def capture_configuration_point(self, target_key, *, workflow):
+        """Capture one calibration point only from trusted, fresh machine state."""
+
+        target_key = str(target_key or "").strip()
+        workflow = str(workflow or "").strip()
+        evidence = self._configuration_capture_readiness()
+        if not evidence.get("ready"):
+            message = "Position capture is not safe: " + ", ".join(evidence["reason_codes"])
+            self.error_occurred_signal.emit("Position Not Captured", message)
+            self.record_configuration_attempt(
+                event_type="rejected",
+                operator=getattr(getattr(self, "configuration_transactions", None), "os_account", "application operator"),
+                reason=message,
+                workflow=workflow,
+                details={"target_key": target_key, "stage": "capture", "preconditions": evidence},
+            )
+            return False
+        point = copy.deepcopy(evidence.get("captured_position") or self.model.machine_model.get_current_position_dict_capital())
+        self._configuration_capture_evidence[(workflow, target_key)] = copy.deepcopy(evidence)
+        return point
+
+    def discard_configuration_capture_evidence(self, workflow):
+        workflow = str(workflow or "")
+        self._configuration_capture_evidence = {
+            key: value
+            for key, value in self._configuration_capture_evidence.items()
+            if key[0] != workflow
+        }
+
+    def _governed_proposal_inputs(self):
+        service = getattr(self, "configuration_transactions", None)
+        guard = getattr(self, "configuration_safety_guard", None)
+        if service is None or guard is None:
+            return None, None, None
+        state = service.refresh(allow_pending=False)
+        documents = read_governed_documents(service.paths)
+        return guard, documents, dict(state.config_sha256)
+
+    def _capture_bundle(self, workflow, target_keys):
+        evidence = []
+        for key in target_keys:
+            item = self._configuration_capture_evidence.get((workflow, key))
+            if item is None:
+                raise ConfigurationSafetyError(f"Fresh capture evidence is missing for {key}.")
+            evidence.append(copy.deepcopy(item))
+        machine_uuids = {item.get("machine_uuid") for item in evidence}
+        trust_epochs = {item.get("trust_epoch") for item in evidence}
+        if len(machine_uuids) != 1 or None in machine_uuids:
+            raise ConfigurationSafetyError("Captured points do not share one authorized machine UUID.")
+        if len(trust_epochs) != 1 or None in trust_epochs:
+            raise ConfigurationSafetyError("Captured points do not share one motion trust epoch.")
+        return evidence
+
+    def _prepare_guarded_proposal(self, proposed, *, workflow, target_keys, captures):
+        guard, before, raw_hashes = self._governed_proposal_inputs()
+        if guard is None:
+            return None
+        profile = before["Settings.json"].get("HARDWARE_PROFILE", self.profile.name)
+        try:
+            assessment = guard.assess(
+                before_documents=before,
+                proposed_documents=proposed,
+                workflow=workflow,
+                target_keys=target_keys,
+                hardware_profile=profile,
+                preconditions={"captures": copy.deepcopy(captures)},
+                governed_file_sha256=raw_hashes,
+            )
+        except ConfigurationSafetyError as exc:
+            self.error_occurred_signal.emit("Configuration Change Rejected", str(exc))
+            return False
+        return {
+            "documents": copy.deepcopy(proposed),
+            "assessment": assessment,
+            "expected_config_sha256": raw_hashes,
+        }
+
+    def prepare_named_location_change(self, name, *, require_existing=False):
+        name = str(name or "").strip()
+        guard = getattr(self, "configuration_safety_guard", None)
+        if guard is None:
+            return None
+        existing = self.model.location_model.get_all_locations()
+        if not name or (require_existing and name not in existing):
+            self.error_occurred_signal.emit("Configuration Change Failed", "The selected location is invalid.")
+            return False
+        workflow = "named_location_modify" if require_existing else "named_location_add"
+        point = self.capture_configuration_point(name, workflow=workflow)
+        if point is False:
+            return False
+        proposed_locations = copy.deepcopy(existing)
+        proposed_locations[name] = point
+        captures = self._capture_bundle(workflow, (name,))
+        return self._prepare_guarded_proposal(
+            {"Locations.json": proposed_locations},
+            workflow=workflow,
+            target_keys=(name,),
+            captures=captures,
+        )
+
+    def prepare_rack_calibration_change(self):
+        workflow = "rack_calibration"
+        keys = ("rack_position_Left", "rack_position_Right")
+        temporary = copy.deepcopy(self.model.rack_model.temp_calibration_data)
+        try:
+            captures = self._capture_bundle(workflow, keys)
+        except ConfigurationSafetyError as exc:
+            self.error_occurred_signal.emit("Rack Calibration Not Saved", str(exc))
+            return False
+        proposed = copy.deepcopy(self.model.location_model.get_all_locations())
+        proposed.update(temporary)
+        return self._prepare_guarded_proposal(
+            {"Locations.json": proposed}, workflow=workflow, target_keys=keys, captures=captures
+        )
+
+    def prepare_plate_calibration_change(self):
+        workflow = "plate_calibration"
+        keys = ("top_left", "top_right", "bottom_right", "bottom_left")
+        try:
+            captures = self._capture_bundle(workflow, keys)
+            proposed = self.model.well_plate.proposed_calibration_document()
+        except Exception as exc:
+            self.error_occurred_signal.emit("Plate Calibration Not Saved", str(exc))
+            return False
+        return self._prepare_guarded_proposal(
+            {"Plates.json": proposed},
+            workflow=workflow,
+            target_keys=(self.model.well_plate.get_current_plate_name(),),
+            captures=captures,
+        )
+
+    def prepare_configuration_import(self, selected_files):
+        service = getattr(self, "configuration_transactions", None)
+        guard = getattr(self, "configuration_safety_guard", None)
+        if service is None or guard is None:
+            return None
+        proposed = {}
+        try:
+            for filename, source_path in selected_files.items():
+                if filename not in {"Locations.json", "Plates.json", "RegulatorProfiles.json"}:
+                    raise ConfigurationSafetyError(f"Unsupported import target {filename!r}.")
+                with open(source_path, "r", encoding="utf-8") as source:
+                    proposed[filename] = json.load(source)
+        except (OSError, json.JSONDecodeError, ConfigurationSafetyError) as exc:
+            self.error_occurred_signal.emit("Configuration Import Failed", str(exc))
+            return False
+        if not set(proposed).intersection({"Locations.json", "Plates.json"}):
+            return None
+        prepared = self._prepare_guarded_proposal(
+            proposed,
+            workflow="governed_configuration_import",
+            target_keys=tuple(sorted(proposed)),
+            captures=[],
+        )
+        if prepared:
+            prepared["operation"] = "import"
+        return prepared
+
+    def prepare_configuration_restore(self, transaction_id, *, machine_id_confirmation):
+        service = getattr(self, "configuration_transactions", None)
+        guard = getattr(self, "configuration_safety_guard", None)
+        if service is None or guard is None:
+            return None
+        if machine_id_confirmation != service.identity.machine_id:
+            self.error_occurred_signal.emit("Configuration Restore Failed", "Exact machine ID confirmation is required.")
+            return False
+        try:
+            proposed = service.read_restore_proposal(transaction_id)
+        except ConfigurationTransactionError as exc:
+            self.error_occurred_signal.emit("Configuration Restore Failed", str(exc))
+            return False
+        if not set(proposed).intersection({"Locations.json", "Plates.json"}):
+            return None
+        prepared = self._prepare_guarded_proposal(
+            proposed,
+            workflow="configuration_restore",
+            target_keys=tuple(sorted(proposed)),
+            captures=[],
+        )
+        if prepared:
+            prepared.update(
+                operation="restore",
+                transaction_id=str(transaction_id),
+                machine_id_confirmation=str(machine_id_confirmation),
+            )
+        return prepared
+
+    def _validate_guard_confirmation(self, assessment, confirmation):
+        parsed = parse_guard_assessment(assessment)
+        if parsed["result"] == "reject":
+            raise ConfigurationSafetyError("Rejected guard assessment cannot be saved.")
+        if not isinstance(confirmation, dict) or confirmation.get("proposal_sha256") != parsed["proposal_sha256"]:
+            raise ConfigurationSafetyError("Confirmation is missing or belongs to another proposal.")
+        if confirmation.get("acknowledged") is not True:
+            raise ConfigurationSafetyError("The displayed coordinate deltas were not acknowledged.")
+        if parsed["result"] == "strong_confirmation" and confirmation.get("typed_phrase") != parsed["required_confirmation_phrase"]:
+            raise ConfigurationSafetyError("The strong confirmation phrase does not match exactly.")
+        return parsed
+
+    def commit_guarded_configuration_proposal(self, proposal, *, operator, reason, confirmation):
+        if not isinstance(proposal, dict):
+            return False
+        try:
+            assessment = self._validate_guard_confirmation(proposal.get("assessment"), confirmation)
+            captures = assessment.get("preconditions", {}).get("captures", [])
+            if captures:
+                readiness = self._configuration_capture_readiness()
+                if not readiness.get("ready"):
+                    raise ConfigurationSafetyError(
+                        "Machine state changed after preview: " + ", ".join(readiness["reason_codes"])
+                    )
+                current_epoch = readiness.get("trust_epoch")
+                if any(item.get("trust_epoch") != current_epoch for item in captures):
+                    raise ConfigurationSafetyError("Motion trust epoch changed after capture.")
+                if assessment["workflow"].startswith("named_location"):
+                    captured = captures[0]["captured_position"]
+                    if readiness.get("captured_position") != captured:
+                        raise ConfigurationSafetyError("Current position changed after the named-location preview.")
+        except (ConfigurationSafetyError, TypeError, KeyError, IndexError) as exc:
+            self.error_occurred_signal.emit("Configuration Change Not Saved", str(exc))
+            return False
+        if proposal.get("operation") == "restore":
+            try:
+                result = self.configuration_transactions.restore_transaction(
+                    proposal["transaction_id"],
+                    operator=operator,
+                    reason=reason,
+                    machine_id_confirmation=proposal["machine_id_confirmation"],
+                    expected_config_sha256=proposal["expected_config_sha256"],
+                    guard_evidence=assessment,
+                )
+            except ConfigurationTransactionError as exc:
+                if isinstance(exc, ConfigurationRecoveryRequired):
+                    self._configuration_recovery_required = True
+                self.error_occurred_signal.emit("Configuration Restore Failed", str(exc))
+                return False
+            result = result if self._install_committed_configuration(result) else False
+        else:
+            result = self._commit_configuration_documents(
+                proposal["documents"],
+                operator=operator,
+                reason=reason,
+                workflow=assessment["workflow"],
+                event_type="import" if proposal.get("operation") == "import" else "change",
+                expected_config_sha256=proposal["expected_config_sha256"],
+                guard_evidence=assessment,
+            )
+        if result:
+            self.discard_configuration_capture_evidence(assessment["workflow"])
+        return result
+
+    def _commit_configuration_documents(
+        self,
+        proposed,
+        *,
+        operator,
+        reason,
+        workflow,
+        event_type="change",
+        restore_reference=None,
+        expected_config_sha256=None,
+        guard_evidence=None,
+    ):
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return None
+        try:
+            result = service.commit_documents(
+                proposed,
+                operator=operator,
+                reason=reason,
+                workflow=workflow,
+                event_type=event_type,
+                restore_reference=restore_reference,
+                expected_config_sha256=expected_config_sha256,
+                guard_evidence=guard_evidence,
+            )
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit("Configuration Change Failed", str(exc))
+            return False
+        if not self._install_committed_configuration(result):
+            return False
+        return result
+
+    def commit_named_location(self, name, *, operator, reason, require_existing=False):
+        """Persist one complete Locations snapshot before changing Model memory."""
+
+        name = str(name or "").strip()
+        if not name:
+            self.error_occurred_signal.emit("Configuration Change Failed", "A location name is required.")
+            return False
+        existing = self.model.location_model.get_all_locations()
+        if require_existing and name not in existing:
+            self.error_occurred_signal.emit("Configuration Change Failed", f"Location {name!r} does not exist.")
+            return False
+        try:
+            x, y, z = self.model.machine_model.get_current_position()
+            proposed = copy.deepcopy(existing)
+            proposed[name] = {"X": int(x), "Y": int(y), "Z": int(z)}
+        except Exception as exc:
+            self.error_occurred_signal.emit("Configuration Change Failed", f"Current position is invalid: {exc}")
+            return False
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            if require_existing:
+                self.model.location_model.update_location(name, x, y, z)
+            else:
+                self.model.location_model.add_location(name, x, y, z)
+            self.model.location_model.save_locations()
+            return True
+        return self._commit_configuration_documents(
+            {"Locations.json": proposed},
+            operator=operator,
+            reason=reason,
+            workflow="named_location_modify" if require_existing else "named_location_add",
+        )
+
+    def add_new_location(self, name, *, operator=None, reason=None):
+        """Compatibility adapter; canonical production still uses one transaction."""
+
+        service = getattr(self, "configuration_transactions", None)
+        actor = operator or getattr(service, "os_account", None) or "application operator"
+        return self.commit_named_location(
+            name,
+            operator=actor,
+            reason=reason or "Save current position as named location",
+            require_existing=False,
+        )
+
+    def modify_location(self, name, *, operator=None, reason=None):
+        """Compatibility adapter for one transactional location modification."""
+
+        service = getattr(self, "configuration_transactions", None)
+        actor = operator or getattr(service, "os_account", None) or "application operator"
+        return self.commit_named_location(
+            name,
+            operator=actor,
+            reason=reason or "Update named location from current position",
+            require_existing=True,
+        )
 
     # def update_current_location(self, name):
     #     """Update the current location to the specified name."""
@@ -5781,7 +6920,145 @@ class Controller(QObject):
 
     def save_locations(self):
         """Save the locations to a file."""
+        if getattr(self, "configuration_transactions", None) is not None:
+            raise ConfigurationValidationError(
+                "Canonical locations must be committed through the transaction service."
+            )
         self.model.location_model.save_locations()
+
+    def commit_rack_calibration(self, *, operator, reason):
+        temporary = copy.deepcopy(self.model.rack_model.temp_calibration_data)
+        required = {"rack_position_Left", "rack_position_Right"}
+        if set(temporary) != required:
+            self.error_occurred_signal.emit(
+                "Rack Calibration Not Saved", "Both Left and Right rack anchors are required."
+            )
+            return False
+        proposed = copy.deepcopy(self.model.location_model.get_all_locations())
+        proposed.update(temporary)
+        result = self._commit_configuration_documents(
+            {"Locations.json": proposed},
+            operator=operator,
+            reason=reason,
+            workflow="rack_calibration",
+        )
+        if result:
+            self.model.rack_model.discard_temp_calibrations()
+        return result
+
+    def commit_plate_calibration(self, *, operator, reason):
+        try:
+            proposed = self.model.well_plate.proposed_calibration_document()
+        except Exception as exc:
+            self.error_occurred_signal.emit("Plate Calibration Not Saved", str(exc))
+            return False
+        result = self._commit_configuration_documents(
+            {"Plates.json": proposed},
+            operator=operator,
+            reason=reason,
+            workflow="plate_calibration",
+        )
+        if result:
+            self.model.well_plate.discard_temp_calibrations()
+        return result
+
+    def record_configuration_attempt(self, *, event_type, operator, reason, workflow, details=None):
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return None
+        try:
+            return service.record_attempt(
+                event_type=event_type,
+                operator=operator,
+                reason=reason,
+                workflow=workflow,
+                details=details,
+            )
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit("Configuration Audit Failed", str(exc))
+            return False
+
+    def verify_configuration_targets(self, confirmations, *, operator, reason, method="physical_check", service_record_reference=None):
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return False
+        try:
+            guard = getattr(self, "configuration_safety_guard", None)
+            if guard is not None:
+                guard.validate_active_documents(read_governed_documents(service.paths))
+            result = service.verify_targets(
+                confirmations,
+                operator=operator,
+                reason=reason,
+                method=method,
+                service_record_reference=service_record_reference,
+            )
+            self.saved_target_authorizer = service.saved_target_authorizer
+            return result
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit("Configuration Verification Failed", str(exc))
+            return False
+
+    def import_configuration_files(self, selected_files, *, operator, reason):
+        """Import an explicit governed-file mapping and refresh runtime state."""
+
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return False
+        supported = {"Locations.json", "Plates.json", "RegulatorProfiles.json"}
+        unsupported = sorted(set(selected_files).difference(supported))
+        if unsupported:
+            self.error_occurred_signal.emit(
+                "Configuration Import Failed",
+                "This running application cannot safely install imported "
+                f"{', '.join(unsupported)}. Use a reviewed offline migration workflow.",
+            )
+            return False
+        try:
+            guard = getattr(self, "configuration_safety_guard", None)
+            if guard is not None and set(selected_files).intersection({"Locations.json", "Plates.json"}):
+                complete = read_governed_documents(service.paths)
+                for filename, source_path in selected_files.items():
+                    with open(source_path, "r", encoding="utf-8") as source:
+                        complete[filename] = json.load(source)
+                guard.validate_active_documents(complete)
+            result = service.import_files(
+                selected_files,
+                operator=operator,
+                reason=reason,
+            )
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit("Configuration Import Failed", str(exc))
+            return False
+        if not self._install_committed_configuration(result):
+            return False
+        return result
+
+    def restore_configuration_transaction(self, transaction_id, *, operator, reason, machine_id_confirmation):
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return False
+        try:
+            result = service.restore_transaction(
+                transaction_id,
+                operator=operator,
+                reason=reason,
+                machine_id_confirmation=machine_id_confirmation,
+            )
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit("Configuration Restore Failed", str(exc))
+            return False
+        if not self._install_committed_configuration(result):
+            return False
+        return result
 
     def home_complete_handler(self):
         """Handle the home complete signal."""
@@ -5823,6 +7100,117 @@ class Controller(QObject):
     def check_if_all_completed(self):
         """Check if all commands have been completed."""
         return self.machine.check_if_all_completed()
+
+    def _saved_target_authorization_request(
+        self,
+        *,
+        name,
+        original_target,
+        final_target,
+        x_offset,
+        z_offset,
+        manual,
+        override,
+        ignore_safe_height,
+    ):
+        authorizer = getattr(self, "saved_target_authorizer", None)
+        paths = getattr(self, "machine_data_paths", None)
+        if authorizer is None or paths is None:
+            return None
+        normalized = str(name or "").strip().casefold()
+        target_key = f"location:{normalized}"
+        target_kind = "location"
+        base_value = dict(original_target)
+        if normalized.startswith("slot-"):
+            calibrations = getattr(self.model.rack_model, "calibrations", {})
+            left = calibrations.get("rack_position_Left")
+            right = calibrations.get("rack_position_Right")
+            if not isinstance(left, dict) or not isinstance(right, dict):
+                return SavedTargetAuthorizationRequest(
+                    paths.machine_uuid,
+                    "rack:primary",
+                    "rack",
+                    {},
+                    dict(final_target),
+                    "rack_slot_move",
+                    {},
+                    manual,
+                    override,
+                    ignore_safe_height,
+                )
+            target_key = "rack:primary"
+            target_kind = "rack"
+            base_value = {"Left": dict(left), "Right": dict(right)}
+        elif normalized == "plate":
+            plate = getattr(self.model, "well_plate", None)
+            get_name = getattr(plate, "get_current_plate_name", None)
+            get_calibrations = getattr(plate, "get_all_current_plate_calibrations", None)
+            if callable(get_name) and callable(get_calibrations):
+                target_key = f"plate:{str(get_name()).casefold()}"
+                target_kind = "plate"
+                base_value = dict(get_calibrations() or {})
+        return SavedTargetAuthorizationRequest(
+            machine_uuid=paths.machine_uuid,
+            target_key=target_key,
+            target_kind=target_kind,
+            base_value=base_value,
+            final_coordinates=dict(final_target),
+            workflow="move_to_location",
+            offsets={"X": int(x_offset), "Y": 0, "Z": int(z_offset)},
+            manual=bool(manual),
+            override=bool(override),
+            ignore_safe_height=bool(ignore_safe_height),
+        )
+
+    def _authorize_saved_target(self, **kwargs):
+        authorizer = getattr(self, "saved_target_authorizer", None)
+        request = self._saved_target_authorization_request(**kwargs)
+        if request is None:
+            return True
+        decision = authorizer.authorize(request)
+        if decision.allowed:
+            return True
+        self.error_occurred_signal.emit("Move Blocked", decision.message)
+        print(
+            f"Move blocked by saved-target verification: "
+            f"{decision.reason_code}: {decision.message}"
+        )
+        return False
+
+    def _authorize_active_plate_derived_target(self, final_target, workflow):
+        authorizer = getattr(self, "saved_target_authorizer", None)
+        paths = getattr(self, "machine_data_paths", None)
+        if authorizer is None or paths is None:
+            return True
+        plate = getattr(self.model, "well_plate", None)
+        get_name = getattr(plate, "get_current_plate_name", None)
+        get_calibrations = getattr(plate, "get_all_current_plate_calibrations", None)
+        if not callable(get_name) or not callable(get_calibrations):
+            self.error_occurred_signal.emit(
+                "Move Blocked", "Active plate calibration evidence is unavailable."
+            )
+            return False
+        request = SavedTargetAuthorizationRequest(
+            machine_uuid=paths.machine_uuid,
+            target_key=f"plate:{str(get_name()).casefold()}",
+            target_kind="plate",
+            base_value=dict(get_calibrations() or {}),
+            final_coordinates=dict(final_target),
+            workflow=str(workflow),
+            offsets={},
+            manual=False,
+            override=True,
+            ignore_safe_height=False,
+        )
+        decision = authorizer.authorize(request)
+        if decision.allowed:
+            return True
+        self.error_occurred_signal.emit("Move Blocked", decision.message)
+        print(
+            f"Plate-derived move blocked by verification: "
+            f"{decision.reason_code}: {decision.message}"
+        )
+        return False
 
     def move_to_location(self, name, direct=True, safe_y=False, x_offset: int = 0,z_offset: int = 0,manual=False,coords=None,override=False,ignore_safe_height=False,on_complete=None):
         """Move to the saved location."""
@@ -5891,6 +7279,18 @@ class Controller(QObject):
             final_target['X'] += x_offset
         if z_offset != 0:
             final_target['Z'] += z_offset
+
+        if not self._authorize_saved_target(
+            name=name,
+            original_target=original_target,
+            final_target=final_target,
+            x_offset=x_offset,
+            z_offset=z_offset,
+            manual=manual,
+            override=override,
+            ignore_safe_height=ignore_safe_height,
+        ):
+            return False
 
         needs_route_safe_z = (
             (current_is_camera or target_is_camera) or
@@ -6536,6 +7936,13 @@ class Controller(QObject):
             "current_barrier_seq32": None,
             "soft_stop_pending": False,
             "soft_stop_phase": None,
+            "soft_stop_origin": None,
+            "soft_stop_frozen_barrier_seq32": None,
+            "soft_stop_attempt_token": 0,
+            "soft_stop_recovery_reason": None,
+            "soft_stop_phase_before_pause": None,
+            "soft_stop_resume_sent": False,
+            "soft_stop_pause_during_clearing": False,
             "pause_departure_pending": True,
             "pause_departure_accel": int(
                 getattr(self, "_array_pause_departure_accel", ARRAY_PAUSE_DEPARTURE_ACCEL)
@@ -6777,6 +8184,12 @@ class Controller(QObject):
             self._complete_array_finalize("hard_abort")
             return False
 
+        if not self._authorize_active_plate_derived_target(
+            well_coords, "print_array_well"
+        ):
+            self._complete_array_finalize("hard_abort")
+            return False
+
         apply_pause_departure_safeguards = bool(context.get("pause_departure_pending"))
         pause_departure_settle_ms = max(0, int(context.get("pause_departure_settle_ms") or 0))
 
@@ -6944,7 +8357,15 @@ class Controller(QObject):
         stock_id = context.get("stock_id", stock_id)
         remaining_wells = self._get_array_remaining_wells(stock_id)
         if not remaining_wells and not context.get("queued_wells"):
-            self._enqueue_array_finalize("completed")
+            if (
+                self.get_array_run_state() == "stop_requested"
+                and context.get("soft_stop_origin") == "immediate_pause"
+            ):
+                # The watermark status that follows this completion owns the
+                # one transport resume and final park sequence.
+                context["soft_stop_pending"] = True
+            else:
+                self._enqueue_array_finalize("completed")
         elif self.get_array_run_state() == "stop_requested":
             context["soft_stop_pending"] = True
             self._maybe_complete_array_soft_stop_after_catchup()
@@ -7067,6 +8488,9 @@ class Controller(QObject):
                 "Review the saved progress before printing again.",
             )
             print(f"Could not synchronize final experiment state: {exc}")
+        self._invalidate_paused_array_soft_stop_attempt(
+            getattr(self, "_array_context", None)
+        )
         self._array_context = None
 
         if reason in {"soft_stop", "refill_required"}:

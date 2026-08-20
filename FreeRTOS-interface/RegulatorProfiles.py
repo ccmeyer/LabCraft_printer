@@ -362,6 +362,17 @@ class RegulatorProfileStore:
     def __init__(self, path=None):
         self.path = Path(path) if path is not None else None
         self.document = None
+        self.transaction_repository = None
+
+    def bind_transaction_repository(self, repository):
+        self.transaction_repository = repository
+
+    def set_document_from_repository(self, document):
+        """Install an already-persisted document without writing it again."""
+
+        validated = validate_document(document)
+        self.document = copy.deepcopy(validated)
+        return copy.deepcopy(self.document)
 
     def _resolve_path(self):
         if self.path is None:
@@ -383,6 +394,10 @@ class RegulatorProfileStore:
         return copy.deepcopy(self.document)
 
     def save(self, document=None):
+        if self.transaction_repository is not None:
+            raise RegulatorProfileError(
+                "Canonical regulator profiles must be committed through the configuration transaction service."
+            )
         path = self._resolve_path()
         if document is None:
             document = self.document if self.document is not None else factory_default_document()

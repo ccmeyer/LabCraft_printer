@@ -128,6 +128,53 @@ def test_update_window_failure_state_shows_reopen_close_and_log_path(qapp, tmp_p
     window.close()
 
 
+def test_update_window_recovery_failure_never_offers_reopen(qapp, tmp_path):
+    window = _make_window(qapp, tmp_path)
+    result = updater.UpdateResult(
+        updater.STATUS_RECOVERY_REQUIRED,
+        updater.EXIT_CODES[updater.STATUS_RECOVERY_REQUIRED],
+        "Update recovery is required before LabCraft can start.",
+        repo_root=tmp_path,
+        before_sha="abc",
+        after_sha="def",
+        relaunch_authorized=False,
+        safe_to_reopen_current=False,
+    )
+
+    window.handle_finished(result)
+
+    assert window.reopen_button.isHidden() is True
+    assert window.retry_launch_button.isHidden() is True
+    assert window.close_button.isHidden() is False
+    window.close()
+
+
+def test_update_window_success_without_receipt_does_not_launch(qapp, tmp_path):
+    launches = []
+    window = _make_window(
+        qapp,
+        tmp_path,
+        launcher=lambda command, cwd: launches.append((command, cwd)),
+    )
+    result = updater.UpdateResult(
+        updater.STATUS_UPDATED,
+        0,
+        "App revision changed; recovery authorization is incomplete.",
+        repo_root=tmp_path,
+        before_sha="abc",
+        after_sha="def",
+        relaunch_authorized=False,
+        safe_to_reopen_current=False,
+    )
+
+    window.handle_finished(result)
+
+    assert launches == []
+    assert window.close_button.isHidden() is False
+    assert window.exit_code == updater.EXIT_CODES[updater.STATUS_RECOVERY_REQUIRED]
+    window.close()
+
+
 def test_update_window_reopen_current_version_launches_and_preserves_failure_code(qapp, tmp_path):
     launches = []
     window = _make_window(

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QAbstractItemView, QComboBox, QDoubleSpinBox, QGro
 import LocalConfig
 import View as view_module
 from CalibrationMemoryStore import CalibrationMemoryStore
+from ExecutionPlan import ExecutionPlanState
 from Model import (
     CURRENT_PROFILE,
     EJECTION_VOLUME_HARD_MAX_NL,
@@ -267,6 +268,67 @@ def _build_real_dialog():
     # exercising the unsaved prompt explicitly restore this to False.
     dialog._allow_close_without_prompt = True
     return dialog
+
+
+def _install_successful_new_session_handler(dialog, base_dir):
+    dialog.model.experiments_root = str(base_dir)
+
+    def start_new_session():
+        dialog.model.reset_experiment_model()
+        dialog.model.initialize_experiment(base_dir=str(base_dir))
+        return dialog.model.experiment_dir_path
+
+    dialog.main_window.start_new_experiment_session = Mock(
+        side_effect=start_new_session
+    )
+    return dialog.main_window.start_new_experiment_session
+
+
+def _seed_new_experiment_origin(dialog, *, upload_mode, lifecycle):
+    if upload_mode is not None:
+        data = {"Drug (mM)": [1.0, 2.0]}
+        if upload_mode == "explicit_wells":
+            data = {"Well": ["A1", "B1"], **data}
+        dialog.model.set_uploaded_design_from_dataframe(
+            pd.DataFrame(data), source_path="prior-design.csv"
+        )
+        dialog._uploaded_design_active = True
+        dialog._uploaded_design_path = "prior-design.csv"
+        dialog._load_factors_into_table()
+        dialog._apply_uploaded_design_mode_to_ui(True)
+        dialog._apply_manual_assignment_lock_state()
+
+    plan_state = {
+        "editable": None,
+        "reloaded_zero_progress": ExecutionPlanState.PREPARED,
+        "partial": ExecutionPlanState.ACTIVE,
+        "completed": ExecutionPlanState.COMPLETED,
+    }[lifecycle]
+    if plan_state is not None:
+        dialog.model._execution_plan_snapshot = SimpleNamespace(state=plan_state)
+        dialog.model._execution_plan_reload_read_only = True
+
+    if lifecycle in {"partial", "completed"}:
+        added = 1 if lifecycle == "partial" else 2
+        dialog.model.progress_data = {
+            "A1": {
+                "reagents": {
+                    "Drug_1_mM": {
+                        "target_droplets": 2,
+                        "added_droplets": added,
+                    }
+                }
+            }
+        }
+        dialog._set_progress_protection(
+            True,
+            {
+                "total_added_droplets": added,
+                "wells_with_progress": 1,
+            },
+        )
+
+    dialog._refresh_all_lock_states()
 
 
 def _head_type_index(combo: QComboBox, head_type_id: str) -> int:
@@ -1132,6 +1194,10 @@ class _UnsavedPromptFake:
     def clickedButton(self):
         return self.clicked_button
 
+    @staticmethod
+    def warning(*_args, **_kwargs):
+        return None
+
 
 @pytest.mark.parametrize(
     ("choice", "save_result", "expected", "expected_save_calls"),
@@ -1174,13 +1240,262 @@ def test_new_experiment_is_cancelled_before_replacing_an_unsaved_draft(qapp):
     dialog._allow_close_without_prompt = False
     dialog._mark_draft_dirty()
     dialog._confirm_unsaved_changes = Mock(return_value=False)
-    dialog.main_window.start_new_experiment_model = Mock()
+    dialog.main_window.start_new_experiment_session = Mock()
 
     assert dialog._on_new_experiment() is False
     dialog._confirm_unsaved_changes.assert_called_once_with(
         "starting a new experiment"
     )
-    dialog.main_window.start_new_experiment_model.assert_not_called()
+    dialog.main_window.start_new_experiment_session.assert_not_called()
+
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
+def test_new_experiment_cancelled_from_resume_ready_preserves_current_session(
+    monkeypatch,
+    qapp,
+):
+    dialog = _build_real_dialog()
+    _seed_new_experiment_origin(
+        dialog,
+        upload_mode="explicit_wells",
+        lifecycle="partial",
+    )
+    dialog._confirm_unsaved_changes = Mock(return_value=True)
+    dialog.main_window.controller = SimpleNamespace(
+        get_array_run_state=Mock(return_value="resume_ready")
+    )
+    dialog.main_window.start_new_experiment_session = Mock()
+    _UnsavedPromptFake.choice = "Cancel"
+    monkeypatch.setattr(view_module, "QMessageBox", _UnsavedPromptFake)
+
+    assert dialog._on_new_experiment() is False
+
+    dialog.main_window.start_new_experiment_session.assert_not_called()
+    assert dialog.model.has_uploaded_design() is True
+    assert dialog.model.progress_data
+    assert dialog._progress_protected is True
+    prompt = _UnsavedPromptFake.last_instance
+    assert prompt.title == "Start New Experiment?"
+    assert "will not be deleted" in prompt.informative_text
+    assert prompt.default_button is prompt.buttons["Cancel"]
+    assert prompt.escape_button is prompt.buttons["Cancel"]
+
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
+def test_new_experiment_accepts_resume_ready_detach_before_fresh_reset(
+    monkeypatch,
+    qapp,
+    tmp_path,
+):
+    dialog = _build_real_dialog()
+    _seed_new_experiment_origin(
+        dialog,
+        upload_mode="automatic_wells",
+        lifecycle="partial",
+    )
+    dialog._confirm_unsaved_changes = Mock(return_value=True)
+    dialog.main_window.controller = SimpleNamespace(
+        get_array_run_state=Mock(return_value="resume_ready")
+    )
+    start_new_session = _install_successful_new_session_handler(dialog, tmp_path)
+    _UnsavedPromptFake.choice = "Start New Experiment"
+    monkeypatch.setattr(view_module, "QMessageBox", _UnsavedPromptFake)
+
+    assert dialog._on_new_experiment() is True
+
+    start_new_session.assert_called_once_with()
+    assert dialog.model.has_uploaded_design() is False
+    assert dialog.model.progress_data == {}
+    assert dialog._progress_protected is False
+    assert dialog.add_reagent_btn.isEnabled() is True
+    assert dialog.status_lbl.text().startswith("New experiment created:")
+
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
+@pytest.mark.parametrize("lifecycle", ["editable", "completed"])
+def test_idle_new_experiment_does_not_show_resume_detach_prompt(
+    monkeypatch,
+    qapp,
+    lifecycle,
+):
+    dialog = _build_real_dialog()
+    _seed_new_experiment_origin(
+        dialog,
+        upload_mode=None,
+        lifecycle=lifecycle,
+    )
+    dialog.main_window.controller = SimpleNamespace(
+        get_array_run_state=Mock(return_value="idle")
+    )
+
+    def unexpected_prompt(*_args, **_kwargs):
+        raise AssertionError("idle experiments must not show the resume prompt")
+
+    monkeypatch.setattr(view_module, "QMessageBox", unexpected_prompt)
+
+    assert dialog._confirm_resume_ready_new_experiment() is True
+
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
+@pytest.mark.parametrize(
+    "upload_mode,lifecycle",
+    [
+        (None, "editable"),
+        (None, "reloaded_zero_progress"),
+        (None, "partial"),
+        (None, "completed"),
+        ("automatic_wells", "editable"),
+        ("explicit_wells", "editable"),
+        ("automatic_wells", "partial"),
+        ("explicit_wells", "partial"),
+        ("automatic_wells", "completed"),
+        ("explicit_wells", "completed"),
+    ],
+)
+def test_new_experiment_restores_fresh_editable_state(
+    qapp,
+    tmp_path,
+    upload_mode,
+    lifecycle,
+):
+    dialog = _build_real_dialog()
+    _seed_new_experiment_origin(
+        dialog,
+        upload_mode=upload_mode,
+        lifecycle=lifecycle,
+    )
+    start_new_session = _install_successful_new_session_handler(dialog, tmp_path)
+
+    dialog.auto_update_chk.setChecked(False)
+    dialog.advanced_settings_panel.show()
+    dialog._auto_timer.start()
+    dialog._apply_requested = True
+    dialog._last_optimization_result = {"best": True, "source": "prior"}
+    dialog._design_optimization_dirty = False
+    dialog._set_stock_table_stale(True, "Prior stock warning")
+    dialog.v_spin.setStyleSheet("border:1px solid red;")
+    dialog.final_v_spin.setStyleSheet("border:1px solid red;")
+    dialog._recompute_silent = Mock(
+        side_effect=AssertionError("new experiment must not optimize an empty design")
+    )
+
+    assert dialog._on_new_experiment() is True
+
+    start_new_session.assert_called_once_with()
+    dialog._recompute_silent.assert_not_called()
+    assert dialog.model.factors == []
+    assert dialog.model.additional_conditions == []
+    assert dialog.model.has_uploaded_design() is False
+    assert dialog.model._uploaded_well_ids is None
+    assert dialog.model.progress_data == {}
+    assert dialog.model.is_execution_design_locked() is False
+
+    assert dialog._uploaded_design_active is False
+    assert dialog._uploaded_design_path is None
+    assert dialog._progress_protected is False
+    assert dialog._preserve_progress_on_finish is False
+    assert dialog._progress_reset_confirmed is False
+    assert dialog._progress_lock_status_message == ""
+    assert dialog._apply_requested is False
+    assert dialog.choice_groups == set()
+    assert dialog._design_optimization_dirty is True
+    assert dialog._last_optimization_result is None
+    assert dialog._stock_table_stale_active is False
+    assert dialog._auto_timer.isActive() is False
+    assert dialog._draft_is_dirty() is False
+
+    assert dialog.exp_name_edit.isEnabled() is True
+    assert dialog.exp_name_edit.isReadOnly() is False
+    assert dialog.add_reagent_btn.isEnabled() is True
+    assert dialog.upload_design_btn.isEnabled() is True
+    assert dialog.reset_upload_btn.isHidden() is True
+    assert dialog.run_btn.isEnabled() is True
+    assert dialog.save_btn.isEnabled() is True
+    assert dialog.v_spin.isEnabled() is True
+    assert dialog.final_v_spin.isEnabled() is True
+    assert dialog.fill_name_edit.isEnabled() is True
+    assert dialog.allow_two_chk.isEnabled() is True
+    assert dialog.subset_chk.isEnabled() is True
+    assert dialog.finish_btn.isEnabled() is True
+    assert dialog.finish_btn.text() == ExperimentDesignDialog.ACTION_FINALIZE_DESIGN
+    assert dialog.lifecycle_banner.isHidden() is True
+    assert dialog.stock_table_status_lbl.text() == ""
+    assert dialog.stock_warning_heading_lbl.isHidden() is True
+    assert dialog.v_spin.styleSheet() == ""
+    assert dialog.final_v_spin.styleSheet() == ""
+    assert dialog.status_lbl.text().startswith("New experiment created:")
+
+    # User workflow/presentation preferences survive the experiment reset.
+    assert dialog.auto_update_chk.isChecked() is False
+    assert dialog.advanced_settings_panel.isHidden() is False
+
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
+def test_new_experiment_backend_failure_preserves_prior_editor_state(
+    monkeypatch,
+    qapp,
+):
+    dialog = _build_real_dialog()
+    _seed_new_experiment_origin(
+        dialog,
+        upload_mode="explicit_wells",
+        lifecycle="partial",
+    )
+    dialog._last_optimization_result = {"best": True, "source": "prior"}
+    dialog._design_optimization_dirty = False
+    dialog.main_window.start_new_experiment_session = Mock(
+        side_effect=RuntimeError("new session failed")
+    )
+    dialog.main_window.controller = SimpleNamespace(
+        get_array_run_state=Mock(return_value="resume_ready")
+    )
+    _UnsavedPromptFake.choice = "Start New Experiment"
+    monkeypatch.setattr(view_module, "QMessageBox", _UnsavedPromptFake)
+    refresh_locks = Mock()
+    dialog._refresh_all_lock_states = refresh_locks
+
+    assert dialog._on_new_experiment() is None
+
+    dialog.main_window.start_new_experiment_session.assert_called_once_with()
+    refresh_locks.assert_not_called()
+    assert dialog.model.has_uploaded_design() is True
+    assert dialog._uploaded_design_active is True
+    assert dialog._uploaded_design_path == "prior-design.csv"
+    assert dialog._progress_protected is True
+    assert dialog._preserve_progress_on_finish is True
+    assert dialog._design_optimization_dirty is False
+    assert dialog._last_optimization_result == {
+        "best": True,
+        "source": "prior",
+    }
+    assert dialog.add_reagent_btn.isEnabled() is False
+    assert dialog.status_lbl.text() == "New experiment failed: new session failed"
+
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
+def test_sync_controls_from_model_can_skip_recompute(qapp):
+    dialog = _build_real_dialog()
+    dialog.model.metadata["name"] = "fresh-controls"
+    dialog.model.metadata["target_reaction_volume_nL"] = 1234.0
+    dialog._recompute_silent = Mock()
+
+    dialog._sync_controls_from_model(recompute=False)
+
+    assert dialog.exp_name_edit.text() == "fresh-controls"
+    assert dialog.v_spin.value() == pytest.approx(1234.0)
+    dialog._recompute_silent.assert_not_called()
 
     dialog._allow_close_without_prompt = True
     dialog.close()

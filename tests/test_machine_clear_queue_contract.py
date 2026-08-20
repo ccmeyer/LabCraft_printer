@@ -1,7 +1,37 @@
 import time
 from types import SimpleNamespace
 
+import Machine_FreeRTOS as mfr
 from Machine_FreeRTOS import Machine
+
+
+def test_clear_queue_preserves_live_serial_input(qapp, test_profile, fake_serial_main):
+    machine = Machine(SimpleNamespace(), profile=test_profile)
+    machine.ser = fake_serial_main
+    machine._start_ack_wait = lambda *args, **kwargs: None
+
+    assert machine.clear_command_queue() is True
+
+    assert fake_serial_main.reset_input_buffer_calls == 0
+    assert fake_serial_main.writes == [
+        mfr.build_frame(mfr.CLEAR_QUEUE, machine._control_seq_base)
+    ]
+
+
+def test_clear_ack_timeout_does_not_disconnect_transport(qapp, test_profile, fake_serial_main):
+    machine = Machine(SimpleNamespace(), profile=test_profile)
+    machine.ser = fake_serial_main
+    machine._start_ack_wait = lambda *args, **kwargs: None
+    connection_losses = []
+    machine.serial_connection_lost.connect(connection_losses.append)
+
+    machine.clear_command_queue()
+    machine._on_clear_ack(timed_out=True)
+
+    assert machine.ser is fake_serial_main
+    assert fake_serial_main.is_open is True
+    assert connection_losses == []
+    assert machine._waiting_for_post_clear_status is True
 
 
 def test_clear_queue_timeout_keeps_tx_blocked_until_clear_status(qapp, test_profile, fake_serial_main):
