@@ -1,4 +1,5 @@
 from unittest.mock import Mock
+from types import SimpleNamespace
 
 from PySide6 import QtWidgets
 from PySide6.QtCore import Qt
@@ -88,6 +89,32 @@ def test_show_keyboard_shortcuts_execs_fresh_dialog_without_shortcut_callbacks(m
     instances[0].exec.assert_called_once_with()
     instances[1].exec.assert_called_once_with()
     callback.assert_not_called()
+
+
+def test_escape_shortcut_routes_to_explicit_pause_workflow():
+    callbacks = {}
+
+    class RecorderShortcutManager:
+        def add_shortcut(self, key, _description, callback):
+            callbacks[key] = callback
+
+    main_window = MainWindow.__new__(MainWindow)
+    main_window.shortcut_manager = RecorderShortcutManager()
+    main_window.controller = SimpleNamespace()
+    main_window.model = SimpleNamespace(
+        machine_model=SimpleNamespace(
+            step_size=1,
+            increase_step_size=Mock(),
+            decrease_step_size=Mock(),
+        )
+    )
+    main_window.well_plate_widget = SimpleNamespace(start_print_array=Mock())
+    main_window.pause_machine = Mock()
+
+    MainWindow.setup_shortcuts(main_window)
+    callbacks["Esc"]()
+
+    main_window.pause_machine.assert_called_once_with()
 
 
 def test_right_panel_action_row_wires_shortcuts_button(qapp):

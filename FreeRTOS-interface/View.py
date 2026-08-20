@@ -903,6 +903,88 @@ class XyMotionRecoveryDialog(QtWidgets.QDialog):
                     "then try again."
                 )
 
+class PauseActionDialog(QMessageBox):
+    RESUME = "resume"
+    KEEP_PAUSED = "keep_paused"
+    REQUEST_CLEAR = "request_clear"
+
+    def __init__(self, parent=None, *, array_active=False):
+        super().__init__(parent)
+        self.array_active = bool(array_active)
+        self.setIcon(QMessageBox.Warning)
+
+        if self.array_active:
+            self.setWindowTitle("Print Array Paused Immediately")
+            self.setText(
+                "The machine command queue is paused immediately, and the current well may be incomplete.\n\n"
+                "Resume Array continues the existing queue. Keep Paused makes no further command change. "
+                "Clearing the queue permanently aborts this experiment and it cannot be resumed."
+            )
+            resume_text = "Resume Array"
+            clear_text = "Abort Array and Clear Queue…"
+        else:
+            self.setWindowTitle("Machine Paused")
+            self.setText(
+                "Machine commands are paused. Resume Commands continues queued work. "
+                "Keep Paused makes no further command change. Clearing the command queue cancels "
+                "queued commands and they cannot be resumed."
+            )
+            resume_text = "Resume Commands"
+            clear_text = "Clear Command Queue…"
+
+        self.resume_button = self.addButton(resume_text, QMessageBox.ActionRole)
+        self.keep_paused_button = self.addButton("Keep Paused", QMessageBox.RejectRole)
+        self.clear_queue_button = self.addButton(clear_text, QMessageBox.DestructiveRole)
+        self.setDefaultButton(self.keep_paused_button)
+        self.setEscapeButton(self.keep_paused_button)
+
+    def action_for_button(self, button):
+        if button is self.resume_button:
+            return self.RESUME
+        if button is self.clear_queue_button:
+            return self.REQUEST_CLEAR
+        return self.KEEP_PAUSED
+
+    def exec_action(self):
+        self.exec()
+        return self.action_for_button(self.clickedButton())
+
+
+class ClearQueueConfirmationDialog(QMessageBox):
+    def __init__(self, parent=None, *, array_active=False):
+        super().__init__(parent)
+        self.array_active = bool(array_active)
+        self.setIcon(QMessageBox.Critical)
+
+        if self.array_active:
+            self.setWindowTitle("Abort Print Array?")
+            self.setText(
+                "Clearing the command queue will permanently abort this print-array experiment. "
+                "The current well may be incomplete or uncertain, and this experiment cannot be resumed.\n\n"
+                "Abort the array and clear the queue?"
+            )
+            confirm_text = "Abort Array and Clear Queue"
+        else:
+            self.setWindowTitle("Clear Command Queue?")
+            self.setText(
+                "Clearing the command queue cancels all queued commands. They cannot be resumed.\n\n"
+                "Clear the command queue?"
+            )
+            confirm_text = "Clear Command Queue"
+
+        self.keep_paused_button = self.addButton("Keep Paused", QMessageBox.RejectRole)
+        self.confirm_button = self.addButton(confirm_text, QMessageBox.DestructiveRole)
+        self.setDefaultButton(self.keep_paused_button)
+        self.setEscapeButton(self.keep_paused_button)
+
+    def confirmed_for_button(self, button):
+        return button is self.confirm_button
+
+    def exec_confirmed(self):
+        self.exec()
+        return self.confirmed_for_button(self.clickedButton())
+
+
 class MainWindow(QMainWindow):
     CLOSE_DISCONNECT_TIMEOUT_MS = 5000
 
@@ -932,6 +1014,8 @@ class MainWindow(QMainWindow):
         self._xy_motion_recovery_dialog = None
         self._xy_motion_recovery_report = {}
         self._xy_motion_recovery_state = "idle"
+        self._pause_action_flow_active = False
+        self._pause_action_dialog = None
 
         base_title = "Droplet Printer Interface v1.0.3"
         if self.runtime_context.is_simulation:
@@ -2112,18 +2196,77 @@ class MainWindow(QMainWindow):
         if self._is_yes_response(response):
             self.controller.reset_all_arrays()
     
-    def pause_machine(self):
-        """Pause the machine."""
-        self.controller.pause_commands()
-        response = self.popup_yes_no('Pause','Printing paused. Do you want to resume?')
-        if self._is_yes_response(response):
-            print('Resuming printing')
-            self.controller.resume_commands()
+    def _machine_is_connected(self):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        is_connected = getattr(machine_model, "is_connected", None)
+        if callable(is_connected):
+            try:
+                return bool(is_connected())
+            except Exception:
+                return False
+        return bool(getattr(machine_model, "machine_connected", False))
+
+    def _active_print_array_is_running(self):
+        state_getter = getattr(getattr(self, "controller", None), "get_array_run_state", None)
+        if not callable(state_getter):
+            return False
+        try:
+            return str(state_getter() or "idle") in {"running", "stop_requested"}
+        except Exception:
+            return False
+
+    def _focus_active_pause_dialog(self):
+        dialog = getattr(self, "_pause_action_dialog", None)
+        if dialog is None:
             return
-        else:
-            print('Clearing Queue')
-            self.controller.clear_command_queue()
-            # self.controller.reset_acceleration()
+        for method_name in ("show", "raise_", "activateWindow"):
+            method = getattr(dialog, method_name, None)
+            if callable(method):
+                method()
+
+    def pause_machine(self):
+        """Pause commands and present explicit, fail-safe follow-up actions."""
+        if getattr(self, "_pause_action_flow_active", False):
+            self._focus_active_pause_dialog()
+            return
+
+        if not self._machine_is_connected():
+            self.popup_message(
+                "Pause Unavailable",
+                "The machine is not connected, so there are no machine commands to pause.",
+            )
+            return
+
+        self._pause_action_flow_active = True
+        try:
+            machine_model = getattr(self.model, "machine_model", None)
+            if not bool(getattr(machine_model, "paused", False)):
+                self.controller.pause_commands()
+
+            array_active = self._active_print_array_is_running()
+            action_dialog = PauseActionDialog(self, array_active=array_active)
+            self._pause_action_dialog = action_dialog
+            action = action_dialog.exec_action()
+
+            if action == PauseActionDialog.RESUME:
+                self.controller.resume_commands()
+                return
+            if action != PauseActionDialog.REQUEST_CLEAR:
+                return
+
+            # Use the stronger warning if the array was active when paused or is
+            # still active when the destructive action is requested.
+            array_active = array_active or self._active_print_array_is_running()
+            confirmation_dialog = ClearQueueConfirmationDialog(
+                self,
+                array_active=array_active,
+            )
+            self._pause_action_dialog = confirmation_dialog
+            if confirmation_dialog.exec_confirmed():
+                self.controller.clear_command_queue()
+        finally:
+            self._pause_action_dialog = None
+            self._pause_action_flow_active = False
 
     def add_new_location(self):
         """Save the current location information."""
@@ -2391,6 +2534,9 @@ class ConnectionWidget(QGroupBox):
         self.model.machine_model.machine_state_updated.connect(
             self.update_machine_connect_button
         )
+        machine_paused = getattr(self.model.machine_model, "machine_paused", None)
+        if machine_paused is not None:
+            machine_paused.connect(self._refresh_pause_machine_button)
         self.controller.machine.disconnect_complete_signal.connect(
             self._handle_machine_disconnect_complete
         )
@@ -2452,6 +2598,13 @@ class ConnectionWidget(QGroupBox):
         layout.addWidget(QLabel("Device"), 0, 0)
         layout.addWidget(QLabel("Port"),   0, 1)
         layout.addWidget(QLabel("Connect"),0, 2)
+        layout.addWidget(QLabel("Safety"), 0, 3)
+
+        self.pause_machine_button = QPushButton("Pause Machine Now")
+        self.pause_machine_button.setObjectName("pauseMachineButton")
+        self.pause_machine_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.pause_machine_button.clicked.connect(self.main_window.pause_machine)
+        layout.addWidget(self.pause_machine_button, 1, 3)
 
         if not self.legacy_mode:
             # ----- CURRENT MODE (unchanged behavior) -----
@@ -2637,6 +2790,55 @@ class ConnectionWidget(QGroupBox):
             self.port_label.setToolTip("Contained simulator target; no serial hardware is opened.")
         self.update_machine_connect_button(self.model.machine_model.machine_connected)
 
+    @QtCore.Slot()
+    def _refresh_pause_machine_button(self, *_args):
+        machine_model = self.model.machine_model
+        machine_connected = bool(getattr(machine_model, "machine_connected", False))
+        unavailable = (
+            not machine_connected
+            or self._machine_connect_pending
+            or self._machine_disconnect_pending
+        )
+        if self.simulation_mode:
+            simulation_bound = bool(
+                self._simulation_target == "SIMULATED"
+                and callable(self._simulation_connect_callback)
+                and callable(self._simulation_disconnect_callback)
+            )
+            unavailable = unavailable or not simulation_bound
+
+        if unavailable:
+            color = self.color_dict.get(
+                "mid_gray",
+                self.color_dict.get("dark_gray", "#6e6e6e"),
+            )
+            self.pause_machine_button.setText("Pause Machine Now")
+            self.pause_machine_button.setEnabled(False)
+            self.pause_machine_button.setStyleSheet(
+                f"background-color: {color}; color: white;"
+            )
+            self.pause_machine_button.setToolTip(
+                "Connect the machine before pausing commands."
+            )
+            return
+
+        if bool(getattr(machine_model, "paused", False)):
+            color = self.color_dict.get("orange", "#f4743b")
+            self.pause_machine_button.setText("Paused — Actions…")
+            self.pause_machine_button.setToolTip(
+                "Machine commands are paused. Reopen the resume, keep paused, or clear choices."
+            )
+        else:
+            color = self.color_dict.get("dark_red", "#8a0303")
+            self.pause_machine_button.setText("Pause Machine Now")
+            self.pause_machine_button.setToolTip(
+                "Immediately pause machine commands and open explicit pause actions."
+            )
+        self.pause_machine_button.setEnabled(True)
+        self.pause_machine_button.setStyleSheet(
+            f"background-color: {color}; color: white;"
+        )
+
     # def update_machine_connect_button(self, machine_connected: bool):
     #     """Set button text/color based on connection state."""
     #     if machine_connected:
@@ -2697,6 +2899,7 @@ class ConnectionWidget(QGroupBox):
                 )
             if self.legacy_mode:
                 self.machine_port_combo.setEnabled(False)
+            self._refresh_pause_machine_button()
             return
         if not machine_connected and self._machine_disconnect_pending:
             self._machine_disconnect_pending = False
@@ -2714,6 +2917,7 @@ class ConnectionWidget(QGroupBox):
             )
             if self.legacy_mode:
                 self.machine_port_combo.setEnabled(False)
+            self._refresh_pause_machine_button()
             return
 
         self.machine_connect_button.setEnabled(True)
@@ -2733,6 +2937,7 @@ class ConnectionWidget(QGroupBox):
             )
             if self.legacy_mode:
                 self.machine_port_combo.setEnabled(True)
+        self._refresh_pause_machine_button()
 
     # --------- Balance connect/disconnect ----------
     def request_balance_connect_change(self):
@@ -6004,11 +6209,6 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.start_print_array_button.setEnabled(False)
         self.start_print_array_button.clicked.connect(self.start_print_array)
         self.bottom_layout.addWidget(self.start_print_array_button)
-
-        self.pause_machine_button = QPushButton("Pause Now")
-        self.pause_machine_button.setStyleSheet(f"background-color: {self.color_dict['dark_red']}; color: white;")
-        self.pause_machine_button.clicked.connect(self.main_window.pause_machine)
-        self.bottom_layout.addWidget(self.pause_machine_button)
 
         self.reagent_selection = QComboBox()
         self._populate_reagent_selection()

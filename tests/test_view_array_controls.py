@@ -1,3 +1,4 @@
+import inspect
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
@@ -557,7 +558,7 @@ def test_well_plate_widget_reset_resume_passes_dock_confirmation_with_overrides(
     )
 
 
-def test_shift_p_shortcut_uses_well_plate_print_launch_path():
+def test_array_and_pause_shortcuts_use_their_explicit_launch_paths():
     shortcuts = {}
 
     class RecorderShortcutManager:
@@ -575,11 +576,21 @@ def test_shift_p_shortcut_uses_well_plate_print_launch_path():
         )
     )
     main_window.well_plate_widget = SimpleNamespace(start_print_array=Mock())
+    main_window.pause_machine = Mock()
 
     MainWindow.setup_shortcuts(main_window)
     shortcuts["Shift+p"]()
+    shortcuts["Esc"]()
 
     main_window.well_plate_widget.start_print_array.assert_called_once_with()
+    main_window.pause_machine.assert_called_once_with()
+
+
+def test_well_plate_controls_do_not_include_immediate_pause_button():
+    source = inspect.getsource(WellPlateWidget.init_ui)
+
+    assert "pause_machine_button" not in source
+    assert "Pause Now" not in source
 
 
 def test_well_plate_widget_running_button_requests_soft_stop():
