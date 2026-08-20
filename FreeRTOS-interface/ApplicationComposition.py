@@ -463,6 +463,15 @@ def build_application_components(
         dependencies,
         experimental_features,
     )
+    authorized_context = dependencies.authorized_machine_context
+    if (
+        dependencies.runtime_context.mode is RuntimeMode.PRODUCTION
+        and getattr(authorized_context, "configuration_transactions", None) is not None
+        and getattr(authorized_context, "configuration_safety_guard", None) is None
+    ):
+        raise ApplicationConstructionError(
+            "Authorized production configuration is missing its validated safety guard."
+        )
 
     model = machine = controller = balance = balance_service = view = None
     try:
@@ -513,6 +522,13 @@ def build_application_components(
                 getattr(
                     dependencies.authorized_machine_context,
                     "configuration_transactions",
+                    None,
+                )
+            ),
+            configuration_safety_guard=(
+                getattr(
+                    dependencies.authorized_machine_context,
+                    "configuration_safety_guard",
                     None,
                 )
             ),

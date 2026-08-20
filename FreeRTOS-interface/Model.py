@@ -15160,6 +15160,11 @@ class MachineModel(QObject):
         self.current_x = 0
         self.current_y = 0
         self.current_z = 0
+        # Position capture evidence is host-monotonic and per-axis.  Values are
+        # refreshed only when that axis is present in an MCU status payload.
+        self._position_received_monotonic = {axis: None for axis in ("X", "Y", "Z")}
+        self._position_generation = {axis: 0 for axis in ("X", "Y", "Z")}
+        self._motion_trust_epoch = 0
         self.current_p = 0
         self.current_r = 0
 
@@ -15232,10 +15237,12 @@ class MachineModel(QObject):
 
     def connect_machine(self):
         print("Model connect")
+        self._advance_motion_trust_epoch()
         self.machine_connected = True
         self.machine_state_updated.emit(self.machine_connected)
 
     def disconnect_machine(self):
+        self._advance_motion_trust_epoch()
         self.machine_connected = False
         self.machine_state_updated.emit(self.machine_connected)
         self.motors_enabled = False
@@ -15246,6 +15253,7 @@ class MachineModel(QObject):
         self.clear_last_reset_report()
 
     def recover_after_board_reset(self):
+        self._advance_motion_trust_epoch()
         self.machine_connected = False
         self.machine_state_updated.emit(self.machine_connected)
         self.motors_enabled = False
@@ -15481,6 +15489,47 @@ class MachineModel(QObject):
         self.current_y = int(y)
         self.current_z = int(z)
 
+    def update_reported_position(self, status, *, received_monotonic=None):
+        """Install only axes actually present in one received status payload."""
+
+        if not isinstance(status, dict):
+            raise TypeError("status must be a dict")
+        received = time.monotonic() if received_monotonic is None else float(received_monotonic)
+        if not math.isfinite(received):
+            raise ValueError("received_monotonic must be finite")
+        for axis, attribute in (("X", "current_x"), ("Y", "current_y"), ("Z", "current_z")):
+            if axis not in status:
+                continue
+            setattr(self, attribute, int(status[axis]))
+            self._position_received_monotonic[axis] = received
+            self._position_generation[axis] += 1
+
+    def get_position_telemetry_snapshot(self, *, now_monotonic=None):
+        now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+        axes = {}
+        values = self.get_current_position_dict()
+        for axis in ("X", "Y", "Z"):
+            received = self._position_received_monotonic[axis]
+            age_ms = None if received is None else max(0.0, (now - received) * 1000.0)
+            axes[axis] = {
+                "value": values[axis],
+                "generation": self._position_generation[axis],
+                "received_monotonic": received,
+                "age_ms": age_ms,
+            }
+        return {
+            "trust_epoch": self._motion_trust_epoch,
+            "axes": axes,
+        }
+
+    def get_motion_trust_epoch(self):
+        return self._motion_trust_epoch
+
+    def _advance_motion_trust_epoch(self):
+        self._motion_trust_epoch += 1
+        self._position_received_monotonic = {axis: None for axis in ("X", "Y", "Z")}
+        return self._motion_trust_epoch
+
     def update_current_p_motor(self, p):
         self.current_p = int(p)
 
@@ -15674,12 +15723,14 @@ class MachineModel(QObject):
         return {"X": self.current_x, "Y": self.current_y, "Z": self.current_z}
 
     def handle_home_complete(self):
+        self._advance_motion_trust_epoch()
         self.motors_homed = True
         self.current_location = "Home"
         self.home_status_signal.emit()
         print("Motors homed.")
 
     def reset_home_status(self):
+        self._advance_motion_trust_epoch()
         self.motors_homed = False
         self.current_location = "Unknown"
 
@@ -16487,9 +16538,7 @@ class Model(QObject):
         Update the state of the machine model
         '''
         status_keys = status_dict.keys()
-        self.machine_model.update_current_position(status_dict.get('X', self.machine_model.current_x),
-                                                   status_dict.get('Y', self.machine_model.current_y),
-                                                   status_dict.get('Z', self.machine_model.current_z))
+        self.machine_model.update_reported_position(status_dict)
         
         self.machine_model.update_current_p_motor(status_dict.get('P', self.machine_model.current_p))
         self.machine_model.update_current_r_motor(status_dict.get('R', self.machine_model.current_r))   

@@ -1,0 +1,51 @@
+{
+  "schema_name": "labcraft.configuration_change_policy",
+  "schema_version": 1,
+  "policy_id": "labcraft-rc2-configuration-guard-v1",
+  "supported_hardware_profiles": [
+    "current",
+    "legacy"
+  ],
+  "position_telemetry_max_age_ms": 2500,
+  "reserved_location_names": [
+    "home",
+    "loading",
+    "pause",
+    "plate",
+    "balance",
+    "camera",
+    "rack_position_Left",
+    "rack_position_Right"
+  ],
+  "pair_only_location_names": [
+    "rack_position_Left",
+    "rack_position_Right"
+  ],
+  "reserved_location_prefixes": [
+    "slot-"
+  ],
+  "always_strong_target_classes": [
+    "camera",
+    "reserved_location",
+    "generic_location",
+    "rack",
+    "plate",
+    "new_target"
+  ],
+  "warning_thresholds_steps": {},
+  "rack": {
+    "slot_count": 5,
+    "orientation_axis": "Y",
+    "orientation_direction": "increasing"
+  },
+  "plate": {
+    "initial_orientation": "counterclockwise",
+    "maximum_transform_condition_number": null
+  },
+  "confirmation": {
+    "phrase_version": 1,
+    "template": "SAVE {target} {proposal_short_hash}"
+  },
+  "rationale": "Release-candidate safety baseline: all coordinate changes require strong confirmation until reviewed fleet characterization supports narrower routine thresholds.",
+  "approval_reference": "docs/machine_data_migration_milestone_5_implementation_plan.md"
+}

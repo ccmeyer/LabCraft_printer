@@ -42,6 +42,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime
 from pathlib import Path
 import cv2
+import copy
 from utilities import ShortcutManager, apply_pressure_plot_style
 from ExperimentAuditReader import ExperimentAuditReader, build_audit_markdown
 from ConfigurationHistoryReader import ConfigurationHistoryReader
@@ -498,6 +499,138 @@ class AuditTimelineWindow(QtWidgets.QDialog):
         self.status_label.setText(f"Exported audit markdown to {file_path}")
 
 
+class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
+    """Modal, assessment-driven preview for guarded coordinate changes."""
+
+    def __init__(self, assessment, parent=None):
+        super().__init__(parent)
+        self.assessment = copy.deepcopy(dict(assessment))
+        self.outcome = "cancelled"
+        self.setWindowTitle("Review Configuration Change")
+        self.resize(860, 680)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        result = self.assessment.get("result", "reject")
+        target = ", ".join(self.assessment.get("target_keys", []))
+        heading = QtWidgets.QLabel(
+            f"{result.replace('_', ' ').title()}: {target}\n"
+            f"Policy {self.assessment.get('policy_id')} "
+            f"({str(self.assessment.get('policy_sha256', ''))[:12]})\n"
+            f"Proposal {str(self.assessment.get('proposal_sha256', ''))[:12]}"
+        )
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        self.table = QtWidgets.QTableWidget(0, 8, self)
+        self.table.setHorizontalHeaderLabels(
+            ["Target", "Old X/Y/Z", "Proposed X/Y/Z", "Delta X", "Delta Y", "Delta Z", "Largest", "Rule"]
+        )
+        rows = self.assessment.get("changes", [])
+        self.table.setRowCount(len(rows))
+        rules = self.assessment.get("threshold_results", [])
+        for row_index, change in enumerate(rows):
+            before = change.get("before")
+            proposed = change.get("proposed") or {}
+            signed = change.get("signed_delta") or {}
+            absolute = change.get("absolute_delta") or {}
+            numeric = [value for value in absolute.values() if isinstance(value, int)]
+            rule = next(
+                (item.get("rule", "") for item in rules if item.get("target_key") == change.get("target_key")),
+                "",
+            )
+            values = (
+                change.get("target_key", ""),
+                "new" if before is None else f"{before.get('X')}/{before.get('Y')}/{before.get('Z')}",
+                f"{proposed.get('X')}/{proposed.get('Y')}/{proposed.get('Z')}",
+                signed.get("X"), signed.get("Y"), signed.get("Z"),
+                max(numeric) if numeric else "new",
+                rule,
+            )
+            for column, value in enumerate(values):
+                self.table.setItem(row_index, column, QtWidgets.QTableWidgetItem(str(value)))
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+        checks = QtWidgets.QPlainTextEdit(self)
+        checks.setReadOnly(True)
+        checks.setMaximumHeight(150)
+        checks.setPlainText(
+            "\n".join(
+                f"{'PASS' if item.get('passed') else 'REJECT'} — {item.get('code')}: {item.get('message')}"
+                for item in self.assessment.get("hard_checks", [])
+            )
+        )
+        layout.addWidget(checks)
+
+        notice = QtWidgets.QLabel(
+            "Saving does not verify this target. The changed value remains motion-blocked "
+            "until a separate exact-value physical or service-record verification is audited."
+        )
+        notice.setWordWrap(True)
+        layout.addWidget(notice)
+
+        form = QtWidgets.QFormLayout()
+        self.operator_edit = QtWidgets.QLineEdit(self)
+        self.reason_edit = QtWidgets.QLineEdit(self)
+        self.acknowledge = QtWidgets.QCheckBox("I reviewed every displayed coordinate and delta.", self)
+        form.addRow("Operator:", self.operator_edit)
+        form.addRow("Reason:", self.reason_edit)
+        form.addRow("", self.acknowledge)
+        self.phrase_edit = QtWidgets.QLineEdit(self)
+        required_phrase = self.assessment.get("required_confirmation_phrase")
+        if required_phrase:
+            form.addRow(f"Type exactly: {required_phrase}", self.phrase_edit)
+        else:
+            self.phrase_edit.hide()
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addStretch()
+        self.cancel_button = QtWidgets.QPushButton("Cancel", self)
+        self.action_button = QtWidgets.QPushButton(
+            "Record Rejection and Close" if result == "reject" else "Save and Revoke",
+            self,
+        )
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.action_button)
+        layout.addLayout(buttons)
+        self.cancel_button.clicked.connect(self.reject)
+        self.action_button.clicked.connect(self._finish)
+
+    def _finish(self):
+        operator = self.operator_edit.text().strip()
+        reason = self.reason_edit.text().strip()
+        if not operator or not reason:
+            QMessageBox.warning(self, "Information Required", "Operator and reason are required for the audit event.")
+            return
+        if self.assessment.get("result") != "reject":
+            if not self.acknowledge.isChecked():
+                QMessageBox.warning(self, "Review Required", "Acknowledge the displayed coordinate deltas.")
+                return
+            expected = self.assessment.get("required_confirmation_phrase")
+            if expected and self.phrase_edit.text() != expected:
+                QMessageBox.warning(self, "Phrase Does Not Match", "The strong confirmation phrase must match exactly.")
+                return
+            self.outcome = "accepted"
+        else:
+            self.outcome = "rejected"
+        self.accept()
+
+    def review_result(self):
+        self.exec()
+        return {
+            "outcome": self.outcome,
+            "operator": self.operator_edit.text().strip(),
+            "reason": self.reason_edit.text().strip(),
+            "confirmation": {
+                "proposal_sha256": self.assessment.get("proposal_sha256"),
+                "acknowledged": self.acknowledge.isChecked(),
+                "typed_phrase": self.phrase_edit.text(),
+            },
+        }
+
+
 class ConfigurationHistoryWindow(QtWidgets.QDialog):
     """Read-only configuration audit with explicit verify/restore actions."""
 
@@ -692,6 +825,16 @@ class ConfigurationHistoryWindow(QtWidgets.QDialog):
         if not source_path:
             return
         parent = self.parent()
+        prepare = getattr(self.controller, "prepare_configuration_import", None)
+        reviewer = getattr(parent, "review_guarded_configuration_proposal", None)
+        if callable(prepare) and callable(reviewer) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+            proposal = prepare({filename: source_path})
+            if proposal is False:
+                return
+            if proposal is not None:
+                if reviewer(proposal, title="Import Governed Configuration"):
+                    self.refresh()
+                return
         identity_getter = getattr(parent, "request_configuration_identity", None)
         if not callable(identity_getter):
             return
@@ -714,6 +857,24 @@ class ConfigurationHistoryWindow(QtWidgets.QDialog):
         if row is None or row.payload.get("backup_manifest") is None:
             return
         parent = self.parent()
+        machine_id, ok = QtWidgets.QInputDialog.getText(
+            self, "Confirm Physical Machine", "Enter the exact machine ID:"
+        )
+        if not ok:
+            return
+        prepare = getattr(self.controller, "prepare_configuration_restore", None)
+        reviewer = getattr(parent, "review_guarded_configuration_proposal", None)
+        if callable(prepare) and callable(reviewer) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+            proposal = prepare(
+                row.transaction_id,
+                machine_id_confirmation=machine_id.strip(),
+            )
+            if proposal is False:
+                return
+            if proposal is not None:
+                if reviewer(proposal, title="Restore Configuration Backup"):
+                    self.refresh()
+                return
         identity_getter = getattr(parent, "request_configuration_identity", None)
         if not callable(identity_getter):
             return
@@ -722,11 +883,6 @@ class ConfigurationHistoryWindow(QtWidgets.QDialog):
             f"Restore the exact pre-change files from transaction {row.transaction_id}?",
         )
         if identity is None:
-            return
-        machine_id, ok = QtWidgets.QInputDialog.getText(
-            self, "Confirm Physical Machine", "Enter the exact machine ID:"
-        )
-        if not ok:
             return
         result = self.controller.restore_configuration_transaction(
             row.transaction_id,
@@ -1821,6 +1977,42 @@ class MainWindow(QMainWindow):
             return None
         return operator.strip(), reason.strip()
 
+    def review_guarded_configuration_proposal(self, proposal, *, title):
+        """Review, audit, and if authorized commit one frozen guarded proposal."""
+
+        if not proposal:
+            return False
+        assessment = proposal["assessment"]
+        dialog = ConfigurationChangePreviewDialog(assessment, self)
+        reviewed = dialog.review_result()
+        service = getattr(self.controller, "configuration_transactions", None)
+        actor = reviewed["operator"] or getattr(service, "os_account", "application operator")
+        reason = reviewed["reason"] or f"Operator closed {title} preview"
+        if reviewed["outcome"] != "accepted":
+            event_type = "rejected" if reviewed["outcome"] == "rejected" else "cancelled"
+            recorded = self.controller.record_configuration_attempt(
+                event_type=event_type,
+                operator=actor,
+                reason=reason,
+                workflow=assessment["workflow"],
+                details={
+                    "stage": "guard_preview",
+                    "guard_assessment": assessment,
+                },
+            )
+            if recorded is False:
+                self.popup_message("Configuration Audit Failed", "The cancellation or rejection could not be audited.")
+            discard = getattr(self.controller, "discard_configuration_capture_evidence", None)
+            if callable(discard):
+                discard(assessment["workflow"])
+            return False
+        return self.controller.commit_guarded_configuration_proposal(
+            proposal,
+            operator=reviewed["operator"],
+            reason=reviewed["reason"],
+            confirmation=reviewed["confirmation"],
+        )
+
     def request_app_update(self):
         """Launch the standalone updater, then close through the normal path."""
         check_result = None
@@ -2358,6 +2550,15 @@ class MainWindow(QMainWindow):
         name = self.popup_input("Save Location","Enter the name of the location")
         if name is None or not name.strip():
             return
+        prepare = getattr(self.controller, "prepare_named_location_change", None)
+        if callable(prepare) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+            proposal = prepare(name.strip(), require_existing=False)
+            if proposal and self.review_guarded_configuration_proposal(proposal, title="Save Location"):
+                self.popup_message(
+                    "Location Saved",
+                    "The location was saved and audited. Movement to the new value is blocked until its exact coordinates are verified.",
+                )
+            return
         try:
             x, y, z = self.model.machine_model.get_current_position()
         except Exception as exc:
@@ -2393,6 +2594,15 @@ class MainWindow(QMainWindow):
         """Modify a saved location."""
         name = self.popup_options("Modify Location","Select a location to modify",self.model.location_model.get_location_names())
         if name is None:
+            return
+        prepare = getattr(self.controller, "prepare_named_location_change", None)
+        if callable(prepare) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+            proposal = prepare(name, require_existing=True)
+            if proposal and self.review_guarded_configuration_proposal(proposal, title="Modify Location"):
+                self.popup_message(
+                    "Location Saved",
+                    "The location was saved and audited. Movement to the changed value is blocked until its exact coordinates are verified.",
+                )
             return
         try:
             x, y, z = self.model.machine_model.get_current_position()
@@ -6911,7 +7121,15 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             print("Calibration completed successfully.")
             commit = getattr(self.controller, "commit_plate_calibration", None)
             identity_getter = getattr(self.main_window, "request_configuration_identity", None)
-            if callable(commit) and callable(identity_getter):
+            prepare = getattr(self.controller, "prepare_plate_calibration_change", None)
+            reviewer = getattr(self.main_window, "review_guarded_configuration_proposal", None)
+            if callable(prepare) and callable(reviewer) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+                proposal = prepare()
+                if not proposal or not reviewer(proposal, title="Save Plate Calibration"):
+                    self.model.well_plate.discard_temp_calibrations()
+                    return
+                self.model.well_plate.discard_temp_calibrations()
+            elif callable(commit) and callable(identity_getter):
                 identity = identity_getter(
                     "Save Plate Calibration",
                     f"Save all four corners for plate {self.model.well_plate.get_current_plate_name()}?",
@@ -8372,6 +8590,7 @@ class PreprogrammedSequencesTab(QtWidgets.QWidget):
         )
 
 class BaseCalibrationDialog(QDialog):
+    configuration_capture_workflow = None
     def __init__(self, main_window, model, controller, title, steps, name_dict,offsets):
         super().__init__()
         self.main_window = main_window
@@ -8526,9 +8745,18 @@ class BaseCalibrationDialog(QDialog):
 
         if self.current_step < len(self.steps):
             # Save the current position as the calibration for this step
-            current_position = self.model.machine_model.get_current_position_dict_capital()
             step_name = self.steps[self.current_step]
             converted_step_name = self.name_dict[step_name]
+            capture = getattr(self.controller, "capture_configuration_point", None)
+            if callable(capture) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+                current_position = capture(
+                    converted_step_name,
+                    workflow=self.configuration_capture_workflow,
+                )
+                if current_position is False:
+                    return
+            else:
+                current_position = self.model.machine_model.get_current_position_dict_capital()
             self.set_calibration_position(converted_step_name, current_position)
 
             #print(f"Calibrating {self.steps[self.current_step]} position...")
@@ -8629,6 +8857,7 @@ class BaseCalibrationDialog(QDialog):
         raise NotImplementedError
 
 class PlateCalibrationDialog(BaseCalibrationDialog):
+    configuration_capture_workflow = "plate_calibration"
     def __init__(self, main_window, model, controller):
         steps = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
         name_dict = {
@@ -8701,6 +8930,7 @@ class PlateCalibrationDialog(BaseCalibrationDialog):
 
 class RackCalibrationDialog(BaseCalibrationDialog):
     RACK_MOVE_ERROR_TITLE = "Rack Calibration Move Error"
+    configuration_capture_workflow = "rack_calibration"
 
     def __init__(self, main_window, model, controller):
         steps = ["Left","Right"]
@@ -8850,9 +9080,18 @@ class RackCalibrationDialog(BaseCalibrationDialog):
                     "Cannot move between rack calibration positions because home Z is unavailable.",
                 )
 
-            current_position = self.model.machine_model.get_current_position_dict_capital()
             step_name = self.steps[self.current_step]
             converted_step_name = self.name_dict[step_name]
+            capture = getattr(self.controller, "capture_configuration_point", None)
+            if callable(capture) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+                current_position = capture(
+                    converted_step_name,
+                    workflow=self.configuration_capture_workflow,
+                )
+                if current_position is False:
+                    return False
+            else:
+                current_position = self.model.machine_model.get_current_position_dict_capital()
             self.set_calibration_position(converted_step_name, current_position)
 
             if next_step_index < len(self.steps):
@@ -9328,7 +9567,15 @@ class RackBox(QGroupBox):
             print("Rack calibration completed successfully.")
             commit = getattr(self.controller, "commit_rack_calibration", None)
             identity_getter = getattr(self.main_window, "request_configuration_identity", None)
-            if callable(commit) and callable(identity_getter):
+            prepare = getattr(self.controller, "prepare_rack_calibration_change", None)
+            reviewer = getattr(self.main_window, "review_guarded_configuration_proposal", None)
+            if callable(prepare) and callable(reviewer) and getattr(self.controller, "configuration_safety_guard", None) is not None:
+                proposal = prepare()
+                if not proposal or not reviewer(proposal, title="Save Rack Calibration"):
+                    self.model.rack_model.discard_temp_calibrations()
+                else:
+                    self.model.rack_model.discard_temp_calibrations()
+            elif callable(commit) and callable(identity_getter):
                 identity = identity_getter(
                     "Save Rack Calibration",
                     "Save the Left and Right rack anchors as one audited change?",

@@ -30,6 +30,7 @@ class ConfigurationHistoryRow:
 
 def _change_summary(changes) -> str:
     labels = []
+    guard_bits = []
     for change in changes or []:
         if not isinstance(change, dict):
             continue
@@ -40,8 +41,25 @@ def _change_summary(changes) -> str:
             labels.extend(str(item) for item in change["affected_files"])
         elif change.get("stage"):
             labels.append(str(change["stage"]))
+        guard = change.get("guard_assessment")
+        if isinstance(guard, dict):
+            target = ",".join(str(item) for item in guard.get("target_keys", []))
+            deltas = []
+            for item in guard.get("changes", []):
+                for value in (item.get("absolute_delta") or {}).values():
+                    if isinstance(value, int):
+                        deltas.append(value)
+            guard_bits.append(
+                "guard="
+                f"{guard.get('result', 'unknown')} target={target or 'unknown'} "
+                f"largest_delta={max(deltas) if deltas else 'new'} "
+                f"policy={guard.get('policy_id', 'unknown')} "
+                f"proposal={str(guard.get('proposal_sha256', ''))[:12]} "
+                f"rejection={guard.get('rejection_code') or 'none'}"
+            )
     unique = list(dict.fromkeys(labels))
-    return ", ".join(unique) if unique else "No governed values changed"
+    base = ", ".join(unique) if unique else "No governed values changed"
+    return "; ".join([base] + guard_bits)
 
 
 class ConfigurationHistoryReader:

@@ -39,6 +39,11 @@ from MachineDataVerification import (
     build_target_snapshot_from_documents,
     canonical_value_sha256,
 )
+from ConfigurationSafetyPolicy import (
+    ConfigurationSafetyError,
+    parse_guard_assessment,
+    proposal_sha256,
+)
 
 
 EVENT_SCHEMA_NAME = "labcraft.configuration_event"
@@ -1208,6 +1213,11 @@ class ConfigurationTransactionService:
         self.os_account = str(os_account or getpass.getuser() or "unknown").strip()
         self.session_id = str(uuid_factory())
         self._writer_mutex = threading.Lock()
+        # Enabled only by the authorized production bootstrap after the tracked
+        # policy and active documents have been validated. This keeps the pure
+        # M4 repository independently testable without creating a permissive
+        # production path.
+        self.require_configuration_guard_evidence = False
         self.state = inspect_configuration_state(paths, identity, active, verification)
         self.saved_target_authorizer = TransactionalSavedTargetAuthorizer(self)
 
@@ -1355,6 +1365,7 @@ class ConfigurationTransactionService:
         event_type: str = "change",
         expected_config_sha256: Mapping[str, str] | None = None,
         restore_reference: str | None = None,
+        guard_evidence: Mapping[str, object] | None = None,
     ) -> ConfigurationTransactionResult:
         return self._commit_documents(
             proposed,
@@ -1364,6 +1375,7 @@ class ConfigurationTransactionService:
             event_type=event_type,
             expected_config_sha256=expected_config_sha256,
             restore_reference=restore_reference,
+            guard_evidence=guard_evidence,
         )
 
     def _commit_documents(
@@ -1376,6 +1388,7 @@ class ConfigurationTransactionService:
         event_type: str,
         expected_config_sha256: Mapping[str, str] | None,
         restore_reference: str | None,
+        guard_evidence: Mapping[str, object] | None,
         exact_serialized: Mapping[str, bytes] | None = None,
     ) -> ConfigurationTransactionResult:
         if event_type not in {"change", "import", "restore"}:
@@ -1409,6 +1422,61 @@ class ConfigurationTransactionService:
                     raise ConfigurationValidationError(f"Unsupported governed config: {filename}")
                 complete[filename] = copy.deepcopy(payload)
             complete = _validate_documents(complete)
+            active_guard = getattr(self, "configuration_safety_guard", None)
+            if active_guard is not None:
+                try:
+                    active_guard.validate_active_documents(complete)
+                except ConfigurationSafetyError as exc:
+                    raise ConfigurationValidationError(
+                        f"Configuration safety validation failed: {exc}"
+                    ) from exc
+            parsed_guard = None
+            guarded_workflows = {
+                "named_location_add",
+                "named_location_modify",
+                "rack_calibration",
+                "plate_calibration",
+            }
+            guarded_coordinate_operation = workflow in guarded_workflows or (
+                workflow in {"governed_configuration_import", "configuration_restore"}
+                and bool(set(proposed).intersection({"Locations.json", "Plates.json"}))
+            )
+            if guard_evidence is not None:
+                try:
+                    parsed_guard = parse_guard_assessment(guard_evidence)
+                except ConfigurationSafetyError as exc:
+                    raise ConfigurationValidationError(
+                        f"Guard evidence is invalid: {exc}"
+                    ) from exc
+                if parsed_guard["workflow"] != workflow:
+                    raise ConfigurationValidationError(
+                        "Guard evidence workflow differs from the transaction."
+                    )
+                if parsed_guard["result"] == "reject":
+                    raise ConfigurationValidationError(
+                        "A rejected guard assessment cannot authorize a commit."
+                    )
+                if parsed_guard["proposal_sha256"] != proposal_sha256(proposed):
+                    raise ConfigurationConflictError(
+                        "Guard evidence differs from the proposed documents."
+                    )
+                if dict(parsed_guard["governed_file_sha256"]) != before_hashes:
+                    raise ConfigurationConflictError(
+                        "Configuration changed after the guard preview was prepared."
+                    )
+                if active_guard is not None and (
+                    parsed_guard["policy_id"] != active_guard.policy.policy_id
+                    or parsed_guard["policy_sha256"] != active_guard.policy.raw_sha256
+                ):
+                    raise ConfigurationConflictError(
+                        "The active configuration safety policy differs from the preview."
+                    )
+            elif guarded_coordinate_operation and bool(
+                getattr(self, "require_configuration_guard_evidence", False)
+            ):
+                raise ConfigurationValidationError(
+                    "This coordinate workflow requires configuration guard evidence."
+                )
             if complete["Settings.json"].get("HARDWARE_PROFILE", "current") != before_documents["Settings.json"].get("HARDWARE_PROFILE", "current"):
                 raise ConfigurationValidationError("HARDWARE_PROFILE cannot change while the application is active.")
             all_bytes = _canonical_config_bytes(complete)
@@ -1503,7 +1571,10 @@ class ConfigurationTransactionService:
                 "reason": reason,
                 "config_before_sha256": before_hashes,
                 "config_after_sha256": after_hashes,
-                "changes": changes or [{"affected_files": affected}],
+                "changes": (
+                    (changes or [{"affected_files": affected}])
+                    + ([{"guard_assessment": parsed_guard}] if parsed_guard else [])
+                ),
                 "authorization_after": authorization,
                 "backup_manifest": backup_reference,
                 "restore_reference": restore_reference,
@@ -1961,17 +2032,8 @@ class ConfigurationTransactionService:
         finally:
             self._writer_mutex.release()
 
-    def restore_transaction(
-        self,
-        transaction_id: str,
-        *,
-        operator: str,
-        reason: str,
-        machine_id_confirmation: str,
-    ) -> ConfigurationTransactionResult:
+    def _restore_inputs(self, transaction_id: str):
         transaction_id = _canonical_uuid(transaction_id, "restore transaction_id")
-        if machine_id_confirmation != self.identity.machine_id:
-            raise ConfigurationValidationError("Exact machine ID confirmation is required.")
         manifest_path = self.paths.configuration_backups_root / transaction_id / "manifest.json"
         if not manifest_path.is_file():
             raise ConfigurationValidationError("The requested configuration backup does not exist.")
@@ -2003,14 +2065,35 @@ class ConfigurationTransactionService:
                 ) from exc
             proposed[item["filename"]] = payload
             exact_serialized[item["filename"]] = data
+        return proposed, exact_serialized
+
+    def read_restore_proposal(self, transaction_id: str) -> dict[str, object]:
+        proposed, _exact = self._restore_inputs(transaction_id)
+        return copy.deepcopy(proposed)
+
+    def restore_transaction(
+        self,
+        transaction_id: str,
+        *,
+        operator: str,
+        reason: str,
+        machine_id_confirmation: str,
+        expected_config_sha256: Mapping[str, str] | None = None,
+        guard_evidence: Mapping[str, object] | None = None,
+    ) -> ConfigurationTransactionResult:
+        transaction_id = _canonical_uuid(transaction_id, "restore transaction_id")
+        if machine_id_confirmation != self.identity.machine_id:
+            raise ConfigurationValidationError("Exact machine ID confirmation is required.")
+        proposed, exact_serialized = self._restore_inputs(transaction_id)
         return self._commit_documents(
             proposed,
             operator=operator,
             reason=reason,
-            workflow="configuration_history_restore",
+            workflow="configuration_restore",
             event_type="restore",
-            expected_config_sha256=None,
+            expected_config_sha256=expected_config_sha256,
             restore_reference=transaction_id,
+            guard_evidence=guard_evidence,
             exact_serialized=exact_serialized,
         )
 

@@ -40,6 +40,11 @@ from MachineDataTransactions import (
     ConfigurationRecoveryRequired,
     ConfigurationTransactionError,
     ConfigurationValidationError,
+    read_governed_documents,
+)
+from ConfigurationSafetyPolicy import (
+    ConfigurationSafetyError,
+    parse_guard_assessment,
 )
 
 ARRAY_PAUSE_DEPARTURE_ACCEL = 32000
@@ -950,6 +955,7 @@ class Controller(QObject):
         saved_target_authorizer=None,
         machine_data_paths=None,
         configuration_transactions=None,
+        configuration_safety_guard=None,
     ):
         super().__init__()
 
@@ -960,6 +966,8 @@ class Controller(QObject):
         self.saved_target_authorizer = saved_target_authorizer
         self.machine_data_paths = machine_data_paths
         self.configuration_transactions = configuration_transactions
+        self.configuration_safety_guard = configuration_safety_guard
+        self._configuration_capture_evidence = {}
         self._configuration_recovery_required = False
         self.experimental_features = (
             experimental_features or ExperimentalFeatures()
@@ -5708,8 +5716,11 @@ class Controller(QObject):
 
     def set_relative_X(self, x,manual=False,handler=None,override=False):
         """Set the relative X coordinate for the machine."""
+        target = {'X': self.expected_position['X'] + x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': self.expected_position['X'] + x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting relative X: {x}")
@@ -5719,8 +5730,11 @@ class Controller(QObject):
 
     def set_relative_Y(self, y,manual=False,handler=None, override=False):
         """Set the relative Y coordinate for the machine."""
+        target = {'X': self.expected_position['X'], 'Y': self.expected_position['Y'] + y, 'Z': self.expected_position['Z']}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': self.expected_position['Y'] + y, 'Z': self.expected_position['Z']}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting relative Y: {y}")
@@ -5730,8 +5744,11 @@ class Controller(QObject):
 
     def set_relative_Z(self, z,manual=False,handler=None, override=False):
         """Set the relative Z coordinate for the machine."""
+        target = {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z'] + z}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z'] + z}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting relative Z: {z}")
@@ -5741,8 +5758,11 @@ class Controller(QObject):
     
     def set_absolute_XY(self, x, y, manual=False, handler=None, override=False):
         """Set the absolute X and Y coordinates for the machine."""
+        target = {'X': x, 'Y': y, 'Z': self.expected_position['Z']}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': x, 'Y': y, 'Z': self.expected_position['Z']}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting absolute XY: {x}, {y}")
@@ -5753,8 +5773,11 @@ class Controller(QObject):
 
     def set_absolute_X(self, x,manual=False,handler=None, override=False):
         """Set the absolute X coordinate for the machine."""
+        target = {'X': x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting absolute X: {x}")
@@ -5765,8 +5788,11 @@ class Controller(QObject):
 
     def set_absolute_Y(self, y,manual=False,handler=None, override=False):
         """Set the absolute Y coordinate for the machine."""
+        target = {'X': self.expected_position['X'], 'Y': y, 'Z': self.expected_position['Z']}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': y, 'Z': self.expected_position['Z']}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting absolute Y: {y}")
@@ -5777,14 +5803,33 @@ class Controller(QObject):
     
     def set_absolute_Z(self, z,manual=False,handler=None, override=False):
         """Set the absolute Z coordinate for the machine."""
+        target = {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': z}
+        if not self._hard_endpoint_allowed(target):
+            return False
         if not override:
-            if self.check_collision(self.expected_position, {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': z}):
+            if self.check_collision(self.expected_position, target):
                 print('Collision detected')
                 return False
         #print(f"Setting absolute Z: {z}")
         if self.machine.set_absolute_Z(z,manual=manual,handler=handler) is False:
             return False
         self.update_expected_position(z=z)
+        return True
+
+    def _hard_endpoint_allowed(self, target_pos):
+        """Enforce numeric/global travel bounds even when obstacle override is used."""
+
+        guard = getattr(self, "configuration_safety_guard", None)
+        if guard is None:
+            return True
+        try:
+            guard.validate_endpoint(target_pos)
+        except ConfigurationSafetyError as exc:
+            print(f"Motion endpoint rejected: {exc}")
+            signal = getattr(self, "error_occurred_signal", None)
+            if signal is not None:
+                signal.emit("Motion Endpoint Rejected", str(exc))
+            return False
         return True
 
     def check_collision(self,current_pos, target_pos):
@@ -5823,13 +5868,15 @@ class Controller(QObject):
     
     def set_relative_coordinates(self, x, y, z, manual=False, handler=None,override=False):
         """Set the relative coordinates for the machine."""
+        new_position = {
+            'X': self.expected_position['X'] + x,
+            'Y': self.expected_position['Y'] + y,
+            'Z': self.expected_position['Z'] + z
+        }
+        if not self._hard_endpoint_allowed(new_position):
+            return False
         #print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
         if not override:
-            new_position = {
-                'X': self.expected_position['X'] + x,
-                'Y': self.expected_position['Y'] + y,
-                'Z': self.expected_position['Z'] + z
-            }
             if self.check_collision(self.expected_position, new_position):
                 print('Collision detected')
                 return False
@@ -5872,6 +5919,9 @@ class Controller(QObject):
     def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, kwargs=None, override=False):
         """Set absolute coordinates; always use XY for any X/Y movement."""
         new_position = {'X': x, 'Y': y, 'Z': z}
+
+        if not self._hard_endpoint_allowed(new_position):
+            return False
 
         # 1) collision check
         if not override and self.check_collision(self.expected_position, new_position):
@@ -6412,6 +6462,331 @@ class Controller(QObject):
             )
             return False
 
+    def _configuration_capture_readiness(self):
+        """Return one JSON-safe, fail-closed current-position evidence snapshot."""
+
+        guard = getattr(self, "configuration_safety_guard", None)
+        if guard is None:
+            return {"ready": True, "reason_codes": [], "compatibility_mode": True}
+        machine_model = self.model.machine_model
+        now = float(self._monotonic_fn())
+        telemetry_getter = getattr(machine_model, "get_position_telemetry_snapshot", None)
+        telemetry = telemetry_getter(now_monotonic=now) if callable(telemetry_getter) else None
+        reasons = []
+        if not machine_model.is_connected():
+            reasons.append("not_connected")
+        if not machine_model.motors_are_enabled():
+            reasons.append("motors_disabled")
+        if not machine_model.motors_are_homed():
+            reasons.append("not_homed")
+        if self.get_xy_motion_recovery_state() != "idle":
+            reasons.append("motion_recovery_active")
+        if bool(getattr(machine_model, "paused", False)):
+            reasons.append("machine_paused")
+        if bool(getattr(machine_model, "transport_paused", False)):
+            reasons.append("transport_paused")
+        if self.get_array_run_state() not in {"idle", "resume_ready"}:
+            reasons.append("array_runner_active")
+        if str(getattr(self, "_seq_state", "idle")) != "idle":
+            reasons.append("sequence_runner_active")
+        try:
+            queue_empty = bool(self.check_if_all_completed())
+        except Exception:
+            queue_empty = False
+        if not queue_empty:
+            reasons.append("queue_not_empty")
+        if bool(machine_model.is_busy()):
+            reasons.append("machine_busy")
+        position = machine_model.get_current_position_dict_capital()
+        if telemetry is None:
+            reasons.append("position_telemetry_unavailable")
+            axes = {}
+            trust_epoch = None
+        else:
+            axes = telemetry.get("axes", {})
+            trust_epoch = telemetry.get("trust_epoch")
+            for axis in ("X", "Y", "Z"):
+                evidence = axes.get(axis, {})
+                age = evidence.get("age_ms")
+                if evidence.get("generation", 0) <= 0 or age is None:
+                    reasons.append(f"position_missing_{axis.lower()}")
+                elif age > guard.policy.position_telemetry_max_age_ms:
+                    reasons.append(f"position_stale_{axis.lower()}")
+        try:
+            guard.validate_endpoint(position)
+        except ConfigurationSafetyError:
+            reasons.append("position_outside_global_bounds")
+        expected = dict(self.expected_position)
+        if any(type(position.get(axis)) is not int for axis in ("X", "Y", "Z")):
+            reasons.append("position_invalid")
+        if any(expected.get(axis) != position.get(axis) for axis in ("X", "Y", "Z")):
+            reasons.append("expected_position_mismatch")
+        machine_uuid = getattr(getattr(self, "machine_data_paths", None), "machine_uuid", None)
+        if not machine_uuid:
+            reasons.append("authorized_machine_missing")
+        return {
+            "ready": not reasons,
+            "reason_codes": list(dict.fromkeys(reasons)),
+            "machine_uuid": machine_uuid,
+            "trust_epoch": trust_epoch,
+            "captured_position": {axis: int(position[axis]) for axis in ("X", "Y", "Z")},
+            "expected_position": copy.deepcopy(expected),
+            "telemetry": copy.deepcopy(axes),
+            "captured_monotonic": now,
+            "telemetry_max_age_ms": guard.policy.position_telemetry_max_age_ms,
+        }
+
+    def capture_configuration_point(self, target_key, *, workflow):
+        """Capture one calibration point only from trusted, fresh machine state."""
+
+        target_key = str(target_key or "").strip()
+        workflow = str(workflow or "").strip()
+        evidence = self._configuration_capture_readiness()
+        if not evidence.get("ready"):
+            message = "Position capture is not safe: " + ", ".join(evidence["reason_codes"])
+            self.error_occurred_signal.emit("Position Not Captured", message)
+            self.record_configuration_attempt(
+                event_type="rejected",
+                operator=getattr(getattr(self, "configuration_transactions", None), "os_account", "application operator"),
+                reason=message,
+                workflow=workflow,
+                details={"target_key": target_key, "stage": "capture", "preconditions": evidence},
+            )
+            return False
+        point = copy.deepcopy(evidence.get("captured_position") or self.model.machine_model.get_current_position_dict_capital())
+        self._configuration_capture_evidence[(workflow, target_key)] = copy.deepcopy(evidence)
+        return point
+
+    def discard_configuration_capture_evidence(self, workflow):
+        workflow = str(workflow or "")
+        self._configuration_capture_evidence = {
+            key: value
+            for key, value in self._configuration_capture_evidence.items()
+            if key[0] != workflow
+        }
+
+    def _governed_proposal_inputs(self):
+        service = getattr(self, "configuration_transactions", None)
+        guard = getattr(self, "configuration_safety_guard", None)
+        if service is None or guard is None:
+            return None, None, None
+        state = service.refresh(allow_pending=False)
+        documents = read_governed_documents(service.paths)
+        return guard, documents, dict(state.config_sha256)
+
+    def _capture_bundle(self, workflow, target_keys):
+        evidence = []
+        for key in target_keys:
+            item = self._configuration_capture_evidence.get((workflow, key))
+            if item is None:
+                raise ConfigurationSafetyError(f"Fresh capture evidence is missing for {key}.")
+            evidence.append(copy.deepcopy(item))
+        machine_uuids = {item.get("machine_uuid") for item in evidence}
+        trust_epochs = {item.get("trust_epoch") for item in evidence}
+        if len(machine_uuids) != 1 or None in machine_uuids:
+            raise ConfigurationSafetyError("Captured points do not share one authorized machine UUID.")
+        if len(trust_epochs) != 1 or None in trust_epochs:
+            raise ConfigurationSafetyError("Captured points do not share one motion trust epoch.")
+        return evidence
+
+    def _prepare_guarded_proposal(self, proposed, *, workflow, target_keys, captures):
+        guard, before, raw_hashes = self._governed_proposal_inputs()
+        if guard is None:
+            return None
+        profile = before["Settings.json"].get("HARDWARE_PROFILE", self.profile.name)
+        try:
+            assessment = guard.assess(
+                before_documents=before,
+                proposed_documents=proposed,
+                workflow=workflow,
+                target_keys=target_keys,
+                hardware_profile=profile,
+                preconditions={"captures": copy.deepcopy(captures)},
+                governed_file_sha256=raw_hashes,
+            )
+        except ConfigurationSafetyError as exc:
+            self.error_occurred_signal.emit("Configuration Change Rejected", str(exc))
+            return False
+        return {
+            "documents": copy.deepcopy(proposed),
+            "assessment": assessment,
+            "expected_config_sha256": raw_hashes,
+        }
+
+    def prepare_named_location_change(self, name, *, require_existing=False):
+        name = str(name or "").strip()
+        guard = getattr(self, "configuration_safety_guard", None)
+        if guard is None:
+            return None
+        existing = self.model.location_model.get_all_locations()
+        if not name or (require_existing and name not in existing):
+            self.error_occurred_signal.emit("Configuration Change Failed", "The selected location is invalid.")
+            return False
+        workflow = "named_location_modify" if require_existing else "named_location_add"
+        point = self.capture_configuration_point(name, workflow=workflow)
+        if point is False:
+            return False
+        proposed_locations = copy.deepcopy(existing)
+        proposed_locations[name] = point
+        captures = self._capture_bundle(workflow, (name,))
+        return self._prepare_guarded_proposal(
+            {"Locations.json": proposed_locations},
+            workflow=workflow,
+            target_keys=(name,),
+            captures=captures,
+        )
+
+    def prepare_rack_calibration_change(self):
+        workflow = "rack_calibration"
+        keys = ("rack_position_Left", "rack_position_Right")
+        temporary = copy.deepcopy(self.model.rack_model.temp_calibration_data)
+        try:
+            captures = self._capture_bundle(workflow, keys)
+        except ConfigurationSafetyError as exc:
+            self.error_occurred_signal.emit("Rack Calibration Not Saved", str(exc))
+            return False
+        proposed = copy.deepcopy(self.model.location_model.get_all_locations())
+        proposed.update(temporary)
+        return self._prepare_guarded_proposal(
+            {"Locations.json": proposed}, workflow=workflow, target_keys=keys, captures=captures
+        )
+
+    def prepare_plate_calibration_change(self):
+        workflow = "plate_calibration"
+        keys = ("top_left", "top_right", "bottom_right", "bottom_left")
+        try:
+            captures = self._capture_bundle(workflow, keys)
+            proposed = self.model.well_plate.proposed_calibration_document()
+        except Exception as exc:
+            self.error_occurred_signal.emit("Plate Calibration Not Saved", str(exc))
+            return False
+        return self._prepare_guarded_proposal(
+            {"Plates.json": proposed},
+            workflow=workflow,
+            target_keys=(self.model.well_plate.get_current_plate_name(),),
+            captures=captures,
+        )
+
+    def prepare_configuration_import(self, selected_files):
+        service = getattr(self, "configuration_transactions", None)
+        guard = getattr(self, "configuration_safety_guard", None)
+        if service is None or guard is None:
+            return None
+        proposed = {}
+        try:
+            for filename, source_path in selected_files.items():
+                if filename not in {"Locations.json", "Plates.json", "RegulatorProfiles.json"}:
+                    raise ConfigurationSafetyError(f"Unsupported import target {filename!r}.")
+                with open(source_path, "r", encoding="utf-8") as source:
+                    proposed[filename] = json.load(source)
+        except (OSError, json.JSONDecodeError, ConfigurationSafetyError) as exc:
+            self.error_occurred_signal.emit("Configuration Import Failed", str(exc))
+            return False
+        if not set(proposed).intersection({"Locations.json", "Plates.json"}):
+            return None
+        prepared = self._prepare_guarded_proposal(
+            proposed,
+            workflow="governed_configuration_import",
+            target_keys=tuple(sorted(proposed)),
+            captures=[],
+        )
+        if prepared:
+            prepared["operation"] = "import"
+        return prepared
+
+    def prepare_configuration_restore(self, transaction_id, *, machine_id_confirmation):
+        service = getattr(self, "configuration_transactions", None)
+        guard = getattr(self, "configuration_safety_guard", None)
+        if service is None or guard is None:
+            return None
+        if machine_id_confirmation != service.identity.machine_id:
+            self.error_occurred_signal.emit("Configuration Restore Failed", "Exact machine ID confirmation is required.")
+            return False
+        try:
+            proposed = service.read_restore_proposal(transaction_id)
+        except ConfigurationTransactionError as exc:
+            self.error_occurred_signal.emit("Configuration Restore Failed", str(exc))
+            return False
+        if not set(proposed).intersection({"Locations.json", "Plates.json"}):
+            return None
+        prepared = self._prepare_guarded_proposal(
+            proposed,
+            workflow="configuration_restore",
+            target_keys=tuple(sorted(proposed)),
+            captures=[],
+        )
+        if prepared:
+            prepared.update(
+                operation="restore",
+                transaction_id=str(transaction_id),
+                machine_id_confirmation=str(machine_id_confirmation),
+            )
+        return prepared
+
+    def _validate_guard_confirmation(self, assessment, confirmation):
+        parsed = parse_guard_assessment(assessment)
+        if parsed["result"] == "reject":
+            raise ConfigurationSafetyError("Rejected guard assessment cannot be saved.")
+        if not isinstance(confirmation, dict) or confirmation.get("proposal_sha256") != parsed["proposal_sha256"]:
+            raise ConfigurationSafetyError("Confirmation is missing or belongs to another proposal.")
+        if confirmation.get("acknowledged") is not True:
+            raise ConfigurationSafetyError("The displayed coordinate deltas were not acknowledged.")
+        if parsed["result"] == "strong_confirmation" and confirmation.get("typed_phrase") != parsed["required_confirmation_phrase"]:
+            raise ConfigurationSafetyError("The strong confirmation phrase does not match exactly.")
+        return parsed
+
+    def commit_guarded_configuration_proposal(self, proposal, *, operator, reason, confirmation):
+        if not isinstance(proposal, dict):
+            return False
+        try:
+            assessment = self._validate_guard_confirmation(proposal.get("assessment"), confirmation)
+            captures = assessment.get("preconditions", {}).get("captures", [])
+            if captures:
+                readiness = self._configuration_capture_readiness()
+                if not readiness.get("ready"):
+                    raise ConfigurationSafetyError(
+                        "Machine state changed after preview: " + ", ".join(readiness["reason_codes"])
+                    )
+                current_epoch = readiness.get("trust_epoch")
+                if any(item.get("trust_epoch") != current_epoch for item in captures):
+                    raise ConfigurationSafetyError("Motion trust epoch changed after capture.")
+                if assessment["workflow"].startswith("named_location"):
+                    captured = captures[0]["captured_position"]
+                    if readiness.get("captured_position") != captured:
+                        raise ConfigurationSafetyError("Current position changed after the named-location preview.")
+        except (ConfigurationSafetyError, TypeError, KeyError, IndexError) as exc:
+            self.error_occurred_signal.emit("Configuration Change Not Saved", str(exc))
+            return False
+        if proposal.get("operation") == "restore":
+            try:
+                result = self.configuration_transactions.restore_transaction(
+                    proposal["transaction_id"],
+                    operator=operator,
+                    reason=reason,
+                    machine_id_confirmation=proposal["machine_id_confirmation"],
+                    expected_config_sha256=proposal["expected_config_sha256"],
+                    guard_evidence=assessment,
+                )
+            except ConfigurationTransactionError as exc:
+                if isinstance(exc, ConfigurationRecoveryRequired):
+                    self._configuration_recovery_required = True
+                self.error_occurred_signal.emit("Configuration Restore Failed", str(exc))
+                return False
+            result = result if self._install_committed_configuration(result) else False
+        else:
+            result = self._commit_configuration_documents(
+                proposal["documents"],
+                operator=operator,
+                reason=reason,
+                workflow=assessment["workflow"],
+                event_type="import" if proposal.get("operation") == "import" else "change",
+                expected_config_sha256=proposal["expected_config_sha256"],
+                guard_evidence=assessment,
+            )
+        if result:
+            self.discard_configuration_capture_evidence(assessment["workflow"])
+        return result
+
     def _commit_configuration_documents(
         self,
         proposed,
@@ -6421,6 +6796,8 @@ class Controller(QObject):
         workflow,
         event_type="change",
         restore_reference=None,
+        expected_config_sha256=None,
+        guard_evidence=None,
     ):
         service = getattr(self, "configuration_transactions", None)
         if service is None:
@@ -6433,6 +6810,8 @@ class Controller(QObject):
                 workflow=workflow,
                 event_type=event_type,
                 restore_reference=restore_reference,
+                expected_config_sha256=expected_config_sha256,
+                guard_evidence=guard_evidence,
             )
         except ConfigurationTransactionError as exc:
             if isinstance(exc, ConfigurationRecoveryRequired):
@@ -6575,6 +6954,9 @@ class Controller(QObject):
         if service is None:
             return False
         try:
+            guard = getattr(self, "configuration_safety_guard", None)
+            if guard is not None:
+                guard.validate_active_documents(read_governed_documents(service.paths))
             result = service.verify_targets(
                 confirmations,
                 operator=operator,
@@ -6606,6 +6988,13 @@ class Controller(QObject):
             )
             return False
         try:
+            guard = getattr(self, "configuration_safety_guard", None)
+            if guard is not None and set(selected_files).intersection({"Locations.json", "Plates.json"}):
+                complete = read_governed_documents(service.paths)
+                for filename, source_path in selected_files.items():
+                    with open(source_path, "r", encoding="utf-8") as source:
+                        complete[filename] = json.load(source)
+                guard.validate_active_documents(complete)
             result = service.import_files(
                 selected_files,
                 operator=operator,

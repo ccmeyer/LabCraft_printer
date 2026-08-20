@@ -60,6 +60,9 @@ def _active_context(tmp_path):
             camera_confirmation=candidate.safety_snapshot["locations"]["camera"],
         )
     )
+    # These tests qualify the M4 transaction engine in isolation. M5 production
+    # bootstrap enforcement is covered by the guarded-workflow tests.
+    context.configuration_transactions.require_configuration_guard_evidence = False
     return base, context
 
 

@@ -12,6 +12,12 @@ from typing import Callable, Mapping
 from uuid import UUID, uuid4
 
 import LocalConfig
+from ConfigurationSafetyPolicy import (
+    ConfigurationChangeGuard,
+    ConfigurationSafetyError,
+    load_configuration_change_policy,
+    parse_safety_bounds,
+)
 from MachineData import (
     ActiveMachine,
     ActiveMachineError,
@@ -72,6 +78,7 @@ from MachineDataTransactions import (
     ConfigurationTransactionService,
     build_active_tree_overrides,
     inspect_configuration_state,
+    read_governed_documents,
 )
 
 
@@ -178,6 +185,7 @@ class AuthorizedMachineContext:
     saved_target_authorizer: object
     configuration_state: ConfigurationState
     configuration_transactions: ConfigurationTransactionService
+    configuration_safety_guard: ConfigurationChangeGuard
     configuration_lock: AcquiredConfigurationLock
 
     def close(self) -> None:
@@ -1020,6 +1028,21 @@ class MachineDataBootstrap:
         )
         settings = LocalConfig.validate_machine_config_file(settings_path, "Settings.json")
         settings_sha = sha256_file(settings_path)[0]
+        try:
+            policy = load_configuration_change_policy()
+            documents = read_governed_documents(paths)
+            guard = ConfigurationChangeGuard(
+                policy,
+                parse_safety_bounds(documents["Obstacles.json"]),
+            )
+            guard.validate_active_documents(documents)
+        except (ConfigurationSafetyError, OSError, ValueError) as exc:
+            raise BootstrapError(
+                "recovery_required",
+                f"Active configuration safety validation failed: {exc}",
+            ) from exc
+        transactions.configuration_safety_guard = guard
+        transactions.require_configuration_guard_evidence = True
         return AuthorizedMachineContext(
             paths=paths,
             identity=identity,
@@ -1032,6 +1055,7 @@ class MachineDataBootstrap:
             saved_target_authorizer=transactions.saved_target_authorizer,
             configuration_state=configuration_state,
             configuration_transactions=transactions,
+            configuration_safety_guard=guard,
             configuration_lock=configuration_lock,
         )
 
