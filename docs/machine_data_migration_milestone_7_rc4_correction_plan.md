@@ -1,8 +1,8 @@
 # Milestone 7 rc.4 Exact-Restore Correction Plan
 
-Status: `implementation_complete` - the corrective code and pre-commit Windows
-gates pass; the exact candidate commit, clean-commit Windows SIL,
-disposable-Pi, tag, and attended LC-001 gates remain.
+Status: `implementation_complete` - exact candidate Windows and disposable-Pi
+gates pass; the rc.4 tag and attended LC-001 protected update/restore remain
+explicit authorization gates.
 
 Prepared: 2026-08-20
 
@@ -149,5 +149,57 @@ substituted-manifest rejection, and backup tamper rejection. It also proves
 the Controller path commits the original noncanonical raw bytes and stores the
 restore evidence in the immutable audit event.
 
-Exact-candidate clean-worktree SIL, disposable-Pi, tag, and attended recovery
-results will be appended without rewriting this finding.
+The exact-candidate and disposable-Pi results are recorded below. Tag and
+attended recovery results remain pending and will be appended without
+rewriting this finding.
+
+## Exact candidate and disposable-Pi validation record
+
+The frozen rc.4 release candidate is
+`3e451c01e23f2957d12c8242c9c664bf8974aeae` (`fix: bind exact restore target
+removal`). It is clean and untagged. On that exact commit:
+
+- the narrow guarded-workflow/preview/transaction group passed 59 tests on
+  Windows and again on the Pi;
+- release metadata validation passed, firmware remained unchanged from rc.3,
+  and clean-commit Windows contained SIL completed 96/96;
+- the 52,114,801-byte complete Git transport bundle verified at SHA-256
+  `C71CF5E9...C665A35D`;
+- a detached clean Pi checkout under
+  `/tmp/labcraft-m7-rc4-qualification.XIslw0` used only an ignored symlink to
+  the already-qualified production interpreter;
+- an independent disposable store committed an added revoked
+  `qualification-unverified` target at sequence 1, previewed its explicit
+  removal with source-event/manifest evidence, restored the exact original raw
+  `Locations.json` bytes at sequence 2, removed only that target, and left no
+  pending transaction without constructing hardware or the normal MVC;
+- Pi private-device contained SIL completed 96/96, reported a clean candidate,
+  private `/dev`, unshared network, read-only system/repository boundaries, and
+  zero forbidden hardware access;
+- the retrieved 3,395,318-byte SIL archive matched at SHA-256
+  `71347FEC...7FCA74F4`; and
+- the separate 3,814-byte focused/restore/postflight evidence archive matched
+  at SHA-256 `1B46D436...C22C908D`.
+
+The first disposable setup stopped after clone because its read-only
+postflight named the deployment anchor under `metadata/` rather than
+`update_history/`; no test, production write, or hardware action occurred. The
+corrected setup used a fresh disposable directory. Windows execution policy,
+then sandboxed child-SSH access, stopped two SIL-wrapper launches before a
+remote test began. The first connected SIL launch identified the intentionally
+absent candidate venv; adding the ignored interpreter shim resolved it. These
+were harness/setup findings, not candidate failures.
+
+Production postflight proved the rc.3 checkout remained clean at `d965927e`,
+the normal app remained PID 14283, and the active pointer, deployment anchor,
+and all 25 protected preflight files remained byte-identical. The preflight
+already contained audit sequence 4: the fourth event is the operator's
+cancelled rc.3 restore preview after the recorded sequence-3 rejection. That
+event was not created by disposable qualification. Production remains at
+sequence 4, with `qualification-unverified` still present and revoked, no
+pending transaction, unchanged Camera evidence, and no rc.4 tag.
+
+Do not tag or update from this record alone. The next step is explicit operator
+authorization to create the immutable local rc.4 tag at `3e451c01`, validate
+it with `--check-tags`, stage it without moving production `HEAD`, and run the
+normal protected rc.3 -> rc.4 update before retrying the attended restore.

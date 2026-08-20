@@ -8,8 +8,8 @@
 > publication, and rollout.
 
 Status: `in_progress` - rc.4 corrective implementation is active; exact-commit
-Windows, disposable-Pi, tag, attended recovery, publication, and rollout gates
-remain.
+tag, attended recovery, publication, and rollout gates remain; exact-candidate
+Windows and disposable-Pi rc.4 gates pass.
 
 Started: 2026-08-20
 
@@ -313,7 +313,23 @@ fingerprint, and exact member hashes. Only a bound exact restore may remove an
 added target; governed imports remain deletion-prohibited. Pre-commit Windows
 gates passed 59 narrow tests, 336 broader affected tests, 5,434 full-suite
 tests with 156 skips, and contained SIL 96/96, plus release/static/firmware
-identity checks. Exact-candidate and target-Pi evidence remains pending.
+identity checks.
+
+The exact candidate is `3e451c01e23f2957d12c8242c9c664bf8974aeae`.
+Its clean-commit 59-test and Windows 96/96 gates passed. A detached clean Pi
+checkout passed the same 59 tests, an independent add/revoke/exact-restore
+exercise with exact original bytes and no pending transaction, and
+private-device contained SIL 96/96. The retrieved SIL archive SHA-256 is
+`71347FEC...7FCA74F4`; focused/restore/postflight evidence is
+`1B46D436...C22C908D`.
+
+Read-only postflight matched the active pointer, deployment anchor, and all 25
+protected preflight files. Production remained clean at rc.3 commit
+`d965927e`, with the normal app still running. Audit sequence 4 was already in
+the preflight snapshot and is the operator-cancelled restore preview after the
+sequence-3 rejection; disposable qualification created no production event.
+The disposable target remains revoked and no production pending transaction
+exists. Rc.4 remains untagged.
 
 ## Local tag, updater, and rollback qualification
 
@@ -349,7 +365,6 @@ Final ignored evidence roots:
 
 ## Open gates
 
-- Complete exact-candidate Windows and disposable-Pi qualification for rc.4.
 - Authorize and create the immutable local `v1.3.0-rc.4` tag; do not publish it
   before the required tag-dependent and attended recovery gates pass.
 - Apply rc.4 through the normal protected updater, then complete the attended
@@ -364,6 +379,7 @@ Final ignored evidence roots:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Froze rc.4 candidate `3e451c01`; passed exact-commit Windows and Pi focused tests, independent exact-restore, Windows/Pi contained SIL 96/96, private-device proof, matching evidence archives, and byte-identical production postflight; retained tag and attended recovery as explicit gates. |
 | 2026-08-20 | Recorded the successful rc.3 protected recovery update and normal reopen, the guarded cancellation/addition/revocation/no-command passes, and the safe exact-restore deletion rejection; began the narrow rc.4 source-event/backup-bound correction and recorded its first 59 passing focused tests. |
 | 2026-08-20 | Froze exact rc.3 candidate `d965927e`; passed 270 affected Pi tests, 96/96 private-device SIL, and a fresh disposable real-Git short-anchor rc.2 recovery/full-anchor rc.3 reopen; rechecked unchanged production and sealed two matching evidence archives. |
 | 2026-08-20 | Implemented the rc.3 full-commit binding, exact rc.2 prefix compatibility, candidate-side recovery updater, exact-evidence rc.3 genesis enrollment, release metadata, and runbook; final Windows gates passed 602 focused/1 skipped, 5,430 full/156 skipped, and 96/96 contained SIL. |
