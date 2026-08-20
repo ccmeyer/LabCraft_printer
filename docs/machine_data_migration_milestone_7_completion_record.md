@@ -214,17 +214,36 @@ valid and must not be removed or rewritten. A corrected candidate must pass
 affected Windows/Pi/release gates and reach this enrolled machine through the
 authorized M6 update path; direct Git mutation is no longer permitted.
 
-Local correction validation on the successor correction tree passed 64
-focused bootstrap/migration/verification tests and the complete suite with
-5,403 passed, 156 skipped, and 605 existing warnings. Python compilation,
-release-metadata validation, release-JSON parsing, and `git diff --check` also
-passed. No firmware, protocol, Controller, Model, communication, motion,
-pressure, timing, Pi checkout, or canonical machine-data file changed during
-the correction. Exact-commit Windows/Pi qualification remains pending until
-the correction is committed and frozen.
+The correction is frozen as exact candidate
+`d59f73be498b695db47872a4b7a01bb95ded2d8e`. Exact-commit Windows
+qualification passed 571 tests with one skip in the M1-M7 focused group and
+5,403 tests with 156 skips in the complete suite. Python compilation,
+release-metadata validation, release-JSON parsing, `git diff --check`, clean
+worktree, no-rc.2-tag, no-firmware-diff, and a contained 96/96 SIL run also
+passed. The verified 52,083,845-byte transport bundle has SHA-256
+`B0D151E5...185BB6C1`.
 
-No-command probe, audit/restore, firmware provenance or flash, SAFE/HIL,
-Camera route, and corrected-candidate requalification remain pending.
+The affected target-Pi group passed 196 migration/bootstrap/UI tests in the
+detached candidate checkout. Contained Pi SIL completed 96/96 and independently
+proved private `/dev`, unshared network, read-only root and repository, and
+zero forbidden hardware matches. Its 3,393,454-byte evidence archive has
+SHA-256 `B38B738A...7DA87CC` and binds source commit `d59f73be`. Production
+postflight remained clean at `5f54a4a1`, with no app process and the original
+genesis deployment anchor still intact. Two preliminary disposable clones
+stopped before Python when qualification commands confused annotated tag
+objects with peeled commits; both were retained, the assertion was corrected,
+and neither production nor hardware was reached.
+
+No firmware, protocol, Controller, Model, communication, motion, pressure,
+timing, production checkout, or canonical machine-data file changed during
+the correction or its isolated qualification. The corrected enrolled-machine
+update cannot start while the candidate is untagged: M6 deliberately resolves
+and verifies a release tag and has no commit-only bypass. Direct Git mutation
+remains prohibited. Creating the final local `v1.3.0-rc.2` tag therefore
+remains the explicit next authorization/pre-tag decision.
+
+No-command probe, audit/restore, firmware provenance or flash, SAFE/HIL, and
+the machine-specific Camera route remain pending.
 
 ## Local tag, updater, and rollback qualification
 
@@ -258,8 +277,8 @@ Final ignored evidence roots:
 
 ## Open gates
 
-- Commit and freeze the bootstrap UI correction as a new exact rc.2 candidate.
-- Repeat affected focused/full/static/release/SIL and target-Pi candidate gates.
+- Authorize and create the final local `v1.3.0-rc.2` tag at corrected candidate
+  `d59f73be`; do not push it before the required tag-dependent gates pass.
 - Apply the corrected candidate to enrolled LC-001 through an authorized M6
   update transaction and verify preservation/relaunch evidence.
 - Private operator, rc.6 pilot, rc.1 pilot, fixtures, and Camera-route approval.
@@ -271,6 +290,7 @@ Final ignored evidence roots:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Froze correction candidate `d59f73be`; passed exact-commit Windows focused/full/static/release/SIL and affected target-Pi focused/private-device SIL gates; proved production remained unchanged; stopped the enrolled update at the intentional release-tag boundary. |
 | 2026-08-20 | Recorded passing attended backup/install/cancel/review/migration/activation/genesis gates on LC-001, then superseded `5f54a4a1` for release after its prefilled source failed closed and manual Camera transcription was judged unsafe; began the direct-source/read-only-Camera correction and required affected requalification. |
 | 2026-08-20 | Created the in-progress completion record, closed the software traceability audit without a code change, recorded sanitized read-only Pi preflight evidence, and documented the untagged rc.2 candidate changes and remaining gates. |
 | 2026-08-20 | Recorded the local `main` integration boundary and the passing pre-candidate focused, metadata, firmware-identity, and contained-SIL checks without claiming the exact-commit gate. |

@@ -1134,7 +1134,7 @@ Milestone 7 is `verified` only when:
 - [x] Create the Slice 2 rc.2 release commit without a tag.
 - [x] Pass Slice 3 Windows qualification and candidate-bundle verification.
 - [x] Pass Slice 4 unattended SSH Pi qualification and archive recheck.
-- [ ] Freeze the corrected rc.2 candidate and repeat affected Slice 3/4 gates
+- [x] Freeze the corrected rc.2 candidate and repeat affected Slice 3/4 gates
   after the attended prefilled-source and Camera-transcription findings.
 - [ ] Pass Slice 5 attended designated-machine and Camera qualification.
 - [ ] Pass Slice 6 local-tag, exact old-updater, offline, rollback, and re-upgrade gates.
@@ -1177,8 +1177,9 @@ Milestone 7 is `verified` only when:
    questions. Migration allows no unexplained coordinate delta; M5 thresholds
    only select confirmation strength for a deliberate guarded proposal.
 10. A realistic exact-tag legacy updater/rollback gate depends on a local tag.
-   The tag is created only after all non-tag-dependent safety gates, remains
-   unpushed during these tests, and may be discarded locally if they fail.
+   The tag is created only after all non-tag-dependent safety gates and remains
+   unpushed during these tests. If a later gate fails, preserve the tag and
+   prepare a new version; never move, delete, or retarget it.
 11. A sanitized fixture proves software behavior but cannot establish the
     physical correctness of a real machine's configuration or firmware. Both
     deployed source cohorts still require representative pilots.
@@ -1227,6 +1228,11 @@ Milestone 7 is `verified` only when:
   M7 documents, and the minimal Pi SIL read-only-rebind correction.
 - Windows focused/full/static/release/SIL and fresh unattended target-Pi
   focused/cohort/private-device SIL/archive gates passed on that exact commit.
+- Corrected candidate `d59f73be498b695db47872a4b7a01bb95ded2d8e`
+  passed its exact-commit Windows focused/full/static/release/SIL and affected
+  Pi migration/bootstrap/private-device SIL gates. Production remained clean
+  at the superseded candidate and its genesis anchor was unchanged. M6 update
+  preparation stopped at the required, still-uncreated rc.2 release tag.
 - Attended hardware work, the local tag and exact old-updater/rollback lanes,
   publication, pilots, and rollout have not completed.
 
@@ -1244,13 +1250,20 @@ Milestone 7 is `verified` only when:
   hardware matches; production pre/post state was identical.
 - Pi evidence manifest/archive passed on-Pi and local rechecks at archive
   SHA-256 `09D68B3C...0E98A0B7`.
-- No application runtime, firmware, protocol, tag, production checkout,
-  production machine-data, or deployed hardware state changed.
+- The correction changed only the first-start dialog and its tests/docs; it did
+  not change Controller, Model, communication, motion, pressure, timing,
+  firmware, protocol, tag, production checkout, production machine-data, or
+  deployed hardware state.
+- Correction results: 571 passed/1 skipped focused and 5,403 passed/156 skipped
+  full on Windows; 96/96 Windows SIL; 196 affected Pi tests; 96/96 Pi SIL with
+  zero forbidden hardware matches; bundle SHA-256 `B0D151E5...185BB6C1`; Pi
+  SIL archive SHA-256 `B38B738A...7DA87CC`.
 
 ## Document change log
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Froze corrected candidate `d59f73be`, repeated the exact Windows and affected isolated Pi gates successfully, preserved unchanged production state, and stopped before enrolled M6 update because the required final rc.2 tag is not yet authorized or created. |
 | 2026-08-20 | Attended LC-001 migration and genesis enrollment passed on `5f54a4a1`, then safely exposed the prefilled direct-local classification defect and unnecessary Camera transcription risk; superseded that release candidate and added a corrected-candidate requalification gate. |
 | 2026-08-20 | Created the concrete eight-slice rc.2 coverage, candidate, Windows, SSH/Pi, attended Camera/HIL, local-tag updater/rollback, publication, staged-rollout, evidence, stop-condition, and closeout plan. |
 | 2026-08-20 | Began implementation: closed the software coverage audit without a code change, captured private LC-001 read-only backup/Camera preflight over SSH, prepared untagged rc.2 release metadata and the in-progress completion record, and retained attended approval as the HIL/tag blocker. |
