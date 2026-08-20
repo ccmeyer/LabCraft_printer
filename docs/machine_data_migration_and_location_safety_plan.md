@@ -56,7 +56,7 @@ For every milestone update:
 | 1 | Freeze external machine-data contract | `verified` | Commit `9b882141` | 101 focused and 5,100 full-suite tests passed |
 | 2 | Build inert migration and backup engine | `verified` | Commit `157db800` | 180 focused and 5,179 full-suite tests plus static checks passed |
 | 3 | Activate first-launch migration and verification | `verified` | Production cutover commit `b3cf12ad`; Qt worker-shutdown fix `08d41bc2` | Original and fix automated gates passed; target-Pi rc.1 migration, fail-closed corruption, cross-worktree reuse, restored reopen, and 10 zero-command safety tests passed |
-| 4 | Add transactional configuration history | `implementation_complete` | Uncommitted implementation on `update_bug_fix` | 5,288 full-suite tests and contained 96-well SIL passed; target-Pi qualification pending |
+| 4 | Add transactional configuration history | `verified` | Implementation `6925d029`; exact-restore correction `f6d65fd9` | 5,363 full-suite tests, contained 96-well SIL, and fresh target-Pi no-hardware qualification passed |
 | 5 | Add guarded location and calibration changes | `planned` | Not started | Not started |
 | 6 | Protect future updates and controlled rollback | `planned` | Not started | Not started |
 | 7 | Qualify, release, and stage deployment | `planned` | Not started | Not started |
@@ -1248,7 +1248,7 @@ merely switching app code back.
 
 ## Milestone 4: Add transactional configuration history
 
-Status: `corrective_fix_local_validation_passed_pi_requalification_pending`
+Status: `verified`
 
 Concrete plan:
 [Machine Data Migration Milestone 4: Transactional Configuration History Plan](machine_data_migration_milestone_4_implementation_plan.md)
@@ -1361,6 +1361,11 @@ canonical history and requires a compatibility export.
   representation-only differences as auditable file changes, preserves target
   authorization when only formatting changes, and uses the existing durable
   journal/recovery path without changing normal edit serialization.
+- The corrective implementation was committed as `f6d65fd9`
+  (`fix: restore exact configuration backup bytes`) and qualified from clean
+  primary and detached Pi checkouts at the same commit. The completion record
+  is
+  [Machine Data Migration Milestone 4 Completion Record](machine_data_migration_milestone_4_completion_record.md).
 
 ### Validation record
 
@@ -1391,8 +1396,19 @@ canonical history and requires a compatibility export.
 - Corrective exact-restore validation on 2026-08-20 passed: 50 transaction
   tests; 61 focused tests; 324 broad affected tests with 1 skipped; the full
   suite with 5,363 passed and 156 skipped in 329.31 seconds; changed-module
-  compilation; `git diff --check`; and contained 96/96 standard SIL. A fresh
-  target-Pi qualification at the corrective commit remains required.
+  compilation; `git diff --check`; and contained 96/96 standard SIL.
+- Fresh target-Pi qualification at corrective commit `f6d65fd9` passed from
+  disposable root `/tmp/labcraft-m4-corrected.thNIP1`: seven immutable and
+  five exact configuration baseline hashes passed; named, verification, rack,
+  plate, and exact-restore exercises finished at sequence 7 with seven events,
+  six backup manifests, no pending transaction, and unchanged authorized
+  Camera data; primary/detached history was byte-identical; four fault/recovery
+  cases passed; Pi gates passed 61 focused and 10 zero-command tests; and the
+  contained SIL passed 96/96 with all hardware interfaces disabled.
+- Pi closeout sealed and rechecked 56 evidence files. The 59-member durable
+  archive copied under ignored `verification_reports/` revalidated locally at
+  SHA-256
+  `26ab07e544294b2af395a23155e4f65b93949b21c7b6cacdccc1f439cddc799a`.
 
 ## Milestone 5: Add guarded location and calibration changes
 
@@ -1954,6 +1970,8 @@ Hardware use is last. It requires:
 | 2026-08-19 | M3 Pi validation | The first-start guide's deliberate missing-file probe used `exit 1`, which closed the operator's terminal and prevented the next hash-snapshot command | Never exit the interactive shell from an evidence probe; report all missing paths, stop procedurally, and preserve an explicit exception record when a baseline was missed |
 | 2026-08-19 | M3 Pi validation | The normal main window does not currently present the canonical machine ID and hardware profile clearly enough for the documented visual check | Print and record both values from the authorized pointer and canonical Settings; treat the main-window screenshot only as lifecycle evidence |
 | 2026-08-19 | M3 Pi validation | The rc.1 backup contained only `update_logs/...` M2 unclassified paths | Confirmed every path resolves through reviewed archive-only rule `legacy-update-logs-v1`; unknown or prohibited paths remain blocking |
+| 2026-08-20 | M4 Pi qualification | Valid migrated legacy JSON can be semantically correct but use noncanonical raw bytes, so parsing and reserializing a backup cannot satisfy an exact-file restore promise | Commit `f6d65fd9` permits verified restore bytes only after raw, semantic, schema, filename, and hardware-profile checks, then uses the normal journal/event/recovery path |
+| 2026-08-20 | M4 Pi qualification | The corrective implementation restored all five governed files to their exact legacy baseline bytes while keeping Camera unchanged and authorized | Mark Milestone 4 verified after cross-checkout, four-boundary recovery, 61 focused, 10 zero-command, and 96/96 contained SIL gates passed |
 
 Add findings here as work proceeds. Do not rewrite prior findings to hide an
 earlier assumption; add a correction with date and evidence.
@@ -1978,6 +1996,7 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-19 | 4 | Transaction history implementation committed | Commit `6925d029`; 54 focused, 5,288 full-suite, and 96/96 contained SIL passed before commit | Run disposable target-Pi qualification |
 | 2026-08-20 | 4 | Pi sequence-zero baseline passed; exact restore defect found read-only before mutation | All baseline hashes `OK`; all five legacy files valid but noncanonical; explicit restore would canonicalize instead of reproducing raw backup bytes | Preserve failed-qualification evidence and correct exact restoration before transactions |
 | 2026-08-20 | 4 | Exact-byte restore corrective implementation and local validation completed | 50 transaction, 61 focused, 324 affected/1 skipped, 5,363 full/156 skipped, 96/96 contained SIL, compilation, and diff checks passed | Create corrective commit, pull it to the Pi, and restart qualification from a fresh disposable root |
+| 2026-08-20 | 4 | Milestone 4 verified at exact-restore correction `f6d65fd9` | Fresh disposable Pi qualification: exact baselines `7 + 5`; history sequence/events `7/7`; six backups; no pending; four recovery cases; 61 focused and 10 zero-command tests; 96/96 hardware-disabled SIL; sealed evidence archive SHA-256 `26ab07e5...d799a` | Begin the concrete Milestone 5 plan using verified history and authorization contracts |
 
 ## Definition of done for v1.3.0-rc.2
 
@@ -2021,3 +2040,4 @@ The work is complete only when:
 | 2026-08-19 | Recorded implementation-complete Milestone 3 production cutover, operator guidance, focused/full/host-SIL evidence, findings, risks, rollback, and its remaining commit/manual-Pi verification gates. |
 | 2026-08-19 | Recorded fix commit `08d41bc2`, the Pi Qt/GIL shutdown-race diagnosis, corrected operator evidence/profile guidance, complete target-Pi evidence including the missing-baseline exception, and marked Milestone 3 verified. |
 | 2026-08-20 | Recorded Milestone 4 commit `6925d029`, the target-Pi noncanonical exact-restore finding, its locally validated corrective implementation, and the fresh-Pi requalification gate. |
+| 2026-08-20 | Recorded corrective commit `f6d65fd9`, the complete target-Pi no-hardware qualification and durable evidence checksum, added the Milestone 4 completion record, and marked Milestone 4 verified. |

@@ -1,6 +1,6 @@
 # Machine Data Migration Milestone 4: Transactional Configuration History Plan
 
-Status: `corrective_fix_local_validation_passed_pi_requalification_pending`
+Status: `verified`
 
 Prepared: 2026-08-19
 
@@ -1128,12 +1128,12 @@ Milestone 4 is `verified` only when all of the following are true:
 - [x] Implement Slice 5.
 - [x] Implement Slice 6.
 - [x] Implement Slice 7.
-- [ ] Complete Slice 8: the dedicated implementation commit and corrective
-  local qualification are complete; fresh target-Pi qualification remains.
+- [x] Complete Slice 8: dedicated commits, corrective local qualification,
+  fresh target-Pi qualification, and evidence closeout are complete.
 - [x] Create dedicated Milestone 4 implementation commit `6925d029`.
-- [ ] Create the exact-byte restore corrective commit.
-- [ ] Complete and record target-Pi qualification.
-- [ ] Mark Milestone 4 `verified` in both plans.
+- [x] Create exact-byte restore corrective commit `f6d65fd9`.
+- [x] Complete and record target-Pi qualification.
+- [x] Mark Milestone 4 `verified` in both plans.
 
 ## Planning findings
 
@@ -1264,14 +1264,32 @@ Corrective local validation on 2026-08-20:
 - contained `virtual_print_array_96_v1`: passed with 96/96 completions;
 - changed-module compilation and `git diff --check`: passed.
 
-Remaining verification work:
+### Target-Pi verification closeout
 
-1. create the exact-byte restore corrective commit after review;
-2. pull that commit into a clean Pi checkout;
-3. start from a fresh disposable root and execute the documented M3-to-M4,
-   cross-checkout, aggregate,
-   fault/recovery, restore, history/export, and zero-command safety sequence;
-4. record exact Pi hashes/logs and only then mark both plans `verified`.
+Corrective commit `f6d65fd9` was pulled into clean primary and detached target-
+Pi checkouts. A fresh qualification used disposable root
+`/tmp/labcraft-m4-corrected.thNIP1`; it did not launch `App.py`, access physical
+hardware, or write to the normal machine-data root.
+
+The closeout passed all required gates:
+
+- seven immutable and five exact configuration baseline files rechecked;
+- exact restoration returned all governed configuration files to their
+  original noncanonical bytes;
+- Camera remained unchanged and authorized;
+- sequence 7, seven events, six backups, and zero pending transactions;
+- byte-identical primary and detached-checkout history;
+- four selected journal/config/event/head interruption and recovery cases;
+- 61 focused tests and 10 zero-command safety tests on the Pi; and
+- contained `virtual_print_array_96_v1` SIL, seed 1, 96/96 completions,
+  classification `pass`, with all hardware interfaces disabled.
+
+The Pi sealed 56 evidence files, all of which rechecked successfully. The
+durable ignored archive contains 59 paths and revalidated after transfer with
+SHA-256
+`26ab07e544294b2af395a23155e4f65b93949b21c7b6cacdccc1f439cddc799a`.
+See
+[Machine Data Migration Milestone 4 Completion Record](machine_data_migration_milestone_4_completion_record.md).
 
 ## Document change log
 
@@ -1280,3 +1298,4 @@ Remaining verification work:
 | 2026-08-19 | Created the concrete transactional configuration history plan after Milestone 3 target-Pi verification and cleanup. |
 | 2026-08-19 | Implemented Slices 1-7 and the local portion of Slice 8; recorded full Windows and contained SIL validation, implementation findings, and the remaining post-commit Pi gate. |
 | 2026-08-20 | Recorded implementation commit `6925d029`, the sequence-zero Pi baseline pass, the noncanonical exact-restore defect, its validated corrective implementation, and the remaining corrective-commit/fresh-Pi gates. |
+| 2026-08-20 | Recorded corrective commit `f6d65fd9`, complete fresh target-Pi qualification and evidence preservation, closed Slice 8, and marked Milestone 4 verified. |
