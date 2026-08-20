@@ -1,6 +1,6 @@
 # Machine Data Migration Milestone 4: Transactional Configuration History Plan
 
-Status: `ready_for_implementation`
+Status: `implementation_complete_local_validation_passed`
 
 Prepared: 2026-08-19
 
@@ -949,8 +949,15 @@ Run, at minimum:
 
 ```powershell
 .\env\Scripts\python.exe -m pytest -q <focused Milestone 4 tests>
-.\env\Scripts\python.exe -m pytest -q
-.\tools\run_pi_virtual_workflow.ps1
+.\env\Scripts\python.exe -m pytest -q --basetemp <external-temp-root>
+.\env\Scripts\python.exe tools\run_virtual_workflow.py `
+  --scenario virtual_print_array_96_v1 `
+  --output-root <external-output-root> `
+  --warmup-runs 0 --measured-runs 1 `
+  --host-label <non-secret-host-label>
+powershell -ExecutionPolicy Bypass -File .\tools\run_pi_virtual_workflow.ps1 `
+  -PiHost <qualified-pi-host> -SshIdentityFile <identity-file> `
+  -SafetyProofOnly
 git diff --check
 ```
 
@@ -1114,14 +1121,15 @@ Milestone 4 is `verified` only when all of the following are true:
   carry-forward/revocation rules.
 - [x] Define MVC, import, restore, re-verification, history, tests, Pi gate, and
   rollback behavior.
-- [ ] Implement Slice 1.
-- [ ] Implement Slice 2.
-- [ ] Implement Slice 3.
-- [ ] Implement Slice 4.
-- [ ] Implement Slice 5.
-- [ ] Implement Slice 6.
-- [ ] Implement Slice 7.
-- [ ] Implement Slice 8.
+- [x] Implement Slice 1.
+- [x] Implement Slice 2.
+- [x] Implement Slice 3.
+- [x] Implement Slice 4.
+- [x] Implement Slice 5.
+- [x] Implement Slice 6.
+- [x] Implement Slice 7.
+- [ ] Complete Slice 8: local qualification and documentation are complete;
+  the dedicated commit and target-Pi qualification remain.
 - [ ] Create the dedicated Milestone 4 implementation commit.
 - [ ] Complete and record target-Pi qualification.
 - [ ] Mark Milestone 4 `verified` in both plans.
@@ -1159,9 +1167,67 @@ Milestone 4 is `verified` only when all of the following are true:
     first event while still rejecting untracked edits.
 12. The experiment audit timeline cannot substitute for configuration history;
     it has different ownership, retention, and recovery meaning.
+13. A durable event may exist while the head still names the preceding event.
+    Exact pending-journal binding permits this one stale-head state so startup
+    can advance the head; any unrelated stale or altered head remains unsafe.
+14. Plate row, column, spacing, default, or other definition changes can alter
+    derived motion even when four corner coordinates are unchanged. The target
+    impact calculation therefore revokes that plate on any semantic change to
+    its complete plate definition.
+15. Pytest/SIL temporary roots must be outside the repository. A repository-
+    local `--basetemp` is correctly rejected by simulation containment and is
+    not valid full-suite evidence.
+
+## Implementation and local validation record
+
+Implemented on `update_bug_fix` on 2026-08-19; changes remain intentionally
+uncommitted until the user requests the dedicated Milestone 4 commit.
+
+Implemented behavior:
+
+- strict v1 event, head, journal, backup, authorization, and governed-document
+  contracts with exact dynamic active-tree inventory;
+- exact pre-change backups, canonical staged bytes, atomic replacement,
+  immutable hash-chained events, current head, and retained-lock/in-process
+  writer serialization;
+- deterministic startup recovery for before-only, mixed, all-after,
+  event-written/head-stale, head-advanced/pending, and cleanup-interrupted
+  states, with ambiguous data rejected before MVC construction;
+- per-target authorization carry-forward and exact revocation for named
+  locations, rack dependencies, plate definitions, Settings, and Obstacles;
+- disk-before-memory Controller adapters for named, rack, plate, import, and
+  restore workflows, plus exact target verification events and a machine queue
+  fatal latch if committed runtime installation fails;
+- strict human-readable history, deterministic Markdown/JSON export, and UI
+  actions for exact verification, governed import, and restore;
+- direct canonical writer guards and an AST writer-inventory regression test.
+
+Validation evidence:
+
+- changed-module `py_compile`: passed for fourteen modules;
+- affected-area gate: `268 passed, 1 skipped`;
+- final Milestone 4 focused gate: `54 passed`;
+- final full Python suite with external basetemp
+  `C:\Users\conar\AppData\Local\Temp\labcraft-m4-full-20260819-2`:
+  `5288 passed, 153 skipped` in 505.16 seconds;
+- local contained `virtual_print_array_96_v1`, seed 1, one measured run:
+  passed with 96/96 completions and no physical hardware;
+- `git diff --check`: passed;
+- remote Pi wrapper was not treated as local SIL: it requires `-PiHost`, and
+  the Pi must first receive the dedicated Milestone 4 commit so the result
+  exercises this implementation.
+
+Remaining verification work:
+
+1. create the dedicated Milestone 4 commit after review;
+2. pull that commit into a clean Pi checkout;
+3. execute the documented disposable M3-to-M4, cross-checkout, aggregate,
+   fault/recovery, restore, history/export, and zero-command safety sequence;
+4. record exact Pi hashes/logs and only then mark both plans `verified`.
 
 ## Document change log
 
 | Date | Change |
 | --- | --- |
 | 2026-08-19 | Created the concrete transactional configuration history plan after Milestone 3 target-Pi verification and cleanup. |
+| 2026-08-19 | Implemented Slices 1-7 and the local portion of Slice 8; recorded full Windows and contained SIL validation, implementation findings, and the remaining post-commit Pi gate. |

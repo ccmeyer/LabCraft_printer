@@ -509,7 +509,22 @@ def build_application_components(
             machine_data_paths=(
                 getattr(dependencies.authorized_machine_context, "paths", None)
             ),
+            configuration_transactions=(
+                getattr(
+                    dependencies.authorized_machine_context,
+                    "configuration_transactions",
+                    None,
+                )
+            ),
         )
+        transaction_repository = getattr(
+            dependencies.authorized_machine_context,
+            "configuration_transactions",
+            None,
+        )
+        profile_store = getattr(model, "regulator_profile_store", None)
+        if transaction_repository is not None and profile_store is not None:
+            profile_store.bind_transaction_repository(transaction_repository)
 
         if profile.name == "legacy":
             model.calibration_model = dependencies.legacy_calibration_model_factory(

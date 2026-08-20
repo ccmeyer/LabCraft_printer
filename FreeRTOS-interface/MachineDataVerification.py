@@ -467,12 +467,15 @@ def _config_hashes(paths: MachineDataPaths) -> dict[str, str]:
     return hashes
 
 
-def build_target_snapshot(paths: MachineDataPaths) -> dict[str, tuple[str, str, object]]:
-    """Return target_key -> (kind, source file, canonical value)."""
+def build_target_snapshot_from_documents(
+    locations: Mapping[str, object],
+    plates: list[object],
+    settings: Mapping[str, object],
+) -> dict[str, tuple[str, str, object]]:
+    """Return target evidence from complete, already parsed config documents."""
 
-    locations = _read_json(paths.config_root / "Locations.json", dict, "Locations.json")
-    plates = _read_json(paths.config_root / "Plates.json", list, "Plates.json")
-    settings = _read_json(paths.config_root / "Settings.json", dict, "Settings.json")
+    if not isinstance(locations, Mapping) or not isinstance(plates, list) or not isinstance(settings, Mapping):
+        raise VerificationError("Target snapshot documents have invalid top-level types.")
     targets: dict[str, tuple[str, str, object]] = {}
     location_names: set[str] = set()
     for display_name, raw in locations.items():
@@ -532,6 +535,15 @@ def build_target_snapshot(paths: MachineDataPaths) -> dict[str, tuple[str, str, 
     if not found_default:
         raise VerificationError("Settings DEFAULT_PLATE does not identify a plate.")
     return targets
+
+
+def build_target_snapshot(paths: MachineDataPaths) -> dict[str, tuple[str, str, object]]:
+    """Return target_key -> (kind, source file, canonical value)."""
+
+    locations = _read_json(paths.config_root / "Locations.json", dict, "Locations.json")
+    plates = _read_json(paths.config_root / "Plates.json", list, "Plates.json")
+    settings = _read_json(paths.config_root / "Settings.json", dict, "Settings.json")
+    return build_target_snapshot_from_documents(locations, plates, settings)
 
 
 def create_machine_verification(
@@ -774,6 +786,7 @@ __all__ = [
     "VerificationError",
     "VerificationState",
     "build_target_snapshot",
+    "build_target_snapshot_from_documents",
     "canonical_value_sha256",
     "create_machine_verification",
     "load_activation_receipt",

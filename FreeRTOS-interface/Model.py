@@ -13236,6 +13236,7 @@ class WellPlate(QObject):
 
         self.calibration_applied = False
         self.temp_calibration_data = {}
+        self.canonical_transaction_required = False
     
         self.apply_calibration_data()
 
@@ -13474,9 +13475,49 @@ class WellPlate(QObject):
     
     def update_calibration_data(self):
         """Run the full update of all calibration data."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical plate calibration must use the configuration transaction service."
+            )
         self.store_calibrations()
         self.save_calibrations_to_file()
         self.apply_calibration_data()
+
+    def proposed_calibration_document(self):
+        """Return a complete plate document without changing active plate state."""
+
+        required = {"top_left", "top_right", "bottom_right", "bottom_left"}
+        if set(self.temp_calibration_data) != required:
+            raise ValueError("All four temporary plate corners are required.")
+        proposed = copy.deepcopy(self.all_plate_data)
+        current_name = self.get_current_plate_name()
+        for plate in proposed:
+            if plate.get("name") == current_name:
+                plate["calibrations"] = copy.deepcopy(self.temp_calibration_data)
+                return proposed
+        raise ValueError(f"Plate format {current_name!r} was not found.")
+
+    def install_committed_document(self, all_plate_data):
+        """Install a complete already-persisted Plates snapshot."""
+
+        current_name = self.get_current_plate_name()
+        proposed = copy.deepcopy(all_plate_data)
+        selected = next(
+            (plate for plate in proposed if plate.get("name") == current_name),
+            None,
+        )
+        if selected is None:
+            raise ValueError(f"Committed plates omit current format {current_name!r}.")
+        self.all_plate_data = proposed
+        self.current_plate_data = selected
+        self.rows = selected["rows"]
+        self.cols = selected["columns"]
+        self.calibrations = selected["calibrations"]
+        self.calibration_applied = False
+        self.normalize_excluded_wells()
+        self.apply_calibration_data()
+        self.plate_format_changed_signal.emit()
+        self.plate_summary_changed_signal.emit(current_name, self.rows, self.cols)
 
     def get_plate_data_by_name(self, plate_name):
         for plate_data in self.all_plate_data:
@@ -13486,6 +13527,10 @@ class WellPlate(QObject):
 
     def store_calibrations(self):
         """Save the temporary calibration data to the main calibration data."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical plate calibration cannot change active memory before commit."
+            )
         plate_name = self.get_current_plate_name()
         for plate_data in self.all_plate_data:
             if plate_data['name'] == plate_name:
@@ -13499,6 +13544,10 @@ class WellPlate(QObject):
 
     def save_calibrations_to_file(self, file_path=None):
         """Save the current calibration data to a JSON file."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical Plates.json writes require a configuration transaction."
+            )
         path = file_path or self.plates_path
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp_path = path + ".tmp"
@@ -14326,6 +14375,7 @@ class RackModel(QObject):
 
         self.calibration_applied = False
         self.temp_calibration_data = {}
+        self.canonical_transaction_required = False
     
         self.apply_calibration_data()
 
@@ -14412,6 +14462,10 @@ class RackModel(QObject):
 
     def store_calibrations(self):
         """Save the temporary calibration data to the main calibration data."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical rack calibration cannot change active memory before commit."
+            )
         for position_name, coords in self.temp_calibration_data.items():
             self.calibrations[position_name] = coords
         self.temp_calibration_data.clear()
@@ -14422,6 +14476,10 @@ class RackModel(QObject):
 
     def update_calibration_data(self):
         """Run the full update of all calibration data."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical rack calibration must use the configuration transaction service."
+            )
         self.store_calibrations()
         self.save_calibrations_to_file()
         self.apply_calibration_data()
@@ -14810,6 +14868,7 @@ class LocationModel(QObject):
         self.locations = {}
         self.boundaries = []
         self.obstacles = []
+        self.canonical_transaction_required = False
 
     # === Atomic file utility ===
     def _atomic_write_json(self, path: str, obj: dict) -> None:
@@ -14839,11 +14898,21 @@ class LocationModel(QObject):
 
     def save_locations(self):
         """Save locations to a JSON file atomically."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical Locations.json writes require a configuration transaction."
+            )
         try:
             self._atomic_write_json(self.json_file_path, self.locations)
         except Exception as e:
             print(f"Failed to save locations '{self.json_file_path}': {e}")
             # consider re-raising if you want calling code to handle it
+
+    def install_committed_locations(self, locations):
+        """Install a complete already-persisted Locations snapshot."""
+
+        self.locations = copy.deepcopy(dict(locations))
+        self.locations_updated.emit()
 
     # === Obstacles / Boundaries ===
     def load_obstacles(self):
@@ -14869,12 +14938,20 @@ class LocationModel(QObject):
 
     def add_location(self, name, x, y, z):
         """Add a new location or update an existing one."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical locations cannot change active memory before commit."
+            )
         self.locations[name] = {'X': x, 'Y': y, 'Z': z}
         self.locations_updated.emit()
         #print(f"Location '{name}' added/updated.")
 
     def update_location(self, name, x, y, z):
         """Update an existing location by name."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical locations cannot change active memory before commit."
+            )
         if name in self.locations:
             self.locations[name] = {'X': x, 'Y': y, 'Z': z}
             self.current_location_updated.emit(name)
@@ -14894,6 +14971,10 @@ class LocationModel(QObject):
 
     def update_location_coords(self, name, coords):
         """Update an existing location by name."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical locations cannot change active memory before commit."
+            )
         if name in self.locations:
             self.locations[name] = coords
             self.locations_updated.emit()
@@ -14904,6 +14985,10 @@ class LocationModel(QObject):
 
     def remove_location(self, name):
         """Remove a location by name."""
+        if self.canonical_transaction_required:
+            raise RuntimeError(
+                "Canonical locations cannot change active memory before commit."
+            )
         if name in self.locations:
             del self.locations[name]
             self.locations_updated.emit()
@@ -15598,6 +15683,9 @@ class Model(QObject):
         self.location_model.load_obstacles()
         self.all_plate_data = self.load_all_plate_data(self.plates_path)
         self.well_plate = WellPlate(self.all_plate_data,self.plates_path)
+        self.location_model.canonical_transaction_required = self.canonical_existing_only
+        self.rack_model.canonical_transaction_required = self.canonical_existing_only
+        self.well_plate.canonical_transaction_required = self.canonical_existing_only
         self.stock_solutions = StockSolutionManager()
         self.reaction_collection = ReactionCollection()
         self.printer_head_manager = PrinterHeadManager(self.printer_head_colors,self.rack_model)
@@ -16281,6 +16369,27 @@ class Model(QObject):
         self.location_model.update_location_coords('rack_position_Left',self.rack_model.get_calibration_by_name('rack_position_Left'))
         self.location_model.update_location_coords('rack_position_Right',self.rack_model.get_calibration_by_name('rack_position_Right'))
         self.location_model.save_locations()
+
+    def install_committed_locations(self, locations):
+        """Refresh every in-memory consumer from one committed Locations document."""
+
+        snapshot = copy.deepcopy(dict(locations))
+        self.location_model.install_committed_locations(snapshot)
+        self.location_data = copy.deepcopy(snapshot)
+        self.rack_model.process_location_data(snapshot)
+        self.rack_model.apply_calibration_data()
+
+    def install_committed_plates(self, plates):
+        """Refresh the active well-plate transform from committed disk truth."""
+
+        self.all_plate_data = copy.deepcopy(list(plates))
+        self.well_plate.install_committed_document(self.all_plate_data)
+
+    def install_committed_regulator_profiles(self, document):
+        """Refresh regulator profiles after an audited repository commit."""
+
+        validated = self.regulator_profile_store.set_document_from_repository(document)
+        self.regulator_profiles = copy.deepcopy(validated)
 
     def update_state(self, status_dict):
         '''

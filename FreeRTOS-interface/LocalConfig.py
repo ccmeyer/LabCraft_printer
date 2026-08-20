@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import copy
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
@@ -68,6 +69,104 @@ def validate_machine_config_file(path: str | Path, filename: str):
         supported = ", ".join(sorted(_EXPECTED_TOP_LEVEL_TYPES))
         raise ValueError(f"Unsupported machine config '{filename}'. Supported: {supported}")
     return _validate_json_file(Path(path), filename)
+
+
+def validate_machine_config_payload(filename: str, payload):
+    """Validate a complete governed document without writing it.
+
+    These are structural compatibility checks.  Motion bounds and calibration
+    geometry belong to the guarded-change policy, not this persistence layer.
+    """
+
+    if filename not in _EXPECTED_TOP_LEVEL_TYPES:
+        supported = ", ".join(sorted(_EXPECTED_TOP_LEVEL_TYPES))
+        raise ValueError(f"Unsupported machine config '{filename}'. Supported: {supported}")
+    expected_type = _EXPECTED_TOP_LEVEL_TYPES[filename]
+    if not isinstance(payload, expected_type):
+        raise ValueError(
+            f"Invalid {filename}: expected top-level {expected_type.__name__}, "
+            f"got {type(payload).__name__}"
+        )
+    try:
+        # Round-trip also rejects non-JSON objects and non-finite floats.
+        cloned = json.loads(
+            json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid {filename}: {exc}") from exc
+
+    if filename == "Locations.json":
+        folded = set()
+        for name, coords in cloned.items():
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("Locations.json names must be nonempty text.")
+            key = name.casefold()
+            if key in folded:
+                raise ValueError("Locations.json names must be unique ignoring case.")
+            folded.add(key)
+            if not isinstance(coords, dict):
+                raise ValueError(f"Location {name!r} must be an object.")
+            for axis in ("X", "Y", "Z"):
+                value = coords.get(axis)
+                if type(value) is not int:
+                    raise ValueError(f"Location {name!r} {axis} must be an integer.")
+
+    elif filename == "Plates.json":
+        names = set()
+        default_count = 0
+        corners = {"top_left", "top_right", "bottom_right", "bottom_left"}
+        required = {"name", "rows", "columns", "spacing", "default", "calibrations"}
+        if not cloned:
+            raise ValueError("Plates.json must contain at least one plate.")
+        for plate in cloned:
+            if not isinstance(plate, dict) or not required.issubset(plate):
+                raise ValueError("Every plate must contain the required plate fields.")
+            name = plate.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("Plate names must be nonempty text.")
+            key = name.casefold()
+            if key in names:
+                raise ValueError("Plate names must be unique ignoring case.")
+            names.add(key)
+            if type(plate.get("rows")) is not int or plate["rows"] <= 0:
+                raise ValueError(f"Plate {name!r} rows must be a positive integer.")
+            if type(plate.get("columns")) is not int or plate["columns"] <= 0:
+                raise ValueError(f"Plate {name!r} columns must be a positive integer.")
+            spacing = plate.get("spacing")
+            if isinstance(spacing, bool) or not isinstance(spacing, (int, float)) or spacing <= 0:
+                raise ValueError(f"Plate {name!r} spacing must be positive.")
+            if type(plate.get("default")) is not bool:
+                raise ValueError(f"Plate {name!r} default must be a boolean.")
+            default_count += int(plate["default"])
+            calibrations = plate.get("calibrations")
+            if not isinstance(calibrations, dict):
+                raise ValueError(f"Plate {name!r} calibrations must be an object.")
+            if calibrations and set(calibrations) != corners:
+                raise ValueError(f"Plate {name!r} calibration must contain all four corners.")
+            for corner, coords in calibrations.items():
+                if not isinstance(coords, dict):
+                    raise ValueError(f"Plate {name!r} {corner} must be an object.")
+                for axis in ("X", "Y", "Z"):
+                    if type(coords.get(axis)) is not int:
+                        raise ValueError(f"Plate {name!r} {corner} {axis} must be an integer.")
+        if default_count != 1:
+            raise ValueError("Plates.json must define exactly one default plate.")
+
+    elif filename == "Settings.json":
+        profile = cloned.get("HARDWARE_PROFILE", "current")
+        if not isinstance(profile, str) or not profile.strip():
+            raise ValueError("Settings.json HARDWARE_PROFILE must be nonempty text.")
+        default_plate = cloned.get("DEFAULT_PLATE")
+        if not isinstance(default_plate, str) or not default_plate.strip():
+            raise ValueError("Settings.json DEFAULT_PLATE must be nonempty text.")
+
+    elif filename == "Obstacles.json":
+        if "boundaries" in cloned and not isinstance(cloned["boundaries"], (dict, list)):
+            raise ValueError("Obstacles.json boundaries must be an object or list.")
+        if "obstacles" in cloned and not isinstance(cloned["obstacles"], list):
+            raise ValueError("Obstacles.json obstacles must be a list.")
+
+    return copy.deepcopy(cloned)
 
 
 def _atomic_copy_bytes(source: Path, target: Path):

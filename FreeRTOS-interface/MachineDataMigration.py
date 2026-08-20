@@ -1876,6 +1876,7 @@ def _verify_machine_tree(
     archive_policy: ArchivePolicy | None = None,
     allowed_additional_paths: frozenset[str] = frozenset(),
     required_additional_paths: frozenset[str] = frozenset(),
+    exact_active_overrides: Mapping[str, tuple[int, str]] | None = None,
 ) -> MigrationReceipt:
     machine_root = Path(root)
     manifest_path = machine_root / "metadata" / "migration_tree_manifest.json"
@@ -1906,12 +1907,32 @@ def _verify_machine_tree(
         expected[path] = (size, digest)
     actual = _tree_files(machine_root)
     actual.pop("metadata/migration_tree_manifest.json", None)
-    baseline_actual = {path: actual.get(path) for path in expected}
-    if baseline_actual != expected:
+    effective_expected = dict(expected)
+    override_paths: frozenset[str] = frozenset()
+    if exact_active_overrides is not None:
+        overrides = dict(exact_active_overrides)
+        for relative_path, evidence in overrides.items():
+            if (
+                not isinstance(relative_path, str)
+                or not isinstance(evidence, tuple)
+                or len(evidence) != 2
+                or type(evidence[0]) is not int
+                or not _is_sha256(evidence[1])
+            ):
+                raise MigrationRecoveryRequired("Invalid transactional active-tree evidence.")
+            if relative_path in expected and not relative_path.startswith("config/"):
+                raise MigrationRecoveryRequired(
+                    f"Transactional state cannot replace immutable path: {relative_path}"
+                )
+            effective_expected[relative_path] = evidence
+        override_paths = frozenset(overrides)
+    baseline_actual = {path: actual.get(path) for path in effective_expected}
+    if baseline_actual != effective_expected:
         raise MigrationRecoveryRequired("Machine tree differs from its immutable manifest.")
     additional = frozenset(actual).difference(expected)
-    if not additional.issubset(allowed_additional_paths):
-        unexpected = ", ".join(sorted(additional.difference(allowed_additional_paths)))
+    allowed_with_overrides = allowed_additional_paths | override_paths.difference(expected)
+    if not additional.issubset(allowed_with_overrides):
+        unexpected = ", ".join(sorted(additional.difference(allowed_with_overrides)))
         raise MigrationRecoveryRequired(
             f"Machine tree has unapproved phase files: {unexpected}"
         )
@@ -2040,6 +2061,7 @@ def verify_published_migration(
     *,
     phase: PublishedMigrationPhase = PublishedMigrationPhase.COPIED_UNVERIFIED,
     archive_policy: ArchivePolicy | None = None,
+    active_tree_overrides: Mapping[str, tuple[int, str]] | None = None,
 ) -> PublishedMigrationEvidence:
     """Verify an installed migration with a fixed, versioned phase inventory."""
 
@@ -2059,12 +2081,17 @@ def verify_published_migration(
         if selected_phase is PublishedMigrationPhase.ACTIVE
         else frozenset()
     )
+    if active_tree_overrides is not None and selected_phase is not PublishedMigrationPhase.ACTIVE:
+        raise MigrationRecoveryRequired(
+            "Transactional active-tree evidence is valid only for the active phase."
+        )
     receipt = _verify_machine_tree(
         paths.machine_root,
         expected_uuid=paths.machine_uuid,
         archive_policy=archive_policy,
         allowed_additional_paths=allowed,
         required_additional_paths=required,
+        exact_active_overrides=active_tree_overrides,
     )
     candidate = load_candidate_evidence(paths.candidate_evidence_path)
     if candidate.candidate_id != receipt.candidate_id:

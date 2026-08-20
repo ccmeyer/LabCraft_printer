@@ -135,8 +135,19 @@ class RackCalibrationFixDialog(QtWidgets.QDialog):
         # Set temporary calibration data in the rack_model
         self.rack_model.set_calibration_position("rack_position_Left", left_coords)
         self.rack_model.set_calibration_position("rack_position_Right", right_coords)
-        # Update calibration data (store temp calibrations, save to file, apply calibrations)
-        self.rack_model.update_calibration_data()
+        commit = getattr(self.controller, "commit_rack_calibration", None)
+        identity_getter = getattr(self.main_window, "request_configuration_identity", None)
+        if callable(commit) and callable(identity_getter):
+            identity = identity_getter(
+                "Save Rack Calibration",
+                "Save the Left and Right rack anchors as one audited change?",
+            )
+            if identity is None or not commit(operator=identity[0], reason=identity[1]):
+                self.rack_model.discard_temp_calibrations()
+                return
+        else:
+            # Compatibility for isolated legacy/simulation dialog tests.
+            self.rack_model.update_calibration_data()
         # Close dialog
         self.accept()
 

@@ -22,6 +22,7 @@ import math
 import json
 import uuid
 import inspect
+import copy
 
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
 from hardware.null_devices import NullCamera
@@ -35,6 +36,11 @@ from CaptureCoordinator import CaptureCoordinator
 from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
 from ApplicationComposition import ExperimentalFeatures, PRODUCTION_RUNTIME_CONTEXT
 from MachineDataVerification import SavedTargetAuthorizationRequest
+from MachineDataTransactions import (
+    ConfigurationRecoveryRequired,
+    ConfigurationTransactionError,
+    ConfigurationValidationError,
+)
 
 ARRAY_PAUSE_DEPARTURE_ACCEL = 32000
 ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
@@ -942,6 +948,7 @@ class Controller(QObject):
         experimental_balance_service=None,
         saved_target_authorizer=None,
         machine_data_paths=None,
+        configuration_transactions=None,
     ):
         super().__init__()
 
@@ -951,6 +958,8 @@ class Controller(QObject):
         self.runtime_context = runtime_context or PRODUCTION_RUNTIME_CONTEXT
         self.saved_target_authorizer = saved_target_authorizer
         self.machine_data_paths = machine_data_paths
+        self.configuration_transactions = configuration_transactions
+        self._configuration_recovery_required = False
         self.experimental_features = (
             experimental_features or ExperimentalFeatures()
         )
@@ -1127,6 +1136,21 @@ class Controller(QObject):
         }
 
     def _reject_physical_action(self, action):
+        configuration_shutdown_actions = {
+            "machine disconnection",
+            "balance disconnection",
+            "refuel camera stop",
+        }
+        if (
+            getattr(self, "_configuration_recovery_required", False)
+            and action not in configuration_shutdown_actions
+        ):
+            message = (
+                "Configuration recovery is required. Restart the application and "
+                "resolve the startup diagnostic before using hardware."
+            )
+            self.error_occurred_signal.emit("Configuration Recovery Required", message)
+            return message
         runtime_context = getattr(
             self,
             "runtime_context",
@@ -5777,13 +5801,126 @@ class Controller(QObject):
         """Confirm that a reagent is present in a slot."""
         self.model.rack_model.confirm_slot(slot)
 
-    def add_new_location(self,name):
-        """Save the current location information."""
-        self.model.location_model.add_location(name,*self.model.machine_model.get_current_position())
+    def _install_committed_configuration(self, result):
+        try:
+            if "Locations.json" in result.documents:
+                self.model.install_committed_locations(result.documents["Locations.json"])
+            if "Plates.json" in result.documents:
+                self.model.install_committed_plates(result.documents["Plates.json"])
+            if "RegulatorProfiles.json" in result.documents:
+                self.model.install_committed_regulator_profiles(
+                    result.documents["RegulatorProfiles.json"]
+                )
+            self.saved_target_authorizer = (
+                self.configuration_transactions.saved_target_authorizer
+            )
+            return True
+        except Exception as exc:
+            self._configuration_recovery_required = True
+            # Machine_FreeRTOS rejects every newly queued command and stops
+            # pumping an existing queue while this latch is set.  Safe
+            # disconnection remains available through Controller.
+            if getattr(self, "machine", None) is not None:
+                try:
+                    self.machine._command_queue_blocked_reason = (
+                        "configuration_recovery_required"
+                    )
+                except Exception:
+                    pass
+            self.error_occurred_signal.emit(
+                "Configuration Restart Required",
+                "The configuration was durably committed, but runtime state could not "
+                f"be refreshed: {exc}. Restart before any hardware action.",
+            )
+            return False
 
-    def modify_location(self,name):
-        """Modify the location information."""
-        self.model.location_model.update_location(name,*self.model.machine_model.get_current_position())
+    def _commit_configuration_documents(
+        self,
+        proposed,
+        *,
+        operator,
+        reason,
+        workflow,
+        event_type="change",
+        restore_reference=None,
+    ):
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return None
+        try:
+            result = service.commit_documents(
+                proposed,
+                operator=operator,
+                reason=reason,
+                workflow=workflow,
+                event_type=event_type,
+                restore_reference=restore_reference,
+            )
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit("Configuration Change Failed", str(exc))
+            return False
+        if not self._install_committed_configuration(result):
+            return False
+        return result
+
+    def commit_named_location(self, name, *, operator, reason, require_existing=False):
+        """Persist one complete Locations snapshot before changing Model memory."""
+
+        name = str(name or "").strip()
+        if not name:
+            self.error_occurred_signal.emit("Configuration Change Failed", "A location name is required.")
+            return False
+        existing = self.model.location_model.get_all_locations()
+        if require_existing and name not in existing:
+            self.error_occurred_signal.emit("Configuration Change Failed", f"Location {name!r} does not exist.")
+            return False
+        try:
+            x, y, z = self.model.machine_model.get_current_position()
+            proposed = copy.deepcopy(existing)
+            proposed[name] = {"X": int(x), "Y": int(y), "Z": int(z)}
+        except Exception as exc:
+            self.error_occurred_signal.emit("Configuration Change Failed", f"Current position is invalid: {exc}")
+            return False
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            if require_existing:
+                self.model.location_model.update_location(name, x, y, z)
+            else:
+                self.model.location_model.add_location(name, x, y, z)
+            self.model.location_model.save_locations()
+            return True
+        return self._commit_configuration_documents(
+            {"Locations.json": proposed},
+            operator=operator,
+            reason=reason,
+            workflow="named_location_modify" if require_existing else "named_location_add",
+        )
+
+    def add_new_location(self, name, *, operator=None, reason=None):
+        """Compatibility adapter; canonical production still uses one transaction."""
+
+        service = getattr(self, "configuration_transactions", None)
+        actor = operator or getattr(service, "os_account", None) or "application operator"
+        return self.commit_named_location(
+            name,
+            operator=actor,
+            reason=reason or "Save current position as named location",
+            require_existing=False,
+        )
+
+    def modify_location(self, name, *, operator=None, reason=None):
+        """Compatibility adapter for one transactional location modification."""
+
+        service = getattr(self, "configuration_transactions", None)
+        actor = operator or getattr(service, "os_account", None) or "application operator"
+        return self.commit_named_location(
+            name,
+            operator=actor,
+            reason=reason or "Update named location from current position",
+            require_existing=True,
+        )
 
     # def update_current_location(self, name):
     #     """Update the current location to the specified name."""
@@ -5795,7 +5932,135 @@ class Controller(QObject):
 
     def save_locations(self):
         """Save the locations to a file."""
+        if getattr(self, "configuration_transactions", None) is not None:
+            raise ConfigurationValidationError(
+                "Canonical locations must be committed through the transaction service."
+            )
         self.model.location_model.save_locations()
+
+    def commit_rack_calibration(self, *, operator, reason):
+        temporary = copy.deepcopy(self.model.rack_model.temp_calibration_data)
+        required = {"rack_position_Left", "rack_position_Right"}
+        if set(temporary) != required:
+            self.error_occurred_signal.emit(
+                "Rack Calibration Not Saved", "Both Left and Right rack anchors are required."
+            )
+            return False
+        proposed = copy.deepcopy(self.model.location_model.get_all_locations())
+        proposed.update(temporary)
+        result = self._commit_configuration_documents(
+            {"Locations.json": proposed},
+            operator=operator,
+            reason=reason,
+            workflow="rack_calibration",
+        )
+        if result:
+            self.model.rack_model.discard_temp_calibrations()
+        return result
+
+    def commit_plate_calibration(self, *, operator, reason):
+        try:
+            proposed = self.model.well_plate.proposed_calibration_document()
+        except Exception as exc:
+            self.error_occurred_signal.emit("Plate Calibration Not Saved", str(exc))
+            return False
+        result = self._commit_configuration_documents(
+            {"Plates.json": proposed},
+            operator=operator,
+            reason=reason,
+            workflow="plate_calibration",
+        )
+        if result:
+            self.model.well_plate.discard_temp_calibrations()
+        return result
+
+    def record_configuration_attempt(self, *, event_type, operator, reason, workflow, details=None):
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return None
+        try:
+            return service.record_attempt(
+                event_type=event_type,
+                operator=operator,
+                reason=reason,
+                workflow=workflow,
+                details=details,
+            )
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit("Configuration Audit Failed", str(exc))
+            return False
+
+    def verify_configuration_targets(self, confirmations, *, operator, reason, method="physical_check", service_record_reference=None):
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return False
+        try:
+            result = service.verify_targets(
+                confirmations,
+                operator=operator,
+                reason=reason,
+                method=method,
+                service_record_reference=service_record_reference,
+            )
+            self.saved_target_authorizer = service.saved_target_authorizer
+            return result
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit("Configuration Verification Failed", str(exc))
+            return False
+
+    def import_configuration_files(self, selected_files, *, operator, reason):
+        """Import an explicit governed-file mapping and refresh runtime state."""
+
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return False
+        supported = {"Locations.json", "Plates.json", "RegulatorProfiles.json"}
+        unsupported = sorted(set(selected_files).difference(supported))
+        if unsupported:
+            self.error_occurred_signal.emit(
+                "Configuration Import Failed",
+                "This running application cannot safely install imported "
+                f"{', '.join(unsupported)}. Use a reviewed offline migration workflow.",
+            )
+            return False
+        try:
+            result = service.import_files(
+                selected_files,
+                operator=operator,
+                reason=reason,
+            )
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit("Configuration Import Failed", str(exc))
+            return False
+        if not self._install_committed_configuration(result):
+            return False
+        return result
+
+    def restore_configuration_transaction(self, transaction_id, *, operator, reason, machine_id_confirmation):
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return False
+        try:
+            result = service.restore_transaction(
+                transaction_id,
+                operator=operator,
+                reason=reason,
+                machine_id_confirmation=machine_id_confirmation,
+            )
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit("Configuration Restore Failed", str(exc))
+            return False
+        if not self._install_committed_configuration(result):
+            return False
+        return result
 
     def home_complete_handler(self):
         """Handle the home complete signal."""

@@ -1,6 +1,6 @@
 # Machine Data Migration and Location Safety Plan for v1.3.0-rc.2
 
-Status: `proposed`
+Status: `in_progress`
 
 Prepared: 2026-08-19
 
@@ -56,7 +56,7 @@ For every milestone update:
 | 1 | Freeze external machine-data contract | `verified` | Commit `9b882141` | 101 focused and 5,100 full-suite tests passed |
 | 2 | Build inert migration and backup engine | `verified` | Commit `157db800` | 180 focused and 5,179 full-suite tests plus static checks passed |
 | 3 | Activate first-launch migration and verification | `verified` | Production cutover commit `b3cf12ad`; Qt worker-shutdown fix `08d41bc2` | Original and fix automated gates passed; target-Pi rc.1 migration, fail-closed corruption, cross-worktree reuse, restored reopen, and 10 zero-command safety tests passed |
-| 4 | Add transactional configuration history | `planned` | Not started | Not started |
+| 4 | Add transactional configuration history | `implementation_complete` | Uncommitted implementation on `update_bug_fix` | 5,288 full-suite tests and contained 96-well SIL passed; target-Pi qualification pending |
 | 5 | Add guarded location and calibration changes | `planned` | Not started | Not started |
 | 6 | Protect future updates and controlled rollback | `planned` | Not started | Not started |
 | 7 | Qualify, release, and stage deployment | `planned` | Not started | Not started |
@@ -1248,7 +1248,7 @@ merely switching app code back.
 
 ## Milestone 4: Add transactional configuration history
 
-Status: `planned`
+Status: `implementation_complete`
 
 Concrete plan:
 [Machine Data Migration Milestone 4: Transactional Configuration History Plan](machine_data_migration_milestone_4_implementation_plan.md)
@@ -1333,10 +1333,50 @@ canonical history and requires a compatibility export.
   event chain, defines exact backups/journals/head schemas and crash recovery,
   and specifies per-target verification carry-forward/revocation so a Camera
   edit is blocked without unnecessarily invalidating unchanged locations.
+- 2026-08-19: Implemented the eight planned slices on branch
+  `update_bug_fix`. The implementation is intentionally uncommitted pending
+  review and the dedicated Milestone 4 commit.
+- The active M3 store remains byte-compatible until its first configuration
+  event. The first accepted change lazily creates an exact pre-change backup,
+  durable pending journal, immutable chained event, and current head under the
+  external per-machine root.
+- Named locations, both rack entry points, all four plate corners, reviewed
+  governed imports, exact target verification, and backup restoration now
+  route through the transaction service. Canonical direct Model/profile writes
+  reject in production.
+- Startup validates the exact dynamic inventory and reconciles a recognized
+  pending state while retaining the M3 configuration lock, before Settings or
+  hardware-capable MVC construction. Ambiguous/tampered states fail closed.
+- The Configuration History window exposes integrity-checked details,
+  deterministic Markdown export, exact-value re-verification, reviewed import,
+  and restore-as-new-transaction actions.
 
 ### Validation record
 
-- Not started.
+- Changed-module compilation passed for all fourteen affected application
+  modules.
+- Focused migration/bootstrap/transaction/authorization/MVC/UI/profile tests:
+  `268 passed, 1 skipped` before the final writer-inventory and plate-geometry
+  additions; all final additions are included in the full-suite result below.
+- Final Milestone 4 transaction/history/MVC/writer/UI-fixture gate:
+  `54 passed`.
+- Full Python suite, using the required external SIL-safe temporary root:
+  `5288 passed, 153 skipped` in 505.16 seconds.
+- The first full-suite attempt used a repository-local `--basetemp` and was an
+  invalid SIL setup: 36 session tests correctly rejected repository-overlapping
+  roots, and one existing right-panel fixture lacked the new history callback.
+  The fixture was updated; representative reruns passed before the clean full
+  rerun above.
+- Local contained workflow passed with 96/96 completions:
+  `run_virtual_workflow.py --scenario virtual_print_array_96_v1`, seed 1,
+  one measured run, external output root, no physical hardware.
+- `git diff --check` passed. An AST writer-inventory regression test accounts
+  for every remaining legacy direct-writer call site.
+- The remote `tools/run_pi_virtual_workflow.ps1` gate was not run because it
+  requires a Pi host and the Pi currently has the prior committed checkout;
+  running it before the dedicated commit/pull would not test this
+  implementation. Disposable target-Pi M3-to-M4 qualification remains the
+  gate before changing this milestone to `verified`.
 
 ## Milestone 5: Add guarded location and calibration changes
 

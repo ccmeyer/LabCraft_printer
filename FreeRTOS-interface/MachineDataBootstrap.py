@@ -66,6 +66,13 @@ from MachineDataVerification import (
     write_activation_receipt,
     write_machine_verification,
 )
+from MachineDataTransactions import (
+    ConfigurationRecoveryRequired,
+    ConfigurationState,
+    ConfigurationTransactionService,
+    build_active_tree_overrides,
+    inspect_configuration_state,
+)
 
 
 ACTIVATION_JOURNAL_SCHEMA_NAME = "labcraft.activation_journal"
@@ -168,7 +175,9 @@ class AuthorizedMachineContext:
     activation_receipt: ActivationReceipt
     settings: Mapping[str, object]
     settings_raw_sha256: str
-    saved_target_authorizer: SavedTargetAuthorizer
+    saved_target_authorizer: object
+    configuration_state: ConfigurationState
+    configuration_transactions: ConfigurationTransactionService
     configuration_lock: AcquiredConfigurationLock
 
     def close(self) -> None:
@@ -919,14 +928,30 @@ class MachineDataBootstrap:
     def _validate_active_without_lock(
         self, paths: MachineDataPaths, active: ActiveMachine
     ) -> None:
+        verification = load_machine_verification(paths.verification_path)
+        activation = load_activation_receipt(paths.activation_receipt_path)
+        identity = self._load_identity(paths)
+        try:
+            configuration_state = inspect_configuration_state(
+                paths, identity, active, verification, allow_pending=True
+            )
+        except ConfigurationRecoveryRequired as exc:
+            raise BootstrapError("recovery_required", str(exc)) from exc
+        overrides = (
+            build_active_tree_overrides(paths, configuration_state)
+            if configuration_state.has_history or configuration_state.pending is not None
+            else None
+        )
         published = verify_published_migration(
             paths,
             phase=PublishedMigrationPhase.ACTIVE,
             archive_policy=self.migration_policy.archive_policy,
+            active_tree_overrides=overrides,
         )
-        verification = load_machine_verification(paths.verification_path)
-        activation = load_activation_receipt(paths.activation_receipt_path)
-        self._validate_bindings(paths, active, published, verification, activation)
+        self._validate_bindings(
+            paths, active, published, verification, activation,
+            configuration_state=configuration_state,
+        )
 
     def _context_from_active(
         self,
@@ -935,17 +960,61 @@ class MachineDataBootstrap:
         configuration_lock: AcquiredConfigurationLock,
     ) -> AuthorizedMachineContext:
         configuration_lock.assert_owns(paths)
+        verification = load_machine_verification(paths.verification_path)
+        activation = load_activation_receipt(paths.activation_receipt_path)
+        identity = self._load_identity(paths)
+        try:
+            initial_state = inspect_configuration_state(
+                paths, identity, active, verification, allow_pending=True
+            )
+        except ConfigurationRecoveryRequired as exc:
+            raise BootstrapError("recovery_required", str(exc)) from exc
+        initial_overrides = (
+            build_active_tree_overrides(paths, initial_state)
+            if initial_state.has_history or initial_state.pending is not None
+            else None
+        )
         published = verify_published_migration(
             paths,
             phase=PublishedMigrationPhase.ACTIVE,
             archive_policy=self.migration_policy.archive_policy,
+            active_tree_overrides=initial_overrides,
         )
-        verification = load_machine_verification(paths.verification_path)
-        activation = load_activation_receipt(paths.activation_receipt_path)
-        identity = self._load_identity(paths)
-        self._validate_bindings(paths, active, published, verification, activation)
+        self._validate_bindings(
+            paths, active, published, verification, activation,
+            configuration_state=initial_state,
+        )
         if identity.machine_uuid != active.machine_uuid or identity.machine_id != active.machine_id:
             raise BootstrapError("recovery_required", "Active pointer and identity differ.")
+        transactions = ConfigurationTransactionService(
+            paths=paths,
+            identity=identity,
+            active=active,
+            verification=verification,
+            configuration_lock=configuration_lock,
+            app_version=self.app_version,
+            app_commit=self.app_commit,
+            clock=self.clock,
+        )
+        try:
+            configuration_state = transactions.reconcile()
+        except ConfigurationRecoveryRequired as exc:
+            raise BootstrapError("recovery_required", str(exc)) from exc
+        overrides = (
+            build_active_tree_overrides(paths, configuration_state)
+            if configuration_state.has_history
+            else None
+        )
+        published = verify_published_migration(
+            paths,
+            phase=PublishedMigrationPhase.ACTIVE,
+            archive_policy=self.migration_policy.archive_policy,
+            active_tree_overrides=overrides,
+        )
+        self._validate_bindings(
+            paths, active, published, verification, activation,
+            configuration_state=configuration_state,
+        )
         settings_path = LocalConfig.get_existing_machine_config_path(
             "Settings.json", config_root=paths.config_root
         )
@@ -960,7 +1029,9 @@ class MachineDataBootstrap:
             activation_receipt=activation,
             settings=settings,
             settings_raw_sha256=settings_sha,
-            saved_target_authorizer=SavedTargetAuthorizer(paths, verification),
+            saved_target_authorizer=transactions.saved_target_authorizer,
+            configuration_state=configuration_state,
+            configuration_transactions=transactions,
             configuration_lock=configuration_lock,
         )
 
@@ -971,6 +1042,7 @@ class MachineDataBootstrap:
         published: PublishedMigrationEvidence,
         verification: MachineVerification,
         activation: ActivationReceipt,
+        configuration_state: ConfigurationState | None = None,
     ) -> None:
         activation_sha = sha256_file(paths.activation_receipt_path)[0]
         receipt_sha = sha256_file(paths.migration_receipt_path)[0]
@@ -997,7 +1069,11 @@ class MachineDataBootstrap:
             not decision.activation_allowed for decision in decisions
         ):
             raise BootstrapError("recovery_required", "Ownership evidence/policy changed.")
-        validate_verification_against_files(paths, verification)
+        if configuration_state is None or (
+            not configuration_state.has_history
+            and configuration_state.pending is None
+        ):
+            validate_verification_against_files(paths, verification)
 
     def _validate_resumable_verification(
         self,

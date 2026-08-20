@@ -206,6 +206,18 @@ class MachineDataPaths:
         return self.metadata_root / "activation_receipt.json"
 
     @property
+    def configuration_head_path(self) -> Path:
+        """Current post-activation configuration-chain head."""
+
+        return self.history_root / "configuration_head.json"
+
+    @property
+    def configuration_backups_root(self) -> Path:
+        """Verified pre-change backups for configuration transactions."""
+
+        return self.backups_root / "configuration"
+
+    @property
     def candidate_evidence_path(self) -> Path:
         return self.metadata_root / "candidate_evidence.json"
 

@@ -292,6 +292,84 @@ class DurableFileOps:
                 pass
             raise
 
+    def atomic_write_bytes(
+        self,
+        path: Path,
+        data: bytes,
+        *,
+        checkpoint_prefix: str,
+    ) -> bool:
+        """Durably replace one file with exact bytes and reopen it."""
+
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
+        )
+        temporary = Path(temporary_name)
+        try:
+            self.checkpoint(f"before_{checkpoint_prefix}_write", target)
+            stream = os.fdopen(descriptor, "wb")
+            descriptor = -1
+            with stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            self.checkpoint(f"after_{checkpoint_prefix}_fsync", target)
+            os.replace(temporary, target)
+            self.checkpoint(f"after_{checkpoint_prefix}_replace", target)
+            directory_fsynced = self.fsync_directory(target.parent)
+            if target.read_bytes() != data:
+                raise ArchiveVerificationError(
+                    f"Reopened bytes differ after atomic write: {target}"
+                )
+            return directory_fsynced
+        except Exception:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            raise
+
+    def create_bytes_exclusive(
+        self,
+        path: Path,
+        data: bytes,
+        *,
+        checkpoint_prefix: str,
+    ) -> bool:
+        """Durably create an immutable file without replacing an existing one."""
+
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.checkpoint(f"before_{checkpoint_prefix}_create", target)
+        descriptor = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            self.checkpoint(f"after_{checkpoint_prefix}_fsync", target)
+            directory_fsynced = self.fsync_directory(target.parent)
+            if target.read_bytes() != data:
+                raise ArchiveVerificationError(
+                    f"Reopened bytes differ after exclusive create: {target}"
+                )
+            return directory_fsynced
+        except Exception:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            raise
+
 
 def canonical_json_bytes(payload: object) -> bytes:
     try:

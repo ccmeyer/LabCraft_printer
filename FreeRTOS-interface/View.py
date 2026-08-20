@@ -44,6 +44,7 @@ from pathlib import Path
 import cv2
 from utilities import ShortcutManager, apply_pressure_plot_style
 from ExperimentAuditReader import ExperimentAuditReader, build_audit_markdown
+from ConfigurationHistoryReader import ConfigurationHistoryReader
 import CalibrationClasses
 from typing import Mapping, Sequence, Optional, Any, List, Dict, Tuple, Set
 from hardware.profile import CURRENT_PROFILE, HardwareProfile
@@ -496,6 +497,246 @@ class AuditTimelineWindow(QtWidgets.QDialog):
 
         self.status_label.setText(f"Exported audit markdown to {file_path}")
 
+
+class ConfigurationHistoryWindow(QtWidgets.QDialog):
+    """Read-only configuration audit with explicit verify/restore actions."""
+
+    def __init__(self, parent=None, controller=None):
+        super().__init__(parent)
+        self.controller = controller if controller is not None else getattr(parent, "controller", None)
+        self.rows = []
+        self.setWindowTitle("Configuration History")
+        self.resize(1050, 650)
+        layout = QtWidgets.QVBoxLayout(self)
+        toolbar = QtWidgets.QHBoxLayout()
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.export_button = QtWidgets.QPushButton("Export Markdown")
+        self.import_button = QtWidgets.QPushButton("Import Governed File...")
+        self.verify_button = QtWidgets.QPushButton("Verify Current Target...")
+        self.restore_button = QtWidgets.QPushButton("Restore Selected Backup...")
+        self.status_label = QtWidgets.QLabel("")
+        toolbar.addWidget(self.refresh_button)
+        toolbar.addWidget(self.export_button)
+        toolbar.addWidget(self.import_button)
+        toolbar.addWidget(self.verify_button)
+        toolbar.addWidget(self.restore_button)
+        toolbar.addStretch()
+        toolbar.addWidget(self.status_label)
+        layout.addLayout(toolbar)
+
+        self.table = QtWidgets.QTableWidget(0, 7, self)
+        self.table.setHorizontalHeaderLabels(
+            ["#", "Time", "Operator", "Type", "Outcome", "Workflow", "Summary"]
+        )
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.details = QtWidgets.QPlainTextEdit(self)
+        self.details.setReadOnly(True)
+        splitter = QtWidgets.QSplitter(Qt.Vertical, self)
+        splitter.addWidget(self.table)
+        splitter.addWidget(self.details)
+        layout.addWidget(splitter)
+
+        self.refresh_button.clicked.connect(self.refresh)
+        self.export_button.clicked.connect(self.export_markdown)
+        self.import_button.clicked.connect(self.import_governed_file)
+        self.verify_button.clicked.connect(self.verify_current_target)
+        self.restore_button.clicked.connect(self.restore_selected)
+        self.table.itemSelectionChanged.connect(self._show_selected)
+        self.refresh()
+
+    def _reader(self):
+        service = getattr(self.controller, "configuration_transactions", None)
+        return ConfigurationHistoryReader(service)
+
+    def refresh(self):
+        try:
+            self.rows = self._reader().read_rows()
+        except Exception as exc:
+            self.rows = []
+            self.table.setRowCount(0)
+            self.details.setPlainText(str(exc))
+            self.status_label.setText("Integrity check failed")
+            self.import_button.setEnabled(False)
+            self.verify_button.setEnabled(False)
+            self.restore_button.setEnabled(False)
+            return
+        self.table.setRowCount(len(self.rows))
+        for index, row in enumerate(self.rows):
+            values = (
+                row.sequence,
+                row.created_at_utc,
+                row.operator,
+                row.event_type,
+                row.outcome,
+                row.workflow,
+                row.summary,
+            )
+            for column, value in enumerate(values):
+                self.table.setItem(index, column, QtWidgets.QTableWidgetItem(str(value)))
+        self.status_label.setText(f"Integrity verified: {len(self.rows)} event(s)")
+        self.import_button.setEnabled(True)
+        self.verify_button.setEnabled(True)
+        self.restore_button.setEnabled(bool(self.rows))
+        if self.rows:
+            self.table.selectRow(len(self.rows) - 1)
+        else:
+            self.details.setPlainText("No post-activation configuration events.")
+
+    def _selected_row(self):
+        selected = self.table.selectionModel().selectedRows()
+        if not selected:
+            return None
+        index = selected[0].row()
+        return self.rows[index] if 0 <= index < len(self.rows) else None
+
+    def _show_selected(self):
+        row = self._selected_row()
+        if row is None:
+            return
+        self.details.setPlainText(
+            json.dumps(row.payload, indent=2, sort_keys=True, ensure_ascii=False)
+        )
+        self.restore_button.setEnabled(row.payload.get("backup_manifest") is not None)
+
+    def export_markdown(self):
+        selected = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export Configuration History",
+            "configuration-history.md",
+            "Markdown files (*.md);;All files (*)",
+        )
+        path = selected[0] if isinstance(selected, tuple) else selected
+        if not path:
+            return
+        try:
+            self._reader().export_markdown(path)
+        except Exception as exc:
+            self.status_label.setText(f"Export failed: {exc}")
+            return
+        self.status_label.setText(f"Exported to {path}")
+
+    def verify_current_target(self):
+        try:
+            reader = self._reader()
+            values = reader.current_target_values()
+            state = self.controller.configuration_transactions.refresh(allow_pending=False)
+            targets = [
+                key for key in sorted(values)
+                if state.authorization[key]["state"] == "revoked_pending_verification"
+            ]
+        except Exception as exc:
+            self.status_label.setText(f"Could not load targets: {exc}")
+            return
+        if not targets:
+            self.status_label.setText("No current target requires verification")
+            return
+        target, ok = QtWidgets.QInputDialog.getItem(
+            self, "Verify Configuration Target", "Target:", targets, 0, False
+        )
+        if not ok:
+            return
+        value = values[target]
+        expected_text = json.dumps(value, indent=2, sort_keys=True)
+        confirmation_text, ok = QtWidgets.QInputDialog.getMultiLineText(
+            self,
+            "Exact Target Verification",
+            "Physically verify the target, then enter or paste the exact JSON shown "
+            f"below. Camera is always verified as its own target.\n\nTarget: {target}\n"
+            f"Expected value:\n{expected_text}\n\nExact confirmation JSON:",
+            "",
+        )
+        if not ok:
+            return
+        try:
+            confirmed_value = json.loads(confirmation_text)
+        except json.JSONDecodeError as exc:
+            self.status_label.setText(f"Confirmation is not valid JSON: {exc}")
+            return
+        if confirmed_value != value:
+            self.status_label.setText("Exact confirmation differs; target remains unverified")
+            return
+        operator, ok = QtWidgets.QInputDialog.getText(self, "Target Verification", "Operator name:")
+        if not ok or not operator.strip():
+            return
+        reason, ok = QtWidgets.QInputDialog.getText(self, "Target Verification", "Verification reason/method:")
+        if not ok or not reason.strip():
+            return
+        result = self.controller.verify_configuration_targets(
+            {target: confirmed_value}, operator=operator.strip(), reason=reason.strip()
+        )
+        if result:
+            self.refresh()
+
+    def import_governed_file(self):
+        supported = ["Locations.json", "Plates.json", "RegulatorProfiles.json"]
+        filename, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            "Import Governed Configuration",
+            "Document to replace:",
+            supported,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        selected = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            f"Select reviewed {filename}",
+            "",
+            "JSON files (*.json);;All files (*)",
+        )
+        source_path = selected[0] if isinstance(selected, tuple) else selected
+        if not source_path:
+            return
+        parent = self.parent()
+        identity_getter = getattr(parent, "request_configuration_identity", None)
+        if not callable(identity_getter):
+            return
+        identity = identity_getter(
+            "Import Governed Configuration",
+            f"Replace {filename} with the reviewed file:\n{source_path}",
+        )
+        if identity is None:
+            return
+        result = self.controller.import_configuration_files(
+            {filename: source_path},
+            operator=identity[0],
+            reason=identity[1],
+        )
+        if result:
+            self.refresh()
+
+    def restore_selected(self):
+        row = self._selected_row()
+        if row is None or row.payload.get("backup_manifest") is None:
+            return
+        parent = self.parent()
+        identity_getter = getattr(parent, "request_configuration_identity", None)
+        if not callable(identity_getter):
+            return
+        identity = identity_getter(
+            "Restore Configuration Backup",
+            f"Restore the exact pre-change files from transaction {row.transaction_id}?",
+        )
+        if identity is None:
+            return
+        machine_id, ok = QtWidgets.QInputDialog.getText(
+            self, "Confirm Physical Machine", "Enter the exact machine ID:"
+        )
+        if not ok:
+            return
+        result = self.controller.restore_configuration_transaction(
+            row.transaction_id,
+            operator=identity[0],
+            reason=identity[1],
+            machine_id_confirmation=machine_id.strip(),
+        )
+        if result:
+            self.refresh()
+
 # class ShortcutManager:
 #     """Manage application shortcuts and their descriptions."""
 #     def __init__(self, parent):
@@ -685,6 +926,7 @@ class MainWindow(QMainWindow):
         self.color_dict = self.load_colors(self.color_dict_path)
         self._startup_focus_initialized = False
         self.audit_timeline_window = None
+        self.configuration_history_window = None
         self._plate_reader_analysis_window = None
         self._app_update_close_requested = False
         self._xy_motion_recovery_dialog = None
@@ -950,6 +1192,10 @@ class MainWindow(QMainWindow):
         self.audit_timeline_button = QtWidgets.QPushButton("Audit Timeline")
         self.audit_timeline_button.clicked.connect(self.show_experiment_audit)
         action_row.addWidget(self.audit_timeline_button, 1)
+
+        self.configuration_history_button = QtWidgets.QPushButton("Configuration History")
+        self.configuration_history_button.clicked.connect(self.show_configuration_history)
+        action_row.addWidget(self.configuration_history_button, 1)
 
         self.plate_reader_analysis_button = QtWidgets.QPushButton("Analyze Plate Reader...")
         self.plate_reader_analysis_button.setObjectName("plateReaderAnalysisButton")
@@ -1422,6 +1668,23 @@ class MainWindow(QMainWindow):
         else:
             return None
 
+    def request_configuration_identity(self, title, summary):
+        """Collect the operator attestation used by a configuration event."""
+
+        operator = self.popup_input(title, "Operator name:")
+        if operator is None or not operator.strip():
+            return None
+        reason = self.popup_input(title, "Reason for this configuration change:")
+        if reason is None or not reason.strip():
+            return None
+        response = self.popup_yes_no(
+            title,
+            f"{summary}\n\nSave this change and record it in Configuration History?",
+        )
+        if not self._is_yes_response(response):
+            return None
+        return operator.strip(), reason.strip()
+
     def request_app_update(self):
         """Launch the standalone updater, then close through the normal path."""
         check_result = None
@@ -1765,7 +2028,25 @@ class MainWindow(QMainWindow):
         else:
             window.model = self.model
             window.refresh()
+        window.show()
+        window.raise_()
+        window.activateWindow()
 
+    def show_configuration_history(self):
+        """Open the integrity-checked machine configuration history."""
+
+        if getattr(self.controller, "configuration_transactions", None) is None:
+            self.popup_message(
+                "Configuration History Unavailable",
+                "This runtime does not have an authorized external machine-data store.",
+            )
+            return
+        window = getattr(self, "configuration_history_window", None)
+        if window is None:
+            window = ConfigurationHistoryWindow(self, controller=self.controller)
+            self.configuration_history_window = window
+        else:
+            window.refresh()
         window.show()
         window.raise_()
         window.activateWindow()
@@ -1847,20 +2128,74 @@ class MainWindow(QMainWindow):
     def add_new_location(self):
         """Save the current location information."""
         name = self.popup_input("Save Location","Enter the name of the location")
-        if name is not None:
-            self.controller.add_new_location(name)
-        ansewer = self.popup_yes_no("Write to file","Would you like to write the location to a file?")
-        if self._is_yes_response(ansewer):
-            self.controller.save_locations()
+        if name is None or not name.strip():
+            return
+        try:
+            x, y, z = self.model.machine_model.get_current_position()
+        except Exception as exc:
+            self.popup_message("Location Not Saved", f"Current position is invalid: {exc}")
+            return
+        identity = self.request_configuration_identity(
+            "Save Location",
+            f"Location: {name.strip()}\nCurrent position: X={x}, Y={y}, Z={z}",
+        )
+        if identity is None:
+            service = getattr(self.controller, "configuration_transactions", None)
+            actor = getattr(service, "os_account", "application operator")
+            self.controller.record_configuration_attempt(
+                event_type="cancelled",
+                operator=actor,
+                reason="Operator cancelled named-location save",
+                workflow="named_location_add",
+                details={"location_name": name.strip(), "stage": "confirmation"},
+            )
+            return
+        operator, reason = identity
+        result = self.controller.commit_named_location(
+            name.strip(), operator=operator, reason=reason, require_existing=False
+        )
+        if result:
+            self.popup_message(
+                "Location Saved",
+                "The location was saved and audited. Movement to the new value is "
+                "blocked until its exact coordinates are verified.",
+            )
 
     def modify_location(self):
         """Modify a saved location."""
         name = self.popup_options("Modify Location","Select a location to modify",self.model.location_model.get_location_names())
-        if name is not None:
-            self.controller.modify_location(name)
-        ansewer = self.popup_yes_no("Write to file","Would you like to write the location to a file?")
-        if self._is_yes_response(ansewer):
-            self.controller.save_locations()
+        if name is None:
+            return
+        try:
+            x, y, z = self.model.machine_model.get_current_position()
+        except Exception as exc:
+            self.popup_message("Location Not Saved", f"Current position is invalid: {exc}")
+            return
+        identity = self.request_configuration_identity(
+            "Modify Location",
+            f"Location: {name}\nCurrent position: X={x}, Y={y}, Z={z}",
+        )
+        if identity is None:
+            service = getattr(self.controller, "configuration_transactions", None)
+            actor = getattr(service, "os_account", "application operator")
+            self.controller.record_configuration_attempt(
+                event_type="cancelled",
+                operator=actor,
+                reason="Operator cancelled named-location update",
+                workflow="named_location_modify",
+                details={"location_name": name, "stage": "confirmation"},
+            )
+            return
+        operator, reason = identity
+        result = self.controller.commit_named_location(
+            name, operator=operator, reason=reason, require_existing=True
+        )
+        if result:
+            self.popup_message(
+                "Location Saved",
+                "The location was saved and audited. Movement to the changed value is "
+                "blocked until its exact coordinates are verified.",
+            )
 
     def move_to_location(self,location=False,direct=True,safe_y=False,manual=False):
         """Move the machine to a saved location."""
@@ -6289,7 +6624,21 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         # Execute the dialog and check if the user completes the calibration
         if plate_calibration_dialog.exec() == QDialog.Accepted:
             print("Calibration completed successfully.")
-            self.model.well_plate.update_calibration_data()
+            commit = getattr(self.controller, "commit_plate_calibration", None)
+            identity_getter = getattr(self.main_window, "request_configuration_identity", None)
+            if callable(commit) and callable(identity_getter):
+                identity = identity_getter(
+                    "Save Plate Calibration",
+                    f"Save all four corners for plate {self.model.well_plate.get_current_plate_name()}?",
+                )
+                if identity is None:
+                    self.model.well_plate.discard_temp_calibrations()
+                    return
+                if not commit(operator=identity[0], reason=identity[1]):
+                    self.model.well_plate.discard_temp_calibrations()
+                    return
+            else:
+                self.model.well_plate.update_calibration_data()
 
         else:
             print("Calibration was canceled or failed.")
@@ -8692,7 +9041,19 @@ class RackBox(QGroupBox):
 
         if rack_calibration_dialog.exec() == QDialog.Accepted:
             print("Rack calibration completed successfully.")
-            self.model.rack_model.update_calibration_data()
+            commit = getattr(self.controller, "commit_rack_calibration", None)
+            identity_getter = getattr(self.main_window, "request_configuration_identity", None)
+            if callable(commit) and callable(identity_getter):
+                identity = identity_getter(
+                    "Save Rack Calibration",
+                    "Save the Left and Right rack anchors as one audited change?",
+                )
+                if identity is None:
+                    self.model.rack_model.discard_temp_calibrations()
+                elif not commit(operator=identity[0], reason=identity[1]):
+                    self.model.rack_model.discard_temp_calibrations()
+            else:
+                self.model.rack_model.update_calibration_data()
         else:
             print("Rack calibration was canceled or failed.")
             self.model.rack_model.discard_temp_calibrations()
