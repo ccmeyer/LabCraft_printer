@@ -1250,6 +1250,9 @@ merely switching app code back.
 
 Status: `planned`
 
+Concrete plan:
+[Machine Data Migration Milestone 4: Transactional Configuration History Plan](machine_data_migration_milestone_4_implementation_plan.md)
+
 ### Objective
 
 Make every safety-relevant configuration mutation durable, recoverable,
@@ -1322,7 +1325,14 @@ canonical history and requires a compatibility export.
 
 ### Implementation record
 
-- Not started.
+- 2026-08-19: Audited the current named-location, rack, plate, dormant
+  regulator-profile, bootstrap, active-tree, lock, and saved-target
+  authorization paths and created the concrete eight-slice implementation
+  plan. Production implementation has not started.
+- The plan preserves M2/M3 activation evidence, lazily anchors a separate
+  event chain, defines exact backups/journals/head schemas and crash recovery,
+  and specifies per-target verification carry-forward/revocation so a Camera
+  edit is blocked without unnecessarily invalidating unchanged locations.
 
 ### Validation record
 
