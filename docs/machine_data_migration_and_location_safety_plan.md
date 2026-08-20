@@ -57,7 +57,7 @@ For every milestone update:
 | 2 | Build inert migration and backup engine | `verified` | Commit `157db800` | 180 focused and 5,179 full-suite tests plus static checks passed |
 | 3 | Activate first-launch migration and verification | `verified` | Production cutover commit `b3cf12ad`; Qt worker-shutdown fix `08d41bc2` | Original and fix automated gates passed; target-Pi rc.1 migration, fail-closed corruption, cross-worktree reuse, restored reopen, and 10 zero-command safety tests passed |
 | 4 | Add transactional configuration history | `verified` | Implementation `6925d029`; exact-restore correction `f6d65fd9` | 5,363 full-suite tests, contained 96-well SIL, and fresh target-Pi no-hardware qualification passed |
-| 5 | Add guarded location and calibration changes | `implementation_complete` | Slices 1-6 implemented in working tree; dedicated commit pending | 5,377 full-suite tests, 66 M4/M5 focused tests, 14 new focused tests, 96/96 contained SIL, compilation, and static checks passed; Pi gate pending |
+| 5 | Add guarded location and calibration changes | `verified` | Commit `8b50872d` | 5,377 full-suite tests; clean target-Pi guarded transaction/reopen gate; 168 focused Pi tests; two 96/96 contained/traced SIL journeys; exact baseline-byte restoration; sealed evidence passed |
 | 6 | Protect future updates and controlled rollback | `planned` | Not started | Not started |
 | 7 | Qualify, release, and stage deployment | `planned` | Not started | Not started |
 
@@ -1412,10 +1412,13 @@ canonical history and requires a compatibility export.
 
 ## Milestone 5: Add guarded location and calibration changes
 
-Status: `implementation_complete`
+Status: `verified`
 
 Concrete plan:
 [Machine Data Migration Milestone 5: Guarded Location and Calibration Changes](machine_data_migration_milestone_5_implementation_plan.md)
+
+Completion record:
+[Machine Data Migration Milestone 5 Completion Record](machine_data_migration_milestone_5_completion_record.md)
 
 ### Objective
 
@@ -1490,7 +1493,7 @@ writes, audit history, and unverified-target blocking remain.
 - 2026-08-20: Audited the verified Milestone 4 named-location, rack-pair,
   plate-quartet, import, restore, verification, startup, dispatch,
   Machine_FreeRTOS, and firmware-handler paths and created the concrete
-  eight-slice implementation plan. Production implementation has not started.
+  eight-slice implementation plan. This was the pre-implementation audit.
 - The plan inserts one pure, versioned assessment before M4 commit intent,
   binds the exact preview to current config and telemetry, keeps strong
   confirmation separate from physical verification, makes global endpoint
@@ -1507,9 +1510,16 @@ writes, audit history, and unverified-target blocking remain.
 - The implementation preserves M4 disk-before-memory transactions and exact
   restore bytes. Strong confirmation still revokes the changed target and does
   not grant physical verification. Firmware and protocol files are unchanged.
-- The implementation is intentionally uncommitted pending review and the
-  dedicated Milestone 5 commit. Target-Pi qualification must run only after
-  that exact commit is pulled into a clean checkout.
+- The implementation is committed as `8b50872d`. The exact commit was pulled
+  into a clean target-Pi checkout and qualified only against disposable copies
+  of the verified M4 sequence-zero baseline.
+- Pi qualification retained the all-strong policy, measured a synthetic 100 ms
+  status-delivery cadence against the 2,500 ms freshness ceiling, and proved
+  fresh-only preview readiness with zero hardware commands.
+- The final transaction copy recorded ten expected guard events and six
+  backups, exact-restored every governed configuration file and the active
+  pointer to baseline bytes, reopened from a detached checkout, and retained no
+  pending transaction.
 
 ### Validation record
 
@@ -1523,9 +1533,18 @@ writes, audit history, and unverified-target blocking remain.
   SHA-256 is
   `7f724af4b2e88ab3d46d774f38bb6be8cdd6b82240027e04785bc80b9cfa4274`;
   `.gitattributes` fixes its checkout line endings to LF across Windows/Pi.
-- No Pi process or hardware was exercised because the implementation is not
-  committed. Fresh target-Pi no-hardware qualification and 2,500 ms cadence
-  confirmation remain the gates before `verified`.
+- Target-Pi complete focused inventory: `168 passed` with existing Qt Charts
+  deprecation warnings.
+- Target-Pi contained SIL: `96 / 96`, seed 1; independent traced safety-proof
+  audit: `96 / 96`, seed 1. Production `App.py` was not launched and no
+  physical interface or command was used.
+- The 53-file manifest and ignored local evidence archive revalidated at
+  SHA-256
+  `03c2de79df6e23b75c708c6aa023b88d7c8c58b0b2e625edc176c717fd6f95ff`.
+- Two retained pre-final harness failures were evidence-script defects
+  (read-only mapping serialization and import-versus-port-access
+  classification), not application failures. The final mutating run used a new
+  sequence-zero copy.
 
 ## Milestone 6: Protect future updates and controlled rollback
 
@@ -1966,6 +1985,8 @@ Hardware use is last. It requires:
 | 2026-08-20 | Make global endpoint bounds non-bypassable, including `override=True` paths | A calibration/path override is not authority to exceed machine travel bounds |
 | 2026-08-20 | Use an all-strong fallback until numeric delta thresholds are approved | Missing fleet/physical evidence must not silently create a permissive arbitrary envelope |
 | 2026-08-20 | Do not claim exclusion safety from the currently empty obstacle list | Physical geometry and route behavior require separate measurement and attended HIL |
+| 2026-08-20 | Approve the all-strong v1 policy for rc.2 without numeric routine thresholds | Target-Pi qualification proved usability and fail-closed behavior, but one disposable machine is insufficient evidence for a safe relaxation |
+| 2026-08-20 | Retain a 2,500 ms per-axis capture freshness ceiling | The qualified synthetic Pi delivery interval was 100 ms and the first over-limit case failed closed; future changes require new evidence |
 
 ### Open decisions
 
@@ -2021,6 +2042,8 @@ Hardware use is last. It requires:
 | 2026-08-20 | M5 implementation | Raw hashes of a tracked JSON policy can differ across Windows/Pi when checkout line endings differ | Force LF for the policy in `.gitattributes` and test the frozen raw SHA-256 |
 | 2026-08-20 | M5 implementation | Exact restore must preview semantic coordinate changes without losing M4's noncanonical raw-byte restoration | Assess parsed complete documents, bind the proposal/hash, then pass verified exact backup bytes through the existing restore journal |
 | 2026-08-20 | M5 implementation | The existing obstacle list remains empty, but `override=True` previously bypassed both obstacles and global bounds | Enforce global endpoint bounds before every absolute/relative queue mutation; retain override only for existing route/exclusion behavior |
+| 2026-08-20 | M5 Pi qualification | Importing `Controller.py` loads pyserial support modules even when no port is opened | Treat import-only modules separately from traced device access; retain the independent Pi hardware-isolation proof as the zero-access gate |
+| 2026-08-20 | M5 Pi qualification | Simulated Pi status delivery at 100 ms stayed well inside the 2,500 ms freshness ceiling, while 2,501 ms rejected all axes | Retain 2,500 ms for rc.2 without connecting hardware solely to tune a software timeout |
 
 Add findings here as work proceeds. Do not rewrite prior findings to hide an
 earlier assumption; add a correction with date and evidence.
@@ -2048,6 +2071,7 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-20 | 4 | Milestone 4 verified at exact-restore correction `f6d65fd9` | Fresh disposable Pi qualification: exact baselines `7 + 5`; history sequence/events `7/7`; six backups; no pending; four recovery cases; 61 focused and 10 zero-command tests; 96/96 hardware-disabled SIL; sealed evidence archive SHA-256 `26ab07e5...d799a` | Begin the concrete Milestone 5 plan using verified history and authorization contracts |
 | 2026-08-20 | 5 | Concrete guarded-change implementation plan created | Post-M4 UI-to-firmware audit; versioned policy/telemetry/preview/audit/dispatch design; eight implementation slices; Windows, SIL, and target-Pi no-hardware gates | Complete Slice 0 characterization and approve the initial policy before tests-first implementation |
 | 2026-08-20 | 5 | Guarded-change implementation and local qualification completed | 14 new focused; 66 combined focused; 5,377 full passed/156 skipped; 96/96 contained SIL; compilation/diff checks; policy SHA-256 `7f724af4...fa4274` | Review, create the dedicated Milestone 5 commit, pull it to the Pi, then run the clean no-hardware qualification and cadence gate |
+| 2026-08-20 | 5 | Milestone 5 verified at implementation commit `8b50872d` | Clean target-Pi qualification from a verified M4 sequence-zero copy: 100 ms simulated cadence; ten guarded events; six backups; zero pending/commands; exact config/pointer restore; detached reopen; 168 focused tests; contained and traced SIL 96/96; archive SHA-256 `03c2de79...f95ff` | Create the concrete Milestone 6 updater-preservation and controlled-rollback plan |
 
 ## Definition of done for v1.3.0-rc.2
 
@@ -2093,3 +2117,4 @@ The work is complete only when:
 | 2026-08-20 | Recorded Milestone 4 commit `6925d029`, the target-Pi noncanonical exact-restore finding, its locally validated corrective implementation, and the fresh-Pi requalification gate. |
 | 2026-08-20 | Recorded corrective commit `f6d65fd9`, the complete target-Pi no-hardware qualification and durable evidence checksum, added the Milestone 4 completion record, and marked Milestone 4 verified. |
 | 2026-08-20 | Added and linked the concrete Milestone 5 guarded location/calibration plan; recorded telemetry, override, reserved-name, threshold-fallback, audit, and no-hardware qualification decisions/findings. |
+| 2026-08-20 | Recorded Milestone 5 commit `8b50872d`, clean target-Pi guarded-change/cadence/reopen/safety-proof qualification, sealed evidence checksum, added the Milestone 5 completion record, and marked Milestone 5 verified. |

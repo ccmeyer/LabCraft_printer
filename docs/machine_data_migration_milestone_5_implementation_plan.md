@@ -1,6 +1,6 @@
 # Machine Data Migration Milestone 5: Guarded Location and Calibration Changes
 
-Status: `implementation_complete`
+Status: `verified`
 
 Prepared: 2026-08-20
 
@@ -18,6 +18,9 @@ Depends on:
 - Milestone 4 verification record `9a2f92e4`
 
 Target release: `v1.3.0-rc.2`
+
+Completion record:
+`docs/machine_data_migration_milestone_5_completion_record.md`
 
 ## Outcome
 
@@ -1037,20 +1040,21 @@ Milestone 5 is `verified` only when:
   telemetry provenance, and geometry rules.
 - [x] Define eight implementation slices, file inventory, tests, Pi gate, and
   rollback strategy.
-- [ ] Complete Slice 0 Pi cadence measurement and final policy approval. The
+- [x] Complete Slice 0 Pi cadence measurement and final policy approval. The
   tracked all-strong fallback and sanitized characterization tool are complete;
   no numeric relaxation was introduced.
 - [x] Implement Slices 1-6 tests-first.
 - [x] Complete local Slice 7 qualification.
-- [ ] Create dedicated Milestone 5 implementation commit.
-- [ ] Complete target-Pi no-hardware qualification and evidence preservation.
-- [ ] Mark Milestone 5 `verified` in both plans.
+- [x] Create dedicated Milestone 5 implementation commit.
+- [x] Complete target-Pi no-hardware qualification and evidence preservation.
+- [x] Mark Milestone 5 `verified` in both plans.
 
 ## Implementation and local validation record
 
-Implementation completed on 2026-08-20 in the uncommitted `update_bug_fix`
-working tree. The dedicated commit and clean target-Pi qualification remain
-required before this milestone can become `verified`.
+Implementation completed and was committed on 2026-08-20 as
+`8b50872d344fa5a4dcf4a96890d8438b610238af` on `update_bug_fix`. Clean
+target-Pi qualification and evidence preservation subsequently passed; see the
+Milestone 5 completion record.
 
 Implemented behavior:
 
@@ -1086,11 +1090,15 @@ Local validation:
 - policy raw SHA-256 is
   `7f724af4b2e88ab3d46d774f38bb6be8cdd6b82240027e04785bc80b9cfa4274`.
 
-The Pi gate was not run against this uncommitted tree. After the dedicated
-commit is pulled into a clean Pi checkout, run the no-hardware sequence in this
-document, measure/confirm the 2,500 ms freshness decision from synthetic or
-already captured status delivery, preserve its evidence, and only then mark
-Milestone 5 `verified`.
+The Pi gate ran at the exact implementation commit. A synthetic 100 ms status
+cadence confirmed the retained 2,500 ms freshness ceiling, while a 2,501 ms
+snapshot rejected all axes. The complete focused Pi inventory passed 168
+tests; the contained SIL and traced safety-proof journeys each passed 96/96;
+the final transaction copy restored all governed files and the active pointer
+to exact baseline bytes with ten events, six backups, no pending transaction,
+and zero hardware commands. The 53-file evidence manifest and copied archive
+revalidated at SHA-256
+`03c2de79df6e23b75c708c6aa023b88d7c8c58b0b2e625edc176c717fd6f95ff`.
 
 ## Planning findings
 
@@ -1141,8 +1149,8 @@ Milestone 5 `verified`.
 
 | Decision | Recommended direction | Required before |
 | --- | --- | --- |
-| Numeric generic/reserved per-axis thresholds | Use reviewed characterization; otherwise keep all coordinate changes strong | Marking Slice 0 complete |
-| Position freshness age | Provisional 2,500 ms, confirm against normal Pi status cadence and current MCU timeout | Implementing production capture guard |
+| Numeric generic/reserved per-axis thresholds | Approved rc.2 result: keep all coordinate changes strong; no numeric routine threshold is inferred from this qualification | Any future policy relaxation |
+| Position freshness age | Retain 2,500 ms; Pi synthetic delivery was 100 ms and the 2,501 ms boundary rejected all axes | Any future timeout revision |
 | Rack physical span/Z tolerances | Keep invariant violations hard and unmeasured magnitudes strong until physical ranges are approved | Adding numeric hard geometry limits |
 | Plate edge/Z/condition limits | Keep topology/invertibility/bounds hard and unmeasured magnitudes strong until plate/profile evidence is approved | Adding numeric hard geometry limits |
 | Physical exclusions and route behavior | Leave empty/unclaimed; add only measured geometry with attended HIL | Enabling any obstacle safety claim |
@@ -1154,3 +1162,4 @@ Milestone 5 `verified`.
 | --- | --- |
 | 2026-08-20 | Created the concrete post-Milestone-4 guard policy, telemetry, preview, audit, dispatch, eight-slice implementation, Windows/Pi qualification, and rollback plan. |
 | 2026-08-20 | Recorded completed Slices 1-6 and local Slice 7 gates; retained `implementation_complete` pending dedicated commit, Pi cadence/policy confirmation, and clean no-hardware Pi evidence. |
+| 2026-08-20 | Recorded implementation commit `8b50872d`, synthetic 100 ms cadence decision, complete clean target-Pi no-hardware qualification, 168 focused tests, two 96/96 SIL/safety-proof journeys, exact baseline restoration, and sealed archive SHA-256 `03c2de79...f95ff`; marked Milestone 5 verified. |
