@@ -1,6 +1,7 @@
 # Machine Data Migration Milestone 7: Qualification, Release, and Staged Deployment
 
-Status: `in_progress`
+Status: `in_progress` — Slices 1-4 passed on candidate `5f54a4a1`; Slice 0
+attended assignments and Slices 5-7 remain.
 
 Prepared: 2026-08-20
 
@@ -1129,10 +1130,10 @@ Milestone 7 is `verified` only when:
 - [ ] Complete Slice 0 traceability and private operator/cohort/route records
   (software mapping and LC-001 backup preflight complete; attended approvals
   and rc.6 pilot identity pending).
-- [ ] Complete Slice 1 gap tests and candidate-tree freeze.
-- [ ] Create the Slice 2 rc.2 release commit without a tag.
-- [ ] Pass Slice 3 Windows qualification and candidate-bundle verification.
-- [ ] Pass Slice 4 unattended SSH Pi qualification and archive recheck.
+- [x] Complete Slice 1 gap tests and candidate-tree freeze.
+- [x] Create the Slice 2 rc.2 release commit without a tag.
+- [x] Pass Slice 3 Windows qualification and candidate-bundle verification.
+- [x] Pass Slice 4 unattended SSH Pi qualification and archive recheck.
 - [ ] Pass Slice 5 attended designated-machine and Camera qualification.
 - [ ] Pass Slice 6 local-tag, exact old-updater, offline, rollback, and re-upgrade gates.
 - [ ] Publish and complete Slice 7 staged rollout.
@@ -1156,20 +1157,27 @@ Milestone 7 is `verified` only when:
 5. The existing Pi SIL wrapper performs preflight and a private-device
    bwrap/strace proof over SSH. Reusing it against a disposable candidate repo
    provides stronger evidence than an ad hoc direct GUI launch.
-6. The Pi SIL wrapper expects a repository-local virtual environment. A
-   disposable candidate clone may reference the already verified production
-   environment through an ignored symlink, but the link and resolved
-   interpreter must be recorded and the environment must not be modified.
-7. The firmware Camera-transition selector verifies a firmware motion pattern,
+6. The Pi SIL wrapper expects a repository-local virtual environment. Because
+   the repository ignores `env/` directories but not a top-level `env`
+   symlink, the disposable clone uses an ignored directory containing
+   read-only links to the verified production venv. The direct production
+   launcher/prefix and each shim target are recorded; the environment is not
+   modified.
+7. A candidate below `/tmp` was initially hidden by the runner's private
+   `/tmp` mount. The runner now re-binds only `REPO_ROOT` read-only after that
+   mount and overlays only its evidence root writable. The failed discovery
+   attempt reached neither Python nor hardware, and a mount-order regression
+   test now guards the correction.
+8. The firmware Camera-transition selector verifies a firmware motion pattern,
    not the machine-specific application Camera value that caused the original
    incident. Both checks are independently required.
-8. Migration equality and intentional-edit thresholds answer different
+9. Migration equality and intentional-edit thresholds answer different
    questions. Migration allows no unexplained coordinate delta; M5 thresholds
    only select confirmation strength for a deliberate guarded proposal.
-9. A realistic exact-tag legacy updater/rollback gate depends on a local tag.
+10. A realistic exact-tag legacy updater/rollback gate depends on a local tag.
    The tag is created only after all non-tag-dependent safety gates, remains
    unpushed during these tests, and may be discarded locally if they fail.
-10. A sanitized fixture proves software behavior but cannot establish the
+11. A sanitized fixture proves software behavior but cannot establish the
     physical correctness of a real machine's configuration or firmware. Both
     deployed source cohorts still require representative pilots.
 
@@ -1204,10 +1212,13 @@ Milestone 7 is `verified` only when:
   and live Locations evidence, current hardware profile, no running App, and no
   machine-data environment override. Exact values remain in ignored private
   evidence; attended approvals and the rc.6 pilot identity remain pending.
-- Untagged rc.2 version, changelog, release index, manifest, and in-progress
-  completion record are prepared in the working tree.
-- Candidate qualification, commit, tagging, attended hardware work, and
-  rollout have not completed.
+- M1-M6 were merged into local `main`; untagged rc.2 candidate
+  `5f54a4a174cd50f145e1bfa98aa61535b7aa59e9` contains the release metadata,
+  M7 documents, and the minimal Pi SIL read-only-rebind correction.
+- Windows focused/full/static/release/SIL and fresh unattended target-Pi
+  focused/cohort/private-device SIL/archive gates passed on that exact commit.
+- Attended hardware work, the local tag and exact old-updater/rollback lanes,
+  publication, pilots, and rollout have not completed.
 
 ## Validation record
 
@@ -1215,9 +1226,16 @@ Milestone 7 is `verified` only when:
   validation passed before implementation began.
 - Read-only Pi preflight changed no checkout, machine-data, process, or hardware
   state.
-- Candidate Windows/Pi/release validation remains pending.
-- No application runtime, firmware, protocol, tag, or deployed machine state
-  has changed.
+- Exact-candidate Windows results: 592 passed/1 skipped focused; 5,402
+  passed/156 skipped full; release/static checks passed; contained SIL 96/96;
+  verified bundle SHA-256 `B135BE8D...7EB408ED`.
+- Exact-candidate Pi results: 199 + 101 + 275 focused tests and a 33-case named
+  matrix passed; private-device SIL completed 96/96 with zero forbidden
+  hardware matches; production pre/post state was identical.
+- Pi evidence manifest/archive passed on-Pi and local rechecks at archive
+  SHA-256 `09D68B3C...0E98A0B7`.
+- No application runtime, firmware, protocol, tag, production checkout,
+  production machine-data, or deployed hardware state changed.
 
 ## Document change log
 
@@ -1225,3 +1243,4 @@ Milestone 7 is `verified` only when:
 | --- | --- |
 | 2026-08-20 | Created the concrete eight-slice rc.2 coverage, candidate, Windows, SSH/Pi, attended Camera/HIL, local-tag updater/rollback, publication, staged-rollout, evidence, stop-condition, and closeout plan. |
 | 2026-08-20 | Began implementation: closed the software coverage audit without a code change, captured private LC-001 read-only backup/Camera preflight over SSH, prepared untagged rc.2 release metadata and the in-progress completion record, and retained attended approval as the HIL/tag blocker. |
+| 2026-08-20 | Froze candidate `5f54a4a1`; corrected the Pi runner's private-`/tmp` checkout visibility with a read-only repo rebind and regression test; passed Windows focused/full/static/SIL and fresh SSH/Pi focused/cohort/private-device SIL/archive gates; left attended, tag-dependent, publication, and rollout work open. |

@@ -1842,8 +1842,18 @@ rollback procedure.
 - Read-only SSH preflight recorded matching LC-001 rc.1 backup/live Locations
   evidence and retained exact values in ignored private evidence.
 - Untagged rc.2 version, changelog, index, manifest, and in-progress completion
-  record are prepared. Qualification, tagging, attended hardware work, and
-  rollout remain pending.
+  record were frozen in candidate `5f54a4a1` after merging M1-M6 into local
+  `main`.
+- Candidate qualification found that the Pi SIL runner's private `/tmp` hid a
+  candidate checkout below `/tmp`. A one-line read-only repository rebind,
+  mount-order regression assertion, and troubleshooting note corrected the
+  qualification tool without changing application, firmware, protocol,
+  motion, pressure, or updater behavior.
+- Exact-candidate Windows and fresh unattended Pi qualification passed,
+  including both source cohorts, fail-closed scenario evidence, private-device
+  SIL, unchanged production pre/post state, and independent archive rechecks.
+- Tagging, attended hardware work, exact tag-dependent updater/rollback lanes,
+  publication, pilots, and rollout remain pending.
 
 ### Validation record
 
@@ -1851,7 +1861,19 @@ rollback procedure.
   saved-location motion, release, firmware-pairing, and target-Pi SIL paths.
 - Read-only Pi preflight passed with a clean checkout, no running App, no data
   root override, and matching backup/live Locations hashes.
-- Candidate Windows/Pi, hardware, tag, and rollout validation remain pending.
+- Candidate Windows validation passed: 592 focused passed/1 skipped; complete
+  suite 5,402 passed/156 skipped; metadata/static gates passed; contained SIL
+  completed 96/96; verified bundle SHA-256 `B135BE8D...7EB408ED`.
+- Fresh unattended Pi validation passed: 199 migration/bootstrap, 101
+  transaction/guard/routing, 275 update/rollback/release, and 33 named cohort
+  and fail-closed cases; private-device SIL completed 96/96 with zero forbidden
+  hardware matches.
+- Production Pi HEAD/tree/version/interpreter, clean status, and no-App state
+  were identical before and after; production machine data was not accessed.
+- The Pi evidence archive contained 63 safe members backed by 48 file hashes
+  and independently rechecked at SHA-256 `09D68B3C...0E98A0B7`.
+- Attended hardware, local-tag, publication, pilot, and rollout validation
+  remain pending.
 
 ## End-to-end migration flows
 
@@ -2190,3 +2212,4 @@ The work is complete only when:
 | 2026-08-20 | Recorded Milestone 5 commit `8b50872d`, clean target-Pi guarded-change/cadence/reopen/safety-proof qualification, sealed evidence checksum, added the Milestone 5 completion record, and marked Milestone 5 verified. |
 | 2026-08-20 | Corrected the milestone summary to reflect verified Milestone 6 implementation `9e666291` and verification record `0ee3e50a`; added and linked the concrete Milestone 7 Windows, SSH/Pi, attended Camera/HIL, exact-tag updater/rollback, release, staged-rollout, and closeout plan. |
 | 2026-08-20 | Began Milestone 7 implementation: mapped every required automated scenario to existing coverage, recorded sanitized clean LC-001 backup preflight evidence, prepared untagged rc.2 release metadata and an in-progress completion record, and left attended approvals as explicit HIL/tag gates. |
+| 2026-08-20 | Froze rc.2 candidate `5f54a4a1`; corrected the Pi SIL private-`/tmp` candidate visibility gap with a read-only rebind and regression test; passed exact Windows focused/full/static/SIL and fresh SSH/Pi cohort/fail-closed/private-device SIL/archive gates; retained attended/tag/publication/rollout gates. |

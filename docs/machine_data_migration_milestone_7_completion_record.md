@@ -1,6 +1,7 @@
 # Machine Data Migration Milestone 7 Completion Record
 
-Status: `in_progress`
+Status: `in_progress` — Windows and unattended Pi gates passed; attended,
+tag-dependent, publication, and rollout gates remain.
 
 Started: 2026-08-20
 
@@ -87,12 +88,16 @@ Working-tree changes prepared on local `main` on 2026-08-20:
   history, guarded changes, update preservation, support-guided rollback, and
   firmware pairing.
 
-No runtime, firmware, protocol, motion, pressure, or updater source changed in
-this candidate-construction slice.
+No application runtime, firmware, protocol, motion, pressure, or updater source
+changed in this candidate-construction slice. Qualification found and corrected
+one Pi SIL shell mount-order gap, with one focused regression assertion and
+operator documentation.
 
 ## Windows validation
 
-Status: exact-candidate gate pending.
+Status: `passed` for exact candidate
+`5f54a4a174cd50f145e1bfa98aa61535b7aa59e9` (tree
+`4dc25df5a7b0b206dc40f0bce8c75d085c2d2bc0`).
 
 Pre-candidate checks on the same application/release tree passed 570 focused
 tests with one skip, release-metadata and release-JSON validation, firmware
@@ -107,18 +112,53 @@ candidate checkout located below `/tmp`. Candidate execution stopped before
 Python, the application, or hardware access. The Pi SIL shell now re-binds only
 the candidate repository read-only after mounting the private `/tmp`, then
 overlays only its evidence output writable. A regression assertion fixes that
-mount order. The candidate must be re-frozen and all exact-commit gates rerun.
+mount order. The candidate was re-frozen and every exact-commit gate was rerun.
 
-Record focused count, full-suite count/skips, contained SIL result, metadata,
-JSON, firmware fingerprint, compilation, diff, and worktree evidence here.
+Final exact-candidate evidence:
+
+- focused M1-M7 group: 592 passed, 1 skipped, 130 warnings in 93.37 seconds;
+- complete suite: 5,402 passed, 156 skipped, 605 warnings in 343.14 seconds;
+- changed Python regression module compiled and executed successfully;
+- release metadata validation and parsing of every release JSON passed;
+- contained Windows SIL completed 96/96 with exit code 0;
+- `git diff --check`, clean-worktree, no-rc.2-tag, and no-firmware-diff checks
+  passed;
+- firmware artifact remained 343,064 bytes, Git blob
+  `526bc6ffbe980bbbebc67a8cf4b1db04ec8f263a`, SHA-256
+  `EDA070CE...B0D5884`; and
+- qualification bundle verified as complete at 52,075,353 bytes and SHA-256
+  `B135BE8D...7EB408ED`.
 
 ## Target-Pi unattended qualification
 
-Status: pending candidate commit and transport bundle.
+Status: `passed` for the unattended/no-hardware boundary.
 
-Record the random `/tmp` parent, candidate SHA, cohort roots, test results,
-hardware-isolation proof, production pre/post comparison, archive member count,
-and archive SHA-256 here.
+Final workspace: `/tmp/labcraft-m7-qualification.nqzNos`.
+
+- The transferred bundle hash, candidate commit, and peeled rc.6, v1.2.0, and
+  rc.1 commits matched the Windows record.
+- The candidate was detached and clean; the verified production venv was
+  exposed only through an ignored disposable shim.
+- Focused groups passed 199 migration/bootstrap, 101 transaction/guard/routing,
+  and 275 update/rollback/release tests.
+- A verbose 33-case matrix independently showed both exact source cohorts,
+  non-preset Camera preservation, supported folder/ZIP layouts, malformed and
+  preset-like failure modes, cancellation, target revocation, transactional
+  recovery, backup failure, exact return, and synthetic Camera-conflict paths.
+- Bubblewrap/strace SIL completed 96/96. Its report bound commit `5f54a4a1`,
+  showed a clean worktree, private `/dev`, unshared network, read-only root,
+  simulation-only interfaces, and zero forbidden hardware-device matches.
+- Production Pi HEAD `0ee3e50a`, tree `5db5adb4`, VERSION, interpreter/prefix,
+  clean status, and no-App-process state matched before and after. The default
+  production machine-data root was not read or written.
+- The Pi-side evidence manifest verified 48 files. The archive contained 63
+  safe relative members, excluded the venv, and matched locally at SHA-256
+  `09D68B3C...0E98A0B7` after SCP.
+
+The superseded diagnostic workspace
+`/tmp/labcraft-m7-qualification.3Z7R15` remains retained. Its failed SIL
+attempt exposed the private-`/tmp` visibility gap and reached neither Python
+nor hardware; none of its results are counted as final qualification evidence.
 
 ## Attended designated-machine qualification
 
@@ -152,11 +192,14 @@ Private evidence root:
 No private evidence is tracked by Git. Final archives require a Pi-side and
 post-transfer checksum match before their truncated hash is recorded here.
 
+Final ignored evidence roots:
+
+- `verification_reports/machine_data_m7/5f54a4a174cd50f145e1bfa98aa61535b7aa59e9/`;
+- retrieved Pi SIL archive SHA-256 `4E4B6C16...9804C8C8`; and
+- retrieved unattended archive SHA-256 `09D68B3C...0E98A0B7`.
+
 ## Open gates
 
-- Focused and complete Windows validation.
-- Exact candidate commit and verified transport bundle.
-- Disposable SSH/Pi qualification and archive recheck.
 - Private operator, rc.6 pilot, rc.1 pilot, fixtures, and Camera-route approval.
 - Attended designated-machine migration, firmware, HIL, and Camera route.
 - Local tag and exact legacy updater/rollback qualification.
@@ -169,3 +212,4 @@ post-transfer checksum match before their truncated hash is recorded here.
 | 2026-08-20 | Created the in-progress completion record, closed the software traceability audit without a code change, recorded sanitized read-only Pi preflight evidence, and documented the untagged rc.2 candidate changes and remaining gates. |
 | 2026-08-20 | Recorded the local `main` integration boundary and the passing pre-candidate focused, metadata, firmware-identity, and contained-SIL checks without claiming the exact-commit gate. |
 | 2026-08-20 | Recorded and corrected the Pi SIL private-`/tmp` visibility gap; the failed attempt reached neither Python nor hardware, and exact-candidate qualification restarted. |
+| 2026-08-20 | Recorded final candidate `5f54a4a1`, passing Windows focused/full/static/SIL gates, passing fresh target-Pi focused/cohort/private-device SIL gates, unchanged production state, and the independently rechecked evidence archives; retained attended/tag/publication/rollout gates. |
