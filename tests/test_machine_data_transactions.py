@@ -139,7 +139,9 @@ def test_exact_verification_and_restore_are_new_events(tmp_path):
     _base, context = _active_context(tmp_path)
     try:
         service = context.configuration_transactions
-        locations = json.loads((context.paths.config_root / "Locations.json").read_text(encoding="utf-8"))
+        locations_path = context.paths.config_root / "Locations.json"
+        before_bytes = locations_path.read_bytes()
+        locations = json.loads(before_bytes.decode("utf-8"))
         before_camera = copy.deepcopy(locations["camera"])
         locations["camera"]["Y"] += 10
         changed = service.commit_documents(
@@ -164,12 +166,211 @@ def test_exact_verification_and_restore_are_new_events(tmp_path):
             reason="Restore prior Camera calibration",
             machine_id_confirmation=MACHINE_ID,
         )
-        current = json.loads((context.paths.config_root / "Locations.json").read_text(encoding="utf-8"))
+        current = json.loads(locations_path.read_text(encoding="utf-8"))
         assert current["camera"] == before_camera
+        assert locations_path.read_bytes() == before_bytes
         assert restored.state.sequence == 3
         assert restored.state.authorization["location:camera"]["state"] == "revoked_pending_verification"
     finally:
         context.close()
+
+
+def test_restore_records_raw_only_change_and_reinstates_noncanonical_bytes(tmp_path):
+    _base, context = _active_context(tmp_path)
+    try:
+        service = context.configuration_transactions
+        locations_path = context.paths.config_root / "Locations.json"
+        original_bytes = locations_path.read_bytes()
+        original = json.loads(original_bytes.decode("utf-8"))
+
+        changed_locations = copy.deepcopy(original)
+        changed_locations["camera"]["Y"] += 11
+        first_change = service.commit_documents(
+            {"Locations.json": changed_locations},
+            operator="Alice",
+            reason="Create exact restore source",
+            workflow="named_location_modify",
+        )
+
+        canonical_return = service.commit_documents(
+            {"Locations.json": original},
+            operator="Alice",
+            reason="Return values through normal canonical serialization",
+            workflow="named_location_modify",
+        )
+        assert canonical_return.state.sequence == 2
+        assert json.loads(locations_path.read_text(encoding="utf-8")) == original
+        assert locations_path.read_bytes() != original_bytes
+
+        restored = service.restore_transaction(
+            first_change.transaction_id,
+            operator="Support",
+            reason="Restore exact historical representation",
+            machine_id_confirmation=MACHINE_ID,
+        )
+
+        assert restored.state.sequence == 3
+        assert restored.changed_targets == ()
+        assert locations_path.read_bytes() == original_bytes
+        event = json.loads(
+            next(
+                context.paths.configuration_events_root.glob(
+                    f"{restored.state.sequence:020d}-*.json"
+                )
+            ).read_text(encoding="utf-8")
+        )
+        assert event["event_type"] == "restore"
+        assert event["restore_reference"] == first_change.transaction_id
+        assert (
+            event["config_before_sha256"]["Locations.json"]
+            != event["config_after_sha256"]["Locations.json"]
+        )
+    finally:
+        context.close()
+
+
+def test_raw_only_settings_restore_does_not_create_false_target_changes(tmp_path):
+    _base, context = _active_context(tmp_path)
+    try:
+        service = context.configuration_transactions
+        settings_path = context.paths.config_root / "Settings.json"
+        original_bytes = settings_path.read_bytes()
+        original = json.loads(original_bytes.decode("utf-8"))
+
+        changed_settings = copy.deepcopy(original)
+        changed_settings["SAFE_Z"] = int(changed_settings.get("SAFE_Z", 0)) + 1
+        first_change = service.commit_documents(
+            {"Settings.json": changed_settings},
+            operator="Alice",
+            reason="Create exact Settings restore source",
+            workflow="settings_change",
+        )
+        service.commit_documents(
+            {"Settings.json": original},
+            operator="Alice",
+            reason="Return Settings values canonically",
+            workflow="settings_change",
+        )
+        authorization_before_restore = {
+            key: copy.deepcopy(dict(value))
+            for key, value in service.state.authorization.items()
+        }
+        assert settings_path.read_bytes() != original_bytes
+
+        restored = service.restore_transaction(
+            first_change.transaction_id,
+            operator="Support",
+            reason="Restore exact Settings representation",
+            machine_id_confirmation=MACHINE_ID,
+        )
+
+        assert restored.changed_targets == ()
+        assert {
+            key: dict(value) for key, value in restored.state.authorization.items()
+        } == authorization_before_restore
+        assert settings_path.read_bytes() == original_bytes
+    finally:
+        context.close()
+
+
+def test_multi_file_restore_reinstates_every_exact_backup_member(tmp_path):
+    _base, context = _active_context(tmp_path)
+    try:
+        service = context.configuration_transactions
+        locations_path = context.paths.config_root / "Locations.json"
+        settings_path = context.paths.config_root / "Settings.json"
+        original_locations = locations_path.read_bytes()
+        original_settings = settings_path.read_bytes()
+        locations = json.loads(original_locations.decode("utf-8"))
+        settings = json.loads(original_settings.decode("utf-8"))
+        locations["camera"]["Y"] += 13
+        settings["SAFE_Z"] = int(settings.get("SAFE_Z", 0)) + 1
+
+        changed = service.commit_documents(
+            {"Locations.json": locations, "Settings.json": settings},
+            operator="Alice",
+            reason="Create multi-file restore source",
+            workflow="governed_configuration_import",
+        )
+        restored = service.restore_transaction(
+            changed.transaction_id,
+            operator="Support",
+            reason="Restore both exact historical files",
+            machine_id_confirmation=MACHINE_ID,
+        )
+
+        assert restored.state.sequence == 2
+        assert set(restored.documents) == {"Locations.json", "Settings.json"}
+        assert locations_path.read_bytes() == original_locations
+        assert settings_path.read_bytes() == original_settings
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize(
+    ("checkpoint", "restore_completes"),
+    [
+        ("after_configuration_locations_fsync", False),
+        ("after_configuration_locations_replace", True),
+        ("after_configuration_event_fsync", True),
+        ("after_configuration_head_replace", True),
+    ],
+)
+def test_interrupted_exact_restore_reconciles_exact_bytes(
+    tmp_path, checkpoint, restore_completes
+):
+    base, context = _active_context(tmp_path)
+    locations_path = context.paths.config_root / "Locations.json"
+    original_bytes = locations_path.read_bytes()
+    changed_locations = json.loads(original_bytes.decode("utf-8"))
+    changed_locations["camera"]["Y"] += 12
+    changed = context.configuration_transactions.commit_documents(
+        {"Locations.json": changed_locations},
+        operator="Alice",
+        reason="Create interrupted exact restore source",
+        workflow="named_location_modify",
+    )
+    pre_restore_bytes = locations_path.read_bytes()
+    observed_replacement = []
+
+    def fault(name, path):
+        if name == checkpoint:
+            if name == "after_configuration_locations_replace":
+                observed_replacement.append(path.read_bytes())
+            raise RuntimeError(f"fault at {checkpoint}")
+
+    context.configuration_transactions.io = DurableFileOps(fault_hook=fault)
+    with pytest.raises(ConfigurationRecoveryRequired):
+        context.configuration_transactions.restore_transaction(
+            changed.transaction_id,
+            operator="Support",
+            reason="Interrupted exact restore",
+            machine_id_confirmation=MACHINE_ID,
+        )
+    if observed_replacement:
+        assert observed_replacement == [original_bytes]
+    context.close()
+
+    recovered = _bootstrap(base).open_ready()
+    try:
+        assert recovered.configuration_state.sequence == 2
+        current_bytes = locations_path.read_bytes()
+        assert current_bytes == (
+            original_bytes if restore_completes else pre_restore_bytes
+        )
+        event = json.loads(
+            next(
+                recovered.paths.configuration_events_root.glob(
+                    f"{recovered.configuration_state.sequence:020d}-*.json"
+                )
+            ).read_text(encoding="utf-8")
+        )
+        assert event["event_type"] == (
+            "restore" if restore_completes else "recovery"
+        )
+        assert not list(recovered.paths.pending_transactions_root.glob("*"))
+    finally:
+        recovered.close()
 
 
 def test_cancelled_attempt_changes_no_config_bytes(tmp_path):

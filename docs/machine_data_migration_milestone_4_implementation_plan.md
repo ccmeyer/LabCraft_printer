@@ -1,6 +1,6 @@
 # Machine Data Migration Milestone 4: Transactional Configuration History Plan
 
-Status: `implementation_complete_local_validation_passed`
+Status: `corrective_fix_local_validation_passed_pi_requalification_pending`
 
 Prepared: 2026-08-19
 
@@ -1128,9 +1128,10 @@ Milestone 4 is `verified` only when all of the following are true:
 - [x] Implement Slice 5.
 - [x] Implement Slice 6.
 - [x] Implement Slice 7.
-- [ ] Complete Slice 8: local qualification and documentation are complete;
-  the dedicated commit and target-Pi qualification remain.
-- [ ] Create the dedicated Milestone 4 implementation commit.
+- [ ] Complete Slice 8: the dedicated implementation commit and corrective
+  local qualification are complete; fresh target-Pi qualification remains.
+- [x] Create dedicated Milestone 4 implementation commit `6925d029`.
+- [ ] Create the exact-byte restore corrective commit.
 - [ ] Complete and record target-Pi qualification.
 - [ ] Mark Milestone 4 `verified` in both plans.
 
@@ -1180,8 +1181,9 @@ Milestone 4 is `verified` only when all of the following are true:
 
 ## Implementation and local validation record
 
-Implemented on `update_bug_fix` on 2026-08-19; changes remain intentionally
-uncommitted until the user requests the dedicated Milestone 4 commit.
+Implemented on `update_bug_fix` on 2026-08-19 and committed as `6925d029`
+(`feat: Added transaction history`). A target-Pi qualification finding on
+2026-08-20 required the exact-byte restore correction recorded below.
 
 Implemented behavior:
 
@@ -1217,11 +1219,57 @@ Validation evidence:
   the Pi must first receive the dedicated Milestone 4 commit so the result
   exercises this implementation.
 
+### Target-Pi exact-byte restore finding and correction
+
+The first target-Pi qualification attempt ran from clean commit `6925d029`
+against disposable root `/tmp/labcraft-m4-qualification.74Iwju`. The isolated
+rc.1 first start exited `0`; the active pointer and hardware profile were
+resolved from canonical evidence; the configuration head was absent; event,
+pending, and configuration-backup counts were all zero; hardware-free domain
+reopen reported `ready`, no history, and sequence zero; and every immutable and
+configuration baseline hash rechecked `OK`.
+
+Before the first transaction, a read-only serialization comparison found that
+all five migrated governed files were valid noncanonical legacy JSON. For
+example, `Locations.json` had current raw SHA-256
+`3e5b4de97877c467395a9a63e1b8fc444359144bfa6aa395837ea99c5f3c7d02`,
+while transaction canonical serialization produced
+`e2fdd21a1b183593839826cfcfc767f9afa7ada155ada97f4b40c83975bee4a0`.
+Inspection then established that explicit restore parsed the verified backup
+and passed the object through normal canonical serialization. It therefore
+restored equivalent values but not the UI-promised exact pre-change file, and
+it rejected a representation-only restore as unchanged. No transaction had
+been attempted, so the Pi store remained an untouched sequence-zero baseline.
+
+The corrective implementation keeps normal edits/imports canonical but gives
+only verified backup restoration an internal exact-serialized input. The
+service reopens and rechecks each backup member's size, raw SHA-256, semantic
+SHA-256, UTF-8 JSON, governed filename, complete cross-document schema, and
+hardware-profile constraint before commit intent. Raw-byte differences now
+count as affected for event/head hashes even when values are equal. Target
+revocation still follows semantic changes, so a formatting-only Settings or
+Obstacles restoration does not fabricate target changes. Exact bytes use the
+same pre-change backup, proposed staging, pending journal, atomic replacement,
+immutable event, head, and startup reconciliation path as every other commit.
+
+Corrective local validation on 2026-08-20:
+
+- transaction suite: `50 passed`, including noncanonical, raw-only,
+  multi-file, and four-boundary interrupted exact restores;
+- final Milestone 4 focused gate: `61 passed`;
+- broad migration/bootstrap/configuration/application gate:
+  `324 passed, 1 skipped`;
+- full Python suite with external basetemp:
+  `5363 passed, 156 skipped` in 329.31 seconds;
+- contained `virtual_print_array_96_v1`: passed with 96/96 completions;
+- changed-module compilation and `git diff --check`: passed.
+
 Remaining verification work:
 
-1. create the dedicated Milestone 4 commit after review;
+1. create the exact-byte restore corrective commit after review;
 2. pull that commit into a clean Pi checkout;
-3. execute the documented disposable M3-to-M4, cross-checkout, aggregate,
+3. start from a fresh disposable root and execute the documented M3-to-M4,
+   cross-checkout, aggregate,
    fault/recovery, restore, history/export, and zero-command safety sequence;
 4. record exact Pi hashes/logs and only then mark both plans `verified`.
 
@@ -1231,3 +1279,4 @@ Remaining verification work:
 | --- | --- |
 | 2026-08-19 | Created the concrete transactional configuration history plan after Milestone 3 target-Pi verification and cleanup. |
 | 2026-08-19 | Implemented Slices 1-7 and the local portion of Slice 8; recorded full Windows and contained SIL validation, implementation findings, and the remaining post-commit Pi gate. |
+| 2026-08-20 | Recorded implementation commit `6925d029`, the sequence-zero Pi baseline pass, the noncanonical exact-restore defect, its validated corrective implementation, and the remaining corrective-commit/fresh-Pi gates. |

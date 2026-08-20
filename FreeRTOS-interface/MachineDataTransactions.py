@@ -1009,16 +1009,22 @@ def _make_authorization_after(
     before_authorization: Mapping[str, Mapping[str, object]],
     after_hashes: Mapping[str, str],
     affected_files: set[str],
+    semantically_affected_files: set[str] | None = None,
 ) -> tuple[dict[str, dict[str, object]], list[dict[str, object]], tuple[str, ...]]:
+    semantic_files = (
+        affected_files
+        if semantically_affected_files is None
+        else semantically_affected_files
+    )
     before_snapshot = build_target_snapshot_from_documents(
         before_documents["Locations.json"], before_documents["Plates.json"], before_documents["Settings.json"]
     )
     after_snapshot = build_target_snapshot_from_documents(
         after_documents["Locations.json"], after_documents["Plates.json"], after_documents["Settings.json"]
     )
-    revoke_all = bool({"Settings.json", "Obstacles.json"}.intersection(affected_files))
+    revoke_all = bool({"Settings.json", "Obstacles.json"}.intersection(semantic_files))
     forced_dependency_changes: set[str] = set()
-    if "Plates.json" in affected_files:
+    if "Plates.json" in semantic_files:
         before_plates = {
             str(plate["name"]).casefold(): plate for plate in before_documents["Plates.json"]
         }
@@ -1350,8 +1356,39 @@ class ConfigurationTransactionService:
         expected_config_sha256: Mapping[str, str] | None = None,
         restore_reference: str | None = None,
     ) -> ConfigurationTransactionResult:
+        return self._commit_documents(
+            proposed,
+            operator=operator,
+            reason=reason,
+            workflow=workflow,
+            event_type=event_type,
+            expected_config_sha256=expected_config_sha256,
+            restore_reference=restore_reference,
+        )
+
+    def _commit_documents(
+        self,
+        proposed: Mapping[str, object],
+        *,
+        operator: str,
+        reason: str,
+        workflow: str,
+        event_type: str,
+        expected_config_sha256: Mapping[str, str] | None,
+        restore_reference: str | None,
+        exact_serialized: Mapping[str, bytes] | None = None,
+    ) -> ConfigurationTransactionResult:
         if event_type not in {"change", "import", "restore"}:
             raise ConfigurationValidationError("Invalid mutating event type.")
+        exact_serialized = dict(exact_serialized or {})
+        if exact_serialized and event_type != "restore":
+            raise ConfigurationValidationError(
+                "Exact serialized files are restricted to verified restore transactions."
+            )
+        if not set(exact_serialized).issubset(proposed):
+            raise ConfigurationValidationError(
+                "Every exact serialized file requires a matching proposed document."
+            )
         reason = str(reason or "").strip()
         workflow = str(workflow or "").strip()
         if not reason or not workflow:
@@ -1375,9 +1412,39 @@ class ConfigurationTransactionService:
             if complete["Settings.json"].get("HARDWARE_PROFILE", "current") != before_documents["Settings.json"].get("HARDWARE_PROFILE", "current"):
                 raise ConfigurationValidationError("HARDWARE_PROFILE cannot change while the application is active.")
             all_bytes = _canonical_config_bytes(complete)
+            for filename, data in exact_serialized.items():
+                if filename not in CONFIG_FILENAMES or type(data) is not bytes:
+                    raise ConfigurationValidationError(
+                        "Exact restore input must contain governed filenames and immutable bytes."
+                    )
+                try:
+                    serialized_payload = json.loads(data.decode("utf-8"))
+                    serialized_semantic_sha = semantic_json_sha256(serialized_payload)
+                    validated_semantic_sha = semantic_json_sha256(complete[filename])
+                except Exception as exc:
+                    raise ConfigurationValidationError(
+                        f"Exact restore bytes for {filename} are not valid JSON: {exc}"
+                    ) from exc
+                if serialized_semantic_sha != validated_semantic_sha:
+                    raise ConfigurationValidationError(
+                        f"Exact restore bytes for {filename} differ from the validated document."
+                    )
+                all_bytes[filename] = data
+            semantically_affected = {
+                name
+                for name in CONFIG_FILENAMES
+                if semantic_json_sha256(before_documents[name])
+                != semantic_json_sha256(complete[name])
+            }
             affected = [
                 name for name in CONFIG_FILENAMES
-                if semantic_json_sha256(before_documents[name]) != semantic_json_sha256(complete[name])
+                if (
+                    name in semantically_affected
+                    or (
+                        name in exact_serialized
+                        and before_hashes[name] != sha256_bytes(all_bytes[name])
+                    )
+                )
             ]
             if not affected:
                 raise ConfigurationValidationError("The proposed configuration is unchanged.")
@@ -1390,6 +1457,7 @@ class ConfigurationTransactionService:
                 current_state.authorization,
                 after_hashes,
                 set(affected),
+                semantically_affected,
             )
             transaction_id = str(self.uuid_factory())
             event_id = str(self.uuid_factory())
@@ -1913,16 +1981,37 @@ class ConfigurationTransactionService:
         }
         manifest = _parse_backup_manifest(self.paths, reference)
         proposed = {}
+        exact_serialized = {}
         for item in manifest["files"]:
             path = self.paths.machine_root / item["relative_path"]
-            proposed[item["filename"]] = json.loads(path.read_text(encoding="utf-8"))
-        return self.commit_documents(
+            try:
+                data = path.read_bytes()
+                if len(data) != item["size"] or sha256_bytes(data) != item["raw_sha256"]:
+                    raise ConfigurationRecoveryRequired(
+                        "Configuration backup member changed after manifest verification."
+                    )
+                payload = json.loads(data.decode("utf-8"))
+                if semantic_json_sha256(payload) != item["semantic_json_sha256"]:
+                    raise ConfigurationRecoveryRequired(
+                        "Configuration backup member semantic hash changed after verification."
+                    )
+            except ConfigurationRecoveryRequired:
+                raise
+            except Exception as exc:
+                raise ConfigurationRecoveryRequired(
+                    f"Configuration backup member cannot be reopened: {item['filename']}: {exc}"
+                ) from exc
+            proposed[item["filename"]] = payload
+            exact_serialized[item["filename"]] = data
+        return self._commit_documents(
             proposed,
             operator=operator,
             reason=reason,
             workflow="configuration_history_restore",
             event_type="restore",
+            expected_config_sha256=None,
             restore_reference=transaction_id,
+            exact_serialized=exact_serialized,
         )
 
 

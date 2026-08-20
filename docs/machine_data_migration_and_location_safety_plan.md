@@ -1248,7 +1248,7 @@ merely switching app code back.
 
 ## Milestone 4: Add transactional configuration history
 
-Status: `implementation_complete`
+Status: `corrective_fix_local_validation_passed_pi_requalification_pending`
 
 Concrete plan:
 [Machine Data Migration Milestone 4: Transactional Configuration History Plan](machine_data_migration_milestone_4_implementation_plan.md)
@@ -1350,6 +1350,17 @@ canonical history and requires a compatibility export.
 - The Configuration History window exposes integrity-checked details,
   deterministic Markdown export, exact-value re-verification, reviewed import,
   and restore-as-new-transaction actions.
+- The dedicated implementation was committed as `6925d029`. The first
+  target-Pi qualification established a valid untouched sequence-zero store,
+  then a read-only probe found that all five legacy files had noncanonical raw
+  bytes. Explicit restore at that commit would parse and canonically reserialize
+  those bytes, contradicting the exact-file restore contract even though JSON
+  values remained equivalent. No transaction was attempted on the Pi store.
+- The corrective implementation restricts exact serialized input to verified
+  backup restoration, rechecks raw and semantic evidence before intent, treats
+  representation-only differences as auditable file changes, preserves target
+  authorization when only formatting changes, and uses the existing durable
+  journal/recovery path without changing normal edit serialization.
 
 ### Validation record
 
@@ -1377,6 +1388,11 @@ canonical history and requires a compatibility export.
   running it before the dedicated commit/pull would not test this
   implementation. Disposable target-Pi M3-to-M4 qualification remains the
   gate before changing this milestone to `verified`.
+- Corrective exact-restore validation on 2026-08-20 passed: 50 transaction
+  tests; 61 focused tests; 324 broad affected tests with 1 skipped; the full
+  suite with 5,363 passed and 156 skipped in 329.31 seconds; changed-module
+  compilation; `git diff --check`; and contained 96/96 standard SIL. A fresh
+  target-Pi qualification at the corrective commit remains required.
 
 ## Milestone 5: Add guarded location and calibration changes
 
@@ -1959,6 +1975,9 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-19 | 3 | Bootstrap, verification, activation, strict canonical loading, and Controller enforcement committed | Dedicated Milestone 3 commit; 287 focused passed/1 skipped; 5,232 full passed/153 skipped; standard host SIL and static checks passed | Run the exact target-Pi no-hardware gate |
 | 2026-08-19 | 3 | Pi-discovered bootstrap worker shutdown deadlock corrected | Fix commit `08d41bc2`; 13 dialog, 107 focused, 5,235 full-suite tests, and target-Pi real-QThread probe passed | Repeat the interrupted restored-store launch on the corrected commit |
 | 2026-08-19 | 3 | Milestone 3 verified | Target-Pi rc.1 migration/cancel/reuse/corruption/restore gate passed; restored exit `0`; Pi zero-command gate `10 passed`; closeout hashes all `OK`; missing initial snapshot recorded as a procedural exception | Commit the verification/runbook documentation, then perform reviewed cleanup of only the disposable validation root |
+| 2026-08-19 | 4 | Transaction history implementation committed | Commit `6925d029`; 54 focused, 5,288 full-suite, and 96/96 contained SIL passed before commit | Run disposable target-Pi qualification |
+| 2026-08-20 | 4 | Pi sequence-zero baseline passed; exact restore defect found read-only before mutation | All baseline hashes `OK`; all five legacy files valid but noncanonical; explicit restore would canonicalize instead of reproducing raw backup bytes | Preserve failed-qualification evidence and correct exact restoration before transactions |
+| 2026-08-20 | 4 | Exact-byte restore corrective implementation and local validation completed | 50 transaction, 61 focused, 324 affected/1 skipped, 5,363 full/156 skipped, 96/96 contained SIL, compilation, and diff checks passed | Create corrective commit, pull it to the Pi, and restart qualification from a fresh disposable root |
 
 ## Definition of done for v1.3.0-rc.2
 
@@ -2001,3 +2020,4 @@ The work is complete only when:
 | 2026-08-19 | Recorded dedicated Milestone 2 commit `157db800`, marked Milestone 2 verified, and recorded the post-implementation Milestone 3 phase-handoff review. |
 | 2026-08-19 | Recorded implementation-complete Milestone 3 production cutover, operator guidance, focused/full/host-SIL evidence, findings, risks, rollback, and its remaining commit/manual-Pi verification gates. |
 | 2026-08-19 | Recorded fix commit `08d41bc2`, the Pi Qt/GIL shutdown-race diagnosis, corrected operator evidence/profile guidance, complete target-Pi evidence including the missing-baseline exception, and marked Milestone 3 verified. |
+| 2026-08-20 | Recorded Milestone 4 commit `6925d029`, the target-Pi noncanonical exact-restore finding, its locally validated corrective implementation, and the fresh-Pi requalification gate. |
