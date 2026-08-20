@@ -55,7 +55,7 @@ For every milestone update:
 | 0 | Preserve deployed machine state | `verified` | Operator backup complete | Operator attestation recorded |
 | 1 | Freeze external machine-data contract | `verified` | Commit `9b882141` | 101 focused and 5,100 full-suite tests passed |
 | 2 | Build inert migration and backup engine | `verified` | Commit `157db800` | 180 focused and 5,179 full-suite tests plus static checks passed |
-| 3 | Activate first-launch migration and verification | `implementation_complete` | All eight implementation slices and the dedicated commit are complete on `update_bug_fix` | 287 focused passed/1 skipped; 5,232 full passed/153 skipped; standard host SIL passed; manual Pi gate pending |
+| 3 | Activate first-launch migration and verification | `verified` | Production cutover commit `b3cf12ad`; Qt worker-shutdown fix `08d41bc2` | Original and fix automated gates passed; target-Pi rc.1 migration, fail-closed corruption, cross-worktree reuse, restored reopen, and 10 zero-command safety tests passed |
 | 4 | Add transactional configuration history | `planned` | Not started | Not started |
 | 5 | Add guarded location and calibration changes | `planned` | Not started | Not started |
 | 6 | Protect future updates and controlled rollback | `planned` | Not started | Not started |
@@ -1051,7 +1051,7 @@ and fixtures if they remain useful for the redesigned approach.
 
 ## Milestone 3: Activate first-launch migration and verification
 
-Status: `implementation_complete`
+Status: `verified`
 
 Concrete plan:
 [Machine Data Migration Milestone 3: Bootstrap, Verification, and Activation Plan](machine_data_migration_milestone_3_implementation_plan.md)
@@ -1190,6 +1190,12 @@ merely switching app code back.
 - 2026-08-19: Added
   `docs/machine_data_migration_milestone_3_first_start.md` for operator/source
   selection, verification, recovery, exit-code, and rollback guidance.
+- 2026-08-19: Dedicated production-cutover commit `b3cf12ad`
+  (`feat: activate verified external machine data`) records the eight
+  implementation slices and their original automated evidence.
+- 2026-08-19: Target-Pi validation exposed a Qt/Python worker-shutdown race.
+  Fix commit `08d41bc2` (`fix: wait for bootstrap worker shutdown`) stages the
+  worker outcome and accepts/rejects the dialog only after `QThread.finished`.
 
 ### Validation record
 
@@ -1207,8 +1213,31 @@ merely switching app code back.
 - Post-M2 review covered receipt/tree-manifest strictness, installed-backup
   layout, workspace cleanup, lock preconditions, and partial-stage recovery at
   commit `157db800`.
-- Manual target-Pi no-hardware validation remains before Milestone 3 can be
-  marked `verified`.
+- Worker-shutdown correction gate: `13 passed` dialog tests, `107 passed`
+  focused bootstrap/startup/safety tests, and `5235 passed, 153 skipped` in the
+  full Python suite. A hardware-free probe using the target Pi's real
+  PySide6/QThread runtime also passed.
+- Target-Pi no-hardware validation passed at commit `08d41bc2` using a
+  disposable external root and an operator-selected `v1.3.0-rc.1` backup for
+  machine `LC-001` with hardware profile `current`: source-page and review-page
+  cancellation returned `2`; activation and detached-worktree reuse opened
+  normally; deliberate canonical Settings corruption returned `4`; exact-byte
+  restoration reopened normally with exit `0`; and the zero-command safety
+  gate passed `10 passed in 1.81s` with exit `0`.
+- The initial operator hash snapshot was not created because a deliberate
+  missing-file probe used `exit 1` and closed the shell before the following
+  hash command. This procedural exception is recorded on the Pi. Verification
+  remained acceptable because all immutable migration/activation metadata kept
+  its activation timestamps, bootstrap revalidated every bound artifact,
+  restored Settings matched its recovery copy at SHA-256
+  `69a5f4b90ede862fc716090cbf2e53ce330080f8d403ba747ce1d8d69ba7646a`,
+  and a transparently labeled closeout snapshot/check reported `OK` for the
+  active pointer, all six metadata files, Settings, and its recovery copy.
+- The rc.1 source's M2 `unclassified_source_paths` were all `update_logs/...`
+  entries resolved by reviewed archive-only ownership rule
+  `legacy-update-logs-v1`; no unmatched or prohibited path was activated.
+- Milestone 3 is verified at fix commit `08d41bc2`. The disposable Pi evidence
+  root remains preserved pending documentation commit and reviewed cleanup.
 
 ## Milestone 4: Add transactional configuration history
 
@@ -1848,6 +1877,10 @@ Hardware use is last. It requires:
 | 2026-08-19 | M3 post-M2 review | M2's exact tree verifier rejects verification, activation, and lock sidecars not present in its manifest | Keep the M2 manifest immutable and introduce fixed phase-specific additional-path inventories |
 | 2026-08-19 | M3 post-M2 review | Successful M2 publication removes its workspace, while the installed generated backup has a different layout from a selected candidate ZIP | Resume from published receipt/candidate/manifest/backup evidence and keep candidate inspection separate from installed-backup verification |
 | 2026-08-19 | M3 post-M2 review | M2 preserves partial or mismatched stages rather than deleting evidence | M3 recovery UI must fail closed with diagnostics/support exit and never auto-delete/rebuild the stage |
+| 2026-08-19 | M3 Pi validation | A worker-result slot closed the modal bootstrap dialog before its `QThread` stopped, allowing the GUI thread to wait while holding the GIL and the worker to wait for that GIL | Stage results, wait for `QThread.finished`, then accept/reject or show errors; fix and regression tests are commit `08d41bc2` |
+| 2026-08-19 | M3 Pi validation | The first-start guide's deliberate missing-file probe used `exit 1`, which closed the operator's terminal and prevented the next hash-snapshot command | Never exit the interactive shell from an evidence probe; report all missing paths, stop procedurally, and preserve an explicit exception record when a baseline was missed |
+| 2026-08-19 | M3 Pi validation | The normal main window does not currently present the canonical machine ID and hardware profile clearly enough for the documented visual check | Print and record both values from the authorized pointer and canonical Settings; treat the main-window screenshot only as lifecycle evidence |
+| 2026-08-19 | M3 Pi validation | The rc.1 backup contained only `update_logs/...` M2 unclassified paths | Confirmed every path resolves through reviewed archive-only rule `legacy-update-logs-v1`; unknown or prohibited paths remain blocking |
 
 Add findings here as work proceeds. Do not rewrite prior findings to hide an
 earlier assumption; add a correction with date and evidence.
@@ -1867,6 +1900,8 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-19 | 2 | Milestone 2 verified | Commit `157db800`; focused/full suites and static checks passed | Use the immutable M2 publication evidence as the Milestone 3 bootstrap baseline |
 | 2026-08-19 | 3 | Concrete bootstrap, verification, activation, and Controller-enforcement plan reviewed against the verified M2 engine | `docs/machine_data_migration_milestone_3_implementation_plan.md` plus startup/MVC/motion-path and M2 phase-handoff audits | Begin tests-first Milestone 3 implementation |
 | 2026-08-19 | 3 | Bootstrap, verification, activation, strict canonical loading, and Controller enforcement committed | Dedicated Milestone 3 commit; 287 focused passed/1 skipped; 5,232 full passed/153 skipped; standard host SIL and static checks passed | Run the exact target-Pi no-hardware gate |
+| 2026-08-19 | 3 | Pi-discovered bootstrap worker shutdown deadlock corrected | Fix commit `08d41bc2`; 13 dialog, 107 focused, 5,235 full-suite tests, and target-Pi real-QThread probe passed | Repeat the interrupted restored-store launch on the corrected commit |
+| 2026-08-19 | 3 | Milestone 3 verified | Target-Pi rc.1 migration/cancel/reuse/corruption/restore gate passed; restored exit `0`; Pi zero-command gate `10 passed`; closeout hashes all `OK`; missing initial snapshot recorded as a procedural exception | Commit the verification/runbook documentation, then perform reviewed cleanup of only the disposable validation root |
 
 ## Definition of done for v1.3.0-rc.2
 
@@ -1908,3 +1943,4 @@ The work is complete only when:
 | 2026-08-19 | Recorded implementation-complete Milestone 2 inert engine, focused/full validation, platform durability and recovery findings, and pending dedicated-commit gate. |
 | 2026-08-19 | Recorded dedicated Milestone 2 commit `157db800`, marked Milestone 2 verified, and recorded the post-implementation Milestone 3 phase-handoff review. |
 | 2026-08-19 | Recorded implementation-complete Milestone 3 production cutover, operator guidance, focused/full/host-SIL evidence, findings, risks, rollback, and its remaining commit/manual-Pi verification gates. |
+| 2026-08-19 | Recorded fix commit `08d41bc2`, the Pi Qt/GIL shutdown-race diagnosis, corrected operator evidence/profile guidance, complete target-Pi evidence including the missing-baseline exception, and marked Milestone 3 verified. |

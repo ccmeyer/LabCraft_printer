@@ -59,10 +59,13 @@ validated and the per-machine configuration lock is held. Later launches from
 another checkout under the same OS account reuse the same external machine
 store and do not read that checkout's `local/` configuration.
 
-Before commanding movement, confirm that the main window identifies the
-expected hardware profile. Milestone 7 still owns the controlled physical-route
-validation; completing bootstrap alone is not authorization to skip that
-checklist.
+The normal main window does not currently present the canonical machine ID and
+hardware profile clearly enough to serve as verification evidence. Before
+commanding movement, print and record both values from the authorized pointer
+and canonical Settings as shown in Step 4. A main-window screenshot proves that
+normal startup completed, not which identity/profile was authorized. Milestone
+7 still owns the controlled physical-route validation; completing bootstrap
+alone is not authorization to skip that checklist.
 
 ## Exact target-Pi first-start validation
 
@@ -144,10 +147,11 @@ Launch the same command again. In the verification window:
    reference. Stop rather than inventing a reference if none exists.
 8. Check the attestation, then select **Create verified backup and activate**.
 
-The main window may appear only after activation succeeds. Confirm the expected
-hardware profile is displayed, take a screenshot, and close the app normally
-without requesting any motion, pressure, camera, balance, or other hardware
-operation.
+The main window may appear only after activation succeeds. Take a screenshot
+as startup-lifecycle evidence and close the app normally without requesting any
+motion, pressure, camera, balance, or other hardware operation. Verify machine
+identity and hardware profile from canonical evidence in Step 4 rather than
+assuming the current main window displays them.
 
 ### 4. Record and reopen the activation evidence
 
@@ -160,6 +164,9 @@ machine_root="$validation_root/machines/$machine_uuid"
 
 "$validation_python" -c 'import json,sys; p=json.load(open(sys.argv[1], encoding="utf-8")); assert p["schema_version"] == 2; print("Authorized pointer:", p["machine_id"], p["machine_uuid"], p["activation_id"], p["migration_id"])' "$active_json"
 
+"$validation_python" -c 'import json,sys; p=json.load(open(sys.argv[1], encoding="utf-8")); s=json.load(open(sys.argv[2], encoding="utf-8")); print("Authorized machine ID:", p["machine_id"]); print("Canonical hardware profile:", s.get("HARDWARE_PROFILE", "current"))' "$active_json" "$machine_root/config/Settings.json"
+
+missing_evidence=0
 for evidence_path in \
   "$machine_root/metadata/machine_identity.json" \
   "$machine_root/metadata/candidate_evidence.json" \
@@ -168,12 +175,28 @@ for evidence_path in \
   "$machine_root/metadata/verification.json" \
   "$machine_root/metadata/activation_receipt.json"
 do
-  test -f "$evidence_path" || { printf 'Missing: %s\n' "$evidence_path"; exit 1; }
+  if test -f "$evidence_path"; then
+    printf 'Found: %s\n' "$evidence_path"
+  else
+    printf 'Missing: %s\n' "$evidence_path"
+    missing_evidence=1
+  fi
 done
 
-sha256sum "$active_json" "$machine_root"/metadata/*.json \
-  | tee "$validation_parent/evidence-sha256.txt"
+if test "$missing_evidence" -ne 0; then
+  printf 'STOP: required evidence is missing; preserve this terminal output and contact support.\n'
+else
+  sha256sum \
+    "$active_json" \
+    "$machine_root"/metadata/*.json \
+    "$machine_root/config/Settings.json" \
+    | tee "$validation_parent/evidence-sha256.txt"
+fi
 ```
+
+Do not replace a filename merely to test this loop, and do not add `exit` to a
+command pasted into the interactive operator shell. A new terminal does not
+remove the disposable root, but shell variables must be assigned again.
 
 Run the domain-level reopen check. It reacquires and releases the canonical
 configuration lock but does not construct application hardware:
@@ -226,9 +249,10 @@ printf 'Second-checkout exit code: %s\n' "$second_exit"
 ```
 
 The verification window should briefly report that verified external data is
-ready and revalidate it without asking for a source. Confirm the same printer
-ID/profile in the normal main window, then close without hardware actions. The
-exit code must be `0`.
+ready and revalidate it without asking for a source. The normal main window is
+not expected to display the canonical machine ID/profile clearly; use the Step
+4 evidence output for those values. Close without hardware actions. The exit
+code must be `0`.
 
 ### 6. Prove corruption cannot fall back to legacy data
 
@@ -260,10 +284,14 @@ cp -- "$settings_recovery" "$settings_path"
 )
 restored_exit=$?
 printf 'Restored exit code: %s\n' "$restored_exit"
+
+sha256sum -c "$validation_parent/evidence-sha256.txt" \
+  | tee "$validation_parent/restored-evidence-check.txt"
 ```
 
 The app must reuse the verified store and exit `0` after the operator closes
-the main window without hardware actions.
+the main window without hardware actions. Every baseline entry, including
+canonical Settings, must then report `OK`.
 
 ### 7. Re-run the zero-command safety tests on the Pi
 
@@ -284,6 +312,24 @@ root until the evidence has been reviewed. Then remove the worktree with
 `unset LABCRAFT_MACHINE_DATA_ROOT`, and arrange support-reviewed cleanup of the
 exact printed `validation_parent`. Never delete or edit either Milestone 0
 backup or the real production machine-data root.
+
+### If the initial evidence snapshot was missed
+
+Do not create a later file and describe it as the original baseline. Preserve
+the reason the snapshot was missed, re-run hardware-free bootstrap validation,
+confirm any restored file against its byte-for-byte recovery copy, and create a
+separately named closeout snapshot. Qualification must explicitly review and
+record that exception before accepting it; otherwise repeat the entire
+disposable validation from a fresh root.
+
+### If startup prints a message but no window appears
+
+Do not enable or reconnect hardware. Record the deployed commit, validation
+root, process ID, and terminal output before terminating the process. Commit
+`08d41bc2` fixes the target-Pi Qt/Python race in which a worker result closed the
+dialog before `QThread.finished`; earlier commits must not be used to complete
+this validation. Update both the primary checkout and any detached validation
+worktree to the same corrected commit before retrying.
 
 ## Cancel, interruption, and recovery
 

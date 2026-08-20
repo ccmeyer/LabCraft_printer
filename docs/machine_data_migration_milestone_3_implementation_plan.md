@@ -1,6 +1,6 @@
 # Machine Data Migration Milestone 3: Bootstrap, Verification, and Activation Plan
 
-Status: `implementation_complete`
+Status: `verified`
 
 Prepared: 2026-08-19
 
@@ -1468,6 +1468,10 @@ Milestone 3 is `verified` only when:
   `157db800`. The revised boundary keeps M2 provenance immutable, adds a
   separate activation receipt/journal, specifies fixed phase inventories, and
   treats absent completed workspaces and installed generated backups correctly.
+- 2026-08-19: Production-cutover commit `b3cf12ad` was followed by target-Pi
+  worker-lifecycle correction commit `08d41bc2`. The correction stages worker
+  results and waits for `QThread.finished` before closing or transitioning the
+  bootstrap dialog.
 
 ## Validation record
 
@@ -1490,8 +1494,28 @@ Milestone 3 is `verified` only when:
   `157db800`.
 - 2026-08-19: `git diff --check`, strict ownership JSON parsing, UTF-8 and
   Markdown-fence checks, and changed-module Python compilation passed.
-- Manual target-Pi no-hardware validation remains the final Milestone 3
-  verification gate.
+- 2026-08-19: Worker-lifecycle correction passed `13` dialog tests, `107`
+  focused bootstrap/startup/safety tests, and the full Python suite at
+  `5235 passed, 153 skipped`. A hardware-free probe using the target Pi's real
+  PySide6/QThread runtime also passed.
+- 2026-08-19: Target-Pi no-hardware qualification passed at `08d41bc2` using
+  an operator-selected `v1.3.0-rc.1` backup, disposable external root, machine
+  `LC-001`, and canonical hardware profile `current`. Both cancellation paths
+  returned `2`; initial activation and detached-worktree reuse succeeded;
+  deliberate Settings corruption failed closed with `4`; exact restoration
+  reopened with `0`; and the Pi zero-command gate passed `10 tests` with exit
+  `0`.
+- The original Step 4 `evidence-sha256.txt` was not created after a deliberate
+  missing-file probe executed `exit 1` in the interactive shell. The exception
+  is retained rather than backfilled. All six immutable metadata files retained
+  their activation timestamps, bootstrap revalidated the receipt/hash graph,
+  restored Settings and its recovery copy shared SHA-256
+  `69a5f4b90ede862fc716090cbf2e53ce330080f8d403ba747ce1d8d69ba7646a`,
+  and the labeled closeout snapshot/check returned `OK` for every entry.
+- Every M2 unclassified path in the real rc.1 source was beneath
+  `update_logs/` and resolved through reviewed archive-only rule
+  `legacy-update-logs-v1`. No unmatched/prohibited ownership decision passed.
+- All exit criteria are satisfied; Milestone 3 is verified at `08d41bc2`.
 
 ## Findings discovered during planning
 
@@ -1549,6 +1573,19 @@ Milestone 3 is `verified` only when:
     containment. The valid full gate used an external disposable pytest base;
     representative failures from a repo-local base passed unchanged outside
     the checkout.
+21. On the target Pi, a queued worker-result slot could call `accept()` while
+    its child `QThread` was still running. Dialog destruction then waited for
+    the worker while the GUI thread held the Python GIL, and the worker waited
+    to reacquire that GIL. UI completion must be gated on both the operation
+    result and `QThread.finished`.
+22. An operator runbook probe must not execute `exit` from an interactive
+    terminal. The missing-file experiment closed the shell and skipped the
+    next evidence-snapshot command; revised guidance reports every missing path
+    and tells the operator to stop without terminating the shell.
+23. Machine ID and hardware profile are authorization evidence but are not
+    clearly presented by the normal main window. Qualification must print them
+    from the versioned active pointer and canonical Settings; a main-window
+    screenshot proves lifecycle only.
 
 ## Document change log
 
@@ -1558,3 +1595,4 @@ Milestone 3 is `verified` only when:
 | 2026-08-19 | Added qualification-worker identity and View optics paths found by the Milestone 2 direct-local closeout inventory. |
 | 2026-08-19 | Revised the plan against verified M2 commit `157db800`: immutable M2 provenance, separate activation receipt/journal, fixed phase inventories, public published-evidence APIs, installed-backup distinction, and workspace-absent recovery. |
 | 2026-08-19 | Implemented all eight slices, added exact first-start/operator guidance, and recorded focused/full/host-SIL automated evidence in the dedicated Milestone 3 commit; status is `implementation_complete` pending manual Pi validation. |
+| 2026-08-19 | Recorded production commit `b3cf12ad`, Pi worker-shutdown fix `08d41bc2`, complete automated/target-Pi evidence, the transparent missing-baseline exception, and marked Milestone 3 `verified`. |
