@@ -7,9 +7,10 @@
 > development workflow needed to test future commits without rebinding the
 > production machine-data store.
 
-Status: `in_progress` - rc.5 behavior commit `65ba38df` passed Windows and
-disposable-Pi qualification. Release metadata, immutable tag, protected rc.4
-update, publication, and staged rollout gates remain.
+Status: `in_progress` - rc.5 tag `34841fe0` is published and the attended
+protected rc.4-to-rc.5 update, first launch, closed-app postflight, and evidence
+seal passed on LC-001. Controlled source-cohort rollout and physical Camera/HIL
+gates remain.
 
 Started: 2026-08-20
 
@@ -433,31 +434,63 @@ service or test. The failed case immediately passed alone, its complete
 17-test module passed, and the required clean full rerun passed all 5,461
 tests with 156 skipped.
 
-Rc.5 release metadata and the exact tag remain the next gate. To re-enter the
-authorized rc.4 updater, support must first preserve the current two runtime
-files and restore their timestamp-only rc.4 source bytes from the verified
-migration archive. The restored bytes must match the original manifest hashes;
-no coordinate, calibration result, location, authorization, or history value
-may be edited. The operator-attended protected updater then owns the rc.5 Git
-change and post-update deployment anchor.
+Rc.5 release metadata commit
+`34841fe0c9f54c6e1c1ceaad2b797ab661084430` passed 419 focused tests,
+the clean 5,461-pass/156-skip full rerun, release/static checks, and the prior
+Windows/Pi contained qualification. The annotated `v1.3.0-rc.5` tag was
+published before `main`, peels exactly to that commit, and does not move any
+earlier release tag.
+
+For the enrolled rc.4 machine, support preserved the current runtime files
+outside the production tree, proved that each differed from its verified
+migration source only in `updated_at_utc`, and restored the exact source bytes:
+
+- `CalibrationMemory/config.json` SHA-256
+  `e616677c...de69a0`;
+- `CalibrationMemory/entities/reagents.json` SHA-256
+  `8af705f7...2ea41`; and
+- unchanged active pointer SHA-256 `392c8aa8...6ac80`.
+
+The restored tagged rc.4 bootstrap returned `ready`. Its first update check
+then failed safely because a detached tag has no Git upstream. No Git or
+machine-data mutation occurred. Support created local branch
+`protected-update-rc5` at the same rc.4 commit and attached only its upstream
+to `origin/main`; the commit and tree remained exact and the worktree clean.
+
+Protected update `3255339d-8d1c-4274-b1ad-e159219d811b` then advanced rc.4
+`25d1b541` to rc.5 `34841fe0`. Its terminal receipt and latest-result pointer
+both authorized relaunch with recovery false, and the new deployment anchor
+binds the exact rc.5 version/commit and update authorization. Normal first
+launch displayed the successful rc.5 result. Live and closed postflights found
+no process after close, clean Git state, bootstrap `ready`, history sequence
+and event count 8/8, zero pending configuration files, unchanged
+`Locations.json` SHA-256 `3e5b4de9...c5f3c7d02`, and no startup failure
+marker.
+
+Operator `Conary-Codex` confirmed no observed physical movement, pressure
+action, or unexpected device activity during the update and first launch. The
+technical archive and separately sealed operator attestation are recorded in
+the evidence section below.
 
 ## Local tag, updater, and rollback qualification
 
-Status: `passed` for the local rc.4 tag and attended protected update/exact
-restore. Rc.2 and rc.3 remain immutable; local rc.4 peels exactly to
-`25d1b541`. The tag has not been published.
-
-Record peeled tag commit, metadata tag validation, release-aware bundle hash,
-exact rc.6/rc.1 old-updater lanes, offline equivalence, unchanged return, and
-synthetic Camera-conflict recovery here.
+Status: `passed` for the published rc.5 tag and attended protected rc.4-to-rc.5
+update. Rc.2, rc.3, and rc.4 remain immutable; rc.5 peels exactly to
+`34841fe0`. The update created a verified backup, preserved protected bytes,
+wrote a relaunch-authorized terminal receipt and exact deployment anchor, and
+reopened normally. Exact rc.6/rc.1 pilot and rollback lanes remain separate
+open gates.
 
 ## Publication and rollout
 
-Status: not authorized.
+Status: rc.5 release publication passed; staged fleet rollout is not yet
+authorized.
 
-Record tag/branch publication order, remote refs, controlled public-tag result,
-rc.6 pilot, rc.1 pilot, evidence reviews, fleet batches, and final decision
-here.
+The immutable rc.5 tag was pushed first, followed by the `main` release-index
+commit, so no client could observe an advertised tag before the tag existed.
+Remote rc.5 peels to `34841fe0`. LC-001 completed the attended protected
+rc.4-to-rc.5 update. Rc.6 and rc.1 representative pilots, evidence reviews,
+fleet batches, and the final rollout decision remain pending.
 
 ## Evidence
 
@@ -475,19 +508,27 @@ Final ignored evidence roots:
 - final rc.4 attended archive:
   `verification_reports/machine_data_m7/25d1b541f62de15dc6f8e09036b5d588fcc95920/labcraft-m7-rc4-attended-final-evidence.tar.gz`,
   SHA-256 `198C533C...8FB9A17`.
+- final rc.5 technical archive:
+  `verification_reports/machine_data_m7/34841fe0c9f54c6e1c1ceaad2b797ab661084430/labcraft-rc5-attended-34841fe0-evidence.tar.gz`,
+  175,365 bytes, 79 safe members, SHA-256
+  `FD74FEDE...14784CD2`;
+- linked rc.5 operator attestation:
+  `verification_reports/machine_data_m7/34841fe0c9f54c6e1c1ceaad2b797ab661084430/labcraft-rc5-attended-34841fe0-operator-attestation.json`,
+  SHA-256 `3F037F7B...6F48AB6D`.
 
 ## Open gates
 
 - Private operator, rc.6 pilot, rc.1 pilot, fixtures, and Camera-route approval.
 - Attended firmware, HIL, and physical Camera-route qualification.
 - Exact legacy updater/rollback qualification beyond the completed enrolled
-  rc.3 -> rc.4 forward-update lane.
-- Release publication and staged rollout.
+  rc.3 -> rc.4 and rc.4 -> rc.5 forward-update lanes.
+- Representative rc.6/rc.1 pilots and staged fleet rollout.
 
 ## Document change log
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Published immutable rc.5 tag `34841fe0` before its `main` advertisement; preserved and exactly restored the two timestamp-only rc.4 runtime files from verified evidence; completed the attended protected rc.4 -> rc.5 update, normal first launch, ready/clean 8-event closed postflight, no-activity operator attestation, and matching technical archive SHA-256 `FD74FEDE...14784CD2` plus attestation SHA-256 `3F037F7B...6F48AB6D`. |
 | 2026-08-20 | Recorded rc.5 behavior commit `65ba38df`, Windows and disposable-Pi qualification, unchanged production fingerprint, the isolated development lane, and the exact evidence-restoration/protected-update boundary required to recover from rc.4's overly broad runtime manifest rule. |
 | 2026-08-20 | Created immutable local rc.4 tag at `25d1b541`; completed the normal protected rc.3 -> rc.4 update, exact sequence-5 restore of the disposable target, byte-identical Camera-safe closed-app postflight, zero-pending/no-motion attestation, and matching final archive SHA-256 `198C533C...8FB9A17`; retained publication and rollout gates. |
 | 2026-08-20 | Froze coverage-complete rc.4 candidate `25d1b541`; passed exact-commit Windows 60-test/full-suite/release/SIL gates, Pi 60-test/independent exact-restore/private-device SIL gates, matching archives, and byte-identical production postflight; retained tag and attended update/restore as explicit authorization gates. |
