@@ -20,14 +20,15 @@ def _safe_report() -> dict:
         metrics = {"observed": 1}
         if test_id == 1007:
             metrics = {
+                "skipped_no_flash_task": 1,
+                "cycles_started": 0,
                 "cycles_timeout": 0,
+                "ext_delta": 0,
+                "flash_ack_delta": 0,
+                "flash_task_wake_delta": 0,
+                "flash_task_done_delta": 0,
                 "ft_acc_delta": 0,
-                "ft_rel_to_delta": 0,
-                "ft_ack_to_delta": 0,
-                "ft_print_to_delta": 0,
-                "flash_session_armed": 0,
-                "flash_fault_latched": 0,
-                "flash_output_armed": 0,
+                "ft_ign_dis_delta": 0,
             }
         results.append(
             {"test_id": test_id, "name": f"safe-{test_id}", "pass": True, "metrics": metrics}
@@ -60,7 +61,7 @@ def test_accepts_exact_plain_safe_inventory() -> None:
     evidence = safe_hil.validate_safe_report(_safe_report())
     assert evidence["status"] == "passed"
     assert evidence["result_count"] == 30
-    assert evidence["flash_output_armed"] == 0
+    assert evidence["flash_non_actuation_contract"] == "no_flash_task_zero_dispatch"
 
 
 @pytest.mark.parametrize(
@@ -99,8 +100,26 @@ def test_rejects_motion_gate_that_executed() -> None:
 def test_rejects_flash_output_armed() -> None:
     report = _safe_report()
     result = next(row for row in report["results"] if row["test_id"] == 1007)
+    result["metrics"].update(
+        {
+            "skipped_no_flash_task": 0,
+            "ft_rel_to_delta": 0,
+            "ft_ack_to_delta": 0,
+            "ft_print_to_delta": 0,
+            "flash_session_armed": 0,
+            "flash_fault_latched": 0,
+        }
+    )
     result["metrics"]["flash_output_armed"] = 1
     with pytest.raises(safe_hil.SafeHilValidationError, match="flash_output_armed"):
+        safe_hil.validate_safe_report(report)
+
+
+def test_present_flash_task_requires_explicit_disarm_fields() -> None:
+    report = _safe_report()
+    result = next(row for row in report["results"] if row["test_id"] == 1007)
+    result["metrics"]["skipped_no_flash_task"] = 0
+    with pytest.raises(safe_hil.SafeHilValidationError, match="ft_rel_to_delta"):
         safe_hil.validate_safe_report(report)
 
 

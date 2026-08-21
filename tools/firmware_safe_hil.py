@@ -146,17 +146,43 @@ def validate_safe_report(payload: Mapping[str, Any]) -> dict[str, Any]:
         _require_metric(metrics, test_id, "gate", "safe_only")
 
     flash_metrics = _metrics(by_id[1007], 1007)
-    for metric in (
-        "cycles_timeout",
-        "ft_acc_delta",
-        "ft_rel_to_delta",
-        "ft_ack_to_delta",
-        "ft_print_to_delta",
-        "flash_session_armed",
-        "flash_fault_latched",
-        "flash_output_armed",
-    ):
-        _require_metric(flash_metrics, 1007, metric, 0)
+    _require_metric(flash_metrics, 1007, "cycles_timeout", 0)
+    _require_metric(flash_metrics, 1007, "ft_acc_delta", 0)
+    skipped_no_flash_task = _integer(
+        flash_metrics.get("skipped_no_flash_task"),
+        "SAFE result 1007 metric skipped_no_flash_task",
+    )
+    if skipped_no_flash_task == 1:
+        # The protocol bounds the metrics payload, so the later arm-state fields
+        # are not transmitted on this branch. Absence of the task plus zero
+        # start/output counters is direct proof that no flash dispatch occurred.
+        for metric in (
+            "cycles_started",
+            "ext_delta",
+            "flash_ack_delta",
+            "flash_task_wake_delta",
+            "flash_task_done_delta",
+            "ft_ign_dis_delta",
+        ):
+            _require_metric(flash_metrics, 1007, metric, 0)
+        flash_contract = "no_flash_task_zero_dispatch"
+    elif skipped_no_flash_task == 0:
+        # If a flash task exists, fail closed unless the report includes the
+        # later explicit disarm/fault and timeout fields.
+        for metric in (
+            "ft_rel_to_delta",
+            "ft_ack_to_delta",
+            "ft_print_to_delta",
+            "flash_session_armed",
+            "flash_fault_latched",
+            "flash_output_armed",
+        ):
+            _require_metric(flash_metrics, 1007, metric, 0)
+        flash_contract = "present_task_explicitly_disarmed"
+    else:
+        raise SafeHilValidationError(
+            "SAFE result 1007 skipped_no_flash_task must be exactly 0 or 1."
+        )
 
     return {
         "schema_name": SCHEMA_NAME,
@@ -167,8 +193,7 @@ def validate_safe_report(payload: Mapping[str, Any]) -> dict[str, Any]:
         "result_count": expected_count,
         "test_ids": sorted(actual_ids),
         "gated_actuation_test_ids": sorted(GATED_ACTUATION_METRICS),
-        "flash_session_armed": 0,
-        "flash_output_armed": 0,
+        "flash_non_actuation_contract": flash_contract,
     }
 
 

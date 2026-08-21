@@ -750,7 +750,21 @@ Planned files:
   the independently bound rc.5 recovery artifact remains
   `eda070ce734d5167f0795faf30df461c8a07341e09ca698de9d850315b0d5884`.
 - Exact commit/push/sync and autonomous Pi development SAFE -> released SAFE
-  qualification remain pending.
+  qualification initially ran from `3719838c`. Both flash commands exited zero
+  and both reports passed 30/30, but the new validator rejected both because it
+  required late flash metrics beyond the protocol's bounded metrics payload.
+  The supervisor therefore conservatively reported `recovery-required` at
+  `verification_reports/development-workflow/firmware/20260821T173630117947Z_85732caa-0bcc-4a03-b1a0-700268826daf/roundtrip.json`.
+- The sealed development and released reports both state
+  `skipped_no_flash_task=1`, `cycles_started=0`, `cycles_timeout=0`, and zero
+  transmitted flash/output counters. The corrected validator accepts that
+  direct no-task/zero-dispatch contract; if a flash task exists it still
+  requires the later explicit session/output-disarmed fields and fails closed
+  when bounded evidence omits them. Both sealed reports now validate, proving
+  the failed transaction ended on the exact rc.5 artifact with passing SAFE,
+  unchanged protected invariants, and no related process.
+- Corrective focused tests: 20 passed. A clean exact-commit rerun through the
+  supervisor remains pending before Slice 5 can be marked verified.
 
 ## Slice 6 - Attended hardware development launch
 
