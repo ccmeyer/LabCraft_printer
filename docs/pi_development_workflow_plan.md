@@ -1,11 +1,11 @@
 # Pi Development Worktree and Qualification Workflow
 
-Status: `attended_retry_pending`
+Status: `attended_campaign_complete`
 
 Prepared: 2026-08-21
 
-Current implementation target: final non-attended postflight and one attended
-Slice 6 launch; Slices 1-5 and 7 are verified
+Current implementation target: complete; Slices 1-7 and the bounded attended
+hardware-capable launch are verified
 
 ## Purpose
 
@@ -40,7 +40,7 @@ evidence are recorded here.
 | 3 | Bind the shared interpreter and development machine data | `verified` | `733f9e77`, `fd2fc5e4`, `6756b5a0` | 45 focused tests; Pi create/reuse/path-free validation, dependency/environment/data invariance passed |
 | 4 | Launch and qualify the no-hardware development app | `verified` | `c9ed2fda`, `eb4d8fcd` | 72 focused and 5,522 full-suite tests; exact-commit offscreen/visible no-hardware Pi launches and protected invariance passed |
 | 5 | Build, flash, and qualify committed development firmware | `verified` | `3719838c`, `816e0e70` | 74 post-commit focused tests; 461 firmware host tests; headless build; exact Pi development SAFE -> rc.5 restore SAFE and protected invariance passed |
-| 6 | Launch an attended real-hardware development session | `implementation_complete` | `1eedc1e8`, `45453212`, `bdd86711` | 37 focused tests plus final policy tests; all planned Pi refusal/cancel paths passed with invariants; attended success deferred |
+| 6 | Launch an attended real-hardware development session | `verified` | `1eedc1e8`, `45453212`, `bdd86711`, `ebd61ce7` | 37 focused tests plus 18 display-correction tests; all refusal/cancel paths and the corrected attended visible launch passed with invariants and no activity |
 | 7 | Track and restore released firmware state | `verified` | `e30673a0` | 111 focused tests; 461 firmware host tests; headless build; exact development/released SAFE roundtrip and idempotent released restore passed |
 | 8 | Complete the end-to-end workflow qualification and runbook | `planned` | Not started | Not run |
 
@@ -918,8 +918,26 @@ Planned files:
   desktop as the already-qualified visible no-hardware launcher, sanitize
   inherited display variables, and pass the exact environment only to its
   owned process. The Pi has `/run/user/1000/wayland-0` and X11 socket `X0`.
-  Focused supervisor/launcher/authorization gate: 18 passed. Attended retry is
-  pending the exact correction commit/sync and repeated activation/preflight.
+  Focused supervisor/launcher/authorization gate: 18 passed.
+- Published and synced correction `ebd61ce7`, reactivated the exact development
+  artifact, passed strict SAFE 30/30, and passed exact firmware/commit/store
+  hardware preflight. The corrected main window opened with the development
+  banner; the attending operator observed no movement or other device activity
+  and did not connect or start a workflow. It then closed normally with exit 0,
+  `normal_exit` cleanup, matching protected invariants, and no remaining
+  process. Evidence:
+  `firmware/20260821T190144094263Z_d9af0293-e168-461e-8447-3d53e0e9f1f8`,
+  `hardware/20260821T190249051107Z_e6ca59ff-e3a0-49ca-b4fc-c15585b9ef42`,
+  and `hardware/20260821T190303887159Z_015a1df9-b736-4ea6-9e0d-34db91939fc5`
+  beneath `verification_reports/development-workflow/`.
+- Immediate exact rc.5 restore passed strict SAFE 30/30 with matching protected
+  invariants. Final read-only status proves clean production and development
+  worktrees, development detached at `ebd61ce7`, durable released revision 14,
+  `production_ready=true`, and zero processes. The only warning remains the two
+  intentionally retained worktrees. Evidence:
+  `firmware/20260821T191855405435Z_122910d5-f81a-407e-bec5-a7ed8ed66491`
+  and `status/20260821T192001290778Z_ebd61ce7a133` beneath
+  `verification_reports/development-workflow/`.
 
 ## Slice 7 - Firmware state and production restoration
 
@@ -1044,7 +1062,7 @@ Expected files:
 
 ## Final non-attended validation and attended handoff
 
-Status: `attended_retry_pending`
+Status: `complete`
 
 ### Completed gates
 
@@ -1222,6 +1240,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Published Slice 7 implementation `e30673a0`, passed required firmware checks, exact development/released SAFE roundtrip, durable transition evidence, and idempotent released restore; final installed role is released revision 6. |
 | 2026-08-21 | Passed the final complete Python suite (`5,569 passed`, `156 skipped`), verified the tracked built firmware artifact, sealed the final released-state postflight, and prepared the exact attended campaign without executing it. |
 | 2026-08-21 | First attended launch failed before window construction because its SSH supervisor omitted the Pi desktop environment; rc.5 was immediately restored and SAFE-verified, then the minimal Wayland/X11 environment correction passed 18 focused tests. |
+| 2026-08-21 | Published `ebd61ce7`; exact activation SAFE, hardware preflight, corrected attended visible launch/normal close, immediate rc.5 restore SAFE, and final released-state postflight all passed without observed device activity. |
 
 ## Goal prompt for Slices 1-4
 
