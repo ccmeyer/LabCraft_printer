@@ -35,7 +35,7 @@ evidence are recorded here.
 | Slice | Scope | Status | Implementation | Validation |
 | --- | --- | --- | --- | --- |
 | 1 | Read-only Windows/Pi status and preflight | `verified` | `e58129b3` | 24 focused and 5,485 full-suite tests; clean/pushed Pi Preflight and exact read-only invariance passed |
-| 2 | Create and synchronize the Pi development worktree | `implementation_complete` | Candidate on `feature/pi-development-workflow`; commit pending | 32 focused tests passed; Pi create/reuse/refusal gates pending |
+| 2 | Create and synchronize the Pi development worktree | `verified` | `4bef5790` | 32 focused tests; Pi create, idempotent reuse, unregistered-path refusal, and protected invariance passed |
 | 3 | Bind the shared interpreter and development machine data | `planned` | Not started | Not run |
 | 4 | Launch and qualify the no-hardware development app | `planned` | Not started | Not run |
 | 5 | Build, flash, and qualify committed development firmware | `planned` | Not started | Not run |
@@ -295,7 +295,7 @@ failure-path tests, and README usage.
 
 ## Slice 2 - Development worktree creation and synchronization
 
-Status: `implementation_complete`
+Status: `verified`
 
 ### Objective
 
@@ -330,8 +330,7 @@ commit without modifying the production checkout.
 
 ### Implementation record
 
-Implementation complete on `feature/pi-development-workflow`; dedicated
-commit pending. `Sync` reuses Slice 1 readiness, fetches the exact upstream
+Implemented and published in `4bef5790`. `Sync` reuses Slice 1 readiness, fetches the exact upstream
 branch into shared Git metadata, creates or retargets only the clean detached
 development worktree, and proves protected Pi invariants before reporting
 success.
@@ -342,8 +341,22 @@ success.
   32 passed in 3.92 seconds.
 - Per the operator's 2026-08-21 validation-policy update, the in-progress full
   suite was stopped and complete regression is deferred to final Slice 4
-  validation. Pi first-create, idempotent reuse, refusal, and invariance gates
-  remain pending after the exact Slice 2 commit is published.
+  validation.
+- First-create evidence:
+  `verification_reports/development-workflow/status/20260821T152545384794Z_4bef5790e5af/status.json`.
+  It created `/home/labcraft/LabCraft_printer-dev` detached at exact commit
+  `4bef5790e5af816b21dd47b657977ee464e2c677`.
+- Idempotent reuse evidence:
+  `verification_reports/development-workflow/status/20260821T152558118430Z_4bef5790e5af/status.json`.
+  It reported `unchanged` at the same commit.
+- Both successful Sync runs recorded equal pre/post protected invariant hash
+  `53a406659b9fe422227289e2f6f4c1fd8397a7435176135cf8ec9fd451dd0fe7`.
+- A non-mutating Sync attempt using existing unregistered `/tmp` failed closed
+  with `development_worktree_unsafe`; subsequent intended-path Preflight passed
+  in `20260821T152645686823Z_4bef5790e5af/status.json`.
+- Production remained clean at `34841fe0`; both retained worktrees, Python
+  3.11.2, no-process state, and development store ID
+  `be5f7305-9046-4d62-8f7a-4e493859fc80` were preserved.
 
 ## Slice 3 - Shared runtime and development-data binding
 
@@ -506,6 +519,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Published `e58129b3` and marked Slice 1 verified after clean/pushed Preflight and exact Pi-state invariance passed. |
 | 2026-08-21 | Began Slice 2 exact-commit development-worktree synchronization implementation. |
 | 2026-08-21 | Completed Slice 2 implementation and focused validation; deferred the full suite to final Slice 4 per operator direction. |
+| 2026-08-21 | Published `4bef5790` and marked Slice 2 verified after Pi create/reuse/refusal and protected-invariance gates passed. |
 
 ## Goal prompt for Slices 1-4
 
