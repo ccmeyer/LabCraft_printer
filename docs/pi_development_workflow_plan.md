@@ -36,7 +36,7 @@ evidence are recorded here.
 | --- | --- | --- | --- | --- |
 | 1 | Read-only Windows/Pi status and preflight | `verified` | `e58129b3` | 24 focused and 5,485 full-suite tests; clean/pushed Pi Preflight and exact read-only invariance passed |
 | 2 | Create and synchronize the Pi development worktree | `verified` | `4bef5790` | 32 focused tests; Pi create, idempotent reuse, unregistered-path refusal, and protected invariance passed |
-| 3 | Bind the shared interpreter and development machine data | `in_progress` | Implementation and focused validation active | 44 focused tests passed; Pi qualification pending |
+| 3 | Bind the shared interpreter and development machine data | `in_progress` | Implementation and qualification correction active | 45 focused tests passed; Pi qualification pending |
 | 4 | Launch and qualify the no-hardware development app | `planned` | Not started | Not run |
 | 5 | Build, flash, and qualify committed development firmware | `planned` | Not started | Not run |
 | 6 | Launch an attended real-hardware development session | `planned` | Not started | Not run |
@@ -440,18 +440,28 @@ Planned files:
 
 ### Implementation record
 
-Implementation is active on `feature/pi-development-workflow`. The focused
-behavior and failure-path test gate currently passes; exact-commit Pi
-configuration and validation remain before the implementation commit can be
-marked verified.
+Implementation commit `733f9e77` exposed a Pi-only virtual-environment symlink
+defect during qualification: resolving `env/bin/python` to `/usr/bin/python3.11`
+lost the venv package context. The correction preserves the absolute lexical
+venv path while retaining resolved-path checks for code and data. Focused
+behavior and failure-path tests pass; corrected exact-commit Pi configuration
+and validation remain before the slice can be marked verified.
 
 ### Validation record
 
-- `env\\Scripts\\python.exe -m pytest -q --basetemp verification_reports\\development-workflow\\pytest-temp\\slice3-final-20260821-01 tests\\test_pi_development_workflow.py`:
-  44 passed in 1.27 seconds.
+- `env\\Scripts\\python.exe -m pytest -q --basetemp verification_reports\\development-workflow\\pytest-temp\\slice3-correction-20260821-01 tests\\test_pi_development_workflow.py`:
+  45 passed in 1.41 seconds.
 - The complete default suite remains deferred to final Slice 4 validation per
   the operator's 2026-08-21 direction.
-- Pi qualification pending.
+- Initial Configure evidence:
+  `verification_reports/development-workflow/status/20260821T154234736074Z_733f9e77cb6e/status.json`.
+  It failed before writing configuration because the venv interpreter symlink
+  had been resolved to the system interpreter and PySide6 was unavailable.
+- Read-only post-failure evidence:
+  `20260821T154357969595Z_733f9e77cb6e/status.json`. It proved the external
+  configuration remained absent, production remained clean at `34841fe0`, and
+  the intended lexical venv path remained available. Corrected qualification
+  is pending.
 
 ## Slice 4 - No-hardware development launch
 
@@ -555,6 +565,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Existing PowerShell SSH workflows already provide strict mode, shell literal handling, identity support, BatchMode, dry-run support, and fake-SSH tests. | Reuse their conventions and test patterns. |
 | 2026-08-21 | The existing firmware HIL wrapper defaults to `/home/labcraft/LabCraft_printer` and uploads tracked files there. | It must not be used for development until Slice 5 isolates it from production. |
 | 2026-08-21 | Direct `.ps1` execution is disabled by the current Windows execution policy. | Documentation and qualification use `powershell -ExecutionPolicy Bypass -File`, matching existing repository workflows. |
+| 2026-08-21 | `Path.resolve()` turns the Pi venv's `env/bin/python` symlink into `/usr/bin/python3.11`; invoking that resolved target bypasses the venv. | Preserve the absolute lexical interpreter path for execution and configuration, while resolving repository/data paths for separation checks. |
 
 ## Change log
 
@@ -568,6 +579,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Completed Slice 2 implementation and focused validation; deferred the full suite to final Slice 4 per operator direction. |
 | 2026-08-21 | Published `4bef5790` and marked Slice 2 verified after Pi create/reuse/refusal and protected-invariance gates passed. |
 | 2026-08-21 | Began Slice 3 shared-runtime and external development-data binding; focused validation passed and Pi qualification remains. |
+| 2026-08-21 | Slice 3 Pi Configure failed safely before writing configuration, revealing and correcting venv-symlink resolution; focused correction tests passed. |
 
 ## Goal prompt for Slices 1-4
 

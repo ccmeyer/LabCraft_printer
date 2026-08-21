@@ -76,6 +76,11 @@ def validate_remote_paths(
         or development in production.parents
     ):
         raise WorkflowError("Production and development worktree paths must be disjoint.")
+    shared = paths["Shared Python"]
+    if production not in shared.parents or development in shared.parents:
+        raise WorkflowError(
+            "Shared Python must use the protected production worktree's environment path."
+        )
     machine_data = paths.get("Development machine-data root")
     if machine_data is not None and (
         machine_data in {production, development}
@@ -251,6 +256,10 @@ def git(path, *arguments, allowed=(0,)):
 
 def resolved(value):
     return Path(value).expanduser().resolve(strict=False)
+
+
+def lexical_absolute(value):
+    return Path(os.path.abspath(str(Path(value).expanduser())))
 
 
 def beneath_or_equal(path, root):
@@ -453,11 +462,12 @@ def inspect_workflow_config(path, production_repo, development_repo, shared_pyth
         bindings = {
             "production_repo": production_repo,
             "development_repo": development_repo,
-            "shared_python": shared_python,
         }
         for name, expected_path in bindings.items():
             if resolved(payload[name]) != resolved(expected_path):
                 raise ValueError(f"configured {name} binding differs")
+        if lexical_absolute(payload["shared_python"]) != lexical_absolute(shared_python):
+            raise ValueError("configured shared_python binding differs")
         UUID(str(payload["development_store_id"]))
         if not isinstance(payload["machine_id"], str) or not payload["machine_id"].strip():
             raise ValueError("configured machine ID is invalid")
@@ -560,7 +570,7 @@ def main():
         if resolved(item["path"]) not in {production_path, development_path}
     ]
 
-    python_path = resolved(config["shared_python"])
+    python_path = lexical_absolute(config["shared_python"])
     interpreter = {
         "path": str(python_path),
         "exists": python_path.is_file(),
@@ -842,6 +852,10 @@ def resolved(value):
     return Path(value).expanduser().resolve(strict=False)
 
 
+def lexical_absolute(value):
+    return Path(os.path.abspath(str(Path(value).expanduser())))
+
+
 def relevant_processes():
     needles = (
         "FreeRTOS-interface/App.py", "tools/run_development_app.py",
@@ -1035,7 +1049,7 @@ def main():
     mode = config["mode"]
     production = resolved(config["production_repo"])
     development = resolved(config["development_repo"])
-    shared_python = resolved(config["shared_python"])
+    shared_python = lexical_absolute(config["shared_python"])
     machine_data = resolved(config["development_machine_data_root"])
     config_path = Path(config["workflow_config"]).expanduser()
     expected_commit = config["expected_commit"]
@@ -1050,6 +1064,8 @@ def main():
         or resolved_config in production.parents or resolved_config in development.parents
     ):
         raise RuntimeError("Workflow configuration overlaps a code worktree.")
+    if production not in shared_python.parents or development in shared_python.parents:
+        raise RuntimeError("Shared Python is not bound to the production environment path.")
 
     if git(production, "rev-parse", "HEAD").stdout.strip() != config["expected_production_head"]:
         raise RuntimeError("Protected production HEAD changed after preflight.")

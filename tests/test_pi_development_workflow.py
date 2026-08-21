@@ -158,6 +158,7 @@ def test_absent_development_worktree_is_ready_with_warning():
         {"development_repo": "/home/labcraft/LabCraft_printer/child"},
         {"development_repo": "/home/labcraft"},
         {"shared_python": "relative/python"},
+        {"shared_python": "/usr/bin/python3"},
         {"development_machine_data_root": "/home/labcraft/LabCraft_printer-dev/data"},
         {"workflow_config": "/home/labcraft/LabCraft_printer-dev/workflow.json"},
         {"workflow_config": "/home/labcraft"},
@@ -463,6 +464,8 @@ def test_configure_remote_runtime_uses_explicit_read_only_contract(monkeypatch):
     assert "environment_before" in captured["input"]
     assert "machine_identity.json" in captured["input"]
     assert "os.replace" in captured["input"]
+    assert 'shared_python = lexical_absolute(config["shared_python"])' in captured["input"]
+    assert 'shared_python = resolved(config["shared_python"])' not in captured["input"]
 
 
 @pytest.mark.parametrize(
