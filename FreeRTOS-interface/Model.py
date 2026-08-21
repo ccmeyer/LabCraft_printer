@@ -4,6 +4,7 @@ import numpy as np
 import copy
 from dataclasses import dataclass, field, replace
 from math import gcd
+from numbers import Integral, Real
 from functools import reduce
 from typing import List, Dict, Tuple, Optional, Any, Set, Iterable
 
@@ -13280,9 +13281,26 @@ class Well(QObject):
             raise ValueError("Must assign a ReactionComposition object.")
         self.assigned_reaction = reaction
 
+    @staticmethod
+    def _normalize_coordinate(value, axis):
+        """Return a built-in integer for an already-integral machine coordinate."""
+        if isinstance(value, bool):
+            raise ValueError(f"Well coordinate {axis} must be an integer.")
+        if isinstance(value, Integral):
+            return int(value)
+        if isinstance(value, Real):
+            numeric = float(value)
+            if math.isfinite(numeric) and numeric.is_integer():
+                return int(value)
+        raise ValueError(f"Well coordinate {axis} must be an integer.")
+
     def assign_coordinates(self, x, y,z):
-        """Assign coordinates to the well."""
-        self.coordinates = {'X':x, 'Y':y, 'Z':z}
+        """Assign normalized machine coordinates to the well."""
+        self.coordinates = {
+            'X': self._normalize_coordinate(x, 'X'),
+            'Y': self._normalize_coordinate(y, 'Y'),
+            'Z': self._normalize_coordinate(z, 'Z'),
+        }
 
     def get_coordinates(self):
         """Get the coordinates of the well."""

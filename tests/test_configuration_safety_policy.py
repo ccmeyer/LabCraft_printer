@@ -2,6 +2,7 @@ import copy
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from ConfigurationSafetyPolicy import (
@@ -12,6 +13,7 @@ from ConfigurationSafetyPolicy import (
     parse_guard_assessment,
     parse_safety_bounds,
 )
+from Model import Well, WellPlate
 
 
 PRESETS = Path(__file__).resolve().parents[1] / "FreeRTOS-interface" / "Presets"
@@ -67,6 +69,39 @@ def test_bounds_parser_is_strict_and_endpoint_check_is_global_only():
     malformed["boundaries"]["min"]["X"] = False
     with pytest.raises(ConfigurationSafetyError, match="integer"):
         parse_safety_bounds(malformed)
+
+
+def test_real_384_well_plate_coordinates_are_builtin_integers_and_pass_guard():
+    documents = _documents()
+    well_plate = WellPlate(documents["Plates.json"], str(PRESETS / "Plates.json"))
+    well_plate.set_plate_format("shallow-384_well_plate")
+
+    coordinates = well_plate.get_well("F2").get_coordinates()
+    directly_calculated = well_plate.get_well_coords(5, 1)
+
+    assert coordinates == directly_calculated
+    assert all(type(value) is int for value in coordinates.values())
+    assert _guard().validate_endpoint(coordinates) == coordinates
+
+
+def test_well_coordinate_normalization_accepts_exact_integral_values_without_truncation():
+    well = Well("F2")
+
+    well.assign_coordinates(np.int64(10), 20.0, np.float64(30.0))
+
+    assert well.get_coordinates() == {"X": 10, "Y": 20, "Z": 30}
+    assert all(type(value) is int for value in well.get_coordinates().values())
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [1.5, np.float64(1.25), float("nan"), float("inf"), True, np.bool_(True)],
+)
+def test_well_coordinate_normalization_rejects_non_integral_values(invalid):
+    well = Well("F2")
+
+    with pytest.raises(ValueError, match="must be an integer"):
+        well.assign_coordinates(invalid, 20, 30)
 
 
 def test_camera_assessment_contains_exact_delta_policy_and_proposal_binding():

@@ -8085,6 +8085,132 @@ class Controller(QObject):
                 return well
         return None
 
+    @staticmethod
+    def _normalize_integral_machine_coordinates(coordinates, label):
+        """Normalize trusted derived coordinates without accepting truncation."""
+        if not isinstance(coordinates, dict) or set(coordinates) != {"X", "Y", "Z"}:
+            raise ConfigurationSafetyError(
+                f"{label} must contain exactly X, Y, and Z coordinates."
+            )
+
+        normalized = {}
+        for axis in ("X", "Y", "Z"):
+            value = coordinates[axis]
+            if isinstance(value, (bool, np.bool_)):
+                raise ConfigurationSafetyError(
+                    f"{label} {axis} coordinate must be an integer."
+                )
+            if isinstance(value, (int, np.integer)):
+                normalized[axis] = int(value)
+                continue
+            if isinstance(value, (float, np.floating)):
+                numeric = float(value)
+                if math.isfinite(numeric) and numeric.is_integer():
+                    normalized[axis] = int(value)
+                    continue
+            raise ConfigurationSafetyError(
+                f"{label} {axis} coordinate must be an integer."
+            )
+        return normalized
+
+    def _get_normalized_array_well_coordinates(self, well):
+        well_id = str(getattr(well, "well_id", "unknown") or "unknown")
+        getter = getattr(well, "get_coordinates", None)
+        coordinates = getter() if callable(getter) else None
+        return self._normalize_integral_machine_coordinates(
+            coordinates,
+            f"Well {well_id}",
+        )
+
+    def _validate_array_preflight_endpoint(self, coordinates):
+        guard = getattr(self, "configuration_safety_guard", None)
+        if guard is not None:
+            guard.validate_endpoint(coordinates)
+        return coordinates
+
+    def _preflight_array_well_targets(self, stock_id):
+        """Validate every remaining array endpoint before queuing hardware work."""
+        wells = self._get_array_remaining_wells(stock_id)
+        preview_context = {
+            "row_start_overshoot_steps": int(
+                getattr(self, "_array_row_start_overshoot_steps", ARRAY_ROW_START_OVERSHOOT_STEPS)
+            ),
+            "last_planned_row_num": None,
+            "last_planned_col": None,
+        }
+        plate_authorized = False
+
+        for well in wells:
+            well_id = str(getattr(well, "well_id", "unknown") or "unknown")
+            try:
+                well_coordinates = self._get_normalized_array_well_coordinates(well)
+                self._validate_array_preflight_endpoint(well_coordinates)
+            except (ConfigurationSafetyError, TypeError, ValueError) as exc:
+                return {
+                    "ok": False,
+                    "code": "well_endpoint_invalid",
+                    "well_id": well_id,
+                    "message": (
+                        f"Well {well_id} cannot be printed because {exc} "
+                        "No machine commands were queued."
+                    ),
+                    "reported": False,
+                }
+
+            # Plate authorization is identical for every well because it is bound
+            # to the same verified calibration document. Check it once here and
+            # retain the per-well runtime check as a defense against later changes.
+            if not plate_authorized:
+                if not self._authorize_active_plate_derived_target(
+                    well_coordinates,
+                    "print_array_preflight",
+                ):
+                    return {
+                        "ok": False,
+                        "code": "plate_target_not_authorized",
+                        "well_id": well_id,
+                        "message": (
+                            "The active plate calibration is not authorized for printing. "
+                            "No machine commands were queued."
+                        ),
+                        "reported": True,
+                    }
+                plate_authorized = True
+
+            overshoot_coordinates = self._get_array_row_start_overshoot_coords(
+                preview_context,
+                well,
+                well_coordinates,
+            )
+            if overshoot_coordinates is not None:
+                try:
+                    overshoot_coordinates = self._normalize_integral_machine_coordinates(
+                        overshoot_coordinates,
+                        f"Row-entry approach for well {well_id}",
+                    )
+                    self._validate_array_preflight_endpoint(overshoot_coordinates)
+                except (ConfigurationSafetyError, TypeError, ValueError) as exc:
+                    return {
+                        "ok": False,
+                        "code": "row_entry_endpoint_invalid",
+                        "well_id": well_id,
+                        "message": (
+                            f"The row-entry approach for well {well_id} cannot be used "
+                            f"because {exc} No machine commands were queued."
+                        ),
+                        "reported": False,
+                    }
+
+            self._record_last_planned_array_well(preview_context, well)
+
+        return {
+            "ok": bool(wells),
+            "code": "ok" if wells else "no_remaining_wells",
+            "well_count": len(wells),
+            "message": "" if wells else "No wells remain for the loaded reagent.",
+            "reported": False,
+        }
+
     def _get_array_well_row_col(self, well):
         try:
             return int(well.row_num), int(well.col)
@@ -8190,9 +8316,13 @@ class Controller(QObject):
         if target_droplets <= 0:
             return False
 
-        well_coords = well.get_coordinates()
-        if not isinstance(well_coords, dict):
-            self.error_occurred_signal.emit('Print Array Error', f'Well {well.well_id} has no coordinates')
+        try:
+            well_coords = self._get_normalized_array_well_coordinates(well)
+        except (ConfigurationSafetyError, TypeError, ValueError) as exc:
+            self.error_occurred_signal.emit(
+                'Print Array Error',
+                f'Well {well.well_id} has invalid coordinates: {exc}',
+            )
             self._complete_array_finalize("hard_abort")
             return False
 
@@ -9144,10 +9274,36 @@ class Controller(QObject):
             print("Cannot print: evaporation plate dock confirmation is required")
             return
 
+        current_head = self.model.rack_model.get_gripper_printer_head()
+        current_stock_id = current_head.get_stock_id()
+        endpoint_preflight = self._preflight_array_well_targets(current_stock_id)
+        if not bool(endpoint_preflight.get("ok")):
+            message = str(
+                endpoint_preflight.get("message")
+                or "The print-array endpoints could not be validated."
+            )
+            if not bool(endpoint_preflight.get("reported")):
+                self.error_occurred_signal.emit(
+                    "Print Array Preflight Failed",
+                    message,
+                )
+            self._record_print_array_audit_event(
+                "print_array_preflight_rejected",
+                "Print array preflight rejected",
+                details={
+                    "request_kind": request_kind,
+                    "preflight_code": endpoint_preflight.get("code"),
+                    "well_id": endpoint_preflight.get("well_id"),
+                    "machine_commands_queued": False,
+                },
+                level="error",
+            )
+            print(f"Cannot print: {message}")
+            return
+
         if callable(lock_plan):
             try:
-                current_head = self.model.rack_model.get_gripper_printer_head()
-                stock_id = current_head.get_stock_id()
+                stock_id = current_stock_id
                 printer_head_id = str(
                     getattr(current_head, "printer_head_id", None) or ""
                 )

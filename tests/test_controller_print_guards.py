@@ -1,8 +1,14 @@
 from types import SimpleNamespace
 from unittest.mock import ANY, Mock, call
 
+import numpy as np
 import pytest
 
+from ConfigurationSafetyPolicy import (
+    ConfigurationChangeGuard,
+    load_configuration_change_policy,
+    parse_safety_bounds,
+)
 from Controller import (
     ARRAY_AXIS_ACCEL_DEFAULT,
     ARRAY_PAUSE_DEPARTURE_ACCEL,
@@ -11,6 +17,21 @@ from Controller import (
 )
 
 ROW_START_OVERSHOOT_FOR_TEST = 200
+
+
+def _endpoint_guard(*, minimum=None, maximum=None):
+    return ConfigurationChangeGuard(
+        load_configuration_change_policy(),
+        parse_safety_bounds(
+            {
+                "boundaries": {
+                    "min": minimum or {"X": 0, "Y": 0, "Z": 0},
+                    "max": maximum or {"X": 1000, "Y": 1000, "Z": 1000},
+                },
+                "obstacles": [],
+            }
+        ),
+    )
 
 
 class Emitter:
@@ -895,6 +916,128 @@ def test_print_array_skips_applied_imaging_guard_for_legacy_profile():
     c.model.experiment_model.validate_applied_imaging_calibration_for_print.assert_not_called()
     c.model.experiment_model.validate_manual_refuel_check_for_print.assert_not_called()
     c.close_gripper.assert_called_once_with()
+
+
+def test_print_array_normalizes_numpy_integral_well_coordinates_before_queueing():
+    well = FakeWell(
+        "F2",
+        5,
+        {"X": np.int64(40162), "Y": np.float64(14057.0), "Z": np.int64(104045)},
+    )
+    c = _make_controller(
+        well_plate=FakeWellPlate([well]),
+        printer_head=_make_printer_head(),
+    )
+    c.configuration_safety_guard = _endpoint_guard(
+        minimum={"X": -500, "Y": 0, "Z": 0},
+        maximum={"X": 80000, "Y": 50000, "Z": 130000},
+    )
+
+    Controller.print_array(c)
+
+    queued = c.set_absolute_coordinates.call_args.args
+    assert queued == (40162, 14057, 104045)
+    assert all(type(value) is int for value in queued)
+    assert c.get_array_run_state() == "running"
+
+
+@pytest.mark.parametrize(
+    "invalid_x",
+    [1.5, np.float64(1.25), float("nan"), float("inf"), True, np.bool_(True)],
+)
+def test_print_array_preflight_rejects_non_integral_well_coordinates_without_commands(
+    invalid_x,
+):
+    c = _make_controller(
+        well_plate=FakeWellPlate(
+            [FakeWell("F2", 5, {"X": invalid_x, "Y": 20, "Z": 30})]
+        ),
+        printer_head=_make_printer_head(),
+    )
+    c.model.experiment_model.lock_execution_plan = Mock()
+    c.model.experiment_model.transition_execution_plan_terminal = Mock()
+
+    Controller.print_array(c)
+
+    assert c.error_occurred_signal.calls[-1][0] == "Print Array Preflight Failed"
+    assert "Well F2" in c.error_occurred_signal.calls[-1][1]
+    assert "No machine commands were queued" in c.error_occurred_signal.calls[-1][1]
+    c.model.experiment_model.lock_execution_plan.assert_not_called()
+    c.model.experiment_model.transition_execution_plan_terminal.assert_not_called()
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+    c.enable_print_profile.assert_not_called()
+    c.set_absolute_coordinates.assert_not_called()
+    c.print_droplets.assert_not_called()
+    c.machine.clear_command_queue.assert_not_called()
+    assert c._array_context is None
+    assert c.get_array_run_state() == "idle"
+
+
+def test_print_array_preflight_checks_every_well_before_locking_or_hardware_actions():
+    first = FakeWell("A1", 5, {"X": 10, "Y": 20, "Z": 30})
+    later_invalid = FakeWell("F2", 5, {"X": 1001, "Y": 20, "Z": 30})
+    c = _make_controller(
+        well_plate=FakeWellPlate([first, later_invalid]),
+        printer_head=_make_printer_head(),
+    )
+    c.configuration_safety_guard = _endpoint_guard()
+    c.model.experiment_model.lock_execution_plan = Mock()
+    c.model.experiment_model.transition_execution_plan_terminal = Mock()
+    c.model.record_experiment_audit_event = Mock()
+
+    Controller.print_array(c)
+
+    assert c.error_occurred_signal.calls[-1][0] == "Print Array Preflight Failed"
+    assert "Well F2" in c.error_occurred_signal.calls[-1][1]
+    assert "outside global bounds" in c.error_occurred_signal.calls[-1][1]
+    c.model.experiment_model.lock_execution_plan.assert_not_called()
+    c.model.experiment_model.transition_execution_plan_terminal.assert_not_called()
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+    c.enable_print_profile.assert_not_called()
+    c.set_absolute_coordinates.assert_not_called()
+    c.print_droplets.assert_not_called()
+    c.machine.clear_command_queue.assert_not_called()
+    audit_call = c.model.record_experiment_audit_event.call_args
+    assert audit_call.args[:2] == (
+        "print_array_preflight_rejected",
+        "Print array preflight rejected",
+    )
+    assert audit_call.kwargs["details"]["preflight_code"] == "well_endpoint_invalid"
+    assert audit_call.kwargs["details"]["well_id"] == "F2"
+    assert audit_call.kwargs["details"]["machine_commands_queued"] is False
+
+
+def test_print_array_preflight_rejects_out_of_bounds_row_entry_approach_without_commands():
+    a2 = FakeWell("A2", 1, {"X": 20, "Y": 10, "Z": 30})
+    b1 = FakeWell("B1", 1, {"X": 100, "Y": 20, "Z": 30})
+    b2 = FakeWell("B2", 0, {"X": 200, "Y": 20, "Z": 30})
+    c = _make_controller(
+        well_plate=FakeWellPlate([a2, b1, b2]),
+        printer_head=_make_printer_head(),
+        initial_state="resume_ready",
+    )
+    c._array_print_serpentine = False
+    c._array_row_start_overshoot_steps = ROW_START_OVERSHOOT_FOR_TEST
+    c.configuration_safety_guard = _endpoint_guard()
+    c.model.machine_model.transport_paused = True
+    c.model.experiment_model.lock_execution_plan = Mock()
+    c.model.experiment_model.transition_execution_plan_terminal = Mock()
+
+    Controller.print_array(c)
+
+    assert c.error_occurred_signal.calls[-1][0] == "Print Array Preflight Failed"
+    assert "row-entry approach for well B1" in c.error_occurred_signal.calls[-1][1]
+    assert "outside global bounds" in c.error_occurred_signal.calls[-1][1]
+    c.model.experiment_model.lock_execution_plan.assert_not_called()
+    c.model.experiment_model.transition_execution_plan_terminal.assert_not_called()
+    c.machine.resume_commands.assert_not_called()
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+    c.machine.clear_command_queue.assert_not_called()
+    assert c._array_context is None
+    assert c.get_array_run_state() == "resume_ready"
 
 
 def test_print_array_prefetches_one_lookahead_well():
