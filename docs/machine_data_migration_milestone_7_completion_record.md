@@ -7,9 +7,9 @@
 > now owns correction qualification, exact recovery of the disposable target,
 > publication, and rollout.
 
-Status: `in_progress` - rc.4 correction commit `25d1b541` passed refrozen
-exact-commit Windows and disposable-Pi qualification. Tag authorization,
-attended recovery, publication, and rollout gates remain.
+Status: `in_progress` - rc.4 correction commit `25d1b541` passed exact-commit
+qualification, was tagged locally, and completed the attended protected update
+and exact recovery on LC-001. Publication and staged rollout gates remain.
 
 Started: 2026-08-20
 
@@ -355,13 +355,37 @@ injected stalls. The retrieved SIL archive is 3,395,955 bytes with SHA-256
 SHA-256 `0FB89AD6...BEDCF561`. Postflight matched the active pointer,
 deployment anchor, and all 25 protected production files; rc.3 commit
 `d965927e`, PID 14283, audit sequence 4, and the no-pending state were
-unchanged. Rc.4 remains untagged pending explicit operator authorization.
+unchanged. This was the final disposable gate before the subsequently
+authorized attended operation.
+
+The annotated local `v1.3.0-rc.4` tag was then created and verified at exact
+commit `25d1b541f62de15dc6f8e09036b5d588fcc95920` without publication. The
+normal running-app updater advanced LC-001 from rc.3 `d965927e` to rc.4,
+preserved the active pointer and all 25 protected files byte-for-byte, and
+wrote update `534bde87...` with `relaunch_authorized`, no recovery required,
+and an exact rc.4 deployment anchor.
+
+After normal reopen, the operator selected committed source event 2,
+transaction `50577384...`. The review showed only
+`qualification-unverified` as removed by exact backup and passed hard
+validation. Accepted restore transaction `53d4ede8...` created committed
+event 5, restored raw `Locations.json` SHA-256 `3E5B4DE9...F3C7D02`, changed
+no other governed file, preserved Camera semantic SHA-256
+`FC7040A4...E9190B0`, removed the disposable target and authorization, and
+left no pending transaction.
+
+The closed-app hardware-free bootstrap reopened `ready`, validated sequence 5,
+the exact bytes, event chain, source/restore manifests, deployment anchor, and
+update receipt. The operator attested to no observed motion, pressure action,
+or unexpected device activity. The final 4,689-byte private archive matched
+on Pi and Windows at SHA-256 `198C533C...8FB9A17`. Production is clean and
+closed at tagged rc.4.
 
 ## Local tag, updater, and rollback qualification
 
-Status: rc.2 and rc.3 tag-dependent gates passed through the successful
-attended rc.3 recovery update. Rc.4 exact-candidate Windows and disposable-Pi
-qualification passed; rc.4 remains untagged pending explicit authorization.
+Status: `passed` for the local rc.4 tag and attended protected update/exact
+restore. Rc.2 and rc.3 remain immutable; local rc.4 peels exactly to
+`25d1b541`. The tag has not been published.
 
 Record peeled tag commit, metadata tag validation, release-aware bundle hash,
 exact rc.6/rc.1 old-updater lanes, offline equivalence, unchanged return, and
@@ -388,23 +412,23 @@ Final ignored evidence roots:
 - `verification_reports/machine_data_m7/5f54a4a174cd50f145e1bfa98aa61535b7aa59e9/`;
 - retrieved Pi SIL archive SHA-256 `4E4B6C16...9804C8C8`; and
 - retrieved unattended archive SHA-256 `09D68B3C...0E98A0B7`.
+- final rc.4 attended archive:
+  `verification_reports/machine_data_m7/25d1b541f62de15dc6f8e09036b5d588fcc95920/labcraft-m7-rc4-attended-final-evidence.tar.gz`,
+  SHA-256 `198C533C...8FB9A17`.
 
 ## Open gates
 
-- Authorize and create the immutable local `v1.3.0-rc.4` tag; do not publish it
-  before the required tag-dependent and attended recovery gates pass.
-- Apply rc.4 through the normal protected updater, then complete the attended
-  exact restore of the disposable target with exact-byte, audit, authorization,
-  Camera, no-pending, and zero-motion evidence.
 - Private operator, rc.6 pilot, rc.1 pilot, fixtures, and Camera-route approval.
-- Attended designated-machine migration, firmware, HIL, and Camera route.
-- Local tag and exact legacy updater/rollback qualification.
+- Attended firmware, HIL, and physical Camera-route qualification.
+- Exact legacy updater/rollback qualification beyond the completed enrolled
+  rc.3 -> rc.4 forward-update lane.
 - Release publication and staged rollout.
 
 ## Document change log
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Created immutable local rc.4 tag at `25d1b541`; completed the normal protected rc.3 -> rc.4 update, exact sequence-5 restore of the disposable target, byte-identical Camera-safe closed-app postflight, zero-pending/no-motion attestation, and matching final archive SHA-256 `198C533C...8FB9A17`; retained publication and rollout gates. |
 | 2026-08-20 | Froze coverage-complete rc.4 candidate `25d1b541`; passed exact-commit Windows 60-test/full-suite/release/SIL gates, Pi 60-test/independent exact-restore/private-device SIL gates, matching archives, and byte-identical production postflight; retained tag and attended update/restore as explicit authorization gates. |
 | 2026-08-20 | Added direct calibrated-plate removal/exact-restore regression coverage after the first rc.4 disposable qualification; retained `3e451c01` as passing runtime evidence but reopened the exact-candidate gate because the tracked release tree changed. |
 | 2026-08-20 | Froze rc.4 candidate `3e451c01`; passed exact-commit Windows and Pi focused tests, independent exact-restore, Windows/Pi contained SIL 96/96, private-device proof, matching evidence archives, and byte-identical production postflight; retained tag and attended recovery as explicit gates. |

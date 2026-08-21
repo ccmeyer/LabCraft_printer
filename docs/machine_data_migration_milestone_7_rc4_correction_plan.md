@@ -1,9 +1,9 @@
 # Milestone 7 rc.4 Exact-Restore Correction Plan
 
-Status: `qualified_untagged` - the coverage-complete correction at
-`25d1b541` passed exact-commit Windows and disposable-Pi gates. The rc.4 tag
-and attended LC-001 protected update/restore remain explicit authorization
-gates.
+Status: `attended_recovery_complete` - the immutable local rc.4 tag targets
+qualified commit `25d1b541`; LC-001 completed the protected update and exact
+restore with matching closed-app evidence. Publication and staged rollout
+remain separately authorized gates.
 
 Prepared: 2026-08-20
 
@@ -249,6 +249,54 @@ coverage. On that exact commit:
   `d965927e`, app PID 14283 and audit sequence 4 were unchanged, and no
   production pending transaction was created.
 
-The implementation and exact-candidate disposable gates are complete. Do not
-create the immutable rc.4 tag or perform the normal protected rc.3 -> rc.4
-update until the operator explicitly authorizes that attended next stage.
+The implementation and exact-candidate disposable gates are complete. The
+subsequently authorized local tag and attended production recovery are
+recorded next.
+
+## Attended tag, update, and exact-restore record
+
+The annotated local `v1.3.0-rc.4` tag was created at and peeled exactly to
+`25d1b541f62de15dc6f8e09036b5d588fcc95920`; tag-aware release validation
+passed. The tag and reachable objects were staged directly in the LC-001
+repository without publishing the tag or moving production `HEAD`.
+
+With operator `Conary-Codex` attending, motor power inhibited, the motion
+envelope clear, and the emergency stop immediately reachable, the normal
+running-app updater moved clean rc.3 `d965927e` to tagged rc.4. Update
+transaction `534bde87...`:
+
+- preserved the active pointer and all 25 protected pre-update files
+  byte-for-byte;
+- wrote a `relaunch_authorized` receipt and rc.4 deployment anchor with no
+  recovery requirement;
+- reopened normally at rc.4 while audit sequence 4 and zero pending
+  transactions remained; and
+- left current Camera evidence identical to the immutable source backup.
+
+The operator selected committed sequence-2 import transaction `50577384...`.
+The rc.4 review displayed only `qualification-unverified` as **removed by
+exact backup**, bound it to the verified source transaction/manifest, and
+reported `hard_validation_passed`. The accepted restore created committed
+sequence-5 restore transaction `53d4ede8...` and then:
+
+- restored exact original `Locations.json` bytes at SHA-256
+  `3E5B4DE97877C467395A9A63E1B8FC444359144BFA6AA395837EA99C5F3C7D02`;
+- changed no other governed file;
+- preserved lowercase `camera` semantic SHA-256
+  `FC7040A4449092C24834225EC7FA208981756E59C3ED77DF9388C2BDAE9190B0`;
+- removed both the disposable location and its authorization entry;
+- created and verified the restore's pre-change backup; and
+- left zero pending transactions.
+
+After normal window closure, a hardware-free rc.4 bootstrap reopened the
+external store as `ready`, validated the complete event chain at sequence 5,
+and reconfirmed the clean tagged checkout, exact bytes, Camera, deployment
+anchor, and update receipt. The operator explicitly attested that no physical
+movement, pressure action, or unexpected device activity was observed during
+the update or restore.
+
+The final 4,689-byte private evidence archive matched on Pi and Windows at
+SHA-256
+`198C533C740C8C588C01B3224B74D5ABEEB0A798363134E833B302BEF8FB9A17`.
+Production is clean and closed at rc.4. Do not move or retarget the rc.4 tag;
+publication and staged rollout remain separately authorized.
