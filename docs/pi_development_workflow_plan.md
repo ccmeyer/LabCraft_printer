@@ -1,6 +1,6 @@
 # Pi Development Worktree and Qualification Workflow
 
-Status: `final_validation` for Slices 5-7
+Status: `ready_for_attended_campaign`
 
 Prepared: 2026-08-21
 
@@ -1026,7 +1026,7 @@ Expected files:
 
 ## Final non-attended validation and attended handoff
 
-Status: `postflight_pending`
+Status: `ready_for_attended_campaign`
 
 ### Completed gates
 
@@ -1043,6 +1043,14 @@ Status: `postflight_pending`
   inventory, recorded released revision 6, preserved protected invariants, and
   left no related process. Its evidence is the Slice 7 idempotent-restore
   report above.
+- Final read-only postflight passed at exact commit `7e158d8f`. Production is
+  clean at rc.5 commit `34841fe0`; development is clean/detached at the exact
+  pushed commit; production/development data tree hashes remain respectively
+  `7b168d3c...` and `6ef0c57b...`; configuration and shared Python are valid;
+  firmware is released revision 6 with `production_ready=true`; and zero
+  related processes remain. The only warning is the two intentionally retained
+  worktrees. Evidence:
+  `verification_reports/development-workflow/status/20260821T182225180334Z_7e158d8f4e45/status.json`.
 
 ### Exact final attended campaign
 
@@ -1194,6 +1202,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Verified Slice 5 after corrective commit `816e0e70` passed exact development SAFE, mandatory rc.5 restore SAFE, and protected-invariance gates. |
 | 2026-08-21 | Completed Slice 6 implementation in `1eedc1e8`/`45453212`; published `bdd86711` and passed cancellation, no-hardware, missing-state, released-state, stale-commit, and mismatched-artifact refusal qualifications. The successful launch remains attended. |
 | 2026-08-21 | Published Slice 7 implementation `e30673a0`, passed required firmware checks, exact development/released SAFE roundtrip, durable transition evidence, and idempotent released restore; final installed role is released revision 6. |
+| 2026-08-21 | Passed the final complete Python suite (`5,569 passed`, `156 skipped`), verified the tracked built firmware artifact, sealed the final released-state postflight, and prepared the exact attended campaign without executing it. |
 
 ## Goal prompt for Slices 1-4
 
