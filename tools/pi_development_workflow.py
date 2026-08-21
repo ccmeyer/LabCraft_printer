@@ -31,6 +31,10 @@ DEFAULT_DEVELOPMENT_PARENT = (
     "/home/labcraft/.local/share/LabCraft/LabCraft Printer/development"
 )
 DEFAULT_WORKFLOW_CONFIG = "/home/labcraft/.config/LabCraft/development_workflow.json"
+DEFAULT_REMOTE_SESSION_ROOT = (
+    "/home/labcraft/.local/share/LabCraft/LabCraft Printer/"
+    "development-workflow/sessions"
+)
 DEFAULT_OUTPUT_ROOT = (
     REPO_ROOT / "verification_reports" / "development-workflow" / "status"
 )
@@ -1223,6 +1227,546 @@ except Exception as exc:
 '''
 
 
+REMOTE_LAUNCH = r'''
+from __future__ import annotations
+
+import base64
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import time
+from uuid import UUID, uuid4
+
+
+LAUNCH_SCHEMA = "labcraft.pi_development_launch"
+LAUNCH_VERSION = 1
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def canonical_sha256(value):
+    data = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
+
+
+def run(arguments, *, allowed=(0,)):
+    completed = subprocess.run(
+        list(arguments), capture_output=True, text=True, check=False
+    )
+    if completed.returncode not in allowed:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(
+            f"Command failed ({completed.returncode}): {arguments[0]}"
+            + (f": {detail}" if detail else "")
+        )
+    return completed
+
+
+def git(path, *arguments, allowed=(0,)):
+    return run(["git", "-C", str(path), *arguments], allowed=allowed)
+
+
+def resolved(value):
+    return Path(value).expanduser().resolve(strict=False)
+
+
+def lexical_absolute(value):
+    return Path(os.path.abspath(str(Path(value).expanduser())))
+
+
+def reject_link_ancestors(path):
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current = current / part
+        if current.exists() and stat.S_ISLNK(current.lstat().st_mode):
+            raise RuntimeError(f"Unsafe symlink in launch path: {current}")
+
+
+def atomic_json(path, payload):
+    reject_link_ancestors(path.parent)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.exists() or path.is_symlink():
+        raise RuntimeError(f"Launch evidence already exists: {path}")
+    temporary = path.parent / f".{path.name}.{uuid4()}.tmp"
+    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        while True:
+            block = handle.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def tree_inventory(root):
+    root = Path(root)
+    if not root.is_dir() or root.is_symlink():
+        raise RuntimeError(f"Inventory root is missing or unsafe: {root}")
+    rows = {}
+    folded = set()
+    for candidate in sorted(root.rglob("*")):
+        details = candidate.lstat()
+        if stat.S_ISLNK(details.st_mode):
+            raise RuntimeError(f"Inventory contains a symlink: {candidate}")
+        if candidate.is_dir():
+            continue
+        if not candidate.is_file():
+            raise RuntimeError(f"Inventory contains a special file: {candidate}")
+        relative = candidate.relative_to(root).as_posix()
+        if relative.casefold() in folded:
+            raise RuntimeError("Inventory contains case-colliding paths.")
+        folded.add(relative.casefold())
+        rows[relative] = {
+            "size": details.st_size,
+            "sha256": file_sha256(candidate),
+        }
+    return {
+        "file_count": len(rows),
+        "total_size": sum(item["size"] for item in rows.values()),
+        "tree_sha256": canonical_sha256(rows),
+        "files": rows,
+    }
+
+
+def environment_inventory(shared_python):
+    probe = (
+        "import importlib.metadata as m,json,sys;"
+        "rows=sorted((str(d.metadata.get('Name') or '').lower(),str(d.version)) "
+        "for d in m.distributions());"
+        "print(json.dumps({'executable':sys.executable,'prefix':sys.prefix,'packages':rows},"
+        "sort_keys=True,separators=(',',':')))"
+    )
+    payload = json.loads(run([str(shared_python), "-c", probe]).stdout)
+    return {
+        "sha256": canonical_sha256(payload),
+        "package_count": len(payload["packages"]),
+        "executable": payload["executable"],
+        "prefix": payload["prefix"],
+    }
+
+
+def relevant_processes():
+    needles = (
+        "FreeRTOS-interface/App.py", "tools/run_development_app.py",
+        "tools/update_window.py", "tools/update_and_restart.py",
+        "firmware/hil/flash_and_test.sh", "dfu_update.py",
+    )
+    matches = []
+    for entry in Path("/proc").glob("[0-9]*"):
+        try:
+            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                "utf-8", errors="replace"
+            ).strip()
+        except (OSError, ValueError):
+            continue
+        if command and any(needle in command for needle in needles):
+            matches.append({"pid": int(entry.name), "command": command})
+    return sorted(matches, key=lambda value: value["pid"])
+
+
+def worktree_state(path):
+    return {
+        "head": git(path, "rev-parse", "HEAD").stdout.strip(),
+        "branch": git(path, "branch", "--show-current").stdout.strip() or None,
+        "status": git(
+            path, "status", "--porcelain=v1", "--untracked-files=all"
+        ).stdout.splitlines(),
+    }
+
+
+def load_runtime_config(path):
+    target = Path(path).expanduser()
+    if not target.is_file() or target.is_symlink():
+        raise RuntimeError("Persisted development workflow configuration is unavailable.")
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    expected = {
+        "schema_name", "schema_version", "production_repo", "development_repo",
+        "shared_python", "development_machine_data_root", "development_store_id",
+        "machine_id", "dependency_manifest_sha256", "configured_at_utc",
+        "configured_by", "creation_commit",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected:
+        raise RuntimeError("Persisted workflow configuration fields differ from schema.")
+    if (
+        payload["schema_name"] != "labcraft.pi_development_workflow_config"
+        or payload["schema_version"] != 1
+    ):
+        raise RuntimeError("Persisted workflow configuration schema is invalid.")
+    return payload
+
+
+def validate_store(root, expected_store_id):
+    root = resolved(root)
+    marker = json.loads((root / "development_store.json").read_text(encoding="utf-8"))
+    pointer = json.loads((root / "active_machine.json").read_text(encoding="utf-8"))
+    store_id = str(UUID(str(marker.get("store_id"))))
+    if store_id != str(UUID(str(expected_store_id))):
+        raise RuntimeError("Development store identity differs from persisted configuration.")
+    if resolved(marker.get("development_root")) != root:
+        raise RuntimeError("Development store root binding differs.")
+    if pointer.get("schema_name") != "labcraft.active_machine" or pointer.get("schema_version") != 2:
+        raise RuntimeError("Development active pointer is unauthorized.")
+    machine_uuid = str(UUID(str(pointer.get("machine_uuid"))))
+    identity = json.loads(
+        (root / "machines" / machine_uuid / "metadata" / "machine_identity.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    if identity.get("machine_id") != pointer.get("machine_id"):
+        raise RuntimeError("Development machine identity differs from active pointer.")
+    return root, resolved(marker["source_machine_data_root"]), store_id
+
+
+def changed_paths(before, after):
+    names = sorted(set(before["files"]) | set(after["files"]))
+    return [name for name in names if before["files"].get(name) != after["files"].get(name)]
+
+
+def desktop_environment():
+    runtime = Path(f"/run/user/{os.getuid()}")
+    environment = {
+        "XDG_RUNTIME_DIR": str(runtime),
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime}/bus",
+    }
+    wayland = sorted(runtime.glob("wayland-*")) if runtime.is_dir() else []
+    wayland = [item for item in wayland if not item.name.endswith(".lock")]
+    if wayland:
+        environment.update({
+            "WAYLAND_DISPLAY": wayland[0].name,
+            "DISPLAY": ":0",
+            "QT_QPA_PLATFORM": "wayland;xcb",
+        })
+    elif Path("/tmp/.X11-unix/X0").exists():
+        environment.update({"DISPLAY": ":0", "QT_QPA_PLATFORM": "xcb"})
+    else:
+        raise RuntimeError("No Pi desktop session is available for visible launch.")
+    return environment
+
+
+def stop_owned_group(process, grace_seconds=8.0):
+    actions = []
+    if process.poll() is not None:
+        return actions
+    for name, value in (
+        ("SIGINT", signal.SIGINT), ("SIGTERM", signal.SIGTERM),
+        ("SIGKILL", signal.SIGKILL),
+    ):
+        try:
+            os.killpg(process.pid, value)
+            actions.append(name)
+        except ProcessLookupError:
+            break
+        try:
+            process.wait(timeout=grace_seconds)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    return actions
+
+
+def load_json_evidence(path, *, expected_schema, expected_commit, expected_store_id):
+    target = resolved(path)
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    if payload.get("schema_name") != expected_schema or payload.get("schema_version") != 1:
+        raise RuntimeError(f"Launch evidence schema is invalid: {target}")
+    if payload.get("app_commit") != expected_commit or payload.get("store_id") != expected_store_id:
+        raise RuntimeError(f"Launch evidence binding differs: {target}")
+    return target, payload
+
+
+def main():
+    request = json.loads(base64.urlsafe_b64decode(sys.argv[1]).decode("utf-8"))
+    mode = request["launch_mode"]
+    if mode not in {"offscreen", "visible"}:
+        raise RuntimeError(f"Unsupported launch mode: {mode}")
+    timeout_seconds = int(request["timeout_seconds"])
+    if not 10 <= timeout_seconds <= 1800:
+        raise RuntimeError("Launch timeout must be between 10 and 1800 seconds.")
+    auto_close = request.get("auto_close_seconds")
+    if auto_close is not None and not 0.5 <= float(auto_close) <= 600.0:
+        raise RuntimeError("Auto-close must be between 0.5 and 600 seconds.")
+    operator = str(request.get("operator") or "").strip()
+    if not operator:
+        raise RuntimeError("A launch operator is required.")
+
+    production = resolved(request["production_repo"])
+    development = resolved(request["development_repo"])
+    shared_python = lexical_absolute(request["shared_python"])
+    workflow_path = Path(request["workflow_config"]).expanduser()
+    expected_commit = request["expected_commit"]
+    expected_production_head = request["expected_production_head"]
+    expected_production_branch = request["expected_production_branch"]
+    session_root = resolved(request["remote_session_root"])
+    if session_root in {production, development} or production in session_root.parents or development in session_root.parents:
+        raise RuntimeError("Remote launch evidence root overlaps a code worktree.")
+    reject_link_ancestors(session_root)
+
+    persisted = load_runtime_config(workflow_path)
+    expected_bindings = {
+        "production_repo": production,
+        "development_repo": development,
+        "shared_python": shared_python,
+    }
+    for name, expected in expected_bindings.items():
+        actual = lexical_absolute(persisted[name]) if name == "shared_python" else resolved(persisted[name])
+        if actual != expected:
+            raise RuntimeError(f"Persisted {name} binding differs from launch request.")
+    development_store, source_store, store_id = validate_store(
+        persisted["development_machine_data_root"], persisted["development_store_id"]
+    )
+    if not shared_python.is_file() or not os.access(shared_python, os.X_OK):
+        raise RuntimeError("Shared Python is unavailable.")
+
+    production_before = worktree_state(production)
+    development_before = worktree_state(development)
+    if (
+        production_before["head"] != expected_production_head
+        or production_before["branch"] != expected_production_branch
+        or production_before["status"]
+    ):
+        raise RuntimeError("Protected production worktree preflight failed.")
+    if (
+        development_before["head"] != expected_commit
+        or development_before["branch"] is not None
+        or development_before["status"]
+    ):
+        raise RuntimeError("Development worktree is not clean/detached at the exact commit.")
+    processes_before = relevant_processes()
+    if processes_before:
+        raise RuntimeError("A relevant LabCraft process is already running.")
+
+    session_id = str(uuid4())
+    session_dir = session_root / f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{session_id}"
+    session_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
+    report_path = session_dir / "launch.json"
+    log_path = session_dir / "application.log"
+    trace_path = session_dir / "system-calls.log"
+    started_at = utc_now()
+    environment_before = environment_inventory(shared_python)
+    source_before = tree_inventory(source_store)
+    development_data_before = tree_inventory(development_store)
+
+    runner = development / "tools" / "run_development_app.py"
+    base_command = [
+        str(shared_python), "-u", str(runner),
+        "--machine-data-root", str(development_store),
+        "--operator", operator,
+    ]
+    if auto_close is not None:
+        base_command.extend(["--auto-close-seconds", str(float(auto_close))])
+    if "--enable-hardware" in base_command:
+        raise RuntimeError("Slice 4 cannot launch with hardware enabled.")
+    if shutil.which("strace") is None:
+        raise RuntimeError("strace is required for hardware-access proof.")
+
+    launch_environment = dict(os.environ)
+    for name in (
+        "DISPLAY", "WAYLAND_DISPLAY", "QT_QPA_PLATFORM", "XDG_RUNTIME_DIR",
+        "DBUS_SESSION_BUS_ADDRESS", "LABCRAFT_DEVELOPMENT_ENABLE_HARDWARE",
+        "LABCRAFT_DEVELOPMENT_HARDWARE_CONFIRMATION",
+    ):
+        launch_environment.pop(name, None)
+    sandbox = {"enabled": False, "network_unshared": False, "private_dev": False, "root_read_only": False}
+    traced_command = list(base_command)
+    if mode == "offscreen":
+        if shutil.which("bwrap") is None:
+            raise RuntimeError("bubblewrap is required for offscreen confinement.")
+        launch_environment.update({
+            "QT_QPA_PLATFORM": "offscreen",
+            "XDG_RUNTIME_DIR": "/tmp/runtime-labcraft",
+        })
+        traced_command = [
+            "bwrap", "--unshare-all", "--die-with-parent", "--new-session",
+            "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+            "--tmpfs", "/tmp", "--bind", str(development_store), str(development_store),
+            "--bind", str(session_dir), str(session_dir),
+            "--dir", "/tmp/runtime-labcraft", "--chmod", "0700", "/tmp/runtime-labcraft",
+            "--", *base_command,
+        ]
+        sandbox = {"enabled": True, "network_unshared": True, "private_dev": True, "root_read_only": True}
+    else:
+        launch_environment.update(desktop_environment())
+
+    command = [
+        "strace", "-f", "-qq", "-e", "trace=%file,ioctl,process",
+        "-o", str(trace_path), "--", *traced_command,
+    ]
+    timed_out = False
+    cleanup_actions = []
+    with log_path.open("xb") as output:
+        process = subprocess.Popen(
+            command, cwd=development, env=launch_environment,
+            stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
+        )
+        supervisor_pid = process.pid
+        try:
+            exit_code = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            cleanup_actions = stop_owned_group(process)
+            exit_code = process.returncode
+    if exit_code is None:
+        raise RuntimeError("Owned launch process group did not terminate.")
+
+    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    evidence_paths = {}
+    for label, prefix in (
+        ("session", "Development session evidence:"),
+        ("runtime", "Development runtime evidence:"),
+    ):
+        matches = [line[len(prefix):].strip() for line in log_text.splitlines() if line.startswith(prefix)]
+        if len(matches) != 1:
+            raise RuntimeError(f"Expected exactly one {label} evidence path in the app log.")
+        evidence_paths[label] = matches[0]
+    pid_matches = [
+        line.split(":", 1)[1].strip() for line in log_text.splitlines()
+        if line.startswith("Development app PID:")
+    ]
+    if len(pid_matches) != 1 or not pid_matches[0].isdigit():
+        raise RuntimeError("Development app PID evidence is missing or invalid.")
+    app_pid = int(pid_matches[0])
+
+    session_evidence_path, session_evidence = load_json_evidence(
+        evidence_paths["session"], expected_schema="labcraft.development_session",
+        expected_commit=expected_commit, expected_store_id=store_id,
+    )
+    runtime_evidence_path, runtime_evidence = load_json_evidence(
+        evidence_paths["runtime"], expected_schema="labcraft.development_no_hardware_runtime",
+        expected_commit=expected_commit, expected_store_id=store_id,
+    )
+    if (
+        session_evidence.get("hardware_enabled") is not False
+        or runtime_evidence.get("machine_type") != "SimulatedMachine"
+        or runtime_evidence.get("hardware_access_allowed") is not False
+        or runtime_evidence.get("updater_access_allowed") is not False
+    ):
+        raise RuntimeError("Runtime evidence did not prove no-hardware composition.")
+
+    trace_text = trace_path.read_text(encoding="utf-8", errors="replace").lower()
+    forbidden_patterns = {
+        "serial": r"/dev/(serial|ttyama|ttys|ttyusb|ttyacm)",
+        "gpio": r"(/dev/gpiochip|/sys/class/gpio)",
+        "camera": r"(/dev/video|/dev/media|/dev/v4l-subdev|/sys/class/video4linux)",
+        "i2c": r"/dev/i2c-",
+        "usb_dfu": r"(/dev/bus/usb|dfu-util)",
+    }
+    forbidden_matches = {
+        name: sorted(set(re.findall(pattern, trace_text)))
+        for name, pattern in forbidden_patterns.items()
+        if re.search(pattern, trace_text)
+    }
+
+    production_after = worktree_state(production)
+    development_after = worktree_state(development)
+    environment_after = environment_inventory(shared_python)
+    source_after = tree_inventory(source_store)
+    development_data_after = tree_inventory(development_store)
+    changed = changed_paths(development_data_before, development_data_after)
+    allowed_prefixes = ("development_sessions/", "development_runtime/")
+    unexpected_changes = [name for name in changed if not name.startswith(allowed_prefixes)]
+    processes_after = relevant_processes()
+    passed = (
+        not timed_out and exit_code == 0 and not forbidden_matches
+        and production_after == production_before
+        and development_after == development_before
+        and environment_after == environment_before
+        and source_after["tree_sha256"] == source_before["tree_sha256"]
+        and not unexpected_changes and not processes_after
+    )
+    report = {
+        "schema_name": LAUNCH_SCHEMA,
+        "schema_version": LAUNCH_VERSION,
+        "session_id": session_id,
+        "status": "passed" if passed else "failed",
+        "launch_mode": mode,
+        "operator": operator,
+        "expected_commit": expected_commit,
+        "development_store_id": store_id,
+        "started_at_utc": started_at,
+        "finished_at_utc": utc_now(),
+        "timeout_seconds": timeout_seconds,
+        "timed_out": timed_out,
+        "exit_code": exit_code,
+        "supervisor_pid": supervisor_pid,
+        "app_pid": app_pid,
+        "cleanup_actions": cleanup_actions,
+        "sandbox": sandbox,
+        "paths": {
+            "report": str(report_path), "log": str(log_path), "trace": str(trace_path),
+            "session_evidence": str(session_evidence_path),
+            "runtime_evidence": str(runtime_evidence_path),
+        },
+        "sha256": {
+            "log": file_sha256(log_path), "trace": file_sha256(trace_path),
+            "session_evidence": file_sha256(session_evidence_path),
+            "runtime_evidence": file_sha256(runtime_evidence_path),
+        },
+        "runtime_evidence": runtime_evidence,
+        "forbidden_hardware_matches": forbidden_matches,
+        "production_worktree_before": production_before,
+        "production_worktree_after": production_after,
+        "development_worktree_before": development_before,
+        "development_worktree_after": development_after,
+        "environment_before": environment_before,
+        "environment_after": environment_after,
+        "source_machine_data_before_sha256": source_before["tree_sha256"],
+        "source_machine_data_after_sha256": source_after["tree_sha256"],
+        "development_data_before_sha256": development_data_before["tree_sha256"],
+        "development_data_after_sha256": development_data_after["tree_sha256"],
+        "development_data_changed_paths": changed,
+        "unexpected_development_data_changes": unexpected_changes,
+        "processes_before": processes_before,
+        "processes_after": processes_after,
+    }
+    atomic_json(report_path, report)
+    if not passed:
+        raise RuntimeError(f"No-hardware launch qualification failed; evidence: {report_path}")
+    print(json.dumps({
+        "status": "passed", "launch_mode": mode, "report_path": str(report_path),
+        "report_sha256": file_sha256(report_path), "session_id": session_id,
+        "exit_code": exit_code, "app_pid": app_pid,
+        "development_data_changed_paths": changed,
+        "forbidden_hardware_matches": forbidden_matches,
+        "sandbox": sandbox,
+    }, sort_keys=True, separators=(",", ":")))
+
+
+try:
+    main()
+except Exception as exc:
+    print(f"Remote development launch failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+'''
+
+
 def collect_remote_state(
     *,
     pi_host: str,
@@ -1388,6 +1932,94 @@ def configure_remote_runtime(
     return payload
 
 
+def launch_remote_app(
+    *,
+    pi_host: str,
+    pi_user: str,
+    identity_file: Path | None,
+    production_repo: str,
+    development_repo: str,
+    shared_python: str,
+    workflow_config: str,
+    operator: str,
+    expected_commit: str,
+    expected_production_head: str,
+    expected_production_branch: str,
+    launch_mode: str,
+    auto_close_seconds: float | None,
+    launch_timeout_seconds: int,
+    remote_session_root: str,
+) -> dict[str, Any]:
+    if launch_mode not in {"offscreen", "visible"}:
+        raise WorkflowError(f"Unsupported launch mode: {launch_mode}")
+    operator_text = str(operator or "").strip()
+    if not operator_text:
+        raise WorkflowError("A launch operator is required.")
+    if not 10 <= launch_timeout_seconds <= 1800:
+        raise WorkflowError("Launch timeout must be between 10 and 1800 seconds.")
+    if auto_close_seconds is not None and not 0.5 <= auto_close_seconds <= 600.0:
+        raise WorkflowError("Auto-close must be between 0.5 and 600 seconds.")
+    validate_remote_paths(
+        pi_user=pi_user,
+        production_repo=production_repo,
+        development_repo=development_repo,
+        shared_python=shared_python,
+        development_machine_data_root=None,
+        workflow_config=workflow_config,
+    )
+    session_path = PurePosixPath(remote_session_root)
+    if not session_path.is_absolute() or ".." in session_path.parts:
+        raise WorkflowError("Remote session root must be an absolute Pi path without '..'.")
+    production_path = PurePosixPath(production_repo)
+    development_path = PurePosixPath(development_repo)
+    if (
+        session_path in {PurePosixPath("/"), PurePosixPath(f"/home/{pi_user}")}
+        or session_path in {production_path, development_path}
+        or production_path in session_path.parents
+        or development_path in session_path.parents
+        or session_path in production_path.parents
+        or session_path in development_path.parents
+    ):
+        raise WorkflowError("Remote session root must be external to both worktrees.")
+    target = pi_host if "@" in pi_host else f"{pi_user}@{pi_host}"
+    request = {
+        "production_repo": production_repo,
+        "development_repo": development_repo,
+        "shared_python": shared_python,
+        "workflow_config": workflow_config,
+        "operator": operator_text,
+        "expected_commit": expected_commit,
+        "expected_production_head": expected_production_head,
+        "expected_production_branch": expected_production_branch,
+        "launch_mode": launch_mode,
+        "auto_close_seconds": auto_close_seconds,
+        "timeout_seconds": launch_timeout_seconds,
+        "remote_session_root": remote_session_root,
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(request, sort_keys=True).encode("utf-8")
+    ).decode("ascii")
+    command = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=8",
+    ]
+    if identity_file is not None:
+        command.extend(["-i", str(identity_file)])
+    command.extend([target, "python3", "-", encoded])
+    completed = _run(
+        command,
+        input_text=REMOTE_LAUNCH,
+        timeout_seconds=launch_timeout_seconds + 45,
+    )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise WorkflowError("Pi returned malformed development-launch JSON.") from exc
+    if not isinstance(payload, dict) or payload.get("status") != "passed":
+        raise WorkflowError("Pi development launch did not return passing evidence.")
+    return payload
+
+
 def pi_invariant_payload(remote: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "hostname": remote.get("hostname"),
@@ -1396,6 +2028,25 @@ def pi_invariant_payload(remote: Mapping[str, Any]) -> dict[str, Any]:
         "shared_python": remote.get("shared_python"),
         "processes": remote.get("processes"),
         "development_machine_data": remote.get("development_machine_data"),
+    }
+
+
+def launch_invariant_payload(remote: Mapping[str, Any]) -> dict[str, Any]:
+    """Protect everything except declared development-session/runtime writes."""
+
+    store = dict(remote.get("development_machine_data") or {})
+    selected = dict(store.get("selected") or {})
+    selected.pop("development_tree_evidence", None)
+    store["selected"] = selected
+    return {
+        "hostname": remote.get("hostname"),
+        "production_worktree": remote.get("production_worktree"),
+        "development_worktree": remote.get("development_worktree"),
+        "other_worktrees": remote.get("other_worktrees"),
+        "shared_python": remote.get("shared_python"),
+        "processes": remote.get("processes"),
+        "development_machine_data": store,
+        "workflow_config": remote.get("workflow_config"),
     }
 
 
@@ -1566,6 +2217,12 @@ def print_summary(report: Mapping[str, Any], report_path: Path) -> None:
             f"{runtime.get('action') or 'validated'} "
             f"{runtime.get('config_path') or ''}".rstrip()
         )
+    launch = report.get("launch") or {}
+    if launch.get("status") == "passed":
+        print(
+            "Development launch: "
+            f"{launch.get('launch_mode')} {launch.get('report_path')}"
+        )
     for warning in report["warnings"]:
         print(f"WARNING [{warning['code']}]: {warning['message']}")
     for blocker in report["blockers"]:
@@ -1579,7 +2236,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--action",
-        choices=("status", "preflight", "sync", "configure", "validate"),
+        choices=("status", "preflight", "sync", "configure", "validate", "launch"),
         default="status",
     )
     parser.add_argument("--pi-host", required=True)
@@ -1591,6 +2248,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--development-machine-data-root")
     parser.add_argument("--workflow-config", default=DEFAULT_WORKFLOW_CONFIG)
     parser.add_argument("--operator", default=getpass.getuser())
+    parser.add_argument(
+        "--launch-mode", choices=("offscreen", "visible"), default="offscreen"
+    )
+    parser.add_argument("--auto-close-seconds", type=float)
+    parser.add_argument("--launch-timeout-seconds", type=int, default=180)
+    parser.add_argument("--remote-session-root", default=DEFAULT_REMOTE_SESSION_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -1634,6 +2297,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(f"Workflow configuration: {args.workflow_config}")
         print(f"Operator: {args.operator}")
+        if args.action == "launch":
+            print(f"Launch mode: {args.launch_mode}")
+            print(f"Auto-close seconds: {args.auto_close_seconds or '(manual close)'}")
+            print(f"Launch timeout seconds: {args.launch_timeout_seconds}")
+            print(f"Remote session root: {args.remote_session_root}")
         print("No SSH call or report write was performed.")
         return 0
     if shutil.which("ssh") is None:
@@ -1789,11 +2457,126 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print_summary(report, report_path)
                 print(f"Workflow failed: {exc}", file=sys.stderr)
                 return 1
+        if args.action == "launch" and not report["blockers"]:
+            development = remote.get("development_worktree") or {}
+            workflow_config = remote.get("workflow_config") or {}
+            selected_store = (
+                remote.get("development_machine_data") or {}
+            ).get("selected") or {}
+            launch_precondition_error = None
+            if args.development_machine_data_root:
+                launch_precondition_error = (
+                    "Launch uses only the persisted workflow configuration; "
+                    "do not supply an explicit development machine-data root."
+                )
+            elif not workflow_config.get("valid"):
+                launch_precondition_error = "Launch requires a valid persisted workflow configuration."
+            elif (
+                development.get("state") != "registered_clean"
+                or development.get("head") != local["head"]
+                or not development.get("detached")
+            ):
+                launch_precondition_error = (
+                    "Development worktree is not clean/detached at the exact Windows commit."
+                )
+            elif not selected_store.get("path"):
+                launch_precondition_error = "Configured development machine data is unresolved."
+            if launch_precondition_error:
+                report["launch"] = {
+                    "status": "failed", "error": launch_precondition_error
+                }
+                report_path = write_report(report, args.output_root)
+                print_summary(report, report_path)
+                return 2
+
+            pre_invariant = canonical_sha256(launch_invariant_payload(remote))
+            try:
+                runtime_result = configure_remote_runtime(
+                    mode="validate",
+                    pi_host=args.pi_host,
+                    pi_user=args.pi_user,
+                    identity_file=identity,
+                    production_repo=args.production_repo,
+                    development_repo=args.development_repo,
+                    shared_python=args.shared_python,
+                    development_machine_data_root=str(selected_store["path"]),
+                    workflow_config=args.workflow_config,
+                    operator=args.operator,
+                    expected_commit=local["head"],
+                    expected_production_head=remote["production_worktree"]["head"],
+                    expected_production_branch=remote["production_worktree"]["branch"],
+                )
+                validation_remote = collect_remote_state(
+                    pi_host=args.pi_host,
+                    pi_user=args.pi_user,
+                    identity_file=identity,
+                    production_repo=args.production_repo,
+                    development_repo=args.development_repo,
+                    shared_python=args.shared_python,
+                    development_machine_data_root=None,
+                    workflow_config=args.workflow_config,
+                )
+                validation_invariant = canonical_sha256(
+                    launch_invariant_payload(validation_remote)
+                )
+                if validation_invariant != pre_invariant:
+                    raise WorkflowError(
+                        "Protected Pi invariants changed during launch validation."
+                    )
+                launch_result = launch_remote_app(
+                    pi_host=args.pi_host,
+                    pi_user=args.pi_user,
+                    identity_file=identity,
+                    production_repo=args.production_repo,
+                    development_repo=args.development_repo,
+                    shared_python=args.shared_python,
+                    workflow_config=args.workflow_config,
+                    operator=args.operator,
+                    expected_commit=local["head"],
+                    expected_production_head=remote["production_worktree"]["head"],
+                    expected_production_branch=remote["production_worktree"]["branch"],
+                    launch_mode=args.launch_mode,
+                    auto_close_seconds=args.auto_close_seconds,
+                    launch_timeout_seconds=args.launch_timeout_seconds,
+                    remote_session_root=args.remote_session_root,
+                )
+                post_remote = collect_remote_state(
+                    pi_host=args.pi_host,
+                    pi_user=args.pi_user,
+                    identity_file=identity,
+                    production_repo=args.production_repo,
+                    development_repo=args.development_repo,
+                    shared_python=args.shared_python,
+                    development_machine_data_root=None,
+                    workflow_config=args.workflow_config,
+                )
+                post_invariant = canonical_sha256(
+                    launch_invariant_payload(post_remote)
+                )
+                if post_invariant != pre_invariant:
+                    raise WorkflowError("Protected Pi invariants changed during launch.")
+                report = build_report(action=args.action, local=local, remote=post_remote)
+                report["runtime"] = {"status": "passed", **runtime_result}
+                report["launch"] = {
+                    "status": "passed",
+                    "pre_invariant_sha256": pre_invariant,
+                    "post_validation_invariant_sha256": validation_invariant,
+                    "post_invariant_sha256": post_invariant,
+                    **launch_result,
+                }
+            except (OSError, ValueError, WorkflowError) as exc:
+                report["launch"] = {"status": "failed", "error": str(exc)}
+                report_path = write_report(report, args.output_root)
+                print_summary(report, report_path)
+                print(f"Workflow failed: {exc}", file=sys.stderr)
+                return 1
         report_path = write_report(report, args.output_root)
         print_summary(report, report_path)
         if args.action == "sync" and report["blockers"]:
             return 2
         if args.action in {"configure", "validate"} and report["blockers"]:
+            return 2
+        if args.action == "launch" and report["blockers"]:
             return 2
     except (OSError, ValueError, WorkflowError) as exc:
         print(f"Workflow failed: {exc}", file=sys.stderr)

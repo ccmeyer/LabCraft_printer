@@ -157,6 +157,59 @@ report under `verification_reports/development-workflow/status/` and investigate
 the named mismatch; the tool does not repair, replace, or fall back to another
 store.
 
+Once `Sync` and `Configure` have succeeded for the current pushed commit, launch
+the Pi application in normal visible no-hardware development mode:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\run_pi_development.ps1 `
+  -Action Launch `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -LaunchMode Visible `
+  -Operator "Operator Name" `
+  -LaunchTimeoutSeconds 1800
+```
+
+Close the main window normally when testing is complete. `Launch` first repeats
+the path-free Slice 3 validation, requires the Pi development worktree to be
+clean and detached at the exact pushed Windows commit, and uses only the
+persisted development-store binding. It does not accept a machine-data path or
+expose a hardware-enable switch. The main window identifies itself as a
+development/no-hardware runtime, uses `SimulatedMachine`, blocks every physical
+peripheral factory, and disables updater access.
+
+For an unattended smoke qualification, use the offscreen lane with a short
+automatic close:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\run_pi_development.ps1 `
+  -Action Launch `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -LaunchMode Offscreen `
+  -AutoCloseSeconds 5 `
+  -LaunchTimeoutSeconds 120 `
+  -Operator "Operator Name"
+```
+
+The offscreen lane uses Bubblewrap with a read-only host root, private `/dev`,
+and no network namespace, while `strace` checks for serial, GPIO, camera, I2C,
+USB/DFU, and updater-tool access. Both lanes write logs and launch evidence
+beneath the external Pi directory:
+
+```text
+/home/labcraft/.local/share/LabCraft/LabCraft Printer/development-workflow/sessions
+```
+
+The Windows status report records the corresponding Pi report path and hash.
+Only `development_sessions/` and `development_runtime/` writes are permitted in
+the development store. Production code/data, the shared Python packages, Git
+worktrees, and relevant process state must be identical before and after. If a
+launch times out, the supervisor signals only its own process group and records
+the cleanup actions; do not kill unrelated Pi processes or bypass a failed
+postflight. Install `bubblewrap` and `strace` through the documented Pi setup if
+the offscreen lane reports either prerequisite missing.
+
 Do not switch a deployed production checkout to an arbitrary development commit
 and launch it against the production machine-data root. Production stores are
 bound to the exact commit authorized by the protected updater.

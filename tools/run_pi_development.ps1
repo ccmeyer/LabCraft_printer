@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [ValidateSet("Status", "Preflight", "Sync", "Configure", "Validate")]
+  [ValidateSet("Status", "Preflight", "Sync", "Configure", "Validate", "Launch")]
   [string]$Action = "Status",
 
   [Parameter(Mandatory = $true)]
@@ -14,6 +14,12 @@ param(
   [string]$DevelopmentMachineDataRoot = "",
   [string]$WorkflowConfig = "/home/labcraft/.config/LabCraft/development_workflow.json",
   [string]$Operator = $env:USERNAME,
+  [ValidateSet("Offscreen", "Visible")]
+  [string]$LaunchMode = "Offscreen",
+  [double]$AutoCloseSeconds = 0,
+  [ValidateRange(10, 1800)]
+  [int]$LaunchTimeoutSeconds = 180,
+  [string]$RemoteSessionRoot = "/home/labcraft/.local/share/LabCraft/LabCraft Printer/development-workflow/sessions",
   [string]$OutputRoot = "verification_reports/development-workflow/status",
   [switch]$DryRun
 )
@@ -51,6 +57,9 @@ $arguments = @(
   "--shared-python", $SharedPython,
   "--workflow-config", $WorkflowConfig,
   "--operator", $Operator,
+  "--launch-mode", $LaunchMode.ToLowerInvariant(),
+  "--launch-timeout-seconds", $LaunchTimeoutSeconds,
+  "--remote-session-root", $RemoteSessionRoot,
   "--output-root", $OutputRoot
 )
 if (-not [string]::IsNullOrWhiteSpace($SshIdentityFile)) {
@@ -61,6 +70,9 @@ if (-not [string]::IsNullOrWhiteSpace($DevelopmentMachineDataRoot)) {
     "--development-machine-data-root",
     $DevelopmentMachineDataRoot
   )
+}
+if ($AutoCloseSeconds -gt 0) {
+  $arguments += @("--auto-close-seconds", $AutoCloseSeconds)
 }
 if ($DryRun.IsPresent) {
   $arguments += "--dry-run"

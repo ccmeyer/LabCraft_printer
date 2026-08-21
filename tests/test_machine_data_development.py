@@ -168,6 +168,71 @@ def test_development_session_binds_exact_commit_pointer_marker_and_operator(tmp_
     assert len(payload["active_pointer_sha256"]) == 64
     assert len(payload["development_store_marker_sha256"]) == 64
 
+    runtime_path = MachineDataDevelopment.record_no_hardware_runtime_evidence(
+        path,
+        app_commit="d" * 40,
+        machine_type="SimulatedMachine",
+        runtime_mode="development",
+        identity_text="DEVELOPMENT BUILD — NO HARDWARE CONNECTED",
+        hardware_access_allowed=False,
+        updater_access_allowed=False,
+        peripheral_factories={
+            "serial": "blocked_serial_access",
+            "refuel_camera": "blocked_refuel_camera_access",
+            "droplet_camera": "blocked_droplet_camera_access",
+            "log_reader": "blocked_log_reader_access",
+            "balance": "blocked_balance_access",
+            "experimental_balance": "blocked_experimental_balance_access",
+            "legacy_calibration": "blocked_legacy_calibration_hardware_access",
+        },
+        clock=lambda: FIXED_TIME,
+    )
+    runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+    assert runtime["schema_name"] == "labcraft.development_no_hardware_runtime"
+    assert runtime["session_id"] == SESSION_ID
+    assert runtime["machine_type"] == "SimulatedMachine"
+    assert runtime["hardware_access_allowed"] is False
+    assert runtime["updater_access_allowed"] is False
+    assert len(runtime["session_evidence_sha256"]) == 64
+
+
+def test_runtime_evidence_rejects_hardware_capable_composition(tmp_path):
+    _source_root, target, _store = _prepare(tmp_path)
+    launch = MachineDataDevelopment.development_launch_from_environment(
+        target,
+        {
+            MachineDataDevelopment.DEVELOPMENT_MODE_ENV: "development",
+            MachineDataDevelopment.DEVELOPMENT_OPERATOR_ENV: "Operator",
+        },
+    )
+    session = MachineDataDevelopment.record_development_session(
+        launch,
+        app_version="v1.3.0-dev",
+        app_commit="d" * 40,
+        clock=lambda: FIXED_TIME,
+        uuid_factory=lambda: SESSION_ID,
+    )
+    with pytest.raises(
+        MachineDataDevelopment.DevelopmentStoreError,
+        match="not no-hardware safe",
+    ):
+        MachineDataDevelopment.record_no_hardware_runtime_evidence(
+            session,
+            app_commit="d" * 40,
+            machine_type="Machine",
+            runtime_mode="development",
+            identity_text="ATTENDED DEVELOPMENT BUILD — HARDWARE ENABLED",
+            hardware_access_allowed=True,
+            updater_access_allowed=False,
+            peripheral_factories={
+                name: f"blocked_{name}"
+                for name in (
+                    "serial", "refuel_camera", "droplet_camera", "log_reader",
+                    "balance", "experimental_balance", "legacy_calibration",
+                )
+            },
+        )
+
 
 def test_development_dependencies_are_visibly_isolated_and_block_hardware(tmp_path):
     base = SimpleNamespace(root=tmp_path / "development-machine-data")

@@ -37,7 +37,7 @@ evidence are recorded here.
 | 1 | Read-only Windows/Pi status and preflight | `verified` | `e58129b3` | 24 focused and 5,485 full-suite tests; clean/pushed Pi Preflight and exact read-only invariance passed |
 | 2 | Create and synchronize the Pi development worktree | `verified` | `4bef5790` | 32 focused tests; Pi create, idempotent reuse, unregistered-path refusal, and protected invariance passed |
 | 3 | Bind the shared interpreter and development machine data | `verified` | `733f9e77`, `fd2fc5e4`, `6756b5a0` | 45 focused tests; Pi create/reuse/path-free validation, dependency/environment/data invariance passed |
-| 4 | Launch and qualify the no-hardware development app | `planned` | Not started | Not run |
+| 4 | Launch and qualify the no-hardware development app | `in_progress` | Implementation active | Focused and Pi qualification pending; full suite reserved for final gate |
 | 5 | Build, flash, and qualify committed development firmware | `planned` | Not started | Not run |
 | 6 | Launch an attended real-hardware development session | `planned` | Not started | Not run |
 | 7 | Track and restore released firmware state | `planned` | Not started | Not run |
@@ -494,7 +494,7 @@ without fallback or package mutation.
 
 ## Slice 4 - No-hardware development launch
 
-Status: `planned`
+Status: `in_progress`
 
 ### Objective
 
@@ -517,6 +517,56 @@ commit, shared interpreter, explicit development data, and simulated machine.
   hardware.
 - Do not add or expose an attended hardware switch in this slice.
 
+### Implementation
+
+Call path:
+
+```text
+Windows run_pi_development.ps1 Launch
+  -> pi_development_workflow.py exact-commit and Slice 3 validation
+  -> traced Pi launch supervisor
+  -> shared production venv (lexical path, read-only packages)
+  -> development worktree tools/run_development_app.py
+  -> explicit development machine-data root and hardware-disabled environment
+  -> development App.py / authorized bootstrap
+  -> development_dependencies(..., hardware_enabled=False)
+  -> SimulatedMachine / blocked peripheral factories / updater-disabled UI
+  -> clean close, runtime receipt, trace proof, and protected postflight
+```
+
+1. Add `Launch` with `Visible|Offscreen` launch modes and bounded timeout/
+   auto-close controls; expose no hardware-enable parameter.
+2. Reuse Slice 3 validation and require the persisted binding, exact clean
+   commits, valid dependency/runtime/store evidence, and no relevant process.
+3. Isolate Qt data/config/cache under the development store, report the child
+   process, and support development-only qualification auto-close.
+4. Assert `SimulatedMachine`, hardware-disabled, and updater-disabled state
+   before showing the UI; write structured runtime evidence linked to the
+   development-session receipt.
+5. Supervise the exact development launcher, preserving external logs, PIDs,
+   timestamps, exit status, receipt hashes, and cleanup limited to its own
+   process group.
+6. Run offscreen qualification in a no-network Bubblewrap sandbox with private
+   `/dev`, read-only host root, explicit writable development/session roots,
+   and `strace`; trace visible launches without granting hardware mode.
+7. Reject forbidden serial, GPIO, camera, I2C, USB/DFU, updater, motion, or
+   pressure access and allow only declared development-session/runtime writes.
+8. Run focused tests, exact-commit offscreen and visible Pi qualification, then
+   the deferred complete default Python suite as the final Slices 1-4 gate.
+
+Planned files:
+
+- `tools/pi_development_workflow.py`
+- `tools/run_pi_development.ps1`
+- `tools/run_development_app.py`
+- `FreeRTOS-interface/App.py`
+- `FreeRTOS-interface/MachineDataDevelopment.py`
+- `tests/test_pi_development_workflow.py`
+- `tests/test_development_app_launcher.py`
+- `tests/test_app_machine_data_bootstrap.py`
+- `tests/test_machine_data_development.py`
+- this live document and `README.md`
+
 ### Exit criteria
 
 - The Pi displays the application from the exact development commit using the
@@ -529,11 +579,34 @@ commit, shared interpreter, explicit development data, and simulated machine.
 
 ### Implementation record
 
-Not started.
+Implementation complete; exact feature-branch commit pending.
+
+- Added a Windows `Launch` action with visible and offscreen modes, bounded
+  timeout/qualification auto-close controls, persisted-binding-only selection,
+  and no hardware-enable option.
+- Added a Pi launch supervisor that revalidates the exact commit/config/store,
+  runs the development launcher with the shared interpreter, records external
+  logs/PIDs/receipts, and limits timeout cleanup to its owned process group.
+- The offscreen lane uses Bubblewrap (`--unshare-all`, private `/dev`, read-only
+  host root) and both lanes use `strace` to reject physical-device/DFU access.
+- The application records a runtime receipt only after proving
+  `SimulatedMachine`, all seven blocked peripheral factories, no hardware
+  authorization, and updater-disabled composition. Qt state is isolated under
+  the development store.
+- Local postflight includes the production checkout/source machine data,
+  development checkout, retained worktrees, shared interpreter, persisted
+  binding, and process state. Only declared development session/runtime files
+  may change.
 
 ### Validation record
 
-Not run.
+- Focused Windows validation passed: `70 passed in 3.08s` across
+  `test_pi_development_workflow.py`, `test_development_app_launcher.py`,
+  `test_machine_data_development.py`, and
+  `test_app_machine_data_bootstrap.py`.
+- The complete default suite is intentionally deferred until the final Slice 4
+  gate, per the operator's 2026-08-21 test policy.
+- Exact-commit Pi offscreen/visible qualification is pending.
 
 ## Slice 5 - Isolated development firmware HIL
 
@@ -611,6 +684,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Began Slice 3 shared-runtime and external development-data binding; focused validation passed and Pi qualification remains. |
 | 2026-08-21 | Slice 3 Pi Configure failed safely before writing configuration, revealing and correcting venv-symlink resolution; focused correction tests passed. |
 | 2026-08-21 | Verified Slice 3 after corrected create, path-free validation, idempotent reuse, shared-environment fingerprinting, and direct production/development data-tree invariance passed on LC-001. |
+| 2026-08-21 | Began Slice 4 no-hardware development launch implementation with offscreen sandbox/trace proof and a visible traced smoke lane. |
 
 ## Goal prompt for Slices 1-4
 

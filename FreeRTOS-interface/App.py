@@ -24,6 +24,9 @@ UI_FREEZE_DIAGNOSTIC_LOG_FILENAME = "ui-freeze-diagnostics.log"
 UI_FREEZE_WATCHDOG_INTERVAL_MS = 500
 UI_FREEZE_WATCHDOG_STALL_SECONDS = 5.0
 UI_FREEZE_WATCHDOG_REPEAT_SECONDS = 30.0
+DEVELOPMENT_AUTOCLOSE_MS_ENV = "LABCRAFT_DEVELOPMENT_AUTOCLOSE_MS"
+DEVELOPMENT_AUTOCLOSE_MIN_MS = 500
+DEVELOPMENT_AUTOCLOSE_MAX_MS = 600_000
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -197,6 +200,27 @@ def install_ui_freeze_watchdog(
     app._labcraft_ui_freeze_watchdog = thread
     return timer, thread
 
+
+def development_autoclose_delay_ms(environment, development_launch):
+    text = str(environment.get(DEVELOPMENT_AUTOCLOSE_MS_ENV, "")).strip()
+    if not text:
+        return None
+    if development_launch is None or bool(development_launch.hardware_enabled):
+        raise RuntimeError(
+            f"{DEVELOPMENT_AUTOCLOSE_MS_ENV} is allowed only for no-hardware development."
+        )
+    try:
+        delay = int(text)
+    except ValueError as exc:
+        raise RuntimeError(f"{DEVELOPMENT_AUTOCLOSE_MS_ENV} must be an integer.") from exc
+    if not DEVELOPMENT_AUTOCLOSE_MIN_MS <= delay <= DEVELOPMENT_AUTOCLOSE_MAX_MS:
+        raise RuntimeError(
+            f"{DEVELOPMENT_AUTOCLOSE_MS_ENV} must be between "
+            f"{DEVELOPMENT_AUTOCLOSE_MIN_MS} and {DEVELOPMENT_AUTOCLOSE_MAX_MS}."
+        )
+    return delay
+
+
 def main():
     app = QApplication(sys.argv)
     configure_app_identity(app)
@@ -210,6 +234,7 @@ def main():
     components = None
     authorized_context = None
     development_launch = None
+    development_session_path = None
     try:
         # Bootstrap-safe presentation only. Production composition, Settings,
         # MVC, serial, camera, balance, and Machine imports happen later.
@@ -245,6 +270,7 @@ def main():
             if str(os.environ.get("LABCRAFT_DEPLOYMENT_MODE", "")).strip():
                 from MachineDataDevelopment import (
                     development_launch_from_environment,
+                    record_no_hardware_runtime_evidence,
                     record_development_session,
                 )
 
@@ -272,12 +298,15 @@ def main():
                         f"production store ({inspection.state.value})."
                     )
                 authorized_context = bootstrap.open_ready()
-                session_path = record_development_session(
+                development_session_path = record_development_session(
                     development_launch,
                     app_version=app_version,
                     app_commit=app_commit,
                 )
-                print(f"Development session evidence: {session_path}", flush=True)
+                print(
+                    f"Development session evidence: {development_session_path}",
+                    flush=True,
+                )
         except Exception as exc:
             code = str(getattr(exc, "code", "bootstrap_failed"))
             QMessageBox.critical(
@@ -360,6 +389,35 @@ def main():
                 os.environ
             ),
         )
+        if development_launch is not None and not development_launch.hardware_enabled:
+            runtime_context = dependencies.runtime_context
+            peripheral_factories = {
+                "serial": dependencies.serial_factory.__name__,
+                "refuel_camera": dependencies.refuel_camera_factory.__name__,
+                "droplet_camera": dependencies.droplet_camera_factory.__name__,
+                "log_reader": dependencies.log_reader_factory.__name__,
+                "balance": dependencies.balance_factory.__name__,
+                "experimental_balance": (
+                    dependencies.experimental_balance_factory.__name__
+                ),
+                "legacy_calibration": (
+                    dependencies.legacy_calibration_model_factory.__name__
+                ),
+            }
+            runtime_evidence_path = record_no_hardware_runtime_evidence(
+                development_session_path,
+                app_commit=app_commit,
+                machine_type=type(components.machine).__name__,
+                runtime_mode=runtime_context.mode.value,
+                identity_text=runtime_context.identity_text,
+                hardware_access_allowed=runtime_context.hardware_access_allowed,
+                updater_access_allowed=runtime_context.updater_access_allowed,
+                peripheral_factories=peripheral_factories,
+            )
+            print(
+                f"Development runtime evidence: {runtime_evidence_path}",
+                flush=True,
+            )
         app.aboutToQuit.connect(components.close)
         view = components.view
 
@@ -371,6 +429,15 @@ def main():
 
         # Delay briefly so the splash can paint before the main window appears.
         QTimer.singleShot(100, show_main_window)
+        auto_close_ms = development_autoclose_delay_ms(
+            os.environ, development_launch
+        )
+        if auto_close_ms is not None:
+            QTimer.singleShot(auto_close_ms, app.quit)
+            print(
+                f"Development auto-close scheduled: {auto_close_ms} ms",
+                flush=True,
+            )
 
 
         # # Show the main window

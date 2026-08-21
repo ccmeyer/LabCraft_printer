@@ -32,6 +32,8 @@ DEVELOPMENT_STORE_SCHEMA_NAME = "labcraft.development_machine_data_store"
 DEVELOPMENT_STORE_SCHEMA_VERSION = 1
 DEVELOPMENT_SESSION_SCHEMA_NAME = "labcraft.development_session"
 DEVELOPMENT_SESSION_SCHEMA_VERSION = 1
+DEVELOPMENT_RUNTIME_SCHEMA_NAME = "labcraft.development_no_hardware_runtime"
+DEVELOPMENT_RUNTIME_SCHEMA_VERSION = 1
 DEVELOPMENT_STORE_FILENAME = "development_store.json"
 
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -400,12 +402,95 @@ def record_development_session(
     return path
 
 
+def record_no_hardware_runtime_evidence(
+    session_path: str | os.PathLike[str],
+    *,
+    app_commit: str,
+    machine_type: str,
+    runtime_mode: str,
+    identity_text: str,
+    hardware_access_allowed: bool,
+    updater_access_allowed: bool,
+    peripheral_factories: Mapping[str, str],
+    clock: Callable[[], str] = utc_now,
+) -> Path:
+    """Prove the development UI was composed without a hardware-capable path."""
+
+    source = _absolute_path(session_path, "Development session evidence")
+    if source.parent.name != "development_sessions" or not source.is_file():
+        raise DevelopmentStoreError("Development session evidence path is invalid.")
+    try:
+        session_id = str(UUID(source.stem))
+        session = json.loads(source.read_text(encoding="utf-8"))
+    except (ValueError, OSError, json.JSONDecodeError) as exc:
+        raise DevelopmentStoreError(
+            f"Development session evidence cannot be verified: {exc}"
+        ) from exc
+    if (
+        not isinstance(session, dict)
+        or session.get("schema_name") != DEVELOPMENT_SESSION_SCHEMA_NAME
+        or session.get("schema_version") != DEVELOPMENT_SESSION_SCHEMA_VERSION
+        or session.get("session_id") != session_id
+        or session.get("hardware_enabled") is not False
+        or session.get("app_commit") != str(app_commit)
+    ):
+        raise DevelopmentStoreError(
+            "Development session does not authorize no-hardware runtime evidence."
+        )
+    factories = dict(peripheral_factories)
+    expected_factories = {
+        "serial", "refuel_camera", "droplet_camera", "log_reader",
+        "balance", "experimental_balance", "legacy_calibration",
+    }
+    if set(factories) != expected_factories or any(
+        not isinstance(value, str) or not value.startswith("blocked_")
+        for value in factories.values()
+    ):
+        raise DevelopmentStoreError(
+            "Development peripheral factories are not all fail-closed."
+        )
+    if (
+        str(machine_type) != "SimulatedMachine"
+        or str(runtime_mode) != "development"
+        or hardware_access_allowed is not False
+        or updater_access_allowed is not False
+        or "DEVELOPMENT" not in str(identity_text)
+        or "NO HARDWARE" not in str(identity_text)
+    ):
+        raise DevelopmentStoreError(
+            "Development application composition is not no-hardware safe."
+        )
+    payload = {
+        "schema_name": DEVELOPMENT_RUNTIME_SCHEMA_NAME,
+        "schema_version": DEVELOPMENT_RUNTIME_SCHEMA_VERSION,
+        "session_id": session_id,
+        "session_evidence_path": str(source),
+        "session_evidence_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "store_id": session["store_id"],
+        "app_commit": str(app_commit),
+        "verified_at_utc": clock(),
+        "machine_type": str(machine_type),
+        "runtime_mode": str(runtime_mode),
+        "identity_text": str(identity_text),
+        "hardware_access_allowed": False,
+        "updater_access_allowed": False,
+        "peripheral_factories": factories,
+    }
+    destination = source.with_suffix(".runtime.json")
+    if destination.exists():
+        raise DevelopmentStoreError("Development runtime evidence already exists.")
+    _atomic_json(destination, payload)
+    return destination
+
+
 __all__ = [
     "DEVELOPMENT_HARDWARE_CONFIRMATION",
     "DEVELOPMENT_HARDWARE_CONFIRMATION_ENV",
     "DEVELOPMENT_HARDWARE_ENV",
     "DEVELOPMENT_MODE_ENV",
     "DEVELOPMENT_OPERATOR_ENV",
+    "DEVELOPMENT_RUNTIME_SCHEMA_NAME",
+    "DEVELOPMENT_RUNTIME_SCHEMA_VERSION",
     "DevelopmentLaunch",
     "DevelopmentStore",
     "DevelopmentStoreError",
@@ -413,4 +498,5 @@ __all__ = [
     "load_development_store",
     "prepare_development_store",
     "record_development_session",
+    "record_no_hardware_runtime_evidence",
 ]

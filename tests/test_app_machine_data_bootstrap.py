@@ -3,6 +3,8 @@ import sys
 import types
 from types import SimpleNamespace
 
+import pytest
+
 import App
 
 
@@ -42,6 +44,9 @@ class _Application:
     def exec(self):
         self.events.append("event_loop")
         return self.result
+
+    def quit(self):
+        self.events.append("app_quit")
 
 
 class _Lock:
@@ -338,6 +343,7 @@ def test_development_launch_requires_ready_store_skips_dialog_and_records_sessio
     events = []
     _patch_app_shell(monkeypatch, tmp_path, events)
     monkeypatch.setenv("LABCRAFT_DEPLOYMENT_MODE", "development")
+    monkeypatch.setenv("LABCRAFT_DEVELOPMENT_AUTOCLOSE_MS", "750")
     monkeypatch.setattr(App, "get_app_version", lambda _root: "v1.3.0-dev")
     monkeypatch.setattr(App, "get_app_commit", lambda _root: "d" * 40)
 
@@ -394,13 +400,42 @@ def test_development_launch_requires_ready_store_skips_dialog_and_records_sessio
         events.append(("development_session", supplied, kwargs))
         or tmp_path / "session.json"
     )
+    development.record_no_hardware_runtime_evidence = (
+        lambda path, **kwargs: (
+            events.append(("development_runtime", path, kwargs))
+            or tmp_path / "session.runtime.json"
+        )
+    )
     monkeypatch.setitem(sys.modules, "MachineDataDevelopment", development)
 
     composition = types.ModuleType("ApplicationComposition")
     composition.ExperimentalFeatures = SimpleNamespace(
         from_environment=lambda _environment: object()
     )
-    dependencies = object()
+    def blocked_factory(name):
+        def blocked(*_args, **_kwargs):
+            raise AssertionError("blocked factory must not be called")
+
+        blocked.__name__ = f"blocked_{name}"
+        return blocked
+
+    dependencies = SimpleNamespace(
+        runtime_context=SimpleNamespace(
+            mode=SimpleNamespace(value="development"),
+            identity_text="DEVELOPMENT BUILD — NO HARDWARE CONNECTED",
+            hardware_access_allowed=False,
+            updater_access_allowed=False,
+        ),
+        serial_factory=blocked_factory("serial_access"),
+        refuel_camera_factory=blocked_factory("refuel_camera_access"),
+        droplet_camera_factory=blocked_factory("droplet_camera_access"),
+        log_reader_factory=blocked_factory("log_reader_access"),
+        balance_factory=blocked_factory("balance_access"),
+        experimental_balance_factory=blocked_factory("experimental_balance_access"),
+        legacy_calibration_model_factory=blocked_factory(
+            "legacy_calibration_hardware_access"
+        ),
+    )
     composition.production_dependencies = lambda _context: (_ for _ in ()).throw(
         AssertionError("production dependencies must not be used")
     )
@@ -422,6 +457,7 @@ def test_development_launch_requires_ready_store_skips_dialog_and_records_sessio
     class Components:
         def __init__(self):
             self.view = view
+            self.machine = type("SimulatedMachine", (), {})()
 
         def close(self):
             context.close()
@@ -441,11 +477,40 @@ def test_development_launch_requires_ready_store_skips_dialog_and_records_sessio
         lambda _pixmap: SimpleNamespace(show=lambda: None, finish=lambda _view: None),
     )
     monkeypatch.setattr(App, "QPixmap", lambda _path: object())
-    monkeypatch.setattr(App.QTimer, "singleShot", lambda _delay, callback: callback())
+    monkeypatch.setattr(
+        App.QTimer,
+        "singleShot",
+        lambda delay, callback: (events.append(("timer", delay)), callback()),
+    )
     monkeypatch.setattr(App, "install_ui_freeze_watchdog", lambda _app: None)
 
     assert App.main() == 0
     assert events.index("development_inspected") < events.index("development_open_ready")
     assert any(isinstance(event, tuple) and event[0] == "development_session" for event in events)
+    assert any(isinstance(event, tuple) and event[0] == "development_runtime" for event in events)
     assert ("development_dependencies", False) in events
     assert "unexpected_update_result" not in events
+    assert ("timer", 750) in events
+    assert "app_quit" in events
+
+
+def test_development_autoclose_is_bounded_and_no_hardware_only():
+    launch = SimpleNamespace(hardware_enabled=False)
+    assert App.development_autoclose_delay_ms({}, launch) is None
+    assert App.development_autoclose_delay_ms(
+        {App.DEVELOPMENT_AUTOCLOSE_MS_ENV: "500"}, launch
+    ) == 500
+    for value in ("not-an-int", "499", "600001"):
+        with pytest.raises(RuntimeError):
+            App.development_autoclose_delay_ms(
+                {App.DEVELOPMENT_AUTOCLOSE_MS_ENV: value}, launch
+            )
+    with pytest.raises(RuntimeError, match="no-hardware development"):
+        App.development_autoclose_delay_ms(
+            {App.DEVELOPMENT_AUTOCLOSE_MS_ENV: "1000"}, None
+        )
+    with pytest.raises(RuntimeError, match="no-hardware development"):
+        App.development_autoclose_delay_ms(
+            {App.DEVELOPMENT_AUTOCLOSE_MS_ENV: "1000"},
+            SimpleNamespace(hardware_enabled=True),
+        )

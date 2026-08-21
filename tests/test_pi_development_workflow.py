@@ -155,6 +155,7 @@ def test_embedded_pi_programs_compile():
     compile(workflow.REMOTE_COLLECTOR, "REMOTE_COLLECTOR", "exec")
     compile(workflow.REMOTE_SYNC, "REMOTE_SYNC", "exec")
     compile(workflow.REMOTE_RUNTIME_CONFIG, "REMOTE_RUNTIME_CONFIG", "exec")
+    compile(workflow.REMOTE_LAUNCH, "REMOTE_LAUNCH", "exec")
 
 
 def test_absent_development_worktree_is_ready_with_warning():
@@ -829,3 +830,182 @@ def test_cli_runtime_failure_writes_evidence(monkeypatch, tmp_path):
     assert result == 1
     report = json.loads(next(tmp_path.rglob("status.json")).read_text(encoding="utf-8"))
     assert report["runtime"] == {"status": "failed", "error": "dependency mismatch"}
+
+
+def test_launch_remote_app_uses_bounded_no_hardware_supervisor(monkeypatch):
+    captured = {}
+
+    def fake_run(arguments, **kwargs):
+        captured["arguments"] = list(arguments)
+        captured["input"] = kwargs["input_text"]
+        captured["timeout"] = kwargs["timeout_seconds"]
+        return subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps({
+                "status": "passed",
+                "launch_mode": "offscreen",
+                "report_path": "/evidence/launch.json",
+            }), stderr=""
+        )
+
+    monkeypatch.setattr(workflow, "_run", fake_run)
+    result = workflow.launch_remote_app(
+        pi_host="pi-test",
+        pi_user="labcraft",
+        identity_file=None,
+        production_repo=workflow.DEFAULT_PRODUCTION_REPO,
+        development_repo=workflow.DEFAULT_DEVELOPMENT_REPO,
+        shared_python=workflow.DEFAULT_SHARED_PYTHON,
+        workflow_config=workflow.DEFAULT_WORKFLOW_CONFIG,
+        operator="Conary-Codex",
+        expected_commit="a" * 40,
+        expected_production_head="b" * 40,
+        expected_production_branch="protected-update-rc5",
+        launch_mode="offscreen",
+        auto_close_seconds=3.0,
+        launch_timeout_seconds=60,
+        remote_session_root=workflow.DEFAULT_REMOTE_SESSION_ROOT,
+    )
+    request = json.loads(
+        base64.urlsafe_b64decode(captured["arguments"][-1]).decode("utf-8")
+    )
+    assert result["status"] == "passed"
+    assert request["launch_mode"] == "offscreen"
+    assert request["auto_close_seconds"] == 3.0
+    assert request["remote_session_root"] == workflow.DEFAULT_REMOTE_SESSION_ROOT
+    assert "enable_hardware" not in request
+    assert captured["timeout"] == 105
+    assert '"bwrap", "--unshare-all"' in captured["input"]
+    assert '"strace", "-f"' in captured["input"]
+    assert 'start_new_session=True' in captured["input"]
+    assert "forbidden_hardware_matches" in captured["input"]
+    assert "SimulatedMachine" in captured["input"]
+
+
+@pytest.mark.parametrize(
+    ("updates", "message"),
+    [
+        ({"launch_mode": "hardware"}, "Unsupported launch mode"),
+        ({"operator": "  "}, "operator"),
+        ({"auto_close_seconds": 0.1}, "Auto-close"),
+        ({"launch_timeout_seconds": 9}, "timeout"),
+        ({"remote_session_root": "/home/labcraft"}, "external"),
+    ],
+)
+def test_launch_remote_app_rejects_unsafe_contract(monkeypatch, updates, message):
+    arguments = {
+        "pi_host": "pi-test",
+        "pi_user": "labcraft",
+        "identity_file": None,
+        "production_repo": workflow.DEFAULT_PRODUCTION_REPO,
+        "development_repo": workflow.DEFAULT_DEVELOPMENT_REPO,
+        "shared_python": workflow.DEFAULT_SHARED_PYTHON,
+        "workflow_config": workflow.DEFAULT_WORKFLOW_CONFIG,
+        "operator": "Conary-Codex",
+        "expected_commit": "a" * 40,
+        "expected_production_head": "b" * 40,
+        "expected_production_branch": "protected-update-rc5",
+        "launch_mode": "offscreen",
+        "auto_close_seconds": 3.0,
+        "launch_timeout_seconds": 60,
+        "remote_session_root": workflow.DEFAULT_REMOTE_SESSION_ROOT,
+    }
+    arguments.update(updates)
+    monkeypatch.setattr(
+        workflow, "_run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("no SSH")),
+    )
+    with pytest.raises(workflow.WorkflowError, match=message):
+        workflow.launch_remote_app(**arguments)
+
+
+def test_launch_invariant_excludes_only_development_runtime_writes():
+    before = _runtime_ready_remote(configured=True, selection_source="configured")
+    after = json.loads(json.dumps(before))
+    after["development_machine_data"]["selected"]["development_tree_evidence"][
+        "tree_sha256"
+    ] = "9" * 64
+    assert workflow.canonical_sha256(workflow.launch_invariant_payload(before)) == (
+        workflow.canonical_sha256(workflow.launch_invariant_payload(after))
+    )
+    after["development_machine_data"]["selected"]["source_tree_evidence"][
+        "tree_sha256"
+    ] = "8" * 64
+    assert workflow.canonical_sha256(workflow.launch_invariant_payload(before)) != (
+        workflow.canonical_sha256(workflow.launch_invariant_payload(after))
+    )
+
+
+def test_cli_launch_validates_then_launches_and_proves_invariants(monkeypatch, tmp_path):
+    states = iter([
+        _runtime_ready_remote(configured=True, selection_source="configured"),
+        _runtime_ready_remote(configured=True, selection_source="configured"),
+        _runtime_ready_remote(configured=True, selection_source="configured"),
+    ])
+    calls = []
+    monkeypatch.setattr(workflow, "collect_local_state", lambda *_: _local())
+    monkeypatch.setattr(workflow, "collect_remote_state", lambda **_: next(states))
+    monkeypatch.setattr(
+        workflow, "configure_remote_runtime",
+        lambda **kwargs: calls.append(("validate", kwargs)) or {
+            "action": "validated", "config_path": workflow.DEFAULT_WORKFLOW_CONFIG,
+        },
+    )
+    monkeypatch.setattr(
+        workflow, "launch_remote_app",
+        lambda **kwargs: calls.append(("launch", kwargs)) or {
+            "status": "passed", "launch_mode": "offscreen",
+            "report_path": "/evidence/launch.json", "report_sha256": "e" * 64,
+        },
+    )
+    result = workflow.main([
+        "--action", "launch", "--pi-host", "pi-test",
+        "--operator", "Conary-Codex", "--auto-close-seconds", "3",
+        "--launch-timeout-seconds", "60", "--output-root", str(tmp_path),
+    ])
+    assert result == 0
+    assert [name for name, _kwargs in calls] == ["validate", "launch"]
+    assert calls[0][1]["mode"] == "validate"
+    assert calls[1][1]["auto_close_seconds"] == 3.0
+    report = json.loads(next(tmp_path.rglob("status.json")).read_text(encoding="utf-8"))
+    assert report["launch"]["status"] == "passed"
+    assert report["launch"]["pre_invariant_sha256"] == report["launch"]["post_invariant_sha256"]
+
+
+def test_cli_launch_rejects_explicit_store_and_writes_evidence(monkeypatch, tmp_path):
+    monkeypatch.setattr(workflow, "collect_local_state", lambda *_: _local())
+    monkeypatch.setattr(
+        workflow, "collect_remote_state",
+        lambda **_: _runtime_ready_remote(configured=True, selection_source="configured"),
+    )
+    monkeypatch.setattr(
+        workflow, "launch_remote_app",
+        lambda **_: (_ for _ in ()).throw(AssertionError("launch must not run")),
+    )
+    result = workflow.main([
+        "--action", "launch", "--pi-host", "pi-test",
+        "--development-machine-data-root", "/machine-data/dev",
+        "--output-root", str(tmp_path),
+    ])
+    assert result == 2
+    report = json.loads(next(tmp_path.rglob("status.json")).read_text(encoding="utf-8"))
+    assert "persisted workflow configuration" in report["launch"]["error"]
+
+
+def test_powershell_wrapper_exposes_slice4_no_hardware_launch():
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("PowerShell is unavailable")
+    result = subprocess.run(
+        [
+            powershell, "-ExecutionPolicy", "Bypass", "-File", str(WRAPPER_PATH),
+            "-Action", "Launch", "-PiHost", "pi-test", "-LaunchMode", "Offscreen",
+            "-AutoCloseSeconds", "3", "-LaunchTimeoutSeconds", "60", "-DryRun",
+        ],
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "DRY RUN action=launch" in result.stdout
+    assert "Launch mode: offscreen" in result.stdout
+    assert "Auto-close seconds: 3" in result.stdout
+    assert "Launch timeout seconds: 60" in result.stdout
+    assert workflow.DEFAULT_REMOTE_SESSION_ROOT in result.stdout
