@@ -36,7 +36,7 @@ evidence are recorded here.
 | --- | --- | --- | --- | --- |
 | 1 | Read-only Windows/Pi status and preflight | `verified` | `e58129b3` | 24 focused and 5,485 full-suite tests; clean/pushed Pi Preflight and exact read-only invariance passed |
 | 2 | Create and synchronize the Pi development worktree | `verified` | `4bef5790` | 32 focused tests; Pi create, idempotent reuse, unregistered-path refusal, and protected invariance passed |
-| 3 | Bind the shared interpreter and development machine data | `planned` | Not started | Not run |
+| 3 | Bind the shared interpreter and development machine data | `in_progress` | Implementation and focused validation active | 44 focused tests passed; Pi qualification pending |
 | 4 | Launch and qualify the no-hardware development app | `planned` | Not started | Not run |
 | 5 | Build, flash, and qualify committed development firmware | `planned` | Not started | Not run |
 | 6 | Launch an attended real-hardware development session | `planned` | Not started | Not run |
@@ -360,7 +360,7 @@ success.
 
 ## Slice 3 - Shared runtime and development-data binding
 
-Status: `planned`
+Status: `in_progress`
 
 ### Objective
 
@@ -387,6 +387,46 @@ all later development launches.
 - Reject production data, checkout-local data, missing markers, multiple
   candidates, dependency mismatch, or shared-environment drift.
 
+### Implementation
+
+Call path:
+
+```text
+Windows run_pi_development.ps1 Configure|Validate
+  -> pi_development_workflow.py local and Pi preflight
+  -> exact detached development commit
+  -> tracked dependency-manifest comparison
+  -> shared production Python read-only checks
+  -> development-store marker, active pointer, and identity checks
+  -> atomic external workflow configuration
+  -> postflight and protected-invariant comparison
+```
+
+1. Extend the wrapper and Python CLI with explicit `Configure` and `Validate`
+   actions, workflow-config path, operator identity, and sanitized dry-run
+   output.
+2. Extend read-only Pi collection to inspect the external configuration and use
+   its exact store path after configuration; never silently fall back when an
+   existing configuration is invalid.
+3. Require a clean detached development worktree at the exact clean/pushed
+   Windows commit and no relevant application or hardware workflow process.
+4. Compare the complete tracked root dependency-file inventory and SHA-256
+   evidence between production and development before sharing the interpreter.
+5. Run version, `pip check`, bounded imports, and installed-distribution
+   fingerprints without invoking any install/update/remove operation.
+6. Revalidate the store marker provenance, authorized active pointer, matching
+   machine identity, UUIDs, hashes, and path separation at the write boundary.
+7. Atomically create the external schema-v1 binding, refuse to overwrite a
+   differing or invalid binding, and prove production/data/environment
+   invariants in local JSON evidence.
+
+Planned files:
+
+- `tools/run_pi_development.ps1`
+- `tools/pi_development_workflow.py`
+- `tests/test_pi_development_workflow.py`
+- this live document and `README.md`
+
 ### Exit criteria
 
 - Same-dependency development commits reuse
@@ -400,11 +440,18 @@ all later development launches.
 
 ### Implementation record
 
-Not started.
+Implementation is active on `feature/pi-development-workflow`. The focused
+behavior and failure-path test gate currently passes; exact-commit Pi
+configuration and validation remain before the implementation commit can be
+marked verified.
 
 ### Validation record
 
-Not run.
+- `env\\Scripts\\python.exe -m pytest -q --basetemp verification_reports\\development-workflow\\pytest-temp\\slice3-final-20260821-01 tests\\test_pi_development_workflow.py`:
+  44 passed in 1.27 seconds.
+- The complete default suite remains deferred to final Slice 4 validation per
+  the operator's 2026-08-21 direction.
+- Pi qualification pending.
 
 ## Slice 4 - No-hardware development launch
 
@@ -520,6 +567,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Began Slice 2 exact-commit development-worktree synchronization implementation. |
 | 2026-08-21 | Completed Slice 2 implementation and focused validation; deferred the full suite to final Slice 4 per operator direction. |
 | 2026-08-21 | Published `4bef5790` and marked Slice 2 verified after Pi create/reuse/refusal and protected-invariance gates passed. |
+| 2026-08-21 | Began Slice 3 shared-runtime and external development-data binding; focused validation passed and Pi qualification remains. |
 
 ## Goal prompt for Slices 1-4
 

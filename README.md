@@ -109,6 +109,54 @@ retained worktrees, shared interpreter, running processes, and development
 machine-data evidence did not change. It never resets, cleans, deletes, or
 switches the protected production worktree.
 
+After the first successful `Sync`, bind the shared interpreter and the intended
+development store explicitly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\run_pi_development.ps1 `
+  -Action Configure `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -DevelopmentMachineDataRoot "/home/labcraft/.local/share/LabCraft/LabCraft Printer/development/main-65ba38df-machine-data" `
+  -Operator "Operator Name"
+```
+
+`Configure` requires the Pi development worktree to be clean, detached, and at
+the exact pushed Windows commit. It confirms that the tracked root dependency
+files are byte-identical in the production and development commits, runs the
+production interpreter's version check, `pip check`, and bounded imports, and
+fingerprints the installed distributions before and after. It never invokes a
+package installer. It also revalidates the development-store marker, authorized
+active pointer, and matching machine identity before atomically creating:
+
+```text
+/home/labcraft/.config/LabCraft/development_workflow.json
+```
+
+The external file contains only explicit paths, machine/store identifiers,
+dependency evidence, and configuration provenance. It is outside every Git
+worktree, so a branch or checkout change cannot redirect the development app to
+another store. An existing different or invalid file is never overwritten.
+
+On later sessions, validate and reuse that binding without repeating or guessing
+the machine-data path:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\run_pi_development.ps1 `
+  -Action Validate `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -Operator "Operator Name"
+```
+
+If validation reports a dependency mismatch, do not install packages into the
+shared production environment. Either restore matching dependency declarations
+for this workflow or use a later, separately approved isolated-environment
+workflow. If configuration or store evidence is invalid, preserve the JSON
+report under `verification_reports/development-workflow/status/` and investigate
+the named mismatch; the tool does not repair, replace, or fall back to another
+store.
+
 Do not switch a deployed production checkout to an arbitrary development commit
 and launch it against the production machine-data root. Production stores are
 bound to the exact commit authorized by the protected updater.

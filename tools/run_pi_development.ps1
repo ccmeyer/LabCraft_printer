@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [ValidateSet("Status", "Preflight", "Sync")]
+  [ValidateSet("Status", "Preflight", "Sync", "Configure", "Validate")]
   [string]$Action = "Status",
 
   [Parameter(Mandatory = $true)]
@@ -12,6 +12,8 @@ param(
   [string]$DevelopmentRepo = "/home/labcraft/LabCraft_printer-dev",
   [string]$SharedPython = "/home/labcraft/LabCraft_printer/env/bin/python",
   [string]$DevelopmentMachineDataRoot = "",
+  [string]$WorkflowConfig = "/home/labcraft/.config/LabCraft/development_workflow.json",
+  [string]$Operator = $env:USERNAME,
   [string]$OutputRoot = "verification_reports/development-workflow/status",
   [switch]$DryRun
 )
@@ -47,6 +49,8 @@ $arguments = @(
   "--production-repo", $ProductionRepo,
   "--development-repo", $DevelopmentRepo,
   "--shared-python", $SharedPython,
+  "--workflow-config", $WorkflowConfig,
+  "--operator", $Operator,
   "--output-root", $OutputRoot
 )
 if (-not [string]::IsNullOrWhiteSpace($SshIdentityFile)) {
