@@ -1,10 +1,10 @@
 # Pi Development Worktree and Qualification Workflow
 
-Status: `verified` for current Slices 1-4 target
+Status: `in_progress` for Slices 5-7
 
 Prepared: 2026-08-21
 
-Current implementation target: Slices 1-4 complete
+Current implementation target: Slices 5-7; Slices 1-4 remain verified
 
 ## Purpose
 
@@ -38,7 +38,7 @@ evidence are recorded here.
 | 2 | Create and synchronize the Pi development worktree | `verified` | `4bef5790` | 32 focused tests; Pi create, idempotent reuse, unregistered-path refusal, and protected invariance passed |
 | 3 | Bind the shared interpreter and development machine data | `verified` | `733f9e77`, `fd2fc5e4`, `6756b5a0` | 45 focused tests; Pi create/reuse/path-free validation, dependency/environment/data invariance passed |
 | 4 | Launch and qualify the no-hardware development app | `verified` | `c9ed2fda`, `eb4d8fcd` | 72 focused and 5,522 full-suite tests; exact-commit offscreen/visible no-hardware Pi launches and protected invariance passed |
-| 5 | Build, flash, and qualify committed development firmware | `planned` | Not started | Not run |
+| 5 | Build, flash, and qualify committed development firmware | `in_progress` | Concrete plan recorded | Focused, firmware, and autonomous Pi round-trip qualification pending |
 | 6 | Launch an attended real-hardware development session | `planned` | Not started | Not run |
 | 7 | Track and restore released firmware state | `planned` | Not started | Not run |
 | 8 | Complete the end-to-end workflow qualification and runbook | `planned` | Not started | Not run |
@@ -639,14 +639,118 @@ Implemented by `c9ed2fda` with the eager-DFU-probe correction in `eb4d8fcd`.
 
 ## Slice 5 - Isolated development firmware HIL
 
-Status: `planned`
+Status: `in_progress`
 
 Harden the existing Windows firmware HIL path so it uses the committed binary
 from the exact development worktree, verifies Windows/Pi SHA-256 identity,
 writes reports outside Git, defaults to SAFE, and never uploads or writes into
 the production checkout. This is the first slice allowed to flash firmware and
-will require separate attended authorization and a known-good released binary
-for rollback.
+uses the operator-authorized unattended SAFE-only lane, and requires a
+known-good released binary for rollback.
+
+### Call path
+
+```text
+Windows development-firmware wrapper
+  -> exact clean/pushed feature commit and tracked artifact
+  -> external-evidence SSH supervisor
+  -> clean/detached Pi development worktree at the exact commit
+  -> development flash_and_test.sh with exact SAFE-only arguments
+  -> DFU BOOT/RESET and exact development firmware artifact
+  -> tools/run_selftest.py --profile SAFE
+  -> strict SAFE report/gated-actuation validator
+  -> verified rc.5 tag/protected recovery artifact
+  -> second DFU flash and SAFE validation
+  -> released-firmware postcondition and protected invariance
+```
+
+### Concrete implementation plan
+
+1. Add a strict SAFE contract/report validator that requires profile `SAFE`, a
+   passing non-aborted report, the known non-actuating result inventory, and
+   `profile=SAFE`, `executed=0`, `gate=safe_only` plus zero actuation metrics
+   for every motion/pressure/valve/pulse/FULL gate.
+2. Add a Windows-to-Pi firmware supervisor and PowerShell wrapper that expose
+   only the autonomous round-trip action and write all session inputs, logs,
+   reports, and receipts beneath external development-workflow roots.
+3. Require a clean/pushed Windows commit, clean/detached exact Pi development
+   commit, tracked byte-identical Windows/Pi development artifact, and a
+   release tag/manifest/protected-checkout recovery artifact with matching
+   SHA-256 before the first flash.
+4. Reuse the Slice 1-4 production/data/environment/process inventory and fail
+   closed on dirty worktrees, ambiguous bindings, package drift, or a running
+   app/updater/DFU/HIL process.
+5. Invoke only the exact development `flash_and_test.sh` with `--profile SAFE`,
+   no selector/benchmark/FULL flags, explicit artifact/report/log/DFU paths,
+   and bounded timeouts; validate its structured report.
+6. Once a development flash starts, always attempt the prevalidated released
+   artifact restore and require a second valid SAFE report before returning
+   success or moving to another slice.
+7. Add focused success, provenance/hash/refusal, mislabeled-actuation,
+   development-failure, restore-failure, process, and invariance tests; update
+   operator documentation and set the legacy general HIL wrapper default to
+   SAFE.
+8. Run focused tests and required firmware checks/build, commit/push/sync the
+   exact feature revision, then perform the autonomous LC-001 development SAFE
+   and released-restore SAFE qualification with sealed evidence.
+
+Planned files:
+
+- `tools/firmware_safe_hil.py`
+- `tools/pi_development_firmware.py`
+- `tools/run_pi_development_firmware.ps1`
+- `firmware/scripts/run_fw_hil_windows.ps1`
+- `tests/test_firmware_safe_hil.py`
+- `tests/test_pi_development_firmware.py`
+- `README.md`
+- this live document
+
+### Implementation record
+
+- Added `tools/firmware_safe_hil.py`, a dependency-free validator for both the
+  committed source contract and the exact plain-SAFE report inventory. It
+  rejects FULL, selectors/extra IDs, missing terminal rows, failed/aborted
+  runs, any executed FULL gate, any nonzero actuation metric, and an armed or
+  faulted flash path.
+- Added `tools/pi_development_firmware.py` and the PowerShell wrapper. They bind
+  the Windows artifact to exact HEAD, the recovery artifact to the rc.5 tag,
+  release manifest, and protected-checkout bytes, then supervise only a fixed
+  development SAFE -> released restore SAFE sequence with external evidence.
+- The remote supervisor rechecks clean exact worktrees, the persisted workflow
+  binding, interpreter, serial port, `dfu-util`, artifact bytes, release
+  provenance, and conflicting processes immediately before flashing. Once the
+  development stage starts, released restoration runs from `finally` even when
+  development flash/SAFE fails.
+- Changed the legacy general HIL wrapper default from FULL to SAFE and
+  documented why it remains unsuitable for the isolated autonomous lane.
+- Added focused behavior-lock tests for the SAFE inventory, gate/flash metrics,
+  release provenance, external paths, fixed remote command, mandatory restore,
+  wrapper dry-run, and legacy default.
+
+### Validation record
+
+- Read-only baseline:
+  `verification_reports/development-workflow/status/20260821T172150640478Z_e74a4d19c7d1/status.json`.
+- Development, protected-checkout, and rc.5-tag artifacts are currently
+  byte-identical at SHA-256
+  `eda070ce734d5167f0795faf30df461c8a07341e09ca698de9d850315b0d5884`.
+- Source inspection proves default SAFE selects profile value `0`; firmware
+  treats only value `1` as FULL. SAFE reports the eleven FULL actuation rows as
+  `executed=0` with zero motion/pressure/valve/pulse/abort metrics.
+- Focused Slice 5 tests: 19 passed. The first combined rerun reached 18 passes
+  before Windows denied pytest's shared temporary root; the exact rerun with a
+  unique explicit test-data directory passed 19/19.
+- Existing workflow plus SAFE-contract regression gate: 64 passed.
+- Required firmware checks: 461/461 host tests passed; Debug headless build
+  completed with zero errors and copied the same-build artifact to the tracked
+  artifact path. The sandboxed first attempt was blocked by Visual Studio
+  FileTracker access; the identical approved unsandboxed command passed.
+- The rebuilt development artifact SHA-256 is
+  `f8aa5080f387b8abb982e8afda156550295d0992b8e2ac919dd7b101da207842`;
+  the independently bound rc.5 recovery artifact remains
+  `eda070ce734d5167f0795faf30df461c8a07341e09ca698de9d850315b0d5884`.
+- Exact commit/push/sync and autonomous Pi development SAFE -> released SAFE
+  qualification remain pending.
 
 ## Slice 6 - Attended hardware development launch
 
@@ -686,6 +790,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Keep machine data outside all worktrees and pass the development root explicitly. | Worktree switching cannot select or seed machine-specific configuration. |
 | 2026-08-21 | Make no-hardware the only launch through Slice 4. | Worktree/runtime/data orchestration can be qualified before any physical capability is introduced. |
 | 2026-08-21 | Keep firmware flashing separate from the development app launcher. | The installed STM32 image is global machine state and requires an attended HIL and rollback path. |
+| 2026-08-21 | Permit unattended firmware flashing only for exact development/released artifacts followed by the non-actuating SAFE profile and mandatory released restore. | The operator explicitly authorized DFU/BOOT/RESET/serial SAFE access while continuing to prohibit FULL, motion, pressure, camera, and balance activity. |
 | 2026-08-21 | Run focused tests for each remaining slice and defer the next complete default suite to final Slice 4 validation. | Avoid repeated six-minute full-suite runs while preserving one final broad regression gate. |
 | 2026-08-21 | Hash the complete production and development machine-data trees during workflow collection. | The current stores are only 4.3 MB/66 files and 3.2 MB/58 files, so direct content evidence is inexpensive and stronger than relying on creation-time marker provenance. |
 
@@ -717,6 +822,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Verified Slice 3 after corrected create, path-free validation, idempotent reuse, shared-environment fingerprinting, and direct production/development data-tree invariance passed on LC-001. |
 | 2026-08-21 | Began Slice 4 no-hardware development launch implementation with offscreen sandbox/trace proof and a visible traced smoke lane. |
 | 2026-08-21 | Published `c9ed2fda`, found and corrected the fail-closed eager DFU probe in `eb4d8fcd`, then passed focused, offscreen, visible, protected-invariance, and corrected full-suite gates; marked Slice 4 verified. |
+| 2026-08-21 | Began Slice 5 isolated SAFE-only development-firmware round-trip implementation after confirming exact artifact and SAFE non-actuation contracts. |
 
 ## Goal prompt for Slices 1-4
 

@@ -210,6 +210,52 @@ the cleanup actions; do not kill unrelated Pi processes or bypass a failed
 postflight. Install `bubblewrap` and `strace` through the documented Pi setup if
 the offscreen lane reports either prerequisite missing.
 
+### SAFE development-firmware round trip
+
+After the exact feature commit has been built, committed, pushed, and synced to
+the clean detached Pi development worktree, use the dedicated firmware wrapper:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\run_pi_development_firmware.ps1 `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -ReleasedTag v1.3.0-rc.5 `
+  -Operator "Operator Name"
+```
+
+This command has no FULL, selector, camera, or benchmark option. Before touching
+the MCU it requires clean/pushed Windows state, a clean detached Pi development
+worktree at the same commit, byte-identical tracked development firmware, a
+release manifest/tag/protected-checkout recovery artifact with identical
+SHA-256, a valid persisted development-store binding, the shared interpreter,
+`dfu-util`, the serial port, and no conflicting process. Reports and logs are
+written only beneath the external `development-workflow/firmware-sessions`
+directory on the Pi and `verification_reports/development-workflow/firmware/`
+on Windows.
+
+The fixed sequence is development flash, plain SAFE, released-artifact flash,
+and a second plain SAFE. The strict validator requires the exact 30-result SAFE
+inventory, verifies that all eleven FULL actuation rows were skipped with zero
+actuation metrics, and proves the flash session/output remained disarmed. Once
+the development flash begins, released restoration is attempted even if its
+SAFE run fails. Success means both SAFE stages passed, protected invariants are
+unchanged, and the final role is released. A restore failure is
+`recovery-required`; preserve its evidence and do not launch either app.
+
+Preview the fixed path without SSH or flashing:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\run_pi_development_firmware.ps1 `
+  -PiHost 192.168.0.33 `
+  -Operator "Operator Name" `
+  -DryRun
+```
+
+The older general-purpose `firmware/scripts/run_fw_hil_windows.ps1` now defaults
+to SAFE, but it is not the isolated development workflow: it can upload into
+the selected repository and still exposes FULL/actuating options. Do not use it
+for autonomous development qualification.
+
 Do not switch a deployed production checkout to an arbitrary development commit
 and launch it against the production machine-data root. Production stores are
 bound to the exact commit authorized by the protected updater.

@@ -4,7 +4,7 @@ param(
 
   [string]$PiUser = "labcraft",     # change if needed
   [string]$RemoteRepo = "/home/labcraft/LabCraft_printer",  # repo path on Pi
-  [string]$Profile = "FULL",
+  [string]$Profile = "SAFE",
   [ValidateSet("Full", "Bisect")]
   [string]$Mode = "Full",
   [string]$Port = "/dev/ttyAMA0",
