@@ -1,6 +1,6 @@
 # Pi Development Worktree and Qualification Workflow
 
-Status: `planned`
+Status: `in_progress`
 
 Prepared: 2026-08-21
 
@@ -34,7 +34,7 @@ evidence are recorded here.
 
 | Slice | Scope | Status | Implementation | Validation |
 | --- | --- | --- | --- | --- |
-| 1 | Read-only Windows/Pi status and preflight | `implementation_complete` | Candidate on `feature/pi-development-workflow`; publication pending | 24 focused and 5,485 full-suite tests passed; clean/pushed Pi invariance gate pending |
+| 1 | Read-only Windows/Pi status and preflight | `verified` | `e58129b3` | 24 focused and 5,485 full-suite tests; clean/pushed Pi Preflight and exact read-only invariance passed |
 | 2 | Create and synchronize the Pi development worktree | `planned` | Not started | Not run |
 | 3 | Bind the shared interpreter and development machine data | `planned` | Not started | Not run |
 | 4 | Launch and qualify the no-hardware development app | `planned` | Not started | Not run |
@@ -136,7 +136,7 @@ Windows wrapper
 
 ## Slice 1 - Read-only status and preflight
 
-Status: `implementation_complete`
+Status: `verified`
 
 ### Objective
 
@@ -266,8 +266,8 @@ Do not block for:
 
 ### Implementation record
 
-Implementation complete on `feature/pi-development-workflow`; dedicated
-commit created locally and awaiting publication. The implementation adds the thin PowerShell wrapper, Python
+Implemented and published in `e58129b3` on
+`feature/pi-development-workflow`. The implementation adds the thin PowerShell wrapper, Python
 status/preflight core, stdin-only remote collector, atomic ignored reports,
 failure-path tests, and README usage.
 
@@ -281,8 +281,17 @@ failure-path tests, and README usage.
 - A live read-only `Status` collection correctly identified LC-001, the clean
   protected rc.5 worktree, absent development worktree, two preserved retained
   worktrees, Python 3.11.2, and the authorized development store. It correctly
-  blocked the uncommitted/no-upstream candidate. Clean/pushed `Preflight` and
-  before/after invariance evidence remain required after the dedicated commit.
+  blocked the initial uncommitted/no-upstream candidate.
+- Clean/published `Preflight` at `e58129b3` exited 0. Evidence:
+  `verification_reports/development-workflow/status/20260821T151655634251Z_e58129b345a0/status.json`.
+  It reported only the expected absent-development-worktree and two retained
+  worktree warnings.
+- The canonical SHA-256 of the complete Pi section matched before and after
+  publication/Preflight:
+  `bfc6596e7b2ab6bfec037c8fcae7cebb3ed07d62106ee713bd8873dcccfe629a`.
+  Production remained clean at `34841fe0`, no application process appeared,
+  Python remained 3.11.2, and the LC-001 development store ID remained
+  `be5f7305-9046-4d62-8f7a-4e493859fc80`.
 
 ## Slice 2 - Development worktree creation and synchronization
 
@@ -484,6 +493,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Created the live eight-slice workflow, concrete Slice 1 plan, Slices 2-4 implementation contract, and continuous Goal prompt. |
 | 2026-08-21 | Began Slice 1 implementation on `feature/pi-development-workflow`. |
 | 2026-08-21 | Completed Slice 1 implementation and automated validation; clean/pushed Pi invariance qualification remains. |
+| 2026-08-21 | Published `e58129b3` and marked Slice 1 verified after clean/pushed Preflight and exact Pi-state invariance passed. |
 
 ## Goal prompt for Slices 1-4
 
