@@ -16,6 +16,10 @@ if str(UI_ROOT) not in sys.path:
 
 from MachineData import MACHINE_DATA_ROOT_ENV  # noqa: E402
 from MachineDataDevelopment import (  # noqa: E402
+    DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION,
+    DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION_ENV,
+    DEVELOPMENT_EXPECTED_COMMIT_ENV,
+    DEVELOPMENT_HARDWARE_AUTHORIZATION_ENV,
     DEVELOPMENT_HARDWARE_CONFIRMATION,
     DEVELOPMENT_HARDWARE_CONFIRMATION_ENV,
     DEVELOPMENT_HARDWARE_ENV,
@@ -50,6 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="required exact confirmation when --enable-hardware is selected",
     )
     parser.add_argument(
+        "--clear-envelope-confirmation",
+        help="required exact physical-envelope confirmation for hardware mode",
+    )
+    parser.add_argument("--hardware-authorization", type=Path)
+    parser.add_argument("--expected-commit")
+    parser.add_argument(
         "--auto-close-seconds",
         type=float,
         help=(
@@ -75,6 +85,39 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "Development hardware launch rejected: supply the exact attended "
             f"confirmation: {DEVELOPMENT_HARDWARE_CONFIRMATION}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.enable_hardware and (
+        args.clear_envelope_confirmation != DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION
+    ):
+        print(
+            "Development hardware launch rejected: supply the exact clear-envelope "
+            f"confirmation: {DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.enable_hardware and (
+        args.hardware_authorization is None or not str(args.expected_commit or "").strip()
+    ):
+        print(
+            "Development hardware launch rejected: external authorization and exact "
+            "commit are required.",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.enable_hardware and any(
+        value is not None
+        for value in (
+            args.hardware_confirmation,
+            args.clear_envelope_confirmation,
+            args.hardware_authorization,
+            args.expected_commit,
+        )
+    ):
+        print(
+            "Development launch rejected: hardware authorization inputs cannot be "
+            "used in no-hardware mode.",
             file=sys.stderr,
         )
         return 2
@@ -117,8 +160,18 @@ def main(argv: list[str] | None = None) -> int:
         environment[DEVELOPMENT_HARDWARE_CONFIRMATION_ENV] = (
             DEVELOPMENT_HARDWARE_CONFIRMATION
         )
+        environment[DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION_ENV] = (
+            DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION
+        )
+        environment[DEVELOPMENT_HARDWARE_AUTHORIZATION_ENV] = str(
+            args.hardware_authorization.resolve()
+        )
+        environment[DEVELOPMENT_EXPECTED_COMMIT_ENV] = str(args.expected_commit).strip()
     else:
         environment.pop(DEVELOPMENT_HARDWARE_CONFIRMATION_ENV, None)
+        environment.pop(DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION_ENV, None)
+        environment.pop(DEVELOPMENT_HARDWARE_AUTHORIZATION_ENV, None)
+        environment.pop(DEVELOPMENT_EXPECTED_COMMIT_ENV, None)
     if args.auto_close_seconds is None:
         environment.pop(DEVELOPMENT_AUTOCLOSE_MS_ENV, None)
     else:

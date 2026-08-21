@@ -256,6 +256,39 @@ to SAFE, but it is not the isolated development workflow: it can upload into
 the selected repository and still exposes FULL/actuating options. Do not use it
 for autonomous development qualification.
 
+### Attended hardware-development preflight
+
+The hardware-development supervisor is separate from both no-hardware launch
+and firmware flashing. Its normal first step is read-only policy preflight:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\run_pi_development_hardware.ps1 `
+  -Action Preflight `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -Operator "Operator Name"
+```
+
+It requires the exact clean/pushed Windows commit, matching clean detached Pi
+worktree, persisted development-store identity, external firmware-state file,
+matching firmware role/commit/artifact/SAFE evidence, and no app/updater/DFU/HIL
+process. When development and released firmware differ, released, stale,
+unknown, or recovery-required state cannot authorize the hardware app.
+
+`Cancel` records an external canceled receipt without reading hardware or
+starting the app. The successful `Launch` action is deliberately harder: it
+requires `-Execute` and the exact attended text printed by the live workflow
+plan. It creates a five-minute external authorization bound to operator,
+commit, development store, and the current firmware-state bytes. Both the
+launcher and App bootstrap revalidate that receipt and the two confirmations.
+Updater, rollback, in-app DFU, and the production machine-data store remain
+blocked. The supervisor owns only the process group it starts and records
+normal exit or bounded cleanup plus protected postflight.
+
+Do not use `Launch` unattended. Slice 6 automated/Pi qualification exercises
+only dry-run, preflight, cancellation, and fail-closed paths. The first
+successful hardware-enabled window is part of the final attended campaign.
+
 Do not switch a deployed production checkout to an arbitrary development commit
 and launch it against the production machine-data root. Production stores are
 bound to the exact commit authorized by the protected updater.

@@ -15,6 +15,12 @@ from typing import Callable, Mapping
 from uuid import UUID, uuid4
 
 from MachineData import require_authorized_active_machine
+from DevelopmentHardwareAuthorization import (
+    ATTENDED_CONFIRMATION,
+    CLEAR_ENVELOPE_CONFIRMATION,
+    DevelopmentHardwareAuthorizationError,
+    validate_authorization,
+)
 
 
 DEVELOPMENT_MODE_ENV = "LABCRAFT_DEPLOYMENT_MODE"
@@ -23,10 +29,16 @@ DEVELOPMENT_HARDWARE_ENV = "LABCRAFT_DEVELOPMENT_HARDWARE"
 DEVELOPMENT_HARDWARE_CONFIRMATION_ENV = (
     "LABCRAFT_DEVELOPMENT_HARDWARE_CONFIRMATION"
 )
-DEVELOPMENT_MODE = "development"
-DEVELOPMENT_HARDWARE_CONFIRMATION = (
-    "I UNDERSTAND THIS DEVELOPMENT BUILD CAN CONTROL HARDWARE"
+DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION_ENV = (
+    "LABCRAFT_DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION"
 )
+DEVELOPMENT_HARDWARE_AUTHORIZATION_ENV = (
+    "LABCRAFT_DEVELOPMENT_HARDWARE_AUTHORIZATION"
+)
+DEVELOPMENT_EXPECTED_COMMIT_ENV = "LABCRAFT_DEVELOPMENT_EXPECTED_COMMIT"
+DEVELOPMENT_MODE = "development"
+DEVELOPMENT_HARDWARE_CONFIRMATION = ATTENDED_CONFIRMATION
+DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION = CLEAR_ENVELOPE_CONFIRMATION
 
 DEVELOPMENT_STORE_SCHEMA_NAME = "labcraft.development_machine_data_store"
 DEVELOPMENT_STORE_SCHEMA_VERSION = 1
@@ -178,6 +190,7 @@ class DevelopmentLaunch:
     store: DevelopmentStore
     operator: str
     hardware_enabled: bool
+    hardware_authorization_id: str | None = None
 
 
 def prepare_development_store(
@@ -357,13 +370,44 @@ def development_launch_from_environment(
             f"{DEVELOPMENT_HARDWARE_ENV} must be 0 or 1."
         )
     hardware_enabled = hardware_text == "1"
-    if hardware_enabled and environment.get(
-        DEVELOPMENT_HARDWARE_CONFIRMATION_ENV
-    ) != DEVELOPMENT_HARDWARE_CONFIRMATION:
-        raise DevelopmentStoreError(
-            "Development hardware access requires the exact attended confirmation."
-        )
-    return DevelopmentLaunch(store, operator, hardware_enabled)
+    authorization_id = None
+    if hardware_enabled:
+        if environment.get(
+            DEVELOPMENT_HARDWARE_CONFIRMATION_ENV
+        ) != DEVELOPMENT_HARDWARE_CONFIRMATION:
+            raise DevelopmentStoreError(
+                "Development hardware access requires the exact attended confirmation."
+            )
+        if environment.get(
+            DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION_ENV
+        ) != DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION:
+            raise DevelopmentStoreError(
+                "Development hardware access requires the exact clear-envelope confirmation."
+            )
+        expected_commit = str(
+            environment.get(DEVELOPMENT_EXPECTED_COMMIT_ENV, "")
+        ).strip()
+        authorization_path = str(
+            environment.get(DEVELOPMENT_HARDWARE_AUTHORIZATION_ENV, "")
+        ).strip()
+        if not expected_commit or not authorization_path:
+            raise DevelopmentStoreError(
+                "Development hardware access requires commit-bound external authorization."
+            )
+        try:
+            authorization = validate_authorization(
+                authorization_path,
+                operator=operator,
+                expected_commit=expected_commit,
+                development_store_id=store.store_id,
+                development_machine_data_root=store.root,
+            )
+        except DevelopmentHardwareAuthorizationError as exc:
+            raise DevelopmentStoreError(
+                f"Development hardware authorization is invalid: {exc}"
+            ) from exc
+        authorization_id = str(authorization["authorization_id"])
+    return DevelopmentLaunch(store, operator, hardware_enabled, authorization_id)
 
 
 def record_development_session(
@@ -388,6 +432,7 @@ def record_development_session(
         "source_machine_data_root": str(launch.store.source_machine_data_root),
         "operator": launch.operator,
         "hardware_enabled": launch.hardware_enabled,
+        "hardware_authorization_id": launch.hardware_authorization_id,
         "app_version": str(app_version),
         "app_commit": str(app_commit),
         "started_at_utc": clock(),
@@ -486,6 +531,10 @@ def record_no_hardware_runtime_evidence(
 __all__ = [
     "DEVELOPMENT_HARDWARE_CONFIRMATION",
     "DEVELOPMENT_HARDWARE_CONFIRMATION_ENV",
+    "DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION",
+    "DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION_ENV",
+    "DEVELOPMENT_EXPECTED_COMMIT_ENV",
+    "DEVELOPMENT_HARDWARE_AUTHORIZATION_ENV",
     "DEVELOPMENT_HARDWARE_ENV",
     "DEVELOPMENT_MODE_ENV",
     "DEVELOPMENT_OPERATOR_ENV",

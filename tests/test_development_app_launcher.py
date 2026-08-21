@@ -77,6 +77,12 @@ def test_autoclose_rejects_hardware_or_out_of_range(monkeypatch, tmp_path, capsy
             "--enable-hardware",
             "--hardware-confirmation",
             launcher.DEVELOPMENT_HARDWARE_CONFIRMATION,
+            "--clear-envelope-confirmation",
+            launcher.DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION,
+            "--hardware-authorization",
+            str(tmp_path / "authorization.json"),
+            "--expected-commit",
+            "a" * 40,
             "--auto-close-seconds",
             "1",
         ],
@@ -106,3 +112,72 @@ def test_empty_operator_fails_before_process_creation(monkeypatch, tmp_path):
     assert launcher.main(
         ["--machine-data-root", str(root), "--operator", "   "]
     ) == 2
+
+
+def test_hardware_inputs_are_complete_and_rejected_in_no_hardware_mode(
+    monkeypatch, tmp_path, capsys
+):
+    root = (tmp_path / "development-machine-data").resolve()
+    root.mkdir()
+    monkeypatch.setattr(
+        launcher,
+        "load_development_store",
+        lambda supplied: type("Store", (), {"root": Path(supplied).resolve()})(),
+    )
+    monkeypatch.setattr(
+        launcher.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("process must not start")
+        ),
+    )
+    base = ["--machine-data-root", str(root), "--operator", "Operator"]
+    assert launcher.main([*base, "--enable-hardware", "--hardware-confirmation",
+                          launcher.DEVELOPMENT_HARDWARE_CONFIRMATION]) == 2
+    assert "clear-envelope" in capsys.readouterr().err
+    assert launcher.main([*base, "--expected-commit", "a" * 40]) == 2
+    assert "cannot be used in no-hardware" in capsys.readouterr().err
+
+
+def test_complete_hardware_launch_passes_only_commit_bound_environment(
+    monkeypatch, tmp_path
+):
+    root = (tmp_path / "development-machine-data").resolve()
+    root.mkdir()
+    authorization = (tmp_path / "authorization.json").resolve()
+    authorization.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        launcher,
+        "load_development_store",
+        lambda supplied: type("Store", (), {"root": Path(supplied).resolve()})(),
+    )
+    captured = {}
+
+    class Process:
+        pid = 4243
+
+        def __init__(self, arguments, **kwargs):
+            captured["arguments"] = list(arguments)
+            captured.update(kwargs)
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", Process)
+    result = launcher.main(
+        [
+            "--machine-data-root", str(root), "--operator", "Operator",
+            "--enable-hardware",
+            "--hardware-confirmation", launcher.DEVELOPMENT_HARDWARE_CONFIRMATION,
+            "--clear-envelope-confirmation",
+            launcher.DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION,
+            "--hardware-authorization", str(authorization),
+            "--expected-commit", "a" * 40,
+        ]
+    )
+    assert result == 0
+    environment = captured["env"]
+    assert environment["LABCRAFT_DEVELOPMENT_HARDWARE"] == "1"
+    assert environment["LABCRAFT_DEVELOPMENT_HARDWARE_AUTHORIZATION"] == str(authorization)
+    assert environment["LABCRAFT_DEVELOPMENT_EXPECTED_COMMIT"] == "a" * 40
+    assert "LABCRAFT_DEVELOPMENT_AUTOCLOSE_MS" not in environment

@@ -113,7 +113,9 @@ def test_prepare_rejects_repo_targets_and_development_sources(tmp_path):
         )
 
 
-def test_development_environment_defaults_to_no_hardware_and_requires_exact_ack(tmp_path):
+def test_development_environment_defaults_to_no_hardware_and_requires_exact_ack(
+    tmp_path, monkeypatch
+):
     _source_root, target, store = _prepare(tmp_path)
     environment = {
         MachineDataDevelopment.DEVELOPMENT_MODE_ENV: "development",
@@ -138,9 +140,28 @@ def test_development_environment_defaults_to_no_hardware_and_requires_exact_ack(
     environment[MachineDataDevelopment.DEVELOPMENT_HARDWARE_CONFIRMATION_ENV] = (
         MachineDataDevelopment.DEVELOPMENT_HARDWARE_CONFIRMATION
     )
-    assert MachineDataDevelopment.development_launch_from_environment(
+    with pytest.raises(
+        MachineDataDevelopment.DevelopmentStoreError,
+        match="clear-envelope",
+    ):
+        MachineDataDevelopment.development_launch_from_environment(target, environment)
+    environment[MachineDataDevelopment.DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION_ENV] = (
+        MachineDataDevelopment.DEVELOPMENT_CLEAR_ENVELOPE_CONFIRMATION
+    )
+    environment[MachineDataDevelopment.DEVELOPMENT_EXPECTED_COMMIT_ENV] = "c" * 40
+    environment[MachineDataDevelopment.DEVELOPMENT_HARDWARE_AUTHORIZATION_ENV] = str(
+        tmp_path / "authorization.json"
+    )
+    monkeypatch.setattr(
+        MachineDataDevelopment,
+        "validate_authorization",
+        lambda *_args, **_kwargs: {"authorization_id": SESSION_ID},
+    )
+    attended = MachineDataDevelopment.development_launch_from_environment(
         target, environment
-    ).hardware_enabled is True
+    )
+    assert attended.hardware_enabled is True
+    assert attended.hardware_authorization_id == SESSION_ID
 
 
 def test_development_session_binds_exact_commit_pointer_marker_and_operator(tmp_path):

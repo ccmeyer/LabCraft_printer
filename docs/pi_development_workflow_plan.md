@@ -38,8 +38,8 @@ evidence are recorded here.
 | 2 | Create and synchronize the Pi development worktree | `verified` | `4bef5790` | 32 focused tests; Pi create, idempotent reuse, unregistered-path refusal, and protected invariance passed |
 | 3 | Bind the shared interpreter and development machine data | `verified` | `733f9e77`, `fd2fc5e4`, `6756b5a0` | 45 focused tests; Pi create/reuse/path-free validation, dependency/environment/data invariance passed |
 | 4 | Launch and qualify the no-hardware development app | `verified` | `c9ed2fda`, `eb4d8fcd` | 72 focused and 5,522 full-suite tests; exact-commit offscreen/visible no-hardware Pi launches and protected invariance passed |
-| 5 | Build, flash, and qualify committed development firmware | `in_progress` | Concrete plan recorded | Focused, firmware, and autonomous Pi round-trip qualification pending |
-| 6 | Launch an attended real-hardware development session | `planned` | Not started | Not run |
+| 5 | Build, flash, and qualify committed development firmware | `verified` | `3719838c`, `816e0e70` | 74 post-commit focused tests; 461 firmware host tests; headless build; exact Pi development SAFE -> rc.5 restore SAFE and protected invariance passed |
+| 6 | Launch an attended real-hardware development session | `in_progress` | Concrete plan recorded | Focused implementation/refusal qualification pending; attended success deferred |
 | 7 | Track and restore released firmware state | `planned` | Not started | Not run |
 | 8 | Complete the end-to-end workflow qualification and runbook | `planned` | Not started | Not run |
 
@@ -763,18 +763,123 @@ Planned files:
   when bounded evidence omits them. Both sealed reports now validate, proving
   the failed transaction ended on the exact rc.5 artifact with passing SAFE,
   unchanged protected invariants, and no related process.
-- Corrective focused tests: 20 passed. A clean exact-commit rerun through the
-  supervisor remains pending before Slice 5 can be marked verified.
+- Corrective focused tests: 20 passed. A clean exact-commit rerun passed from
+  `816e0e70` at
+  `verification_reports/development-workflow/firmware/20260821T174039746624Z_6f17c466-125f-4057-b1bb-50837e3f2c03/roundtrip.json`.
+  Development artifact `f8aa...` and rc.5 artifact `eda0...` each flashed with
+  exit 0 and passed the exact 30-result SAFE inventory using the
+  no-flash-task/zero-dispatch contract. The final role is released, no related
+  process remains, and pre/post protected invariant SHA-256 values are equal at
+  `52611856026f53872a86b5159bf5d21f09922a37527644a9dcb34f965b33e80b`.
 
 ## Slice 6 - Attended hardware development launch
 
-Status: `planned`
+Status: `in_progress` (successful hardware launch remains attended/deferred)
 
 Add an explicit attended hardware launch that requires operator identity,
 exact hardware confirmation, a clear motion envelope, and firmware evidence
 matching the development commit when firmware changed. Real hardware may be
 used, but configuration/history remain in the development store and updater
 and in-app DFU remain blocked.
+
+### Call path
+
+```text
+Windows hardware-development wrapper
+  -> exact clean/pushed feature commit and tracked firmware artifact
+  -> external-evidence Pi policy supervisor
+  -> clean/detached exact development worktree + persisted store binding
+  -> durable firmware-state reader and commit/artifact compatibility policy
+  -> exact attended + clear-envelope authorization receipt
+  -> shared production interpreter (read only)
+  -> tools/run_development_app.py --enable-hardware
+  -> App.py development bootstrap
+  -> MachineDataDevelopment authorization/state recheck
+  -> ApplicationComposition.development_dependencies(hardware_enabled=True)
+  -> real Machine/serial/camera factories with updater/DFU still blocked
+  -> View connection request -> Controller.connect_machine
+  -> Machine_FreeRTOS.connect_board -> firmware protocol session
+```
+
+Autonomous Slice 6 qualification stops before the authorization-receipt and
+successful launch steps. It does not connect the board or call any firmware
+handler.
+
+### Concrete implementation plan
+
+1. Add a strict read-only firmware-state schema/compatibility reader. If the
+   development and released artifacts differ, only exact development role,
+   commit, artifact, flash transaction, and SAFE evidence may authorize launch;
+   unknown/recovery-required/stale/corrupt state blocks.
+2. Add a short-lived external hardware-authorization receipt bound to operator,
+   exact commit, development store/root, firmware-state file/hash, artifact,
+   and hashes of both exact confirmation phrases.
+3. Harden `run_development_app.py` and `MachineDataDevelopment` so hardware mode
+   requires and independently revalidates that receipt, the clear-envelope
+   confirmation, and current firmware-state bytes; no-hardware behavior remains
+   unchanged and updater access remains false.
+4. Add a Windows/Pi hardware-development supervisor and PowerShell wrapper for
+   `preflight`, `cancel`, and `launch`; reuse exact commit/store/environment/
+   process/protected-invariant checks and expose no fallback data/code paths.
+5. For launch, create evidence externally, use the shared interpreter, supervise
+   only the owned process group with a bounded timeout, record normal/canceled/
+   failed cleanup, and compare protected postflight before success.
+6. Add focused tests for missing/expired/tampered authorization, missing clear
+   envelope, stale/unknown/recovery firmware, released/development compatibility,
+   mismatched commit/artifact/store/operator, cancellation, no-hardware misuse,
+   process conflict, timeout ownership, updater/DFU blocking, and invariance.
+7. Commit/push/sync the exact Slice 6 revision and qualify dry-run, preflight,
+   missing-confirmation, stale/mismatched state, cancellation, and no-hardware
+   rejection paths on the Pi without starting the hardware-enabled app.
+8. Mark Slice 6 `implementation_complete`; defer its one successful visible
+   hardware-enabled launch to the final attended campaign after Slice 7 can
+   durably set and restore firmware state.
+
+Planned files:
+
+- `tools/firmware_state.py`
+- `FreeRTOS-interface/DevelopmentHardwareAuthorization.py`
+- `FreeRTOS-interface/MachineDataDevelopment.py`
+- `tools/run_development_app.py`
+- `tools/pi_development_hardware.py`
+- `tools/run_pi_development_hardware.ps1`
+- `tests/test_firmware_state.py`
+- `tests/test_development_hardware_authorization.py`
+- `tests/test_machine_data_development.py`
+- `tests/test_development_app_launcher.py`
+- `tests/test_pi_development_hardware.py`
+- `README.md`
+- this live document
+
+### Implementation record
+
+- Added the strict schema-v1 firmware-state reader and hardware-compatibility
+  policy. It never infers installed firmware from Git and blocks unknown,
+  recovery-required, wrong-machine, stale-commit, or mismatched-artifact state.
+  Released state is accepted only when development/released bytes are
+  identical; different firmware requires exact development role and commit.
+- Added a five-minute external authorization receipt bound to operator, commit,
+  store ID/root, current firmware-state path/hash, development/released artifact
+  hashes, and both confirmation hashes. App bootstrap rehashes the firmware
+  state immediately before composing hardware-capable dependencies.
+- Hardened the development launcher and environment parser. Hardware mode now
+  requires exact attended and clear-envelope confirmations, exact commit, and
+  external authorization; supplying hardware inputs in no-hardware mode is
+  rejected. Session evidence records the authorization ID and updater access
+  remains disabled.
+- Added the Windows/Pi `preflight`, `cancel`, and explicit `launch --execute`
+  supervisor. It reuses exact checkout/store/environment/process checks,
+  rehashes both Pi artifacts, writes only external evidence, owns only its
+  launched process group, and checks protected postflight.
+- Added focused schema, compatibility, expiry/tamper, launcher, composition,
+  wrapper, and supervisor construction/refusal tests.
+
+### Validation record
+
+- Slice 5 final released-state evidence is the starting firmware precondition.
+- Successful hardware-enabled application launch is explicitly deferred.
+- Focused Slice 6 automated gate: 37 passed.
+- Exact commit/push/sync and Pi refusal qualification remain pending.
 
 ## Slice 7 - Firmware state and production restoration
 
