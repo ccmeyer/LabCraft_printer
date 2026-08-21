@@ -1,10 +1,10 @@
 # Pi Development Worktree and Qualification Workflow
 
-Status: `in_progress`
+Status: `verified` for current Slices 1-4 target
 
 Prepared: 2026-08-21
 
-Current implementation target: Slices 1-4
+Current implementation target: Slices 1-4 complete
 
 ## Purpose
 
@@ -37,7 +37,7 @@ evidence are recorded here.
 | 1 | Read-only Windows/Pi status and preflight | `verified` | `e58129b3` | 24 focused and 5,485 full-suite tests; clean/pushed Pi Preflight and exact read-only invariance passed |
 | 2 | Create and synchronize the Pi development worktree | `verified` | `4bef5790` | 32 focused tests; Pi create, idempotent reuse, unregistered-path refusal, and protected invariance passed |
 | 3 | Bind the shared interpreter and development machine data | `verified` | `733f9e77`, `fd2fc5e4`, `6756b5a0` | 45 focused tests; Pi create/reuse/path-free validation, dependency/environment/data invariance passed |
-| 4 | Launch and qualify the no-hardware development app | `in_progress` | Implementation active | Focused and Pi qualification pending; full suite reserved for final gate |
+| 4 | Launch and qualify the no-hardware development app | `verified` | `c9ed2fda`, `eb4d8fcd` | 72 focused and 5,522 full-suite tests; exact-commit offscreen/visible no-hardware Pi launches and protected invariance passed |
 | 5 | Build, flash, and qualify committed development firmware | `planned` | Not started | Not run |
 | 6 | Launch an attended real-hardware development session | `planned` | Not started | Not run |
 | 7 | Track and restore released firmware state | `planned` | Not started | Not run |
@@ -494,7 +494,7 @@ without fallback or package mutation.
 
 ## Slice 4 - No-hardware development launch
 
-Status: `in_progress`
+Status: `verified`
 
 ### Objective
 
@@ -579,7 +579,7 @@ Planned files:
 
 ### Implementation record
 
-Implementation complete; exact feature-branch commit pending.
+Implemented by `c9ed2fda` with the eager-DFU-probe correction in `eb4d8fcd`.
 
 - Added a Windows `Launch` action with visible and offscreen modes, bounded
   timeout/qualification auto-close controls, persisted-binding-only selection,
@@ -600,19 +600,42 @@ Implementation complete; exact feature-branch commit pending.
 
 ### Validation record
 
-- Focused Windows validation passed: `70 passed in 3.08s` across
+- Focused Windows validation passed before the Pi run (`70 passed in 2.72s`)
+  and after the DFU-probe correction (`72 passed in 2.96s`) across
+  `test_controller_static_guards.py`,
   `test_pi_development_workflow.py`, `test_development_app_launcher.py`,
   `test_machine_data_development.py`, and
   `test_app_machine_data_bootstrap.py`.
-- The complete default suite is intentionally deferred until the final Slice 4
-  gate, per the operator's 2026-08-21 test policy.
-- Exact-commit Pi offscreen/visible qualification is pending.
 - First exact-commit offscreen attempt reached `SimulatedMachine`, created both
   receipts, auto-closed with exit 0, and preserved production/data/environment,
   but failed closed because the trace found an eager `dfu-util` executable
   availability probe. Root cause: `Controller` imported the DFU implementation
-  at module load only to obtain an unused symbol. The eager import was removed;
-  corrected qualification is pending.
+  at module load only to obtain an unused symbol. The eager import was removed
+  in `eb4d8fcd`; a static behavior lock prevents its return.
+- Corrected offscreen qualification passed with exit 0, no timeout, an empty
+  forbidden-hardware match set, and Bubblewrap proving a no-network namespace,
+  private `/dev`, and read-only host root. Pi report:
+  `20260821T161121Z_7cc6f6af-9649-4f27-b848-69ea56dbc16b/launch.json`,
+  SHA-256 `9e26a4587a53a92d4f09421e58582ace0af9c4ebd6399ef71dce53a955cc5f3d`.
+- Visible Pi qualification passed with exit 0, no timeout, and an empty
+  forbidden-hardware match set. Pi report:
+  `20260821T161150Z_10f943b6-2bb5-4f6c-b233-9620bf6718a4/launch.json`,
+  SHA-256 `15bd6a5863e223338f4ec9241704fd5e793d9044baeaedcd5849953c991dbfe3`.
+- Both passing launches were bound to exact commit `eb4d8fcd`, store
+  `be5f7305-9046-4d62-8f7a-4e493859fc80`, and `SimulatedMachine`. Production
+  stayed clean at `34841fe0`; environment fingerprint stayed
+  `8821c025a91b16710c92c2224516be791553b08064e8ca9c34225db8ad4dab6a`;
+  production source machine-data stayed
+  `95ec35376ea0e99da1cf5d3c852d57765451a529f153292fb0ef8d5b2fe1198a`.
+  The local protected launch invariant matched before/after at
+  `f539fe72518bf27bad662c5a52b03475e0639dbf92da7687c3d2faa64ffe3e38`.
+  Only declared session/runtime/cache paths changed and no relevant process
+  remained.
+- The first final-suite invocation incorrectly placed `--basetemp` inside the
+  repository, so 33 SIL tests correctly rejected overlapping session roots
+  (`5,489 passed`, `156 skipped`). A representative failure passed under the OS
+  temporary directory. The corrected single final gate then passed:
+  `5,522 passed, 156 skipped` in `360.84s`.
 
 ## Slice 5 - Isolated development firmware HIL
 
@@ -675,6 +698,8 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | The existing firmware HIL wrapper defaults to `/home/labcraft/LabCraft_printer` and uploads tracked files there. | It must not be used for development until Slice 5 isolates it from production. |
 | 2026-08-21 | Direct `.ps1` execution is disabled by the current Windows execution policy. | Documentation and qualification use `powershell -ExecutionPolicy Bypass -File`, matching existing repository workflows. |
 | 2026-08-21 | `Path.resolve()` turns the Pi venv's `env/bin/python` symlink into `/usr/bin/python3.11`; invoking that resolved target bypasses the venv. | Preserve the absolute lexical interpreter path for execution and configuration, while resolving repository/data paths for separation checks. |
+| 2026-08-21 | No-hardware startup still imported `dfu_update.py`, whose module-level executable discovery probed `dfu-util`. | Remove the unused eager import; the trace now proves neither DFU executable discovery nor physical-device access occurs during development startup. |
+| 2026-08-21 | SIL tests reject pytest session roots located beneath the repository. | Final full-suite runs must use a unique OS temporary directory, not an in-repository `--basetemp`. |
 
 ## Change log
 
@@ -691,6 +716,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Slice 3 Pi Configure failed safely before writing configuration, revealing and correcting venv-symlink resolution; focused correction tests passed. |
 | 2026-08-21 | Verified Slice 3 after corrected create, path-free validation, idempotent reuse, shared-environment fingerprinting, and direct production/development data-tree invariance passed on LC-001. |
 | 2026-08-21 | Began Slice 4 no-hardware development launch implementation with offscreen sandbox/trace proof and a visible traced smoke lane. |
+| 2026-08-21 | Published `c9ed2fda`, found and corrected the fail-closed eager DFU probe in `eb4d8fcd`, then passed focused, offscreen, visible, protected-invariance, and corrected full-suite gates; marked Slice 4 verified. |
 
 ## Goal prompt for Slices 1-4
 
@@ -712,8 +738,9 @@ For each slice:
    path, create a decision-complete implementation plan of no more than eight
    steps, and list the exact files before editing.
 2. Implement the smallest safe slice with behavior-lock and failure-path tests.
-3. Run focused tests followed by the complete default Python suite. Diagnose
-   and fix in-scope failures instead of stopping at the first failure.
+3. Run focused tests for each slice and the complete default Python suite once
+   at final Slice 4 validation. Diagnose and fix in-scope failures instead of
+   stopping at the first failure.
 4. Run the slice's specified qualification on LC-001 over SSH, prove all
    production invariants, and preserve the resulting evidence.
 5. Update the live document and create one dedicated descriptive commit for
