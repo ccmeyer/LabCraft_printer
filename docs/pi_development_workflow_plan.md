@@ -1,10 +1,11 @@
 # Pi Development Worktree and Qualification Workflow
 
-Status: `in_progress` for Slices 5-7
+Status: `final_validation` for Slices 5-7
 
 Prepared: 2026-08-21
 
-Current implementation target: Slices 5-7; Slices 1-4 remain verified
+Current implementation target: final non-attended postflight and one attended
+Slice 6 launch; Slices 1-5 and 7 are verified
 
 ## Purpose
 
@@ -39,8 +40,8 @@ evidence are recorded here.
 | 3 | Bind the shared interpreter and development machine data | `verified` | `733f9e77`, `fd2fc5e4`, `6756b5a0` | 45 focused tests; Pi create/reuse/path-free validation, dependency/environment/data invariance passed |
 | 4 | Launch and qualify the no-hardware development app | `verified` | `c9ed2fda`, `eb4d8fcd` | 72 focused and 5,522 full-suite tests; exact-commit offscreen/visible no-hardware Pi launches and protected invariance passed |
 | 5 | Build, flash, and qualify committed development firmware | `verified` | `3719838c`, `816e0e70` | 74 post-commit focused tests; 461 firmware host tests; headless build; exact Pi development SAFE -> rc.5 restore SAFE and protected invariance passed |
-| 6 | Launch an attended real-hardware development session | `implementation_complete` | `1eedc1e8`, `45453212` | 37 focused tests; Pi missing-state, cancellation, no-hardware, and missing-confirmation refusals passed; stale/mismatch cases await real S7 state; attended success deferred |
-| 7 | Track and restore released firmware state | `in_progress` | Concrete plan recorded | Focused and autonomous state/restore qualification pending |
+| 6 | Launch an attended real-hardware development session | `implementation_complete` | `1eedc1e8`, `45453212`, `bdd86711` | 37 focused tests plus final policy tests; all planned Pi refusal/cancel paths passed with invariants; attended success deferred |
+| 7 | Track and restore released firmware state | `verified` | `e30673a0` | 111 focused tests; 461 firmware host tests; headless build; exact development/released SAFE roundtrip and idempotent released restore passed |
 | 8 | Complete the end-to-end workflow qualification and runbook | `planned` | Not started | Not run |
 
 ## Current verified baseline
@@ -639,7 +640,7 @@ Implemented by `c9ed2fda` with the eager-DFU-probe correction in `eb4d8fcd`.
 
 ## Slice 5 - Isolated development firmware HIL
 
-Status: `in_progress`
+Status: `verified`
 
 Harden the existing Windows firmware HIL path so it uses the committed binary
 from the exact development worktree, verifies Windows/Pi SHA-256 identity,
@@ -774,7 +775,7 @@ Planned files:
 
 ## Slice 6 - Attended hardware development launch
 
-Status: `in_progress` (successful hardware launch remains attended/deferred)
+Status: `implementation_complete` (successful hardware launch remains attended/deferred)
 
 Add an explicit attended hardware launch that requires operator identity,
 exact hardware confirmation, a clear motion envelope, and firmware evidence
@@ -879,19 +880,32 @@ Planned files:
 - Slice 5 final released-state evidence is the starting firmware precondition.
 - Successful hardware-enabled application launch is explicitly deferred.
 - Focused Slice 6 automated gate: 37 passed.
-- Exact commit/push/sync and Pi refusal qualification remain pending.
 - Published `1eedc1e8` plus refusal-order correction `45453212`, then synced the
   Pi development worktree exactly. Missing durable state blocked with invariant
   SHA-256 unchanged at
   `6727b64ac7c267a903737b8ccf19d7bff4d85b21f569cf58be92600456f8ffc8`;
   cancellation recorded without launch; the hardware supervisor rejected
   no-hardware mode; missing confirmation failed before SSH. Stale/mismatched
-  Pi cases await the real state file from Slice 7. Successful launch is the
-  only attended behavior and remains deferred.
+  Pi cases initially awaited the real state file from Slice 7. Successful
+  launch is the only attended behavior and remains deferred.
+- Published the final in-memory-only qualification fixture in `bdd86711`. On
+  the Pi, normal released-state, stale-development-commit, and mismatched-
+  development-artifact preflights all failed closed with blocker
+  `firmware_state_incompatible`. The synthetic cases did not write firmware
+  state and recorded fixture `in_memory_only_exact_development_state`.
+  Evidence:
+  `20260821T181227392458Z_c9184ff7-268f-40bf-b3a2-6320eaa6910e`,
+  `20260821T181243621030Z_40ca1259-6f7a-4eae-9fe5-64845f2c902d`, and
+  `20260821T181254536207Z_255824ba-8005-4179-a009-01d2af313bd3` beneath
+  `verification_reports/development-workflow/hardware/`. Every pre/post
+  invariant matched at
+  `0a59813b8422f6f391a8b379b694d90da6660d8515bb59c80f821ff56d1c2387`;
+  durable firmware remained released at revision 6 and no related process
+  remained.
 
 ## Slice 7 - Firmware state and production restoration
 
-Status: `in_progress`
+Status: `verified`
 
 Record when development firmware is active, prevent the workflow from
 declaring production readiness in that state, and add a released-firmware
@@ -990,7 +1004,141 @@ Expected files:
   completed with zero errors and refreshed the tracked same-source artifact.
   Its exact SHA-256 is
   `bd64f3399f8b0a4b008f1eacc6006dfa633355218a8f989e9ad598744d78d5e0`.
-- Exact commit/push/sync and autonomous Pi state roundtrip remain pending.
+- Published implementation commit `e30673a0`. The autonomous Pi roundtrip
+  recorded absent -> recovery-required -> development -> recovery-required ->
+  released, flashing and passing the exact 30-result SAFE inventory for both
+  development artifact `bd64...` and rc.5 artifact `eda0...`. The protected
+  invariant was identical before/after at
+  `52fc63580bab2dc490ca0de7ac1cc656a8f9065896e39e5a683bd51ad8820607`.
+  Evidence:
+  `verification_reports/development-workflow/firmware/20260821T180607902269Z_3a7aed67-ead4-4102-a265-3cc2fb8b24d9/roundtrip.json`.
+- The exact released-restore retry passed from released revision 4 through
+  recovery-required revision 5 to released revision 6. Rc.5 SAFE again passed
+  30/30, the protected invariant remained `52fc...`, and no related process
+  remained. Evidence:
+  `verification_reports/development-workflow/firmware/20260821T180822402434Z_265b8645-b7c1-4ded-9d57-bc57e1c067b9/roundtrip.json`.
+- The final state is valid `released`, revision 6, state SHA-256
+  `3b3c2e6aa11a1565e8f6d4f8f1f3e91a5b2de5bdeeb19f911fb2344bbc513f16`.
+  A read-only sync to `bdd86711` confirmed `production_ready=true`, clean
+  detached development code, unchanged clean production code, valid external
+  data/configuration, and zero related processes. Evidence:
+  `verification_reports/development-workflow/status/20260821T181210303231Z_bdd867115eb8/status.json`.
+
+## Final non-attended validation and attended handoff
+
+Status: `postflight_pending`
+
+### Completed gates
+
+- The complete default Python suite passed from the final Slice 5-7 code using
+  unique OS temporary directory
+  `C:/Users/conar/AppData/Local/Temp/labcraft-s57-final-8a1085ba80a54acdb39fab8ca194064c`:
+  `5,569 passed, 156 skipped` in `364.24s`.
+- The required final firmware gate associated with Slice 7 passed 461/461 host
+  tests and a Debug headless build with zero errors. The committed artifact is
+  byte-identical to HEAD and has SHA-256
+  `bd64f3399f8b0a4b008f1eacc6006dfa633355218a8f989e9ad598744d78d5e0`.
+- A separate released-only restore and SAFE qualification already provides the
+  final no-development-flash SAFE check: rc.5 passed the exact 30-result SAFE
+  inventory, recorded released revision 6, preserved protected invariants, and
+  left no related process. Its evidence is the Slice 7 idempotent-restore
+  report above.
+
+### Exact final attended campaign
+
+Physical prerequisites before the campaign:
+
+- The production and development applications, updater, DFU, and HIL tools are
+  closed.
+- Motor power is inhibited, the entire motion envelope is clear, and the
+  emergency stop is immediately reachable.
+- The operator remains at the Pi for activation, launch, close, and released
+  restoration.
+- This campaign authorizes only a successful hardware-enabled main-window
+  construction. Do not connect, home, jog, move, pressurize, pump, actuate a
+  valve, dispense, open a camera/balance workflow, or start an experiment.
+
+In a Windows PowerShell terminal at the repository root, set the exact
+confirmation once:
+
+```powershell
+$confirmation = 'I CONFIRM MOTOR POWER IS INHIBITED, THE MOTION ENVELOPE IS CLEAR, THE EMERGENCY STOP IS IMMEDIATELY REACHABLE, AND I AM ATTENDING THE PI'
+```
+
+1. Activate and SAFE-verify the exact development firmware. This intentionally
+   leaves durable role `development` only for the attended session:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File tools\run_pi_development_firmware.ps1 `
+     -Action Activate-Development `
+     -PiHost 192.168.0.33 `
+     -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+     -ReleasedTag v1.3.0-rc.5 `
+     -Operator Conary-Codex `
+     -AttendedConfirmation $confirmation `
+     -Execute
+   ```
+
+2. Require a clean read-only hardware preflight. Do not continue unless it
+   reports ready for the exact development commit/artifact:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File tools\run_pi_development_hardware.ps1 `
+     -Action Preflight `
+     -PiHost 192.168.0.33 `
+     -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+     -Operator Conary-Codex
+   ```
+
+3. Launch the attended hardware-capable development window:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File tools\run_pi_development_hardware.ps1 `
+     -Action Launch `
+     -PiHost 192.168.0.33 `
+     -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+     -Operator Conary-Codex `
+     -AttendedConfirmation $confirmation `
+     -LaunchTimeoutSeconds 1800 `
+     -Execute
+   ```
+
+4. The minimal successful check is only that the main window appears, clearly
+   identifies the development/hardware-capable session, and continues to show
+   updater/rollback/DFU protection. Do not press Connect or start a hardware
+   workflow. Close the main window normally and require the wrapper to report a
+   normal exit and matching protected postflight.
+5. Immediately restore and SAFE-verify exact rc.5 firmware:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File tools\run_pi_development_firmware.ps1 `
+     -Action Restore-Released `
+     -PiHost 192.168.0.33 `
+     -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+     -ReleasedTag v1.3.0-rc.5 `
+     -Operator Conary-Codex
+   ```
+
+6. Run the final read-only status command and require released firmware,
+   `production_ready=true`, clean worktrees, valid isolated stores/config, the
+   unchanged shared interpreter, and zero related processes:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File tools\run_pi_development.ps1 `
+     -Action Status `
+     -PiHost 192.168.0.33 `
+     -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+     -Operator Conary-Codex
+   ```
+
+Abort/recovery rule: if activation, preflight, launch, or postflight fails,
+do not retry the app and do not edit firmware-state JSON. Run the exact
+`Restore-Released` command immediately. If it cannot reach released plus
+strict SAFE, stop, preserve all firmware/hardware/status reports, and request
+attended recovery. Seal the activation/SAFE state transition, hardware
+preflight, authorization/launch/cleanup, released restore/SAFE transition, and
+final status evidence from both Windows and the corresponding Pi external
+session paths.
 
 ## Slice 8 - End-to-end qualification and runbook
 
@@ -1043,6 +1191,9 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Began Slice 4 no-hardware development launch implementation with offscreen sandbox/trace proof and a visible traced smoke lane. |
 | 2026-08-21 | Published `c9ed2fda`, found and corrected the fail-closed eager DFU probe in `eb4d8fcd`, then passed focused, offscreen, visible, protected-invariance, and corrected full-suite gates; marked Slice 4 verified. |
 | 2026-08-21 | Began Slice 5 isolated SAFE-only development-firmware round-trip implementation after confirming exact artifact and SAFE non-actuation contracts. |
+| 2026-08-21 | Verified Slice 5 after corrective commit `816e0e70` passed exact development SAFE, mandatory rc.5 restore SAFE, and protected-invariance gates. |
+| 2026-08-21 | Completed Slice 6 implementation in `1eedc1e8`/`45453212`; published `bdd86711` and passed cancellation, no-hardware, missing-state, released-state, stale-commit, and mismatched-artifact refusal qualifications. The successful launch remains attended. |
+| 2026-08-21 | Published Slice 7 implementation `e30673a0`, passed required firmware checks, exact development/released SAFE roundtrip, durable transition evidence, and idempotent released restore; final installed role is released revision 6. |
 
 ## Goal prompt for Slices 1-4
 
