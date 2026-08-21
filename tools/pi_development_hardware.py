@@ -219,6 +219,20 @@ def main():
             expected_commit = request["expected_commit"]
             development_sha = request["development_artifact_sha256"]
             scenario = request["qualification_scenario"]
+            if scenario in {"stale-commit", "mismatched-artifact"}:
+                fixture_payload = dict(state.payload)
+                fixture_payload.update({
+                    "role": "development",
+                    "source_commit": request["expected_commit"],
+                    "artifact_path": str(development / request["artifact_relative_path"]),
+                    "artifact_sha256": request["development_artifact_sha256"],
+                })
+                state = firmware_state.FirmwareState(
+                    state.path, state.sha256, fixture_payload
+                )
+                report["qualification_fixture"] = (
+                    "in_memory_only_exact_development_state"
+                )
             if scenario == "stale-commit": expected_commit = "0" * 40
             if scenario == "mismatched-artifact": development_sha = "0" * 64
             compatibility = firmware_state.require_hardware_compatible(

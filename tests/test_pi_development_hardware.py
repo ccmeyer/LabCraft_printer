@@ -33,6 +33,8 @@ def test_remote_worker_is_valid_and_launch_is_explicitly_gated() -> None:
     assert source.index('request["runtime_mode"] != "hardware"') < source.index(
         'elif compatibility is None'
     )
+    assert "in_memory_only_exact_development_state" in source
+    assert "fixture_payload = dict(state.payload)" in source
 
 
 def test_dry_run_does_not_use_ssh_or_launch(capsys) -> None:
