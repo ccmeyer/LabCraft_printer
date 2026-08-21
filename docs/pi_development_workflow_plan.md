@@ -1,0 +1,575 @@
+# Pi Development Worktree and Qualification Workflow
+
+Status: `planned`
+
+Prepared: 2026-08-21
+
+Current implementation target: Slices 1-4
+
+## Purpose
+
+This is the live implementation and qualification plan for running arbitrary
+development commits on LC-001 without moving or modifying the protected
+production checkout. It covers the Windows wrapper, the linked Pi development
+worktree, the shared read-only Python environment, explicit development
+machine-data binding, later firmware HIL integration, and safe restoration to
+a released firmware state.
+
+Update this document whenever a slice begins, implementation decisions change,
+unexpected findings appear, validation is run, or a slice is completed. A
+slice is not verified until its implementation commit and exact validation
+evidence are recorded here.
+
+## Status definitions
+
+- `planned`: scope and exit criteria are defined; implementation has not begun.
+- `in_progress`: implementation or validation is active.
+- `implementation_complete`: code is committed, but a required gate remains.
+- `verified`: every exit criterion and required validation gate passed.
+- `blocked`: progress requires user input, additional authority, or an external
+  state change.
+- `deferred`: removed from the current target with a recorded reason.
+
+## Slice status
+
+| Slice | Scope | Status | Implementation | Validation |
+| --- | --- | --- | --- | --- |
+| 1 | Read-only Windows/Pi status and preflight | `implementation_complete` | Candidate on `feature/pi-development-workflow`; publication pending | 24 focused and 5,485 full-suite tests passed; clean/pushed Pi invariance gate pending |
+| 2 | Create and synchronize the Pi development worktree | `planned` | Not started | Not run |
+| 3 | Bind the shared interpreter and development machine data | `planned` | Not started | Not run |
+| 4 | Launch and qualify the no-hardware development app | `planned` | Not started | Not run |
+| 5 | Build, flash, and qualify committed development firmware | `planned` | Not started | Not run |
+| 6 | Launch an attended real-hardware development session | `planned` | Not started | Not run |
+| 7 | Track and restore released firmware state | `planned` | Not started | Not run |
+| 8 | Complete the end-to-end workflow qualification and runbook | `planned` | Not started | Not run |
+
+## Current verified baseline
+
+The following state was observed read-only on 2026-08-21. Implementation must
+reinspect it rather than assuming that it remains unchanged.
+
+- Windows repository: branch `main`, commit
+  `45071568d7112b5246a19960545fc82c4ad16ffb`, clean and synchronized with
+  `origin/main`.
+- Pi: `labcraft@192.168.0.33` using
+  `verification_reports/pi_sil_codex_network_ed25519` from the Windows
+  checkout.
+- Protected Pi worktree: `/home/labcraft/LabCraft_printer`, branch
+  `protected-update-rc5`, commit
+  `34841fe0c9f54c6e1c1ceaad2b797ab661084430`, clean.
+- Intended persistent development worktree:
+  `/home/labcraft/LabCraft_printer-dev`; it does not yet exist.
+- Retained qualification worktrees exist at
+  `/home/labcraft/LabCraft_printer-m8s8-sil-1e7efa8` and
+  `/tmp/labcraft-m4-corrected.thNIP1/second-checkout`. They are out of scope
+  and must not be removed or reused by this workflow.
+- Shared interpreter:
+  `/home/labcraft/LabCraft_printer/env/bin/python`, Python 3.11.2.
+- Existing development machine-data store:
+  `/home/labcraft/.local/share/LabCraft/LabCraft Printer/development/main-65ba38df-machine-data`.
+- No production or development LabCraft application process was running.
+
+## Architecture and call paths
+
+### Application development
+
+```text
+Windows tools/run_pi_development.ps1
+  -> Windows repository Python
+  -> tools/pi_development_workflow.py
+  -> SSH to the Pi
+  -> /home/labcraft/LabCraft_printer-dev at an exact commit
+  -> /home/labcraft/LabCraft_printer/env/bin/python (read-only dependencies)
+  -> development tools/run_development_app.py
+  -> explicit LABCRAFT_MACHINE_DATA_ROOT and development mode
+  -> development FreeRTOS-interface/App.py
+  -> machine-data bootstrap
+  -> ApplicationComposition.development_dependencies()
+  -> Controller / Model / View
+  -> SimulatedMachine for Slices 1-4
+```
+
+### Firmware development, beginning in Slice 5
+
+```text
+Windows wrapper
+  -> local firmware unit tests and STM32CubeIDE build
+  -> committed firmware/artifacts/LabCraft_firmware.bin
+  -> exact Pi development commit and binary hash
+  -> firmware/hil/flash_and_test.sh
+  -> dfu_update.py
+  -> STM32
+  -> firmware self-test or qualification
+  -> report downloaded and bound to commit plus binary hash
+```
+
+## Safety and isolation invariants
+
+1. `/home/labcraft/LabCraft_printer` remains the protected released checkout.
+   Development synchronization never switches its branch, moves its HEAD,
+   changes its index, or writes tracked or untracked files into it.
+2. `/home/labcraft/LabCraft_printer-dev` is the only persistent code worktree
+   managed by this workflow. It uses a detached exact commit for qualification.
+3. Windows remains the source of development commits. The Pi workflow does not
+   create commits.
+4. The shared production virtual environment is read-only. Development may
+   execute its interpreter but may not install, remove, or update packages in
+   it.
+5. Reuse of the shared interpreter is allowed only when the production and
+   development dependency declarations match and the environment passes its
+   integrity checks.
+6. Development launch always passes an explicit, validated external
+   development machine-data root. It never falls back to production data or a
+   checkout-local `local/` directory.
+7. Slices 1-4 cannot construct or access serial, cameras, GPIO, the balance,
+   physical motion, pressure hardware, firmware/DFU, or the application
+   updater.
+8. A dirty or ambiguous worktree is a stop condition. Automation never runs
+   `git reset --hard`, `git clean`, or an automatic deletion to recover it.
+9. Reports, logs, session files, and future HIL staging stay outside tracked
+   worktree paths or beneath existing ignored report roots.
+10. Checking out a firmware binary does not flash it. Firmware flashing starts
+    only in Slice 5 with separate attended authorization and rollback.
+11. No release metadata, release tag, `main`, `stable`, device protocol,
+    firmware behavior, motion behavior, or pressure behavior is changed by
+    Slices 1-4.
+
+## Slice 1 - Read-only status and preflight
+
+Status: `implementation_complete`
+
+### Objective
+
+Add a Windows entry point that inventories the Windows checkout and Pi,
+classifies readiness for Slice 2, and writes local evidence without modifying
+either machine.
+
+### Public interface
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\run_pi_development.ps1 `
+  -Action Status `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519
+```
+
+Parameters:
+
+- `-Action Status|Preflight`, default `Status`.
+- Mandatory `-PiHost`; accept a hostname/IP or `user@host`.
+- `-PiUser`, default `labcraft`.
+- Optional `-SshIdentityFile`.
+- `-ProductionRepo`, default `/home/labcraft/LabCraft_printer`.
+- `-DevelopmentRepo`, default `/home/labcraft/LabCraft_printer-dev`.
+- `-SharedPython`, default
+  `/home/labcraft/LabCraft_printer/env/bin/python`.
+- Optional `-DevelopmentMachineDataRoot`. When omitted, Slice 1 may discover
+  candidates for reporting but cannot persist or launch one.
+- `-OutputRoot`, default
+  `verification_reports/development-workflow/status`.
+- `-DryRun`, which prints sanitized planned commands, performs no SSH call,
+  and writes no report.
+
+Exit behavior:
+
+- `Status` returns 0 after complete collection even if blockers are reported.
+- `Preflight` returns 0 when ready for Slice 2 and 2 for policy blockers.
+- Local Git, tooling, SSH, remote collection, or malformed-output failures
+  return 1.
+
+### Implementation
+
+1. Add a thin PowerShell wrapper that resolves
+   `env\Scripts\python.exe`, validates OpenSSH and the optional identity,
+   preserves host-key checking, uses `BatchMode=yes`, and propagates the Python
+   core's exit code.
+2. Add a Python orchestration core. Keep Git inspection, classification, JSON
+   serialization, and human output in pure functions behind one injectable
+   subprocess boundary.
+3. Resolve the Windows HEAD, branch, upstream, ahead/behind counts, clean
+   state, origin, and whether HEAD is reachable through its upstream.
+4. Execute one read-only Pi collector with `ssh ... python3 -`. Pass its
+   configuration as encoded JSON and source through stdin so no collector file
+   is written on the Pi and shell interpolation is avoided.
+5. Inspect Pi worktrees, production status, intended development path,
+   additional worktrees, shared Python, relevant application processes, and
+   development-store marker/pointer evidence.
+6. Write an atomic JSON report under
+   `verification_reports/development-workflow/status/<timestamp>_<short-head>/status.json`
+   and print a concise human summary.
+
+Planned files:
+
+- `tools/run_pi_development.ps1`
+- `tools/pi_development_workflow.py`
+- `tests/test_pi_development_workflow.py`
+- this live document and `README.md`
+
+### Status schema
+
+Schema name: `labcraft.pi_development_status`
+
+Schema version: 1
+
+The report contains:
+
+- Collection ID, UTC timestamp, action, `ready|warning|blocked`, warnings, and
+  blockers.
+- Local root, branch, HEAD, upstream, ahead/behind counts, clean state, origin,
+  and pushed/reachable state.
+- Pi hostname and SSH target, excluding identity-file contents and full key
+  paths.
+- Production worktree path, HEAD, branch/detached state, validity, and clean
+  state.
+- Intended development-worktree state:
+  `absent|registered_clean|registered_dirty|unregistered_path|invalid`.
+- Other worktrees as informational entries.
+- Shared-interpreter path, existence, executable state, and version.
+- Relevant LabCraft processes.
+- Development-store selection source
+  `explicit|single_candidate|none|ambiguous`, marker/pointer validity, store
+  ID, machine ID, and path separation.
+
+### Readiness classification
+
+Block `Preflight` for:
+
+- Dirty or detached Windows HEAD.
+- Missing upstream or a local HEAD not yet reachable from that upstream.
+- Missing/invalid/dirty production checkout.
+- Unsafe intended development path, dirty registered development worktree, or
+  an existing unregistered path at the target.
+- Running production, development, updater, or workflow application process.
+- Missing or non-executable shared Python.
+- Missing, malformed, ambiguous, or unsafe development machine-data evidence.
+
+Do not block for:
+
+- The intended development worktree being absent before Slice 2.
+- Additional retained worktrees; report them as warnings.
+- A local branch behind its upstream when its exact HEAD is already pushed;
+  report it as a warning.
+
+### Tests and qualification
+
+- Unit-test every readiness classification and report schema field.
+- Test PowerShell argument forwarding, `user@host`, identity validation,
+  `BatchMode`, quoting, dry-run behavior, and exit-code propagation.
+- Test fake-SSH success with benign stderr, nonzero failure, malformed JSON,
+  and absence of secret material in reports.
+- Run `tests/test_pi_development_workflow.py`, then the complete default Python
+  suite.
+- On the Pi, hash/capture production HEAD/status, worktree registration,
+  machine-data marker/pointer, interpreter, and process state before and after
+  `Status` and `Preflight`; require exact invariance.
+- No hardware authorization is required because Slice 1 is read-only.
+
+### Implementation record
+
+Implementation complete on `feature/pi-development-workflow`; dedicated
+commit created locally and awaiting publication. The implementation adds the thin PowerShell wrapper, Python
+status/preflight core, stdin-only remote collector, atomic ignored reports,
+failure-path tests, and README usage.
+
+### Validation record
+
+- `env\\Scripts\\python.exe -m pytest -q tests\\test_pi_development_workflow.py`:
+  24 passed in 3.59 seconds after the completion audit added absolute/disjoint
+  remote-path and missing-OpenSSH coverage.
+- `env\\Scripts\\python.exe -m pytest -q`: 5,485 passed, 156 skipped, 605
+  warnings in 356.06 seconds.
+- A live read-only `Status` collection correctly identified LC-001, the clean
+  protected rc.5 worktree, absent development worktree, two preserved retained
+  worktrees, Python 3.11.2, and the authorized development store. It correctly
+  blocked the uncommitted/no-upstream candidate. Clean/pushed `Preflight` and
+  before/after invariance evidence remain required after the dedicated commit.
+
+## Slice 2 - Development worktree creation and synchronization
+
+Status: `planned`
+
+### Objective
+
+Add an explicit `Sync` action that creates or reuses only
+`/home/labcraft/LabCraft_printer-dev` and selects the exact pushed Windows
+commit without modifying the production checkout.
+
+### Required behavior
+
+- Reuse Slice 1 preflight and require a clean, pushed Windows commit.
+- Create the target with `git worktree add --detach` only when the path is
+  absent and Git does not already register it.
+- On reuse, require a clean registered worktree before selecting the requested
+  detached commit.
+- Fetch only through the shared Pi repository and verify the requested full
+  hash exists before changing the development worktree.
+- Capture production HEAD/status before synchronization and prove they are
+  unchanged afterward.
+- Keep reports outside both worktrees.
+- Fail closed for stale registration, an unexpected existing path, dirty
+  files, an active application, missing remote commit, or mismatched final
+  HEAD.
+
+### Exit criteria
+
+- First creation and repeated synchronization are idempotent.
+- Moving between two pushed development commits changes only the development
+  worktree.
+- Dirty, unpublished, missing, and ambiguous cases are automatically tested.
+- Pi qualification proves the protected worktree, retained worktrees,
+  machine data, and shared environment remain unchanged.
+
+### Implementation record
+
+Not started.
+
+### Validation record
+
+Not run.
+
+## Slice 3 - Shared runtime and development-data binding
+
+Status: `planned`
+
+### Objective
+
+Validate and reuse the existing production virtual environment without
+mutating it, and persist an explicit external development-store selection for
+all later development launches.
+
+### Required behavior
+
+- Add `Configure` and `Validate` workflow actions, or equivalent explicit
+  sub-actions, without changing `Status`/`Preflight` compatibility.
+- Compare dependency declaration hashes between the protected production
+  commit and selected development commit. Refuse shared-environment reuse when
+  they differ.
+- Run the shared interpreter's version check, `pip check`, and bounded imports
+  without installing or updating anything.
+- Store only workflow paths/identifiers in an atomic external configuration at
+  `/home/labcraft/.config/LabCraft/development_workflow.json`.
+- Validate `development_store.json`, the active pointer, machine identity,
+  disjoint paths, and the existing development-store source evidence.
+- Always invoke `tools/run_development_app.py` with the explicit validated
+  `--machine-data-root`; never export a persistent shell variable or call the
+  development `App.py` directly.
+- Reject production data, checkout-local data, missing markers, multiple
+  candidates, dependency mismatch, or shared-environment drift.
+
+### Exit criteria
+
+- Same-dependency development commits reuse
+  `/home/labcraft/LabCraft_printer/env/bin/python` read-only.
+- Dependency changes fail with a clear instruction that a later dedicated
+  environment workflow is required.
+- Reopening the workflow selects the same explicit development store without
+  discovery or fallback.
+- Pi qualification proves no package, production data, or production checkout
+  change.
+
+### Implementation record
+
+Not started.
+
+### Validation record
+
+Not run.
+
+## Slice 4 - No-hardware development launch
+
+Status: `planned`
+
+### Objective
+
+Provide the normal Windows-to-Pi development launch using the exact synced
+commit, shared interpreter, explicit development data, and simulated machine.
+
+### Required behavior
+
+- Add `Launch` with no-hardware mode as the only supported Slice 4 launch.
+- Re-run worktree, dependency, interpreter, data, and process preflight before
+  every launch.
+- Start the development `tools/run_development_app.py`, not `App.py` directly,
+  and preserve the existing persistent development banner.
+- Capture the local/Pi commit, production baseline, interpreter, store ID,
+  process ID, session evidence path, logs, start/end time, and exit code.
+- Provide reliable clean close/teardown behavior without terminating unrelated
+  processes.
+- Prove serial, cameras, GPIO, balance, firmware/DFU, updater, motion, and
+  pressure factories remain blocked and that failure cannot fall back to real
+  hardware.
+- Do not add or expose an attended hardware switch in this slice.
+
+### Exit criteria
+
+- The Pi displays the application from the exact development commit using the
+  existing development store and simulated machine.
+- A safe automated/offscreen smoke lane can launch and close without manual
+  input; a visible Pi smoke confirms the banner and main window.
+- Session evidence names the exact commit and development-store ID.
+- Production HEAD/status, machine data, environment, and hardware-access proof
+  remain invariant.
+
+### Implementation record
+
+Not started.
+
+### Validation record
+
+Not run.
+
+## Slice 5 - Isolated development firmware HIL
+
+Status: `planned`
+
+Harden the existing Windows firmware HIL path so it uses the committed binary
+from the exact development worktree, verifies Windows/Pi SHA-256 identity,
+writes reports outside Git, defaults to SAFE, and never uploads or writes into
+the production checkout. This is the first slice allowed to flash firmware and
+will require separate attended authorization and a known-good released binary
+for rollback.
+
+## Slice 6 - Attended hardware development launch
+
+Status: `planned`
+
+Add an explicit attended hardware launch that requires operator identity,
+exact hardware confirmation, a clear motion envelope, and firmware evidence
+matching the development commit when firmware changed. Real hardware may be
+used, but configuration/history remain in the development store and updater
+and in-app DFU remain blocked.
+
+## Slice 7 - Firmware state and production restoration
+
+Status: `planned`
+
+Record when development firmware is active, prevent the workflow from
+declaring production readiness in that state, and add a released-firmware
+restore action that verifies the release artifact, flashes it, runs its SAFE
+self-test, and clears the development marker only after success. A future
+released production startup guard will consume this state.
+
+## Slice 8 - End-to-end qualification and runbook
+
+Status: `planned`
+
+Run the complete failure/success matrix on Windows and LC-001, seal evidence,
+and document daily no-hardware development, firmware HIL, attended hardware
+testing, failure recovery, and released-firmware restoration.
+
+## Decision log
+
+| Date | Decision | Rationale |
+| --- | --- | --- |
+| 2026-08-21 | Keep production and development code in separate linked Pi worktrees. | Each worktree has independent files, index, and HEAD while sharing Git history; experimental commits never replace the protected checkout. |
+| 2026-08-21 | Use detached exact commits on the Pi development worktree. | Qualification remains bound to an immutable commit even if the Windows branch later advances. |
+| 2026-08-21 | Reuse the production virtual environment read-only when dependency declarations match. | Avoids repeated Pi environment creation while preventing development package changes from altering production. |
+| 2026-08-21 | Keep machine data outside all worktrees and pass the development root explicitly. | Worktree switching cannot select or seed machine-specific configuration. |
+| 2026-08-21 | Make no-hardware the only launch through Slice 4. | Worktree/runtime/data orchestration can be qualified before any physical capability is introduced. |
+| 2026-08-21 | Keep firmware flashing separate from the development app launcher. | The installed STM32 image is global machine state and requires an attended HIL and rollback path. |
+
+## Findings log
+
+| Date | Finding | Impact |
+| --- | --- | --- |
+| 2026-08-21 | Existing development-store and launcher code already provide verified cloning, explicit root selection, no-hardware defaults, hardware confirmation, and session evidence. | Slices 1-4 should orchestrate these controls rather than replace them. |
+| 2026-08-21 | Existing PowerShell SSH workflows already provide strict mode, shell literal handling, identity support, BatchMode, dry-run support, and fake-SSH tests. | Reuse their conventions and test patterns. |
+| 2026-08-21 | The existing firmware HIL wrapper defaults to `/home/labcraft/LabCraft_printer` and uploads tracked files there. | It must not be used for development until Slice 5 isolates it from production. |
+| 2026-08-21 | Direct `.ps1` execution is disabled by the current Windows execution policy. | Documentation and qualification use `powershell -ExecutionPolicy Bypass -File`, matching existing repository workflows. |
+
+## Change log
+
+| Date | Change |
+| --- | --- |
+| 2026-08-21 | Created the live eight-slice workflow, concrete Slice 1 plan, Slices 2-4 implementation contract, and continuous Goal prompt. |
+| 2026-08-21 | Began Slice 1 implementation on `feature/pi-development-workflow`. |
+| 2026-08-21 | Completed Slice 1 implementation and automated validation; clean/pushed Pi invariance qualification remains. |
+
+## Goal prompt for Slices 1-4
+
+Copy the complete prompt below into a new request when ready to begin. It
+explicitly authorizes continuous progress through Slices 1-4; no additional
+prompt is required between slices.
+
+```text
+Create and pursue a goal to plan, implement, test, commit, and qualify Slices
+1 through 4 of docs/pi_development_workflow_plan.md sequentially. Continue
+autonomously from one verified slice to the next without waiting for another
+prompt. Use the live document as the authoritative contract and update its
+status, implementation commit, validation commands/results, findings,
+decisions, and change log as work progresses.
+
+For each slice:
+
+1. Reinspect the relevant code and current Windows/Pi state, restate the call
+   path, create a decision-complete implementation plan of no more than eight
+   steps, and list the exact files before editing.
+2. Implement the smallest safe slice with behavior-lock and failure-path tests.
+3. Run focused tests followed by the complete default Python suite. Diagnose
+   and fix in-scope failures instead of stopping at the first failure.
+4. Run the slice's specified qualification on LC-001 over SSH, prove all
+   production invariants, and preserve the resulting evidence.
+5. Update the live document and create one dedicated descriptive commit for
+   that slice only.
+6. Push only the dedicated feature branch when the Pi needs the new exact
+   commit. Never push main, stable, or a release tag. Continue immediately to
+   the next slice after the commit and required qualification pass.
+
+Start from the current clean Windows repository. Create and use a dedicated
+feature branch named feature/pi-development-workflow unless an equivalent
+dedicated branch is already active. You are authorized to commit each slice
+and push that feature branch to origin so the Pi can fetch its exact commits.
+
+Use LC-001 at labcraft@192.168.0.33 with the Windows identity file
+verification_reports\pi_sil_codex_network_ed25519. You are authorized to
+perform the following bounded Pi changes required by Slices 1-4:
+
+- Create and register /home/labcraft/LabCraft_printer-dev as a linked,
+  detached development worktree.
+- Fetch and select exact pushed feature-branch commits only in that worktree.
+- Create the external development-workflow configuration required by Slice 3.
+- Reuse /home/labcraft/LabCraft_printer/env/bin/python strictly read-only.
+- Validate and use the existing development machine-data store at
+  /home/labcraft/.local/share/LabCraft/LabCraft Printer/development/main-65ba38df-machine-data.
+- Launch and close the Slice 4 development application only in its no-hardware
+  simulated mode.
+- Write ignored/local development reports, logs, and session evidence in the
+  locations defined by the live plan.
+
+The following boundaries are mandatory throughout this goal:
+
+- Do not move, switch, reset, clean, update, or write into the protected
+  /home/labcraft/LabCraft_printer worktree.
+- Do not remove or repurpose any existing retained worktree.
+- Do not install, remove, or update packages in the shared virtual environment.
+- Do not read or write production machine data through the development app,
+  and do not copy development changes back into production data.
+- Do not access serial, cameras, GPIO, balance, firmware/DFU, updater, motion,
+  pressure, or any other physical-hardware factory. Slices 1-4 are strictly
+  no-hardware.
+- Do not flash firmware, change the device protocol, change release metadata,
+  create or move tags, publish a release, or push main/stable.
+- Do not use destructive Git or filesystem recovery. If a worktree is dirty or
+  a target path is ambiguous, fail closed and investigate without deleting or
+  resetting user data.
+- Do not treat a Git checkout as changing installed STM32 firmware.
+
+Before and after every Pi mutation or launch, capture and compare the protected
+production HEAD/status, registered worktrees, production and development
+machine-data evidence, shared-environment evidence, and relevant processes.
+Slice 4 must include automated hardware-access proof plus a no-hardware Pi
+launch/close qualification. No motor-power or attended hardware authorization
+is granted by this goal.
+
+Provide concise commentary updates during long-running work. Ask for user input
+only if progress requires authority outside the boundaries above, a genuinely
+destructive action, physical hardware access, firmware flashing, a release
+operation, credentials that are unavailable, or an ambiguity that cannot be
+resolved safely from the repository and Pi. Test failures, implementation
+difficulty, and the transition between slices are not reasons to pause.
+
+Complete the goal only after Slices 1, 2, 3, and 4 are each marked verified in
+the live document, each has its own commit, all required Windows and Pi gates
+pass, the protected production checkout/data/environment remain invariant, and
+the final handoff reports commits, tests, Pi evidence, risks, and rollback.
+```

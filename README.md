@@ -72,6 +72,25 @@ Slow, insulated offline analysis-pipeline tests are skipped by default. Run them
 
 ## Development App Against Machine Data
 
+The Windows-to-Pi development workflow is implemented incrementally under the
+live [Pi development workflow plan](docs/pi_development_workflow_plan.md).
+Its first read-only status/preflight action inventories both checkouts, the
+shared interpreter, running processes, and development-store evidence without
+creating or switching a worktree:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\run_pi_development.ps1 `
+  -Action Status `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519
+```
+
+Use `-Action Preflight` when a nonzero exit is required for policy blockers.
+`Status` still records blockers but exits zero after a complete collection.
+Use `-DryRun` to display the intended target and paths without SSH or report
+creation. JSON evidence is written beneath the ignored
+`verification_reports/development-workflow/status/` root.
+
 Do not switch a deployed production checkout to an arbitrary development commit
 and launch it against the production machine-data root. Production stores are
 bound to the exact commit authorized by the protected updater.
