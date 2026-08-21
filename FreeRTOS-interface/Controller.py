@@ -1170,7 +1170,21 @@ class Controller(QObject):
         if runtime_context.hardware_access_allowed:
             return None
         message = runtime_context.blocked_message(action)
-        self.error_occurred_signal.emit("Simulation Mode", message)
+        title = "Development Mode" if runtime_context.is_development else "Simulation Mode"
+        self.error_occurred_signal.emit(title, message)
+        return message
+
+    def _reject_updater_action(self, action):
+        runtime_context = getattr(
+            self,
+            "runtime_context",
+            PRODUCTION_RUNTIME_CONTEXT,
+        )
+        if runtime_context.updater_access_allowed:
+            return None
+        message = runtime_context.blocked_message(action)
+        title = "Development Mode" if runtime_context.is_development else "Simulation Mode"
+        self.error_occurred_signal.emit(title, message)
         return message
 
     def connect_droplet_camera_signals(self):
@@ -2559,7 +2573,7 @@ class Controller(QObject):
     #     self.machine.update_firmware(bin_path)
 
     def start_firmware_update(self,manual: bool=False):
-        if self._reject_physical_action("firmware/DFU update") is not None:
+        if self._reject_updater_action("firmware/DFU update") is not None:
             return
         print("[Controller] Starting firmware update..., manual mode =", manual)
         if self._dfu_thread and self._dfu_thread.isRunning():
@@ -2646,7 +2660,7 @@ class Controller(QObject):
             return "unknown"
 
     def start_app_update_check(self, command_runner=None, offline_manifest_path=None, release_channel="stable"):
-        blocked = self._reject_physical_action("application update check")
+        blocked = self._reject_updater_action("application update check")
         if blocked is not None:
             return False, blocked
         if self.is_app_update_check_running():
@@ -2687,7 +2701,7 @@ class Controller(QObject):
         self.app_update_check_finished.emit(result)
 
     def start_app_rollback_check(self, command_runner=None, offline_manifest_path=None):
-        blocked = self._reject_physical_action("application rollback check")
+        blocked = self._reject_updater_action("application rollback check")
         if blocked is not None:
             return False, blocked
         if self.is_app_update_check_running():
@@ -3008,7 +3022,7 @@ class Controller(QObject):
         return True, f"Application {operation_label} started."
 
     def launch_app_updater(self, wait_pid, launcher=None):
-        blocked = self._reject_physical_action("application updater launch")
+        blocked = self._reject_updater_action("application updater launch")
         if blocked is not None:
             return False, blocked
         try:
@@ -3023,7 +3037,7 @@ class Controller(QObject):
         )
 
     def launch_app_rollback(self, wait_pid, launcher=None):
-        blocked = self._reject_physical_action("application rollback launch")
+        blocked = self._reject_updater_action("application rollback launch")
         if blocked is not None:
             return False, blocked
         try:
@@ -3045,7 +3059,7 @@ class Controller(QObject):
             "runtime_context",
             PRODUCTION_RUNTIME_CONTEXT,
         )
-        if not runtime_context.hardware_access_allowed:
+        if not runtime_context.updater_access_allowed:
             blockers.append(
                 runtime_context.blocked_message("application update or rollback")
             )

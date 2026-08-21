@@ -330,3 +330,122 @@ def test_settings_hash_change_after_bootstrap_closes_context_without_components(
     assert "context_closed" in events
     assert "Settings changed" in messages[0][-1]
     assert events[-1] == "app_lock_released"
+
+
+def test_development_launch_requires_ready_store_skips_dialog_and_records_session(
+    monkeypatch, tmp_path
+):
+    events = []
+    _patch_app_shell(monkeypatch, tmp_path, events)
+    monkeypatch.setenv("LABCRAFT_DEPLOYMENT_MODE", "development")
+    monkeypatch.setattr(App, "get_app_version", lambda _root: "v1.3.0-dev")
+    monkeypatch.setattr(App, "get_app_commit", lambda _root: "d" * 40)
+
+    base = SimpleNamespace(root=tmp_path / "development-machine-data")
+    machine_data = types.ModuleType("MachineData")
+    machine_data.resolve_machine_data_base = lambda **_kwargs: base
+    monkeypatch.setitem(sys.modules, "MachineData", machine_data)
+
+    config_root = tmp_path / "machine" / "config"
+    config_root.mkdir(parents=True)
+    settings_path = config_root / "Settings.json"
+    settings_path.write_text('{"HARDWARE_PROFILE":"current"}', encoding="utf-8")
+    context = SimpleNamespace(
+        paths=SimpleNamespace(config_root=config_root),
+        settings={"HARDWARE_PROFILE": "current"},
+        settings_raw_sha256=hashlib.sha256(settings_path.read_bytes()).hexdigest(),
+        close=lambda: events.append("context_closed"),
+    )
+    bootstrap_module = types.ModuleType("MachineDataBootstrap")
+
+    class BootstrapState:
+        READY = "ready"
+        RECOVERY_REQUIRED = "recovery_required"
+
+    class Bootstrap:
+        def __init__(self, supplied_base, **kwargs):
+            assert supplied_base is base
+            assert kwargs["deployment_gate_enabled"] is False
+            events.append("development_bootstrap_created")
+
+        def inspect(self):
+            events.append("development_inspected")
+            return SimpleNamespace(state=BootstrapState.READY)
+
+        def open_ready(self):
+            events.append("development_open_ready")
+            return context
+
+    bootstrap_module.BootstrapState = BootstrapState
+    bootstrap_module.MachineDataBootstrap = Bootstrap
+    monkeypatch.setitem(sys.modules, "MachineDataBootstrap", bootstrap_module)
+    dialog_module = types.ModuleType("MachineDataBootstrapDialog")
+    dialog_module.run_bootstrap_dialog = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("development launch must not open the migration dialog")
+    )
+    monkeypatch.setitem(sys.modules, "MachineDataBootstrapDialog", dialog_module)
+
+    launch = SimpleNamespace(hardware_enabled=False)
+    development = types.ModuleType("MachineDataDevelopment")
+    development.development_launch_from_environment = (
+        lambda root, _environment: launch if root == base.root else None
+    )
+    development.record_development_session = lambda supplied, **kwargs: (
+        events.append(("development_session", supplied, kwargs))
+        or tmp_path / "session.json"
+    )
+    monkeypatch.setitem(sys.modules, "MachineDataDevelopment", development)
+
+    composition = types.ModuleType("ApplicationComposition")
+    composition.ExperimentalFeatures = SimpleNamespace(
+        from_environment=lambda _environment: object()
+    )
+    dependencies = object()
+    composition.production_dependencies = lambda _context: (_ for _ in ()).throw(
+        AssertionError("production dependencies must not be used")
+    )
+    composition.development_dependencies = lambda supplied, hardware_enabled: (
+        events.append(("development_dependencies", hardware_enabled))
+        or (dependencies if supplied is context else None)
+    )
+    model = SimpleNamespace(
+        settings=dict(context.settings),
+        machine_model=SimpleNamespace(update_dispense_frequency_hz=lambda _value: None),
+    )
+    view = SimpleNamespace(
+        show=lambda: events.append("view_show"),
+        show_pending_app_update_result_after_startup=lambda: events.append(
+            "unexpected_update_result"
+        ),
+    )
+
+    class Components:
+        def __init__(self):
+            self.view = view
+
+        def close(self):
+            context.close()
+            return True
+
+    def build(_profile, supplied, *, model_setup, **_kwargs):
+        assert supplied is dependencies
+        model_setup(model)
+        return Components()
+
+    composition.build_application_components = build
+    monkeypatch.setitem(sys.modules, "ApplicationComposition", composition)
+    monkeypatch.setattr(App, "get_profile", lambda _name: object())
+    monkeypatch.setattr(
+        App,
+        "QSplashScreen",
+        lambda _pixmap: SimpleNamespace(show=lambda: None, finish=lambda _view: None),
+    )
+    monkeypatch.setattr(App, "QPixmap", lambda _path: object())
+    monkeypatch.setattr(App.QTimer, "singleShot", lambda _delay, callback: callback())
+    monkeypatch.setattr(App, "install_ui_freeze_watchdog", lambda _app: None)
+
+    assert App.main() == 0
+    assert events.index("development_inspected") < events.index("development_open_ready")
+    assert any(isinstance(event, tuple) and event[0] == "development_session" for event in events)
+    assert ("development_dependencies", False) in events
+    assert "unexpected_update_result" not in events

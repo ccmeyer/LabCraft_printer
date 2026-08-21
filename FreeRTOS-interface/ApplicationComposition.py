@@ -21,6 +21,7 @@ EXPERIMENTAL_BALANCE_ENV = "LABCRAFT_ENABLE_EXPERIMENTAL_BALANCE"
 class RuntimeMode(str, Enum):
     PRODUCTION = "production"
     SIMULATION = "simulation"
+    DEVELOPMENT = "development"
 
 
 class RootLoadPolicy(str, Enum):
@@ -32,18 +33,21 @@ class RootLoadPolicy(str, Enum):
 class RuntimeContext:
     mode: RuntimeMode
     identity_text: str = ""
+    hardware_access_allowed: bool = True
+    updater_access_allowed: bool = True
 
     @property
     def is_simulation(self) -> bool:
-        return self.mode is RuntimeMode.SIMULATION
+        return self.mode is RuntimeMode.SIMULATION or not self.hardware_access_allowed
 
     @property
-    def hardware_access_allowed(self) -> bool:
-        return not self.is_simulation
+    def is_development(self) -> bool:
+        return self.mode is RuntimeMode.DEVELOPMENT
 
     def blocked_message(self, action: str) -> str:
+        mode = "Development mode" if self.is_development else "Simulation mode"
         return (
-            f"Simulation mode blocks {str(action).strip() or 'this action'}; "
+            f"{mode} blocks {str(action).strip() or 'this action'}; "
             "no physical hardware or updater action was attempted."
         )
 
@@ -52,6 +56,20 @@ PRODUCTION_RUNTIME_CONTEXT = RuntimeContext(RuntimeMode.PRODUCTION)
 SIMULATION_RUNTIME_CONTEXT = RuntimeContext(
     RuntimeMode.SIMULATION,
     SIMULATION_IDENTITY_TEXT,
+    hardware_access_allowed=False,
+    updater_access_allowed=False,
+)
+DEVELOPMENT_NO_HARDWARE_RUNTIME_CONTEXT = RuntimeContext(
+    RuntimeMode.DEVELOPMENT,
+    "DEVELOPMENT BUILD — NO HARDWARE CONNECTED",
+    hardware_access_allowed=False,
+    updater_access_allowed=False,
+)
+DEVELOPMENT_HARDWARE_RUNTIME_CONTEXT = RuntimeContext(
+    RuntimeMode.DEVELOPMENT,
+    "ATTENDED DEVELOPMENT BUILD — HARDWARE ENABLED",
+    hardware_access_allowed=True,
+    updater_access_allowed=False,
 )
 
 
@@ -122,6 +140,26 @@ class ApplicationRoots:
                 raise ValueError(f"Application root escaped simulation run root: {path}")
         return children
 
+    @classmethod
+    def development(cls, authorized_context) -> "ApplicationRoots":
+        if authorized_context is None:
+            raise ValueError("Development roots require an authorized machine context")
+        paths = authorized_context.paths
+        runtime_root = paths.base.root / "development_runtime"
+        experiments_root = runtime_root / "experiments"
+        experiments_root.mkdir(parents=True, exist_ok=True)
+        if paths.base.root not in experiments_root.resolve().parents:
+            raise ValueError("Development experiments root escaped its machine-data root")
+        return cls(
+            config_root=paths.config_root,
+            experiments_root=experiments_root,
+            calibration_memory_root=paths.calibration_memory_root,
+            droplet_imager_optics_path=paths.droplet_imager_optics_path,
+            regulator_optimization_root=paths.regulator_optimization_root,
+            machine_identity_path=paths.identity_path,
+            load_policy=RootLoadPolicy.CANONICAL_EXISTING_ONLY,
+        )
+
 
 Factory = Callable[..., Any]
 
@@ -154,7 +192,7 @@ class ApplicationDependencies:
         for name in factories:
             if not callable(getattr(self, name)):
                 raise TypeError(f"{name} must be callable")
-        if self.runtime_context.is_simulation:
+        if self.runtime_context.mode is RuntimeMode.SIMULATION:
             missing = [
                 name
                 for name in (
@@ -171,7 +209,7 @@ class ApplicationDependencies:
                 )
         elif self.authorized_machine_context is None:
             raise ValueError(
-                "Production dependencies require an authorized machine context"
+                "Production/development dependencies require an authorized machine context"
             )
 
 
@@ -279,10 +317,13 @@ class ApplicationComponents:
         return True
 
 
-def _blocked_factory(label: str) -> Factory:
+def _blocked_factory(
+    label: str,
+    runtime_context: RuntimeContext = SIMULATION_RUNTIME_CONTEXT,
+) -> Factory:
     def _blocked(*_args, **_kwargs):
         raise HardwareAccessBlocked(
-            SIMULATION_RUNTIME_CONTEXT.blocked_message(label)
+            runtime_context.blocked_message(label)
         )
 
     _blocked.__name__ = f"blocked_{label.replace(' ', '_')}"
@@ -385,6 +426,58 @@ def simulation_dependencies(
     )
 
 
+def development_dependencies(
+    authorized_machine_context,
+    *,
+    hardware_enabled: bool = False,
+) -> ApplicationDependencies:
+    """Compose an isolated development store with explicit hardware policy."""
+
+    if authorized_machine_context is None:
+        raise ValueError("Development dependencies require an authorized machine context")
+    if type(hardware_enabled) is not bool:
+        raise TypeError("hardware_enabled must be a bool")
+    roots = ApplicationRoots.development(authorized_machine_context)
+    if hardware_enabled:
+        context = DEVELOPMENT_HARDWARE_RUNTIME_CONTEXT
+        return ApplicationDependencies(
+            runtime_context=context,
+            roots=roots,
+            machine_factory=_production_machine_factory,
+            serial_factory=_production_serial_factory,
+            refuel_camera_factory=_production_refuel_camera_factory,
+            droplet_camera_factory=_production_droplet_camera_factory,
+            log_reader_factory=_production_log_reader_factory,
+            balance_factory=_production_balance_factory,
+            experimental_balance_factory=_blocked_factory(
+                "experimental balance access", context
+            ),
+            legacy_calibration_model_factory=_production_legacy_calibration_model_factory,
+            authorized_machine_context=authorized_machine_context,
+        )
+
+    from simulation.machine import make_simulated_machine_factory
+
+    context = DEVELOPMENT_NO_HARDWARE_RUNTIME_CONTEXT
+    return ApplicationDependencies(
+        runtime_context=context,
+        roots=roots,
+        machine_factory=make_simulated_machine_factory(),
+        serial_factory=_blocked_factory("serial access", context),
+        refuel_camera_factory=_blocked_factory("refuel camera access", context),
+        droplet_camera_factory=_blocked_factory("droplet camera access", context),
+        log_reader_factory=_blocked_factory("log-reader access", context),
+        balance_factory=_blocked_factory("balance access", context),
+        experimental_balance_factory=_blocked_factory(
+            "experimental balance access", context
+        ),
+        legacy_calibration_model_factory=_blocked_factory(
+            "legacy calibration hardware access", context
+        ),
+        authorized_machine_context=authorized_machine_context,
+    )
+
+
 def _close_experimental_balance_service(balance_service) -> bool:
     if balance_service is None:
         return True
@@ -465,12 +558,13 @@ def build_application_components(
     )
     authorized_context = dependencies.authorized_machine_context
     if (
-        dependencies.runtime_context.mode is RuntimeMode.PRODUCTION
+        dependencies.runtime_context.mode
+        in {RuntimeMode.PRODUCTION, RuntimeMode.DEVELOPMENT}
         and getattr(authorized_context, "configuration_transactions", None) is not None
         and getattr(authorized_context, "configuration_safety_guard", None) is None
     ):
         raise ApplicationConstructionError(
-            "Authorized production configuration is missing its validated safety guard."
+            "Authorized production/development configuration is missing its validated safety guard."
         )
 
     model = machine = controller = balance = balance_service = view = None
@@ -496,7 +590,7 @@ def build_application_components(
             "log_reader_factory": dependencies.log_reader_factory,
         }
         if (
-            dependencies.runtime_context.mode is RuntimeMode.PRODUCTION
+            dependencies.runtime_context.hardware_access_allowed
             and profile.has_log_channel
         ):
             machine_kwargs["machine_log_port"] = (

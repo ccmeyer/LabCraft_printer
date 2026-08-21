@@ -243,6 +243,7 @@ class MachineDataBootstrap:
         uuid_factory: Callable[[], object] = uuid4,
         io: DurableFileOps | None = None,
         release_contract: Mapping[str, object] | None = None,
+        deployment_gate_enabled: bool = True,
     ) -> None:
         self.base = base
         self.app_version = str(app_version or "").strip()
@@ -255,14 +256,22 @@ class MachineDataBootstrap:
         self.uuid_factory = uuid_factory
         self._cancel_event = threading.Event()
         self.io = io or MigrationFileOps(fault_hook=self._cancel_checkpoint)
-        self.release_contract = (
-            release_contract
-            if release_contract is not None
-            else load_current_release_machine_data_contract(
-                Path(__file__).resolve().parents[1],
-                self.app_version,
+        if type(deployment_gate_enabled) is not bool:
+            raise BootstrapError(
+                "invalid_deployment_mode",
+                "deployment_gate_enabled must be a boolean.",
             )
-        )
+        self.deployment_gate_enabled = deployment_gate_enabled
+        self.release_contract = None
+        if deployment_gate_enabled:
+            self.release_contract = (
+                release_contract
+                if release_contract is not None
+                else load_current_release_machine_data_contract(
+                    Path(__file__).resolve().parents[1],
+                    self.app_version,
+                )
+            )
 
     def request_cancel(self) -> None:
         self._cancel_event.set()

@@ -45,6 +45,30 @@ def _verification(tmp_path):
     return base, paths, identity, published, verification
 
 
+def _active_migration(tmp_path):
+    base, paths, identity, published, verification = _verification(tmp_path)
+    verification_sha, directory_synced = MachineDataVerification.write_machine_verification(
+        paths, verification
+    )
+    receipt = MachineDataVerification.ActivationReceipt(
+        activation_id=ACTIVATION_ID,
+        migration_id=published.receipt.migration_id,
+        machine_id=identity.machine_id,
+        machine_uuid=identity.machine_uuid,
+        migration_receipt_sha256=verification.migration_receipt_sha256,
+        migration_tree_manifest_sha256=published.migration_tree_manifest_sha256,
+        verification_sha256=verification_sha,
+        backup_archive_sha256=published.receipt.backup_archive_sha256,
+        ownership_policy_version=1,
+        directory_sync_supported=directory_synced,
+        created_at_utc=FIXED_TIME,
+        app_version=APP_VERSION,
+        app_commit=APP_COMMIT,
+    )
+    MachineDataVerification.write_activation_receipt(paths, receipt)
+    return base, paths, identity, published, verification
+
+
 def test_public_m2_phase_verifier_keeps_baseline_immutable(tmp_path):
     _base, paths, _identity, _candidate, _result = publish_candidate(tmp_path)
 
@@ -237,3 +261,67 @@ def test_activation_receipt_and_v2_pointer_bind_exact_hashes(tmp_path):
         "metadata/activation_receipt.json",
         "metadata/verification.json",
     }
+
+
+def test_active_runtime_calibration_files_may_change_without_weakening_config(tmp_path):
+    _base, paths, _identity, _published, _verification = _active_migration(tmp_path)
+
+    runtime_config = paths.calibration_memory_root / "config.json"
+    config_payload = json.loads(runtime_config.read_text(encoding="utf-8"))
+    config_payload["updated_at_utc"] = "2026-08-20T17:32:32Z"
+    runtime_config.write_text(json.dumps(config_payload, indent=2) + "\n", encoding="utf-8")
+
+    reagents = paths.calibration_memory_root / "entities" / "reagents.json"
+    reagent_payload = json.loads(reagents.read_text(encoding="utf-8"))
+    reagent_payload["updated_at_utc"] = "2026-08-20T17:32:32Z"
+    reagents.write_text(json.dumps(reagent_payload, indent=2) + "\n", encoding="utf-8")
+
+    new_run = paths.calibration_memory_root / "runs" / "post-activation.json"
+    new_run.parent.mkdir(parents=True, exist_ok=True)
+    new_run.write_text('{"status":"complete"}\n', encoding="utf-8")
+    optics = paths.calibration_root / "droplet_imager_optics.json"
+    optics.parent.mkdir(parents=True, exist_ok=True)
+    optics.write_text('{"pixel_to_step":1.5}\n', encoding="utf-8")
+
+    verified = MachineDataMigration.verify_published_migration(
+        paths, phase=MachineDataMigration.PublishedMigrationPhase.ACTIVE
+    )
+    assert "CalibrationMemory/runs/post-activation.json" in verified.additional_paths
+    assert "calibration/droplet_imager_optics.json" in verified.additional_paths
+
+    locations = paths.config_root / "Locations.json"
+    locations.write_bytes(locations.read_bytes() + b"\n")
+    with pytest.raises(
+        MachineDataMigration.MigrationRecoveryRequired,
+        match="immutable manifest",
+    ):
+        MachineDataMigration.verify_published_migration(
+            paths, phase=MachineDataMigration.PublishedMigrationPhase.ACTIVE
+        )
+
+
+def test_active_runtime_calibration_schema_and_required_seed_files_remain_protected(tmp_path):
+    _base, paths, _identity, _published, _verification = _active_migration(tmp_path)
+
+    schema = paths.calibration_memory_root / "schema.json"
+    schema_before = schema.read_bytes()
+    schema.write_bytes(schema.read_bytes() + b"\n")
+    with pytest.raises(
+        MachineDataMigration.MigrationRecoveryRequired,
+        match="immutable manifest",
+    ):
+        MachineDataMigration.verify_published_migration(
+            paths, phase=MachineDataMigration.PublishedMigrationPhase.ACTIVE
+        )
+
+    # Restore the immutable schema, then prove a required mutable seed cannot
+    # simply disappear even though its contents are allowed to evolve.
+    schema.write_bytes(schema_before)
+    (paths.calibration_memory_root / "entities" / "reagents.json").unlink()
+    with pytest.raises(
+        MachineDataMigration.MigrationRecoveryRequired,
+        match="CalibrationMemory baseline is invalid",
+    ):
+        MachineDataMigration.verify_published_migration(
+            paths, phase=MachineDataMigration.PublishedMigrationPhase.ACTIVE
+        )

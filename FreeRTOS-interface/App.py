@@ -209,6 +209,7 @@ def main():
 
     components = None
     authorized_context = None
+    development_launch = None
     try:
         # Bootstrap-safe presentation only. Production composition, Settings,
         # MVC, serial, camera, balance, and Machine imports happen later.
@@ -238,15 +239,45 @@ def main():
                 app_local_data_root=app_local_data,
                 repo_root=REPO_ROOT,
             )
-            bootstrap = MachineDataBootstrap(
-                base,
-                app_version=get_app_version(REPO_ROOT),
-                app_commit=get_app_commit(REPO_ROOT),
-            )
-            authorized_context = run_bootstrap_dialog(
-                bootstrap,
-                current_checkout_local=REPO_ROOT / "local",
-            )
+            app_version = get_app_version(REPO_ROOT)
+            app_commit = get_app_commit(REPO_ROOT)
+            record_development_session = None
+            if str(os.environ.get("LABCRAFT_DEPLOYMENT_MODE", "")).strip():
+                from MachineDataDevelopment import (
+                    development_launch_from_environment,
+                    record_development_session,
+                )
+
+                development_launch = development_launch_from_environment(
+                    base.root,
+                    os.environ,
+                )
+            bootstrap_kwargs = {
+                "app_version": app_version,
+                "app_commit": app_commit,
+            }
+            if development_launch is not None:
+                bootstrap_kwargs["deployment_gate_enabled"] = False
+            bootstrap = MachineDataBootstrap(base, **bootstrap_kwargs)
+            if development_launch is None:
+                authorized_context = run_bootstrap_dialog(
+                    bootstrap,
+                    current_checkout_local=REPO_ROOT / "local",
+                )
+            else:
+                inspection = bootstrap.inspect()
+                if inspection.state is not BootstrapState.READY:
+                    raise RuntimeError(
+                        "Development store is not ready; recreate it from a verified "
+                        f"production store ({inspection.state.value})."
+                    )
+                authorized_context = bootstrap.open_ready()
+                session_path = record_development_session(
+                    development_launch,
+                    app_version=app_version,
+                    app_commit=app_commit,
+                )
+                print(f"Development session evidence: {session_path}", flush=True)
         except Exception as exc:
             code = str(getattr(exc, "code", "bootstrap_failed"))
             QMessageBox.critical(
@@ -312,9 +343,18 @@ def main():
                 except (TypeError, ValueError):
                     pass
 
+        if development_launch is None:
+            dependencies = production_dependencies(authorized_context)
+        else:
+            from ApplicationComposition import development_dependencies
+
+            dependencies = development_dependencies(
+                authorized_context,
+                hardware_enabled=development_launch.hardware_enabled,
+            )
         components = build_application_components(
             profile,
-            production_dependencies(authorized_context),
+            dependencies,
             model_setup=configure_model,
             experimental_features=ExperimentalFeatures.from_environment(
                 os.environ
@@ -326,7 +366,8 @@ def main():
         def show_main_window():
             view.show()
             splash.finish(view)
-            view.show_pending_app_update_result_after_startup()
+            if development_launch is None:
+                view.show_pending_app_update_result_after_startup()
 
         # Delay briefly so the splash can paint before the main window appears.
         QTimer.singleShot(100, show_main_window)

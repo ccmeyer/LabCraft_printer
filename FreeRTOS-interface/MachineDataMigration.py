@@ -1878,6 +1878,8 @@ def _verify_machine_tree(
     required_additional_paths: frozenset[str] = frozenset(),
     exact_active_overrides: Mapping[str, tuple[int, str]] | None = None,
     allowed_additional_prefixes: tuple[str, ...] = (),
+    mutable_existing_prefixes: tuple[str, ...] = (),
+    immutable_paths_within_mutable_prefixes: frozenset[str] = frozenset(),
 ) -> MigrationReceipt:
     machine_root = Path(root)
     manifest_path = machine_root / "metadata" / "migration_tree_manifest.json"
@@ -1927,8 +1929,14 @@ def _verify_machine_tree(
                 )
             effective_expected[relative_path] = evidence
         override_paths = frozenset(overrides)
-    baseline_actual = {path: actual.get(path) for path in effective_expected}
-    if baseline_actual != effective_expected:
+    comparison_expected = {
+        path: evidence
+        for path, evidence in effective_expected.items()
+        if path in immutable_paths_within_mutable_prefixes
+        or not any(path.startswith(prefix) for prefix in mutable_existing_prefixes)
+    }
+    baseline_actual = {path: actual.get(path) for path in comparison_expected}
+    if baseline_actual != comparison_expected:
         raise MigrationRecoveryRequired("Machine tree differs from its immutable manifest.")
     additional = frozenset(actual).difference(expected)
     allowed_with_overrides = allowed_additional_paths | override_paths.difference(expected)
@@ -2060,7 +2068,23 @@ _ACTIVE_REQUIRED_PATHS = frozenset(
         "metadata/activation_receipt.json",
     }
 )
-_ACTIVE_ALLOWED_ADDITIONAL_PREFIXES = ("update_history/",)
+_ACTIVE_RUNTIME_MUTABLE_PREFIXES = (
+    "CalibrationMemory/",
+    "calibration/",
+)
+_ACTIVE_RUNTIME_IMMUTABLE_PATHS = frozenset(
+    {
+        # This is the on-disk format declaration. Runtime calibration records,
+        # registries, indices, and operator settings beneath the same tree are
+        # intentionally mutable, but the schema declaration changes only via a
+        # reviewed migration/update transition.
+        "CalibrationMemory/schema.json",
+    }
+)
+_ACTIVE_ALLOWED_ADDITIONAL_PREFIXES = (
+    "update_history/",
+    *_ACTIVE_RUNTIME_MUTABLE_PREFIXES,
+)
 
 
 def verify_published_migration(
@@ -2092,6 +2116,15 @@ def verify_published_migration(
         raise MigrationRecoveryRequired(
             "Transactional active-tree evidence is valid only for the active phase."
         )
+    if selected_phase is PublishedMigrationPhase.ACTIVE:
+        try:
+            LocalConfig.get_existing_calibration_memory_root(
+                root=paths.calibration_memory_root
+            )
+        except (OSError, ValueError) as exc:
+            raise MigrationRecoveryRequired(
+                f"Active CalibrationMemory baseline is invalid: {exc}"
+            ) from exc
     receipt = _verify_machine_tree(
         paths.machine_root,
         expected_uuid=paths.machine_uuid,
@@ -2103,6 +2136,16 @@ def verify_published_migration(
             _ACTIVE_ALLOWED_ADDITIONAL_PREFIXES
             if selected_phase is PublishedMigrationPhase.ACTIVE
             else ()
+        ),
+        mutable_existing_prefixes=(
+            _ACTIVE_RUNTIME_MUTABLE_PREFIXES
+            if selected_phase is PublishedMigrationPhase.ACTIVE
+            else ()
+        ),
+        immutable_paths_within_mutable_prefixes=(
+            _ACTIVE_RUNTIME_IMMUTABLE_PATHS
+            if selected_phase is PublishedMigrationPhase.ACTIVE
+            else frozenset()
         ),
     )
     candidate = load_candidate_evidence(paths.candidate_evidence_path)

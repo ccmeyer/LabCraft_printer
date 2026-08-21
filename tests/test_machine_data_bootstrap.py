@@ -32,6 +32,25 @@ def _bootstrap(base, *, uuid_values=()):
     )
 
 
+def test_development_bootstrap_explicitly_disables_release_deployment_gate(tmp_path):
+    base, _paths = machine_data_paths(tmp_path)
+    bootstrap = MachineDataBootstrap.MachineDataBootstrap(
+        base,
+        app_version="v1.3.0-rc.4",
+        app_commit="development-commit",
+        release_contract={
+            "preservation_contract": "labcraft.machine_data_update.v1",
+            "data_schema_version": 1,
+            "transition": "none",
+            "transition_id": None,
+        },
+        deployment_gate_enabled=False,
+    )
+
+    assert bootstrap.deployment_gate_enabled is False
+    assert bootstrap.release_contract is None
+
+
 @pytest.mark.parametrize("cohort", ("v1.2.0-rc.6", "v1.3.0-rc.1"))
 def test_first_start_migrates_activates_and_reuses_from_second_checkout(
     tmp_path, cohort

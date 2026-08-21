@@ -70,6 +70,55 @@ Slow, insulated offline analysis-pipeline tests are skipped by default. Run them
 .\env\Scripts\python.exe -m pytest -q --run-analysis-pipeline tests\test_plate_reader_analysis.py
 ```
 
+## Development App Against Machine Data
+
+Do not switch a deployed production checkout to an arbitrary development commit
+and launch it against the production machine-data root. Production stores are
+bound to the exact commit authorized by the protected updater.
+
+Create a separate external development clone while the production app is
+closed. The target must not already exist; the command never overlays it:
+
+```powershell
+.\env\Scripts\python.exe tools\prepare_development_machine_data.py `
+  --source-root "C:\absolute\production\machine-data" `
+  --development-root "C:\absolute\development\machine-data" `
+  --operator "Operator Name"
+```
+
+On the Pi, use the same tool with absolute Linux paths:
+
+```bash
+./env/bin/python tools/prepare_development_machine_data.py \
+  --source-root "/home/labcraft/.local/share/LabCraft/LabCraft Printer/machine-data" \
+  --development-root "/home/labcraft/.local/share/LabCraft/LabCraft Printer/development/main-machine-data" \
+  --operator "Operator Name"
+```
+
+The default development launch uses the cloned configuration and calibration
+data but a simulated machine. Serial, cameras, GPIO, firmware/DFU, and app
+updates are blocked, and the window displays a persistent development banner:
+
+```powershell
+.\env\Scripts\python.exe tools\run_development_app.py `
+  --machine-data-root "C:\absolute\development\machine-data" `
+  --operator "Operator Name"
+```
+
+Each launch writes an external `development_sessions/<uuid>.json` record bound
+to the exact Git commit, active pointer, store marker, operator, and hardware
+mode. Real-hardware development is an attended exception and requires both
+`--enable-hardware` and this exact confirmation:
+
+```text
+I UNDERSTAND THIS DEVELOPMENT BUILD CAN CONTROL HARDWARE
+```
+
+Even in attended development mode, application updates and firmware/DFU remain
+blocked. Use a protected tagged release to change the production deployment.
+To refresh a development store, choose a new empty target directory; retain or
+archive the old directory rather than deleting or overlaying it during a test.
+
 ## Safe Application Construction
 
 `ApplicationComposition` exposes one programmatic composition seam for the real `Model`,

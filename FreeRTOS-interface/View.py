@@ -1250,13 +1250,21 @@ class MainWindow(QMainWindow):
         self._pause_action_dialog = None
 
         base_title = "Droplet Printer Interface v1.0.3"
-        if self.runtime_context.is_simulation:
+        if self.runtime_context.is_development:
+            mode = (
+                "DEVELOPMENT - HARDWARE ENABLED"
+                if self.runtime_context.hardware_access_allowed
+                else "DEVELOPMENT - NO HARDWARE"
+            )
+            self.setWindowTitle(f"[{mode}] {base_title}")
+        elif self.runtime_context.is_simulation:
             self.setWindowTitle(f"[SIMULATION - NO HARDWARE] {base_title}")
         else:
             self.setWindowTitle(base_title)
         self.init_ui()
-        if self.runtime_context.is_simulation:
+        if self.runtime_context.identity_text:
             self._add_simulation_banner()
+        if not self.runtime_context.hardware_access_allowed:
             self._apply_simulation_ui_safety()
         self._init_xy_motion_recovery_ui()
         self.disconnected = False
