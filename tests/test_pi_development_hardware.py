@@ -35,6 +35,15 @@ def test_remote_worker_is_valid_and_launch_is_explicitly_gated() -> None:
     )
     assert "in_memory_only_exact_development_state" in source
     assert "fixture_payload = dict(state.payload)" in source
+    assert "def desktop_environment():" in source
+    assert 'runtime.glob("wayland-*")' in source
+    assert 'Path("/tmp/.X11-unix/X0").exists()' in source
+    assert "launch_environment.update(desktop_environment())" in source
+    assert "env=launch_environment" in source
+    assert source.index("launch_environment.update(desktop_environment())") < source.index(
+        "process = subprocess.Popen(",
+        source.index('elif request["action"] == "launch"'),
+    )
 
 
 def test_dry_run_does_not_use_ssh_or_launch(capsys) -> None:

@@ -1,6 +1,6 @@
 # Pi Development Worktree and Qualification Workflow
 
-Status: `ready_for_attended_campaign`
+Status: `attended_retry_pending`
 
 Prepared: 2026-08-21
 
@@ -902,6 +902,24 @@ Planned files:
   `0a59813b8422f6f391a8b379b694d90da6660d8515bb59c80f821ff56d1c2387`;
   durable firmware remained released at revision 6 and no related process
   remained.
+- The first attended launch attempt passed development activation SAFE and
+  hardware preflight, but the application exited before constructing a window
+  because the remote attended supervisor omitted the active Pi desktop
+  environment. Qt attempted the `xcb` path and aborted with exit 250. The
+  launch protected invariant matched at `3850e0ec...`, no process remained,
+  and the exact rc.5 restore plus SAFE immediately passed. Evidence:
+  `firmware/20260821T185611847516Z_0b83c96e-f836-4968-8029-09d6c0ccad57`,
+  `hardware/20260821T185744849890Z_6fe70292-9bad-419e-ab8a-a16cf35ef2ec`,
+  `hardware/20260821T185800392879Z_2f8e719b-ab3a-4e39-8c3b-685554d54929`,
+  and
+  `firmware/20260821T185814144037Z_37b2f7d3-5732-4f92-9187-fd48b6097c82`
+  beneath `verification_reports/development-workflow/`.
+- Corrected the attended supervisor to discover the same active Wayland/X11
+  desktop as the already-qualified visible no-hardware launcher, sanitize
+  inherited display variables, and pass the exact environment only to its
+  owned process. The Pi has `/run/user/1000/wayland-0` and X11 socket `X0`.
+  Focused supervisor/launcher/authorization gate: 18 passed. Attended retry is
+  pending the exact correction commit/sync and repeated activation/preflight.
 
 ## Slice 7 - Firmware state and production restoration
 
@@ -1026,7 +1044,7 @@ Expected files:
 
 ## Final non-attended validation and attended handoff
 
-Status: `ready_for_attended_campaign`
+Status: `attended_retry_pending`
 
 ### Completed gates
 
@@ -1203,6 +1221,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Completed Slice 6 implementation in `1eedc1e8`/`45453212`; published `bdd86711` and passed cancellation, no-hardware, missing-state, released-state, stale-commit, and mismatched-artifact refusal qualifications. The successful launch remains attended. |
 | 2026-08-21 | Published Slice 7 implementation `e30673a0`, passed required firmware checks, exact development/released SAFE roundtrip, durable transition evidence, and idempotent released restore; final installed role is released revision 6. |
 | 2026-08-21 | Passed the final complete Python suite (`5,569 passed`, `156 skipped`), verified the tracked built firmware artifact, sealed the final released-state postflight, and prepared the exact attended campaign without executing it. |
+| 2026-08-21 | First attended launch failed before window construction because its SSH supervisor omitted the Pi desktop environment; rc.5 was immediately restored and SAFE-verified, then the minimal Wayland/X11 environment correction passed 18 focused tests. |
 
 ## Goal prompt for Slices 1-4
 

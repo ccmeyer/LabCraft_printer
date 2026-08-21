@@ -152,6 +152,27 @@ def processes():
     return sorted(found, key=lambda row: row["pid"])
 
 
+def desktop_environment():
+    runtime = Path(f"/run/user/{os.getuid()}")
+    environment = {
+        "XDG_RUNTIME_DIR": str(runtime),
+        "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime}/bus",
+    }
+    wayland = sorted(runtime.glob("wayland-*")) if runtime.is_dir() else []
+    wayland = [item for item in wayland if not item.name.endswith(".lock")]
+    if wayland:
+        environment.update({
+            "WAYLAND_DISPLAY": wayland[0].name,
+            "DISPLAY": ":0",
+            "QT_QPA_PLATFORM": "wayland;xcb",
+        })
+    elif Path("/tmp/.X11-unix/X0").exists():
+        environment.update({"DISPLAY": ":0", "QT_QPA_PLATFORM": "xcb"})
+    else:
+        raise RuntimeError("No Pi desktop session is available for attended launch.")
+    return environment
+
+
 def atomic(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.parent / f".{path.name}.{uuid4()}.tmp"
@@ -285,10 +306,17 @@ def main():
                 "--expected-commit", request["expected_commit"],
             ]
             log_path = session / "application.log"
+            launch_environment = dict(os.environ)
+            for name in (
+                "DISPLAY", "WAYLAND_DISPLAY", "QT_QPA_PLATFORM",
+                "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+            ):
+                launch_environment.pop(name, None)
+            launch_environment.update(desktop_environment())
             with log_path.open("w", encoding="utf-8", newline="\n") as log:
                 process = subprocess.Popen(
                     command, cwd=development, stdout=log, stderr=subprocess.STDOUT,
-                    text=True, start_new_session=True,
+                    text=True, start_new_session=True, env=launch_environment,
                 )
                 report["owned_process"] = {"pid": process.pid, "process_group": process.pid}
                 try:
