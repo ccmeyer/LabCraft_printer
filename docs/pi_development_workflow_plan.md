@@ -443,14 +443,16 @@ Planned files:
 Implementation commit `733f9e77` exposed a Pi-only virtual-environment symlink
 defect during qualification: resolving `env/bin/python` to `/usr/bin/python3.11`
 lost the venv package context. The correction preserves the absolute lexical
-venv path while retaining resolved-path checks for code and data. Focused
-behavior and failure-path tests pass; corrected exact-commit Pi configuration
-and validation remain before the slice can be marked verified.
+venv path while retaining resolved-path checks for code and data. The collector
+also records content-based fingerprints for the complete production source and
+development data trees, making data invariance direct. Focused behavior and
+failure-path tests pass; corrected exact-commit Pi validation remains before
+the slice can be marked verified.
 
 ### Validation record
 
-- `env\\Scripts\\python.exe -m pytest -q --basetemp verification_reports\\development-workflow\\pytest-temp\\slice3-correction-20260821-01 tests\\test_pi_development_workflow.py`:
-  45 passed in 1.41 seconds.
+- `env\\Scripts\\python.exe -m pytest -q --basetemp verification_reports\\development-workflow\\pytest-temp\\slice3-tree-evidence-20260821-01 tests\\test_pi_development_workflow.py`:
+  45 passed in 1.48 seconds.
 - The complete default suite remains deferred to final Slice 4 validation per
   the operator's 2026-08-21 direction.
 - Initial Configure evidence:
@@ -556,6 +558,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Make no-hardware the only launch through Slice 4. | Worktree/runtime/data orchestration can be qualified before any physical capability is introduced. |
 | 2026-08-21 | Keep firmware flashing separate from the development app launcher. | The installed STM32 image is global machine state and requires an attended HIL and rollback path. |
 | 2026-08-21 | Run focused tests for each remaining slice and defer the next complete default suite to final Slice 4 validation. | Avoid repeated six-minute full-suite runs while preserving one final broad regression gate. |
+| 2026-08-21 | Hash the complete production and development machine-data trees during workflow collection. | The current stores are only 4.3 MB/66 files and 3.2 MB/58 files, so direct content evidence is inexpensive and stronger than relying on creation-time marker provenance. |
 
 ## Findings log
 

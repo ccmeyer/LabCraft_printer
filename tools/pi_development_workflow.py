@@ -229,9 +229,11 @@ REMOTE_COLLECTOR = r'''
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 from uuid import UUID
@@ -264,6 +266,58 @@ def lexical_absolute(value):
 
 def beneath_or_equal(path, root):
     return path == root or root in path.parents
+
+
+def regular_tree_evidence(root):
+    requested = Path(root).expanduser()
+    path = resolved(requested)
+    evidence = {
+        "root": str(path), "valid": False, "file_count": 0,
+        "total_size": 0, "tree_sha256": None, "error": None,
+    }
+    try:
+        if not requested.is_dir() or requested.is_symlink():
+            raise ValueError("tree root is missing or is a symlink")
+        inventory = []
+        folded = set()
+        for candidate in sorted(requested.rglob("*")):
+            details = candidate.lstat()
+            if stat.S_ISLNK(details.st_mode):
+                raise ValueError(f"tree contains a symlink: {candidate}")
+            if candidate.is_dir():
+                continue
+            if not candidate.is_file():
+                raise ValueError(f"tree contains a special file: {candidate}")
+            relative = candidate.relative_to(requested).as_posix()
+            if relative.casefold() in folded:
+                raise ValueError("tree contains case-colliding paths")
+            folded.add(relative.casefold())
+            digest = hashlib.sha256()
+            size = 0
+            with candidate.open("rb") as handle:
+                while True:
+                    block = handle.read(1024 * 1024)
+                    if not block:
+                        break
+                    digest.update(block)
+                    size += len(block)
+            inventory.append({
+                "relative_path": relative,
+                "size": size,
+                "raw_sha256": digest.hexdigest(),
+            })
+        canonical = json.dumps(
+            inventory, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        evidence.update({
+            "valid": True,
+            "file_count": len(inventory),
+            "total_size": sum(item["size"] for item in inventory),
+            "tree_sha256": hashlib.sha256(canonical).hexdigest(),
+        })
+    except Exception as exc:
+        evidence["error"] = str(exc)
+    return evidence
 
 
 def parse_worktrees(text):
@@ -357,7 +411,8 @@ def inspect_store(root, production_repo, development_repo):
             raise ValueError("marker schema version is invalid")
         if resolved(marker["development_root"]) != path:
             raise ValueError("marker development root differs")
-        source = resolved(marker["source_machine_data_root"])
+        source_requested = Path(marker["source_machine_data_root"]).expanduser()
+        source = resolved(source_requested)
         if source == path or beneath_or_equal(source, path) or beneath_or_equal(path, source):
             raise ValueError("source and development roots are not disjoint")
         UUID(str(marker["store_id"]))
@@ -377,6 +432,12 @@ def inspect_store(root, production_repo, development_repo):
             raise ValueError("development store is inside a code worktree")
         result["store_id"] = str(UUID(str(marker["store_id"])))
         result["source_machine_data_root"] = str(source)
+        result["source_tree_evidence"] = regular_tree_evidence(source_requested)
+        result["development_tree_evidence"] = regular_tree_evidence(requested)
+        if not result["source_tree_evidence"]["valid"]:
+            raise ValueError("source machine-data tree evidence is invalid")
+        if not result["development_tree_evidence"]["valid"]:
+            raise ValueError("development machine-data tree evidence is invalid")
         result["marker_valid"] = True
     except Exception as exc:
         result["errors"].append(f"marker: {exc}")

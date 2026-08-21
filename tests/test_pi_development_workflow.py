@@ -83,6 +83,18 @@ def _remote(**updates):
                 "machine_identity_valid": True,
                 "store_id": "00000000-0000-0000-0000-000000000001",
                 "machine_id": "LC-001",
+                "source_tree_evidence": {
+                    "valid": True,
+                    "file_count": 66,
+                    "total_size": 4_300_000,
+                    "tree_sha256": "1" * 64,
+                },
+                "development_tree_evidence": {
+                    "valid": True,
+                    "file_count": 58,
+                    "total_size": 3_200_000,
+                    "tree_sha256": "2" * 64,
+                },
                 "errors": [],
             },
         },
@@ -350,6 +362,8 @@ def test_remote_collector_accepts_json_and_uses_batch_mode(monkeypatch):
     assert "BatchMode=yes" in captured["arguments"]
     assert "development_store.json" in captured["input"]
     assert "machine_identity.json" in captured["input"]
+    assert "regular_tree_evidence" in captured["input"]
+    assert "tree_sha256" in captured["input"]
     encoded = captured["arguments"][-1]
     request = json.loads(base64.urlsafe_b64decode(encoded).decode("utf-8"))
     assert request["workflow_config"] == workflow.DEFAULT_WORKFLOW_CONFIG
