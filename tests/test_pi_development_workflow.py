@@ -31,6 +31,8 @@ def _local(**updates):
         "clean": True,
         "status": [],
         "upstream": "origin/feature/test",
+        "upstream_remote": "origin",
+        "upstream_merge_ref": "refs/heads/feature/test",
         "ahead": 0,
         "behind": 0,
         "head_reachable_from_upstream": True,
@@ -282,6 +284,89 @@ def test_remote_collector_accepts_json_and_uses_batch_mode(monkeypatch):
     assert "development_store.json" in captured["input"]
 
 
+def test_sync_remote_worktree_uses_exact_commit_and_safe_remote_ref(monkeypatch):
+    captured = {}
+
+    def fake_run(arguments, **kwargs):
+        captured["arguments"] = list(arguments)
+        captured["input"] = kwargs["input_text"]
+        return subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps(
+                {
+                    "action": "created",
+                    "commit": "a" * 40,
+                    "development_repo": workflow.DEFAULT_DEVELOPMENT_REPO,
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(workflow, "_run", fake_run)
+    result = workflow.sync_remote_worktree(
+        pi_host="pi-test",
+        pi_user="labcraft",
+        identity_file=None,
+        production_repo=workflow.DEFAULT_PRODUCTION_REPO,
+        development_repo=workflow.DEFAULT_DEVELOPMENT_REPO,
+        expected_commit="a" * 40,
+        expected_production_head="b" * 40,
+        expected_production_branch="protected-update-rc5",
+        remote_name="origin",
+        remote_ref="refs/heads/feature/test",
+        expected_remote_url="https://example.invalid/repo.git",
+    )
+    assert result["action"] == "created"
+    assert "BatchMode=yes" in captured["arguments"]
+    assert "worktree\", \"add\"" in captured["input"]
+    assert "switch\", \"--detach\"" in captured["input"]
+    assert "reset --hard" not in captured["input"]
+    assert "git clean" not in captured["input"]
+
+
+@pytest.mark.parametrize(
+    ("remote_name", "remote_ref"),
+    [("", "refs/heads/feature/test"), (".", "refs/heads/feature/test"), ("origin", "tag")],
+)
+def test_sync_remote_worktree_rejects_unsafe_upstream_contract(remote_name, remote_ref):
+    with pytest.raises(workflow.WorkflowError):
+        workflow.sync_remote_worktree(
+            pi_host="pi-test",
+            pi_user="labcraft",
+            identity_file=None,
+            production_repo=workflow.DEFAULT_PRODUCTION_REPO,
+            development_repo=workflow.DEFAULT_DEVELOPMENT_REPO,
+            expected_commit="a" * 40,
+            expected_production_head="b" * 40,
+            expected_production_branch="protected-update-rc5",
+            remote_name=remote_name,
+            remote_ref=remote_ref,
+            expected_remote_url="https://example.invalid/repo.git",
+        )
+
+
+def test_pi_invariant_hash_excludes_only_managed_development_worktree():
+    before = _remote()
+    after = _remote()
+    after["development_worktree"] = {
+        "path": workflow.DEFAULT_DEVELOPMENT_REPO,
+        "state": "registered_clean",
+        "registered": True,
+        "valid": True,
+        "clean": True,
+        "head": "a" * 40,
+        "detached": True,
+    }
+    assert workflow.canonical_sha256(workflow.pi_invariant_payload(before)) == (
+        workflow.canonical_sha256(workflow.pi_invariant_payload(after))
+    )
+    after["production_worktree"]["head"] = "c" * 40
+    assert workflow.canonical_sha256(workflow.pi_invariant_payload(before)) != (
+        workflow.canonical_sha256(workflow.pi_invariant_payload(after))
+    )
+
+
 def test_powershell_wrapper_dry_run_and_identity_validation(tmp_path):
     powershell = shutil.which("powershell") or shutil.which("pwsh")
     if powershell is None:
@@ -349,3 +434,78 @@ def test_cli_rejects_missing_openssh_before_collection(monkeypatch, capsys):
     result = workflow.main(["--action", "status", "--pi-host", "pi-test"])
     assert result == 1
     assert "OpenSSH client" in capsys.readouterr().err
+
+
+def test_cli_sync_blocks_before_mutation(monkeypatch, tmp_path):
+    monkeypatch.setattr(workflow, "collect_local_state", lambda *_: _local(clean=False))
+    monkeypatch.setattr(workflow, "collect_remote_state", lambda **_: _remote())
+    called = False
+
+    def unexpected_sync(**_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("sync must not run")
+
+    monkeypatch.setattr(workflow, "sync_remote_worktree", unexpected_sync)
+    result = workflow.main(
+        ["--action", "sync", "--pi-host", "pi-test", "--output-root", str(tmp_path)]
+    )
+    assert result == 2
+    assert called is False
+    report = json.loads(next(tmp_path.rglob("status.json")).read_text(encoding="utf-8"))
+    assert "local_dirty" in _codes(report["blockers"])
+
+
+def test_cli_sync_creates_exact_clean_detached_worktree_and_proves_invariants(
+    monkeypatch, tmp_path
+):
+    pre = _remote()
+    post = _remote()
+    post["development_worktree"] = {
+        "path": workflow.DEFAULT_DEVELOPMENT_REPO,
+        "state": "registered_clean",
+        "registered": True,
+        "valid": True,
+        "clean": True,
+        "status": [],
+        "head": "a" * 40,
+        "branch": None,
+        "detached": True,
+    }
+    states = iter([pre, post])
+    monkeypatch.setattr(workflow, "collect_local_state", lambda *_: _local())
+    monkeypatch.setattr(workflow, "collect_remote_state", lambda **_: next(states))
+    monkeypatch.setattr(
+        workflow,
+        "sync_remote_worktree",
+        lambda **_: {
+            "action": "created",
+            "commit": "a" * 40,
+            "development_repo": workflow.DEFAULT_DEVELOPMENT_REPO,
+        },
+    )
+    result = workflow.main(
+        ["--action", "sync", "--pi-host", "pi-test", "--output-root", str(tmp_path)]
+    )
+    assert result == 0
+    report = json.loads(next(tmp_path.rglob("status.json")).read_text(encoding="utf-8"))
+    assert report["sync"]["status"] == "passed"
+    assert report["sync"]["action"] == "created"
+    assert report["sync"]["pre_invariant_sha256"] == report["sync"]["post_invariant_sha256"]
+    assert report["pi"]["development_worktree"]["head"] == "a" * 40
+
+
+def test_cli_sync_failure_writes_evidence_and_returns_one(monkeypatch, tmp_path):
+    monkeypatch.setattr(workflow, "collect_local_state", lambda *_: _local())
+    monkeypatch.setattr(workflow, "collect_remote_state", lambda **_: _remote())
+    monkeypatch.setattr(
+        workflow,
+        "sync_remote_worktree",
+        lambda **_: (_ for _ in ()).throw(workflow.WorkflowError("fetch rejected")),
+    )
+    result = workflow.main(
+        ["--action", "sync", "--pi-host", "pi-test", "--output-root", str(tmp_path)]
+    )
+    assert result == 1
+    report = json.loads(next(tmp_path.rglob("status.json")).read_text(encoding="utf-8"))
+    assert report["sync"] == {"status": "failed", "error": "fetch rejected"}

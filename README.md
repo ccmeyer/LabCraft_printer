@@ -91,6 +91,24 @@ Use `-DryRun` to display the intended target and paths without SSH or report
 creation. JSON evidence is written beneath the ignored
 `verification_reports/development-workflow/status/` root.
 
+After committing and pushing a development branch, create or update only the
+dedicated Pi development worktree at the exact Windows commit:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\run_pi_development.ps1 `
+  -Action Sync `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -DevelopmentMachineDataRoot "/home/labcraft/.local/share/LabCraft/LabCraft Printer/development/main-65ba38df-machine-data"
+```
+
+`Sync` requires a clean, pushed Windows HEAD and clean Pi state. It fetches the
+configured upstream ref, selects the exact commit in detached mode under
+`/home/labcraft/LabCraft_printer-dev`, and proves that the protected checkout,
+retained worktrees, shared interpreter, running processes, and development
+machine-data evidence did not change. It never resets, cleans, deletes, or
+switches the protected production worktree.
+
 Do not switch a deployed production checkout to an arbitrary development commit
 and launch it against the production machine-data root. Production stores are
 bound to the exact commit authorized by the protected updater.

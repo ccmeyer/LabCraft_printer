@@ -35,7 +35,7 @@ evidence are recorded here.
 | Slice | Scope | Status | Implementation | Validation |
 | --- | --- | --- | --- | --- |
 | 1 | Read-only Windows/Pi status and preflight | `verified` | `e58129b3` | 24 focused and 5,485 full-suite tests; clean/pushed Pi Preflight and exact read-only invariance passed |
-| 2 | Create and synchronize the Pi development worktree | `planned` | Not started | Not run |
+| 2 | Create and synchronize the Pi development worktree | `implementation_complete` | Candidate on `feature/pi-development-workflow`; commit pending | 32 focused tests passed; Pi create/reuse/refusal gates pending |
 | 3 | Bind the shared interpreter and development machine data | `planned` | Not started | Not run |
 | 4 | Launch and qualify the no-hardware development app | `planned` | Not started | Not run |
 | 5 | Build, flash, and qualify committed development firmware | `planned` | Not started | Not run |
@@ -295,7 +295,7 @@ failure-path tests, and README usage.
 
 ## Slice 2 - Development worktree creation and synchronization
 
-Status: `planned`
+Status: `implementation_complete`
 
 ### Objective
 
@@ -330,11 +330,20 @@ commit without modifying the production checkout.
 
 ### Implementation record
 
-Not started.
+Implementation complete on `feature/pi-development-workflow`; dedicated
+commit pending. `Sync` reuses Slice 1 readiness, fetches the exact upstream
+branch into shared Git metadata, creates or retargets only the clean detached
+development worktree, and proves protected Pi invariants before reporting
+success.
 
 ### Validation record
 
-Not run.
+- `env\\Scripts\\python.exe -m pytest -q tests\\test_pi_development_workflow.py`:
+  32 passed in 3.92 seconds.
+- Per the operator's 2026-08-21 validation-policy update, the in-progress full
+  suite was stopped and complete regression is deferred to final Slice 4
+  validation. Pi first-create, idempotent reuse, refusal, and invariance gates
+  remain pending after the exact Slice 2 commit is published.
 
 ## Slice 3 - Shared runtime and development-data binding
 
@@ -476,6 +485,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Keep machine data outside all worktrees and pass the development root explicitly. | Worktree switching cannot select or seed machine-specific configuration. |
 | 2026-08-21 | Make no-hardware the only launch through Slice 4. | Worktree/runtime/data orchestration can be qualified before any physical capability is introduced. |
 | 2026-08-21 | Keep firmware flashing separate from the development app launcher. | The installed STM32 image is global machine state and requires an attended HIL and rollback path. |
+| 2026-08-21 | Run focused tests for each remaining slice and defer the next complete default suite to final Slice 4 validation. | Avoid repeated six-minute full-suite runs while preserving one final broad regression gate. |
 
 ## Findings log
 
@@ -494,6 +504,8 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Began Slice 1 implementation on `feature/pi-development-workflow`. |
 | 2026-08-21 | Completed Slice 1 implementation and automated validation; clean/pushed Pi invariance qualification remains. |
 | 2026-08-21 | Published `e58129b3` and marked Slice 1 verified after clean/pushed Preflight and exact Pi-state invariance passed. |
+| 2026-08-21 | Began Slice 2 exact-commit development-worktree synchronization implementation. |
+| 2026-08-21 | Completed Slice 2 implementation and focused validation; deferred the full suite to final Slice 4 per operator direction. |
 
 ## Goal prompt for Slices 1-4
 

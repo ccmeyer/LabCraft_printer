@@ -135,6 +135,25 @@ def collect_local_state(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
     upstream = (
         upstream_result.stdout.strip() if upstream_result.returncode == 0 else ""
     )
+    upstream_remote = None
+    upstream_merge_ref = None
+    if upstream and branch:
+        remote_result = _git(
+            "config",
+            "--get",
+            f"branch.{branch}.remote",
+            cwd=root,
+            allowed_exit_codes=(0, 1),
+        )
+        merge_result = _git(
+            "config",
+            "--get",
+            f"branch.{branch}.merge",
+            cwd=root,
+            allowed_exit_codes=(0, 1),
+        )
+        upstream_remote = remote_result.stdout.strip() or None
+        upstream_merge_ref = merge_result.stdout.strip() or None
     ahead = None
     behind = None
     reachable = False
@@ -168,6 +187,8 @@ def collect_local_state(repo_root: Path = REPO_ROOT) -> dict[str, Any]:
         "clean": not status,
         "status": status,
         "upstream": upstream or None,
+        "upstream_remote": upstream_remote,
+        "upstream_merge_ref": upstream_merge_ref,
         "ahead": ahead,
         "behind": behind,
         "head_reachable_from_upstream": reachable,
@@ -488,6 +509,170 @@ except Exception as exc:
 '''
 
 
+REMOTE_SYNC = r'''
+from __future__ import annotations
+
+import base64
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+
+def run(arguments, *, allowed=(0,)):
+    completed = subprocess.run(
+        list(arguments), capture_output=True, text=True, check=False
+    )
+    if completed.returncode not in allowed:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(
+            f"Command failed ({completed.returncode}): {' '.join(arguments[:3])}"
+            + (f": {detail}" if detail else "")
+        )
+    return completed
+
+
+def git(path, *arguments, allowed=(0,)):
+    return run(["git", "-C", str(path), *arguments], allowed=allowed)
+
+
+def resolved(value):
+    return Path(value).expanduser().resolve(strict=False)
+
+
+def parse_worktrees(text):
+    paths = []
+    for line in text.splitlines():
+        if line.startswith("worktree "):
+            paths.append(str(resolved(line[len("worktree "):])) )
+    return paths
+
+
+def relevant_processes():
+    needles = (
+        "FreeRTOS-interface/App.py", "tools/run_development_app.py",
+        "tools/update_window.py", "tools/update_and_restart.py",
+        "firmware/hil/flash_and_test.sh", "dfu_update.py",
+    )
+    matches = []
+    for entry in Path("/proc").glob("[0-9]*"):
+        try:
+            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                "utf-8", errors="replace"
+            ).strip()
+        except (OSError, ValueError):
+            continue
+        if command and any(needle in command for needle in needles):
+            matches.append({"pid": int(entry.name), "command": command})
+    return matches
+
+
+def main():
+    config = json.loads(base64.urlsafe_b64decode(sys.argv[1]).decode("utf-8"))
+    production = resolved(config["production_repo"])
+    development = resolved(config["development_repo"])
+    expected_commit = config["expected_commit"]
+    expected_production_head = config["expected_production_head"]
+    expected_production_branch = config["expected_production_branch"]
+    remote_name = config["remote_name"]
+    remote_ref = config["remote_ref"]
+    tracking_ref = config["tracking_ref"]
+
+    if not production.is_dir():
+        raise RuntimeError("Protected production worktree is missing.")
+    if git(production, "rev-parse", "HEAD").stdout.strip() != expected_production_head:
+        raise RuntimeError("Protected production HEAD changed after preflight.")
+    branch = git(production, "branch", "--show-current").stdout.strip()
+    if branch != expected_production_branch:
+        raise RuntimeError("Protected production branch changed after preflight.")
+    if git(
+        production, "status", "--porcelain=v1", "--untracked-files=all"
+    ).stdout.splitlines():
+        raise RuntimeError("Protected production worktree became dirty.")
+    if relevant_processes():
+        raise RuntimeError("A LabCraft application or hardware workflow is running.")
+    actual_url = git(production, "remote", "get-url", remote_name).stdout.strip()
+    if actual_url.rstrip("/") != config["expected_remote_url"].rstrip("/"):
+        raise RuntimeError("Pi and Windows remote repository identities differ.")
+
+    registered_before = parse_worktrees(
+        git(production, "worktree", "list", "--porcelain").stdout
+    )
+    development_text = str(development)
+    registered = development_text in registered_before
+    if registered:
+        if not development.is_dir():
+            raise RuntimeError("Development worktree registration is stale.")
+        if git(
+            development, "status", "--porcelain=v1", "--untracked-files=all"
+        ).stdout.splitlines():
+            raise RuntimeError("Development worktree is dirty.")
+    elif development.exists():
+        raise RuntimeError("Development target exists but is not registered.")
+
+    fetch_spec = f"{remote_ref}:{tracking_ref}"
+    git(production, "fetch", "--no-tags", remote_name, fetch_spec)
+    git(production, "cat-file", "-e", f"{expected_commit}^{{commit}}")
+    if git(
+        production,
+        "merge-base",
+        "--is-ancestor",
+        expected_commit,
+        tracking_ref,
+        allowed=(0, 1),
+    ).returncode != 0:
+        raise RuntimeError("Requested commit is not reachable from the fetched remote ref.")
+
+    action = "unchanged"
+    if registered:
+        current = git(development, "rev-parse", "HEAD").stdout.strip()
+        if current != expected_commit:
+            git(development, "switch", "--detach", expected_commit)
+            action = "updated"
+    else:
+        git(production, "worktree", "add", "--detach", str(development), expected_commit)
+        action = "created"
+
+    final_head = git(development, "rev-parse", "HEAD").stdout.strip()
+    final_branch = git(development, "branch", "--show-current").stdout.strip()
+    final_status = git(
+        development, "status", "--porcelain=v1", "--untracked-files=all"
+    ).stdout.splitlines()
+    if final_head != expected_commit or final_branch or final_status:
+        raise RuntimeError("Development worktree postcondition failed.")
+    if git(production, "rev-parse", "HEAD").stdout.strip() != expected_production_head:
+        raise RuntimeError("Protected production HEAD changed during synchronization.")
+    if git(production, "branch", "--show-current").stdout.strip() != expected_production_branch:
+        raise RuntimeError("Protected production branch changed during synchronization.")
+    if git(
+        production, "status", "--porcelain=v1", "--untracked-files=all"
+    ).stdout.splitlines():
+        raise RuntimeError("Protected production worktree changed during synchronization.")
+    registered_after = parse_worktrees(
+        git(production, "worktree", "list", "--porcelain").stdout
+    )
+    expected_paths = sorted(set(registered_before) | {development_text})
+    if sorted(registered_after) != expected_paths:
+        raise RuntimeError("Unexpected worktree registration changed during synchronization.")
+    print(json.dumps({
+        "action": action,
+        "commit": final_head,
+        "development_repo": development_text,
+        "remote_name": remote_name,
+        "remote_ref": remote_ref,
+        "tracking_ref": tracking_ref,
+        "registered_before": registered,
+    }, sort_keys=True, separators=(",", ":")))
+
+
+try:
+    main()
+except Exception as exc:
+    print(f"Remote synchronization failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+'''
+
+
 def collect_remote_state(
     *,
     pi_host: str,
@@ -537,6 +722,79 @@ def collect_remote_state(
     payload["ssh_target"] = target
     payload["ssh_identity_supplied"] = identity_file is not None
     return payload
+
+
+def sync_remote_worktree(
+    *,
+    pi_host: str,
+    pi_user: str,
+    identity_file: Path | None,
+    production_repo: str,
+    development_repo: str,
+    expected_commit: str,
+    expected_production_head: str,
+    expected_production_branch: str,
+    remote_name: str,
+    remote_ref: str,
+    expected_remote_url: str,
+    timeout_seconds: int = 120,
+) -> dict[str, Any]:
+    if not remote_name or remote_name == ".":
+        raise WorkflowError("A named Git remote is required for synchronization.")
+    if not remote_ref.startswith("refs/heads/"):
+        raise WorkflowError("The upstream merge ref must identify a remote branch.")
+    branch_suffix = remote_ref[len("refs/heads/"):]
+    tracking_ref = f"refs/remotes/{remote_name}/{branch_suffix}"
+    target = pi_host if "@" in pi_host else f"{pi_user}@{pi_host}"
+    config = {
+        "production_repo": production_repo,
+        "development_repo": development_repo,
+        "expected_commit": expected_commit,
+        "expected_production_head": expected_production_head,
+        "expected_production_branch": expected_production_branch,
+        "remote_name": remote_name,
+        "remote_ref": remote_ref,
+        "tracking_ref": tracking_ref,
+        "expected_remote_url": expected_remote_url,
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(config, sort_keys=True).encode("utf-8")
+    ).decode("ascii")
+    command = [
+        "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout_seconds}",
+        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=8",
+    ]
+    if identity_file is not None:
+        command.extend(["-i", str(identity_file)])
+    command.extend([target, "python3", "-", encoded])
+    completed = _run(command, input_text=REMOTE_SYNC)
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise WorkflowError("Pi returned malformed synchronization JSON.") from exc
+    if not isinstance(payload, dict):
+        raise WorkflowError("Pi synchronization response is not a JSON object.")
+    return payload
+
+
+def pi_invariant_payload(remote: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "hostname": remote.get("hostname"),
+        "production_worktree": remote.get("production_worktree"),
+        "other_worktrees": remote.get("other_worktrees"),
+        "shared_python": remote.get("shared_python"),
+        "processes": remote.get("processes"),
+        "development_machine_data": remote.get("development_machine_data"),
+    }
+
+
+def canonical_sha256(payload: Mapping[str, Any]) -> str:
+    import hashlib
+
+    data = json.dumps(
+        dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    return hashlib.sha256(data).hexdigest()
 
 
 def classify_status(
@@ -698,7 +956,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Inspect the Windows and Pi development workflow safely."
     )
-    parser.add_argument("--action", choices=("status", "preflight"), default="status")
+    parser.add_argument(
+        "--action", choices=("status", "preflight", "sync"), default="status"
+    )
     parser.add_argument("--pi-host", required=True)
     parser.add_argument("--pi-user", default="labcraft")
     parser.add_argument("--ssh-identity-file", type=Path)
@@ -762,8 +1022,60 @@ def main(argv: Sequence[str] | None = None) -> int:
             development_machine_data_root=args.development_machine_data_root,
         )
         report = build_report(action=args.action, local=local, remote=remote)
+        if args.action == "sync" and not report["blockers"]:
+            pre_invariant = canonical_sha256(pi_invariant_payload(remote))
+            try:
+                sync_result = sync_remote_worktree(
+                    pi_host=args.pi_host,
+                    pi_user=args.pi_user,
+                    identity_file=identity,
+                    production_repo=args.production_repo,
+                    development_repo=args.development_repo,
+                    expected_commit=local["head"],
+                    expected_production_head=remote["production_worktree"]["head"],
+                    expected_production_branch=remote["production_worktree"]["branch"],
+                    remote_name=str(local.get("upstream_remote") or ""),
+                    remote_ref=str(local.get("upstream_merge_ref") or ""),
+                    expected_remote_url=str(local.get("origin_url") or ""),
+                )
+                post_remote = collect_remote_state(
+                    pi_host=args.pi_host,
+                    pi_user=args.pi_user,
+                    identity_file=identity,
+                    production_repo=args.production_repo,
+                    development_repo=args.development_repo,
+                    shared_python=args.shared_python,
+                    development_machine_data_root=args.development_machine_data_root,
+                )
+                post_invariant = canonical_sha256(pi_invariant_payload(post_remote))
+                post_development = post_remote.get("development_worktree") or {}
+                if pre_invariant != post_invariant:
+                    raise WorkflowError("Protected Pi invariants changed during synchronization.")
+                if (
+                    post_development.get("state") != "registered_clean"
+                    or post_development.get("head") != local["head"]
+                    or not post_development.get("detached")
+                ):
+                    raise WorkflowError("Development worktree postflight differs from the requested commit.")
+                report = build_report(
+                    action=args.action, local=local, remote=post_remote
+                )
+                report["sync"] = {
+                    "status": "passed",
+                    "pre_invariant_sha256": pre_invariant,
+                    "post_invariant_sha256": post_invariant,
+                    **sync_result,
+                }
+            except (OSError, ValueError, WorkflowError) as exc:
+                report["sync"] = {"status": "failed", "error": str(exc)}
+                report_path = write_report(report, args.output_root)
+                print_summary(report, report_path)
+                print(f"Workflow failed: {exc}", file=sys.stderr)
+                return 1
         report_path = write_report(report, args.output_root)
         print_summary(report, report_path)
+        if args.action == "sync" and report["blockers"]:
+            return 2
     except (OSError, ValueError, WorkflowError) as exc:
         print(f"Workflow failed: {exc}", file=sys.stderr)
         return 1

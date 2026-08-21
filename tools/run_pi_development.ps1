@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [ValidateSet("Status", "Preflight")]
+  [ValidateSet("Status", "Preflight", "Sync")]
   [string]$Action = "Status",
 
   [Parameter(Mandatory = $true)]
