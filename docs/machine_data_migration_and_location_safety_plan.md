@@ -4,7 +4,7 @@ Status: `in_progress`
 
 Prepared: 2026-08-19
 
-Current target release: `v1.3.0-rc.4`
+Current target release: `v1.3.0-rc.5`
 
 Milestone 7 rc.4 correction plan:
 [Exact-Restore Correction Plan](machine_data_migration_milestone_7_rc4_correction_plan.md)
@@ -2183,6 +2183,7 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-20 | 7 | Coverage-complete rc.4 candidate `25d1b541` passed exact-commit Windows and disposable-Pi qualification | Windows 60 focused, 5,435 full/156 skipped, release/firmware identity, SIL 96/96; Pi 60 focused, independent exact-byte restore, SIL 96/96; matching evidence archives; active pointer, anchor, and all 25 production files unchanged | Request explicit authorization for the immutable local rc.4 tag and attended protected rc.3 -> rc.4 update/restore |
 | 2026-08-20 | 7 | Local rc.4 tag and attended LC-001 protected update/exact restore passed | Tag peels to `25d1b541`; rc.3 -> rc.4 update preserved 25 files; sequence-5 restore recovered exact original Locations bytes, unchanged Camera, absent disposable target, zero pending/no motion; closed bootstrap ready; final archive `198C533C...8FB9A17` | Retain immutable tags; complete publication, pilot cohorts, physical Camera/HIL, and staged rollout gates |
 | 2026-08-20 | Post-M7 correction | Calibration runtime classification and isolated development lane implemented locally | 73 migration-focused, 36 composition/development, 282 updater/deployment, and 5,461 full-suite tests passed; contained hardware-disabled SIL completed 96/96; production default and release anchor remain unchanged | Run disposable-Pi qualification, production-store recovery verification, and prepare one rc.5 release |
+| 2026-08-20 | Post-M7 correction | Rc.5 behavior commit `65ba38df` passed disposable-Pi and production-store qualification | Pi focused group 53 passed; external clone reopened with `SimulatedMachine`, updater blocked, no physical interface, commit-bound session evidence; private-device SIL 96/96; production 56-file fingerprint `b31394ac...0ad64a` unchanged and sole bootstrap issue was the expected rc.4 deployment-anchor mismatch; metadata-tree focused gate 419 passed and clean full rerun passed 5,461/156 skipped after one unrelated balance cleanup timing retry | Validate and tag rc.5, restore the two rc.4 timestamp-only source bytes from verified evidence, then run the attended protected update |
 
 ## Definition of done for v1.3.0-rc.2
 
@@ -2215,6 +2216,7 @@ The work is complete only when:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Recorded rc.5 behavior commit `65ba38df`, passing target-Pi focused/development/private-device SIL gates, unchanged production fingerprint, and the verified-source restoration required before the attended rc.4 -> rc.5 protected update. |
 | 2026-08-20 | Recorded immutable local rc.4 tag, successful attended protected rc.3 -> rc.4 update, exact sequence-5 disposable-target recovery, Camera-safe/no-pending/no-motion closed postflight, and matching final archive; retained publication and rollout boundaries. |
 | 2026-08-20 | Recorded the post-rc.4 CalibrationMemory immutable-manifest defect, its active-runtime classification correction, and the separate commit-bound development-store workflow that keeps the production deployment anchor enforced. |
 | 2026-08-20 | Recorded coverage-complete rc.4 candidate `25d1b541`, passing refrozen Windows full/focused/SIL and disposable-Pi focused/exact-restore/private-device SIL/postflight gates; retained the local tag and attended update/restore as explicit authorization boundaries. |

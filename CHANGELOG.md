@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.3.0-rc.5 - 2026-08-20
+
+### Fixed
+
+- Normalized derived well coordinates to exact built-in integers and added a complete print-array endpoint preflight. Every remaining well and row-entry approach must now pass coordinate, global-bound, and active-plate authorization checks before the execution plan is locked or any hardware command is queued.
+- Fixed production restart after legitimate calibration activity by classifying validated active `CalibrationMemory/` and `calibration/` payloads as runtime-owned. Copied, staged, and unverified migrations remain byte-exact; the calibration-memory schema and required seed documents remain enforced.
+- Kept governed configuration, including `Locations.json`, `Plates.json`, target authorization, configuration history, active-machine identity, activation evidence, and deployment anchors under their existing exact or transaction-backed integrity checks.
+
+### Added
+
+- Added a byte-verified external development-store clone and a commit-bound development launcher so ordinary code changes can be exercised without changing the production deployment or its authorized machine-data tree.
+- Development launches default to a simulated machine with serial, camera, GPIO, updater, and firmware/DFU access blocked. Attended hardware development requires an explicit hardware flag and the exact warning confirmation, while update and firmware controls remain blocked.
+
+### Safety and compatibility
+
+- Production startup still requires the exact commit authorized by the protected updater. Development mode can bypass that release gate only for a separately marked external development store and cannot reinterpret the production store as development data.
+- The print-array correction fails before queueing hardware work if any endpoint is invalid; it accepts only values that are already mathematically integral and never truncates fractional, non-finite, or Boolean values.
+- This release changes no firmware, device protocol, pressure behavior, or firmware timing. The bundled firmware artifact is byte-identical to rc.1 through rc.4 with SHA-256 `EDA070CE734D5167F0795FAF30DF461C8A07341E09CA698DE9D850315B0D5884`.
+
+### Validation
+
+- Complete Python suite: `5,461 passed, 156 skipped`.
+- Focused migration, development-composition, updater/deployment, and print-array guard suites passed on Windows.
+- Contained Windows and Raspberry Pi `virtual_print_array_96_v1` qualification completed 96/96 with hardware isolation.
+- A disposable external development clone reopened on the Pi with `SimulatedMachine`, blocked updater access, no physical interface, and commit-bound session evidence.
+- Read-only production inspection accepted the runtime calibration changes and reported only the expected rc.4 deployment-anchor mismatch while the checkout was on the rc.5 code candidate; the complete production tree fingerprint remained unchanged.
+
+### Rollback
+
+- The reviewed rollback target remains `v1.2.0` with its matching firmware and the support-guided compatibility export described in `docs/machine_data_update_and_rollback_runbook.md`.
+- Before the protected rc.4-to-rc.5 update, retain the current production calibration-memory files and restore the two timestamp-only files from the verified rc.4 migration source so rc.4 can authorize the updater. Do not edit coordinates or bypass the deployment anchor.
+
 ## v1.3.0-rc.4 - 2026-08-20
 
 ### Fixed

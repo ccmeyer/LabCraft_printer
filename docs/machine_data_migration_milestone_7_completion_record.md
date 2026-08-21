@@ -1,19 +1,19 @@
 # Machine Data Migration Milestone 7 Completion Record
 
-> Current correction: rc.3 completed the protected update and normal reopen,
-> but the attended audit exercise found a safe restore-only deletion defect.
-> The
-> [rc.4 correction plan](machine_data_migration_milestone_7_rc4_correction_plan.md)
-> now owns correction qualification, exact recovery of the disposable target,
-> publication, and rollout.
+> Current correction: rc.4 completed the protected update and exact restore,
+> then legitimate calibration activity exposed an overly broad immutable
+> migration-manifest rule and array printing exposed derived numeric types that
+> the motion guard rejected. Rc.5 owns both corrections and the isolated
+> development workflow needed to test future commits without rebinding the
+> production machine-data store.
 
-Status: `in_progress` - rc.4 correction commit `25d1b541` passed exact-commit
-qualification, was tagged locally, and completed the attended protected update
-and exact recovery on LC-001. Publication and staged rollout gates remain.
+Status: `in_progress` - rc.5 behavior commit `65ba38df` passed Windows and
+disposable-Pi qualification. Release metadata, immutable tag, protected rc.4
+update, publication, and staged rollout gates remain.
 
 Started: 2026-08-20
 
-Current target release: `v1.3.0-rc.4`
+Current target release: `v1.3.0-rc.5`
 
 Parent documents:
 
@@ -381,6 +381,66 @@ or unexpected device activity. The final 4,689-byte private archive matched
 on Pi and Windows at SHA-256 `198C533C...8FB9A17`. Production is clean and
 closed at tagged rc.4.
 
+## Post-rc.4 calibration, array, and development correction
+
+After rc.4, a successful printer-head calibration updated only runtime-owned
+`updated_at_utc` fields in active `CalibrationMemory/config.json` and
+`CalibrationMemory/entities/reagents.json`. The production bootstrap rejected
+the next launch because the migration tree manifest had classified every
+migrated byte as permanently immutable. Separately, an array run reached its
+pause position before well F2 was rejected because mathematically integral
+NumPy-derived coordinates were not built-in Python integers. Both failures
+were safe, but the array failure occurred too late in the command sequence.
+
+The rc.5 behavior correction:
+
+- keeps copied, staged, and unverified migration data byte-exact;
+- treats validated active `CalibrationMemory/` and `calibration/` payloads as
+  runtime-owned while retaining exact schema and required-seed checks;
+- leaves governed configuration, target authorization, history, identity,
+  activation, and deployment anchors under their existing protection;
+- normalizes only already-integral derived well coordinates and rejects
+  fractional, non-finite, or Boolean values; and
+- preflights every remaining well and row-entry approach before locking the
+  execution plan or queueing any hardware command.
+
+An external development workflow was added so development does not require a
+release per commit. It makes a new byte-verified clone outside the production
+store, marks that clone as development-only, binds every launch to the exact
+commit and operator, and defaults to `SimulatedMachine`. Hardware development
+requires the exact attended confirmation; updater and firmware/DFU controls
+remain blocked in both development modes. The normal production path and
+deployment-anchor gate are unchanged.
+
+Behavior commit `65ba38df2476812dcf70c850b99cbbb80fd22b46` passed:
+
+- 73 migration-focused, 36 development/composition, and 282
+  updater/deployment tests;
+- the complete Windows suite: 5,461 passed and 156 skipped;
+- Windows contained `virtual_print_array_96_v1`: 96/96;
+- target-Pi focused tests: 53 passed;
+- target-Pi external development clone/reopen with `SimulatedMachine`, blocked
+  updater access, no physical interface, and commit-bound session evidence;
+- target-Pi contained private-device SIL: 96/96; and
+- read-only production inspection that accepted the runtime calibration files,
+  reported only the expected pre-release rc.4 deployment-anchor mismatch, and
+  left the complete 56-file production-tree fingerprint unchanged at
+  `b31394ac...0ad64a`.
+
+The first full-suite run against the rc.5 metadata tree had one balance-worker
+cleanup timing failure after 5,460 other passes. Rc.5 does not change that
+service or test. The failed case immediately passed alone, its complete
+17-test module passed, and the required clean full rerun passed all 5,461
+tests with 156 skipped.
+
+Rc.5 release metadata and the exact tag remain the next gate. To re-enter the
+authorized rc.4 updater, support must first preserve the current two runtime
+files and restore their timestamp-only rc.4 source bytes from the verified
+migration archive. The restored bytes must match the original manifest hashes;
+no coordinate, calibration result, location, authorization, or history value
+may be edited. The operator-attended protected updater then owns the rc.5 Git
+change and post-update deployment anchor.
+
 ## Local tag, updater, and rollback qualification
 
 Status: `passed` for the local rc.4 tag and attended protected update/exact
@@ -428,6 +488,7 @@ Final ignored evidence roots:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-20 | Recorded rc.5 behavior commit `65ba38df`, Windows and disposable-Pi qualification, unchanged production fingerprint, the isolated development lane, and the exact evidence-restoration/protected-update boundary required to recover from rc.4's overly broad runtime manifest rule. |
 | 2026-08-20 | Created immutable local rc.4 tag at `25d1b541`; completed the normal protected rc.3 -> rc.4 update, exact sequence-5 restore of the disposable target, byte-identical Camera-safe closed-app postflight, zero-pending/no-motion attestation, and matching final archive SHA-256 `198C533C...8FB9A17`; retained publication and rollout gates. |
 | 2026-08-20 | Froze coverage-complete rc.4 candidate `25d1b541`; passed exact-commit Windows 60-test/full-suite/release/SIL gates, Pi 60-test/independent exact-restore/private-device SIL gates, matching archives, and byte-identical production postflight; retained tag and attended update/restore as explicit authorization gates. |
 | 2026-08-20 | Added direct calibrated-plate removal/exact-restore regression coverage after the first rc.4 disposable qualification; retained `3e451c01` as passing runtime evidence but reopened the exact-candidate gate because the tracked release tree changed. |
