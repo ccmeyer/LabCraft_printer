@@ -241,12 +241,12 @@ def main():
         }
         if request["action"] == "cancel":
             report["status"] = "canceled"
-        elif compatibility is None:
-            report["status"] = "blocked"
-            report["blocker"] = "firmware_state_incompatible"
         elif request["runtime_mode"] != "hardware":
             report["status"] = "blocked"
             report["blocker"] = "no_hardware_mode_rejected"
+        elif compatibility is None:
+            report["status"] = "blocked"
+            report["blocker"] = "firmware_state_incompatible"
         elif request["action"] == "preflight":
             report["status"] = "ready"
         elif request["action"] == "launch":

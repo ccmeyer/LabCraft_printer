@@ -30,6 +30,9 @@ def test_remote_worker_is_valid_and_launch_is_explicitly_gated() -> None:
     assert "os.killpg(process.pid" in source
     assert "update_and_restart.py" in source
     assert "dfu_update.py" in source
+    assert source.index('request["runtime_mode"] != "hardware"') < source.index(
+        'elif compatibility is None'
+    )
 
 
 def test_dry_run_does_not_use_ssh_or_launch(capsys) -> None:
