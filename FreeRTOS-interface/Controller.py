@@ -2,7 +2,6 @@ from PySide6.QtCore import QObject, Signal
 from PySide6 import QtCore
 from serial.tools.list_ports import comports
 from Model import Model,PrinterHead,Slot
-from dfu_update import reset_board
 from dfu_update_worker import DfuUpdateWorker
 from ResetDebugBundle import export_reset_debug_bundle
 from AppVersion import get_app_commit, get_app_version as read_app_version

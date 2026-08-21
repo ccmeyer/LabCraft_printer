@@ -607,6 +607,12 @@ Implementation complete; exact feature-branch commit pending.
 - The complete default suite is intentionally deferred until the final Slice 4
   gate, per the operator's 2026-08-21 test policy.
 - Exact-commit Pi offscreen/visible qualification is pending.
+- First exact-commit offscreen attempt reached `SimulatedMachine`, created both
+  receipts, auto-closed with exit 0, and preserved production/data/environment,
+  but failed closed because the trace found an eager `dfu-util` executable
+  availability probe. Root cause: `Controller` imported the DFU implementation
+  at module load only to obtain an unused symbol. The eager import was removed;
+  corrected qualification is pending.
 
 ## Slice 5 - Isolated development firmware HIL
 

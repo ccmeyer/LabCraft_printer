@@ -23,3 +23,21 @@ def test_controller_has_no_duplicate_method_definitions():
             seen.add(node.name)
 
     assert duplicates == set(), f"Duplicate methods found: {sorted(duplicates)}"
+
+
+def test_controller_does_not_import_hardware_dfu_implementation_at_startup():
+    controller_path = (
+        Path(__file__).resolve().parents[1] / "FreeRTOS-interface" / "Controller.py"
+    )
+    tree = ast.parse(controller_path.read_text(encoding="utf-8"))
+
+    eager_dfu_imports = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            eager_dfu_imports.extend(
+                alias.name for alias in node.names if alias.name == "dfu_update"
+            )
+        elif isinstance(node, ast.ImportFrom) and node.module == "dfu_update":
+            eager_dfu_imports.append(node.module)
+
+    assert eager_dfu_imports == []
