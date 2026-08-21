@@ -36,7 +36,7 @@ evidence are recorded here.
 | --- | --- | --- | --- | --- |
 | 1 | Read-only Windows/Pi status and preflight | `verified` | `e58129b3` | 24 focused and 5,485 full-suite tests; clean/pushed Pi Preflight and exact read-only invariance passed |
 | 2 | Create and synchronize the Pi development worktree | `verified` | `4bef5790` | 32 focused tests; Pi create, idempotent reuse, unregistered-path refusal, and protected invariance passed |
-| 3 | Bind the shared interpreter and development machine data | `in_progress` | Implementation and qualification correction active | 45 focused tests passed; Pi qualification pending |
+| 3 | Bind the shared interpreter and development machine data | `verified` | `733f9e77`, `fd2fc5e4`, `6756b5a0` | 45 focused tests; Pi create/reuse/path-free validation, dependency/environment/data invariance passed |
 | 4 | Launch and qualify the no-hardware development app | `planned` | Not started | Not run |
 | 5 | Build, flash, and qualify committed development firmware | `planned` | Not started | Not run |
 | 6 | Launch an attended real-hardware development session | `planned` | Not started | Not run |
@@ -360,7 +360,7 @@ success.
 
 ## Slice 3 - Shared runtime and development-data binding
 
-Status: `in_progress`
+Status: `verified`
 
 ### Objective
 
@@ -443,11 +443,11 @@ Planned files:
 Implementation commit `733f9e77` exposed a Pi-only virtual-environment symlink
 defect during qualification: resolving `env/bin/python` to `/usr/bin/python3.11`
 lost the venv package context. The correction preserves the absolute lexical
-venv path while retaining resolved-path checks for code and data. The collector
-also records content-based fingerprints for the complete production source and
-development data trees, making data invariance direct. Focused behavior and
-failure-path tests pass; corrected exact-commit Pi validation remains before
-the slice can be marked verified.
+venv path in `fd2fc5e4` while retaining resolved-path checks for code and data.
+Commit `6756b5a0` adds direct content fingerprints for the complete production
+source and development data trees, making data invariance direct. Configure and
+Validate now bind the shared venv and one external LC-001 development store
+without fallback or package mutation.
 
 ### Validation record
 
@@ -462,8 +462,35 @@ the slice can be marked verified.
 - Read-only post-failure evidence:
   `20260821T154357969595Z_733f9e77cb6e/status.json`. It proved the external
   configuration remained absent, production remained clean at `34841fe0`, and
-  the intended lexical venv path remained available. Corrected qualification
-  is pending.
+  the intended lexical venv path remained available.
+- Corrected external-binding creation:
+  `20260821T154500724544Z_fd2fc5e4bce4/status.json`. It recorded action
+  `created`, matching protected pre/post hash
+  `a1277ae068c88fbc4091e86dd40e9ac4296e3735ee7baf1ff2150b7a6fa439d7`,
+  Python 3.11.2, `pip check` success, required imports, and equal before/after
+  environment fingerprint
+  `8821c025a91b16710c92c2224516be791553b08064e8ca9c34225db8ad4dab6a`
+  across 311 distributions.
+- Path-free `Validate` and idempotent `Configure` passed in
+  `20260821T154513555804Z_fd2fc5e4bce4/status.json` and
+  `20260821T154527950330Z_fd2fc5e4bce4/status.json`; selection source was
+  `configured` without supplying a machine-data root, and the repeated
+  Configure action was `unchanged`.
+- Final exact-commit Sync and Validate evidence:
+  `20260821T154811189188Z_6756b5a099d2/status.json` and
+  `20260821T154823375283Z_6756b5a099d2/status.json`. Sync pre/post hash matched
+  at `a224373b55fa736975e86e50e6b7801a6a31146c2bbf1461c3c98d680e4e86e0`;
+  Validate pre/post hash matched at
+  `8271bac9a60af0221253cbf7e697769a7fe0371299eca3ba613d05bef516df31`.
+  The production tree remained 66 files at
+  `7b168d3c442618c31f0f880b15a093a1f59b9c02deeb2ed025dc681ba933e3bf`
+  and the development tree remained 58 files at
+  `106baab78923f31026ad9c1c797e1f1ea9a3ffafd7cb384deec1ddc1169a35a6`.
+- The external configuration is a mode-600 file owned by `labcraft`, SHA-256
+  `35541800b8b15f5d38d3336f397e6996017e44b71c2c1b24e554a0b8ffddf9d7`.
+  Production remained clean at `34841fe0`, development was clean/detached at
+  `6756b5a0`, both retained worktrees were preserved, and no relevant process
+  was running.
 
 ## Slice 4 - No-hardware development launch
 
@@ -583,6 +610,7 @@ testing, failure recovery, and released-firmware restoration.
 | 2026-08-21 | Published `4bef5790` and marked Slice 2 verified after Pi create/reuse/refusal and protected-invariance gates passed. |
 | 2026-08-21 | Began Slice 3 shared-runtime and external development-data binding; focused validation passed and Pi qualification remains. |
 | 2026-08-21 | Slice 3 Pi Configure failed safely before writing configuration, revealing and correcting venv-symlink resolution; focused correction tests passed. |
+| 2026-08-21 | Verified Slice 3 after corrected create, path-free validation, idempotent reuse, shared-environment fingerprinting, and direct production/development data-tree invariance passed on LC-001. |
 
 ## Goal prompt for Slices 1-4
 
