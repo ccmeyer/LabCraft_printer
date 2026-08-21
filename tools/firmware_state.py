@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import os
 from typing import Any, Mapping
 from uuid import UUID
 
@@ -166,3 +167,132 @@ def require_hardware_compatible(
         "safe_evidence_sha256": payload["safe_evidence_sha256"],
         "firmware_differs_from_released": firmware_differs,
     }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _utc_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
+    from uuid import uuid4
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.parent / f".{path.name}.{uuid4()}.tmp"
+    data = json.dumps(dict(payload), indent=2, sort_keys=True) + "\n"
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def transition_state(
+    path: str | Path,
+    *,
+    role: str,
+    machine_id: str,
+    source_commit: str,
+    artifact_path: str | Path,
+    artifact_sha256: str,
+    flash_transaction_id: str,
+    operator: str,
+    flash_evidence_path: str | Path,
+    safe_evidence_path: str | Path,
+    previous_known_good_released: Mapping[str, Any],
+    expected_previous_sha256: str | None = None,
+    timestamp: str | None = None,
+) -> FirmwareState:
+    """Atomically record a verified role transition with stale-write refusal."""
+
+    destination = Path(path).expanduser()
+    if not destination.is_absolute():
+        raise FirmwareStateError("Firmware-state path must be absolute.")
+    destination = destination.resolve(strict=False)
+    current = load_state(destination) if destination.exists() else None
+    if expected_previous_sha256 is not None and (
+        current is None or current.sha256 != expected_previous_sha256
+    ):
+        raise FirmwareStateError("Firmware state changed before the requested transition.")
+    prior_role = current.role if current is not None else None
+    allowed = {
+        None: {"recovery-required", "released"},
+        "released": {"released", "recovery-required"},
+        "development": {"development", "recovery-required"},
+        "unknown": {"recovery-required"},
+        "recovery-required": {"recovery-required", "development", "released"},
+    }
+    if role not in allowed.get(prior_role, set()):
+        raise FirmwareStateError(f"Firmware transition {prior_role!r} -> {role!r} is not allowed.")
+    artifact = Path(artifact_path).expanduser().resolve(strict=False)
+    flash_evidence = Path(flash_evidence_path).expanduser().resolve(strict=False)
+    safe_evidence = Path(safe_evidence_path).expanduser().resolve(strict=False)
+    if not artifact.is_file() or _file_sha256(artifact) != artifact_sha256:
+        raise FirmwareStateError("Firmware transition artifact bytes do not match.")
+    if not flash_evidence.is_file() or not safe_evidence.is_file():
+        raise FirmwareStateError("Firmware transition evidence is missing.")
+    previous = dict(previous_known_good_released)
+    previous_artifact = Path(str(previous.get("artifact_path", ""))).expanduser()
+    if (
+        not previous_artifact.is_absolute()
+        or not previous_artifact.is_file()
+        or _file_sha256(previous_artifact.resolve()) != previous.get("artifact_sha256")
+    ):
+        raise FirmwareStateError("Previous known-good released artifact bytes do not match.")
+    moment = timestamp or _utc_now()
+    payload = {
+        "schema_name": SCHEMA_NAME,
+        "schema_version": SCHEMA_VERSION,
+        "state_revision": 1 if current is None else int(current.payload["state_revision"]) + 1,
+        "machine_id": str(machine_id),
+        "role": role,
+        "source_commit": source_commit,
+        "artifact_path": str(artifact),
+        "artifact_sha256": artifact_sha256,
+        "flash_transaction_id": str(UUID(str(flash_transaction_id))),
+        "operator": str(operator).strip(),
+        "flashed_at_utc": moment,
+        "verified_at_utc": moment,
+        "updated_at_utc": moment,
+        "flash_evidence_path": str(flash_evidence),
+        "flash_evidence_sha256": _file_sha256(flash_evidence),
+        "safe_evidence_path": str(safe_evidence),
+        "safe_evidence_sha256": _file_sha256(safe_evidence),
+        "previous_known_good_released": previous,
+    }
+    validate_payload(payload)
+    _atomic_json(destination, payload)
+    written = load_state(destination)
+    history = destination.parent / "firmware-state-history"
+    receipt = history / (
+        f"{payload['state_revision']:06d}-{payload['flash_transaction_id']}-{role}.json"
+    )
+    transition_receipt = {
+        "schema_name": "labcraft.firmware_state_transition",
+        "schema_version": 1,
+        "state_revision": payload["state_revision"],
+        "prior_role": prior_role,
+        "new_role": role,
+        "state_path": str(destination),
+        "state_sha256": written.sha256,
+        "flash_transaction_id": payload["flash_transaction_id"],
+        "operator": payload["operator"],
+        "recorded_at_utc": moment,
+    }
+    _atomic_json(receipt, transition_receipt)
+    return written

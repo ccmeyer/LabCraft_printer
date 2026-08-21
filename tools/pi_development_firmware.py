@@ -338,6 +338,7 @@ def main():
         "session_path": str(session),
         "status": "preflight",
         "stages": [],
+        "action": request["action"],
     }
     try:
         if not production.is_dir() or not development.is_dir():
@@ -417,22 +418,77 @@ def main():
             "released_artifact_sha256": sha_file(release_artifact),
             "processes": [],
         }
-        atomic_json(session / "request.json", request)
+        request_path = session / "request.json"
+        atomic_json(request_path, request)
+        sys.path.insert(0, str(development / "tools"))
+        import firmware_state
+
+        state_path = Path(request["firmware_state_path"]).resolve()
+        previous_released = {
+            "tag": tag,
+            "source_commit": tag_commit,
+            "artifact_path": str(release_artifact),
+            "artifact_sha256": sha_file(release_artifact),
+        }
+        try:
+            state_before = firmware_state.load_state(state_path)
+            report["firmware_state_before"] = {
+                "role": state_before.role, "sha256": state_before.sha256,
+                "revision": state_before.payload["state_revision"],
+            }
+        except Exception as exc:
+            state_before = None
+            report["firmware_state_before"] = {"status": "absent_or_invalid", "error": str(exc)}
+
+        current_state = state_before
+
+        def transition(role, artifact, source_commit, flash_evidence, safe_evidence):
+            nonlocal current_state
+            current_state = firmware_state.transition_state(
+                state_path, role=role, machine_id=workflow_payload["machine_id"],
+                source_commit=source_commit, artifact_path=artifact,
+                artifact_sha256=sha_file(artifact), flash_transaction_id=session_id,
+                operator=request["operator"], flash_evidence_path=flash_evidence,
+                safe_evidence_path=safe_evidence,
+                previous_known_good_released=previous_released,
+                expected_previous_sha256=(current_state.sha256 if current_state is not None else None),
+            )
+            report.setdefault("firmware_state_transitions", []).append({
+                "role": current_state.role, "sha256": current_state.sha256,
+                "revision": current_state.payload["state_revision"],
+            })
 
         development_stage = None
-        try:
-            development_stage = run_stage(
-                request, role="development", artifact=dev_artifact, session=session
-            )
-            report["stages"].append(development_stage)
-        except Exception as exc:
-            development_stage = {"role": "development", "status": "failed", "error": str(exc)}
-            report["stages"].append(development_stage)
-        finally:
+        released_stage = None
+        action = request["action"]
+        if action in {"roundtrip", "activate-development"}:
+            transition("recovery-required", dev_artifact, request["expected_commit"], request_path, request_path)
             try:
+                development_stage = run_stage(
+                    request, role="development", artifact=dev_artifact, session=session
+                )
+                if development_stage.get("status") == "passed":
+                    safe_report = session / "development" / "safe-report.json"
+                    transition("development", dev_artifact, request["expected_commit"],
+                               Path(development_stage["log_path"]), safe_report)
+            except Exception as exc:
+                development_stage = {"role": "development", "status": "failed", "error": str(exc)}
+            report["stages"].append(development_stage)
+
+        if action in {"roundtrip", "restore-released"}:
+            try:
+                try:
+                    current_state = firmware_state.load_state(state_path)
+                except Exception:
+                    current_state = None
+                transition("recovery-required", release_artifact, tag_commit, request_path, request_path)
                 released_stage = run_stage(
                     request, role="released-restore", artifact=release_artifact, session=session
                 )
+                if released_stage.get("status") == "passed":
+                    safe_report = session / "released-restore" / "safe-report.json"
+                    transition("released", release_artifact, tag_commit,
+                               Path(released_stage["log_path"]), safe_report)
             except Exception as exc:
                 released_stage = {"role": "released-restore", "status": "failed", "error": str(exc)}
             report["stages"].append(released_stage)
@@ -445,20 +501,40 @@ def main():
             "development_worktree": post_development,
             "processes": post_processes,
         }
-        restored = released_stage.get("status") == "passed"
-        qualified = development_stage.get("status") == "passed"
+        restored = released_stage is not None and released_stage.get("status") == "passed"
+        qualified = development_stage is not None and development_stage.get("status") == "passed"
         unchanged = post_production == production_state and post_development == development_state
-        report["final_firmware_role"] = "released" if restored else "recovery-required"
-        report["status"] = "passed" if restored and qualified and unchanged and not post_processes else "failed"
-        if not restored:
+        final_state = firmware_state.load_state(state_path)
+        report["firmware_state_after"] = {
+            "role": final_state.role, "sha256": final_state.sha256,
+            "revision": final_state.payload["state_revision"],
+        }
+        report["final_firmware_role"] = final_state.role
+        stage_success = (
+            restored and qualified if action == "roundtrip"
+            else restored if action == "restore-released"
+            else qualified and final_state.role == "development"
+        )
+        report["status"] = "passed" if stage_success and unchanged and not post_processes else "failed"
+        if action in {"roundtrip", "restore-released"} and not restored:
             report["failure"] = "Released firmware could not be restored and SAFE-verified."
-        elif not qualified:
+        elif action in {"roundtrip", "activate-development"} and not qualified:
             report["failure"] = "Development firmware did not pass SAFE; released firmware was restored."
         elif not unchanged or post_processes:
             report["failure"] = "Protected postflight differs after released restoration."
     except Exception as exc:
         report["status"] = "failed"
-        report["final_firmware_role"] = "unchanged-preflight"
+        try:
+            failed_state = firmware_state.load_state(
+                Path(request["firmware_state_path"]).resolve()
+            )
+            report["final_firmware_role"] = failed_state.role
+            report["firmware_state_after"] = {
+                "role": failed_state.role, "sha256": failed_state.sha256,
+                "revision": failed_state.payload["state_revision"],
+            }
+        except Exception:
+            report["final_firmware_role"] = "unchanged-preflight"
         report["failure"] = str(exc)
     report["completed_at_utc"] = now()
     atomic_json(report_path, report)
@@ -539,6 +615,11 @@ def write_report(report: Mapping[str, Any], output_root: Path) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--action",
+        choices=("roundtrip", "restore-released", "activate-development"),
+        default="roundtrip",
+    )
     parser.add_argument("--pi-host", required=True)
     parser.add_argument("--pi-user", default="labcraft")
     parser.add_argument("--ssh-identity-file", type=Path)
@@ -549,6 +630,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--released-tag", default=DEFAULT_RELEASED_TAG)
     parser.add_argument("--port", default="/dev/ttyAMA0")
     parser.add_argument("--operator", default=getpass.getuser())
+    parser.add_argument(
+        "--firmware-state-path",
+        default=(
+            "/home/labcraft/.local/share/LabCraft/LabCraft Printer/"
+            "development-workflow/firmware-state.json"
+        ),
+    )
+    parser.add_argument("--attended-confirmation")
+    parser.add_argument("--execute", action="store_true")
     parser.add_argument("--remote-session-root", default=DEFAULT_REMOTE_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--dry-run", action="store_true")
@@ -585,19 +675,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if not str(args.operator).strip():
             raise FirmwareWorkflowError("An operator identity is required.")
+        validate_remote_session_root(
+            str(PurePosixPath(args.firmware_state_path).parent),
+            pi_user=args.pi_user, production_repo=args.production_repo,
+            development_repo=args.development_repo,
+        )
+        if args.action == "activate-development" and (
+            not args.execute
+            or args.attended_confirmation
+            != "I CONFIRM MOTOR POWER IS INHIBITED, THE MOTION ENVELOPE IS CLEAR, THE EMERGENCY STOP IS IMMEDIATELY REACHABLE, AND I AM ATTENDING THE PI"
+        ):
+            raise FirmwareWorkflowError(
+                "Development activation requires --execute and exact attended confirmation."
+            )
+        if args.action != "activate-development" and args.execute:
+            raise FirmwareWorkflowError("Execute is valid only for development activation.")
     except (FirmwareWorkflowError, workflow.WorkflowError) as exc:
         print(f"Firmware workflow failed: {exc}", file=sys.stderr)
         return 1
 
     if args.dry_run:
         target = args.pi_host if "@" in args.pi_host else f"{args.pi_user}@{args.pi_host}"
-        print("DRY RUN action=development-safe-released-safe-roundtrip")
+        print(f"DRY RUN action={args.action}")
         print(f"SSH target: {target}")
         print(f"Development worktree: {args.development_repo}")
         print(f"Protected worktree (read only): {args.production_repo}")
         print(f"Released recovery tag: {args.released_tag}")
         print("HIL profile: SAFE (fixed; no selectors, camera, motion, or pressure)")
-        print("Mandatory final stage: released restore plus SAFE")
+        print(f"Firmware state: {args.firmware_state_path}")
+        if args.action == "roundtrip":
+            print("Mandatory final stage: released restore plus SAFE")
+        elif args.action == "restore-released":
+            print("Exact action: released restore plus SAFE")
+        else:
+            print("ATTENDED action: activate development firmware plus SAFE")
         print("No SSH call, flash, or evidence write was performed.")
         return 0
     if shutil.which("ssh") is None:
@@ -644,6 +755,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         production = pre_remote.get("production_worktree") or {}
         pre_invariant = workflow.canonical_sha256(workflow.launch_invariant_payload(pre_remote))
         request = {
+            "action": args.action,
             "production_repo": args.production_repo,
             "development_repo": args.development_repo,
             "shared_python": args.shared_python,
@@ -662,6 +774,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "released_tag": args.released_tag,
             "released_tag_commit": provenance["released"]["tag_commit"],
             "released_artifact_sha256": provenance["released"]["sha256"],
+            "firmware_state_path": args.firmware_state_path,
         }
         remote_result = run_remote_roundtrip(
             pi_host=args.pi_host, pi_user=args.pi_user, identity_file=identity,
@@ -679,15 +792,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         report["pre_invariant_sha256"] = pre_invariant
         report["post_invariant_sha256"] = post_invariant
         report["completed_at_utc"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        expected_final_role = (
+            "development" if args.action == "activate-development" else "released"
+        )
         report["status"] = (
             "passed"
             if remote_result.get("status") == "passed"
-            and remote_result.get("final_firmware_role") == "released"
+            and remote_result.get("final_firmware_role") == expected_final_role
             and pre_invariant == post_invariant
             else "failed"
         )
         workflow._atomic_json(report_path, report)
-        print(f"Firmware round-trip: {report['status'].upper()}")
+        print(f"Firmware {args.action}: {report['status'].upper()}")
         print(f"Final firmware role: {remote_result.get('final_firmware_role')}")
         print(f"Evidence: {report_path}")
         return 0 if report["status"] == "passed" else 2

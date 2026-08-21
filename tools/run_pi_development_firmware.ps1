@@ -1,5 +1,7 @@
 [CmdletBinding()]
 param(
+  [ValidateSet("Roundtrip", "Restore-Released", "Activate-Development")]
+  [string]$Action = "Roundtrip",
   [Parameter(Mandatory = $true)]
   [string]$PiHost,
   [string]$PiUser = "labcraft",
@@ -11,8 +13,11 @@ param(
   [string]$ReleasedTag = "v1.3.0-rc.5",
   [string]$Port = "/dev/ttyAMA0",
   [string]$Operator = $env:USERNAME,
+  [string]$FirmwareStatePath = "/home/labcraft/.local/share/LabCraft/LabCraft Printer/development-workflow/firmware-state.json",
+  [string]$AttendedConfirmation = "",
   [string]$RemoteSessionRoot = "/home/labcraft/.local/share/LabCraft/LabCraft Printer/development-workflow/firmware-sessions",
   [string]$OutputRoot = "verification_reports/development-workflow/firmware",
+  [switch]$Execute,
   [switch]$DryRun
 )
 
@@ -34,6 +39,7 @@ if ([string]::IsNullOrWhiteSpace($python)) {
 
 $arguments = @(
   "tools/pi_development_firmware.py",
+  "--action", $Action.ToLowerInvariant(),
   "--pi-host", $PiHost,
   "--pi-user", $PiUser,
   "--production-repo", $ProductionRepo,
@@ -43,6 +49,7 @@ $arguments = @(
   "--released-tag", $ReleasedTag,
   "--port", $Port,
   "--operator", $Operator,
+  "--firmware-state-path", $FirmwareStatePath,
   "--remote-session-root", $RemoteSessionRoot,
   "--output-root", $OutputRoot
 )
@@ -51,6 +58,12 @@ if (-not [string]::IsNullOrWhiteSpace($SshIdentityFile)) {
 }
 if ($DryRun.IsPresent) {
   $arguments += "--dry-run"
+}
+if (-not [string]::IsNullOrWhiteSpace($AttendedConfirmation)) {
+  $arguments += @("--attended-confirmation", $AttendedConfirmation)
+}
+if ($Execute.IsPresent) {
+  $arguments += "--execute"
 }
 
 Push-Location $repoRoot

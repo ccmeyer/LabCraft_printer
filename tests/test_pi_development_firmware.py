@@ -69,6 +69,11 @@ def test_remote_supervisor_is_valid_python_and_has_mandatory_restore() -> None:
     assert "finally:" in source
     assert "final_firmware_role" in source
     assert "development-safe" not in source
+    assert 'transition("recovery-required", dev_artifact' in source
+    assert 'transition("development", dev_artifact' in source
+    assert 'transition("recovery-required", release_artifact' in source
+    assert 'transition("released", release_artifact' in source
+    assert 'action in {"roundtrip", "restore-released"}' in source
 
 
 @pytest.mark.parametrize(
@@ -111,6 +116,21 @@ def test_cli_dry_run_is_safe_and_nonmutating(capsys: pytest.CaptureFixture[str])
     assert "HIL profile: SAFE" in output
     assert "Mandatory final stage: released restore plus SAFE" in output
     assert "No SSH call, flash, or evidence write" in output
+
+
+def test_restore_dry_run_and_attended_activation_gate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert firmware.main(
+        ["--action", "restore-released", "--pi-host", "192.0.2.10",
+         "--operator", "Test Operator", "--dry-run"]
+    ) == 0
+    assert "released restore plus SAFE" in capsys.readouterr().out
+    assert firmware.main(
+        ["--action", "activate-development", "--pi-host", "192.0.2.10",
+         "--operator", "Test Operator", "--dry-run"]
+    ) == 1
+    assert "exact attended confirmation" in capsys.readouterr().err
 
 
 def test_powershell_wrapper_dry_run() -> None:

@@ -106,3 +106,95 @@ def test_corrupt_or_extra_state_fields_fail_closed(tmp_path: Path) -> None:
     payload["unexpected"] = True
     with pytest.raises(state_mod.FirmwareStateError, match="schema fields"):
         state_mod.validate_payload(payload)
+
+
+def transition_inputs(tmp_path: Path) -> dict:
+    artifact = (tmp_path / "development.bin").resolve()
+    artifact.write_bytes(b"development")
+    released = (tmp_path / "released.bin").resolve()
+    released.write_bytes(b"released")
+    flash = (tmp_path / "flash.json").resolve()
+    flash.write_text("{}\n", encoding="utf-8")
+    safe = (tmp_path / "safe.json").resolve()
+    safe.write_text("{}\n", encoding="utf-8")
+    import hashlib
+
+    return {
+        "machine_id": "LC-001",
+        "source_commit": "a" * 40,
+        "artifact_path": artifact,
+        "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        "flash_transaction_id": str(uuid4()),
+        "operator": "Operator",
+        "flash_evidence_path": flash,
+        "safe_evidence_path": safe,
+        "previous_known_good_released": {
+            "tag": "v1.3.0-rc.5",
+            "source_commit": "e" * 40,
+            "artifact_path": str(released),
+            "artifact_sha256": hashlib.sha256(released.read_bytes()).hexdigest(),
+        },
+        "timestamp": "2026-08-21T10:00:00Z",
+    }
+
+
+def test_atomic_recovery_development_restore_sequence(tmp_path: Path) -> None:
+    path = (tmp_path / "firmware-state.json").resolve()
+    inputs = transition_inputs(tmp_path)
+    recovery = state_mod.transition_state(path, role="recovery-required", **inputs)
+    assert recovery.role == "recovery-required"
+    development = state_mod.transition_state(
+        path, role="development", expected_previous_sha256=recovery.sha256, **inputs
+    )
+    assert development.payload["state_revision"] == 2
+    release = inputs["previous_known_good_released"]
+    restored_inputs = dict(inputs)
+    restored_inputs.update(
+        source_commit=release["source_commit"],
+        artifact_path=release["artifact_path"],
+        artifact_sha256=release["artifact_sha256"],
+    )
+    restoring = state_mod.transition_state(
+        path, role="recovery-required", expected_previous_sha256=development.sha256,
+        **restored_inputs,
+    )
+    released = state_mod.transition_state(
+        path, role="released", expected_previous_sha256=restoring.sha256,
+        **restored_inputs,
+    )
+    assert released.role == "released"
+    assert released.payload["state_revision"] == 4
+    receipts = list((tmp_path / "firmware-state-history").glob("*.json"))
+    assert len(receipts) == 4
+
+
+def test_stale_compare_and_wrong_artifact_fail_without_overwrite(tmp_path: Path) -> None:
+    path = (tmp_path / "firmware-state.json").resolve()
+    inputs = transition_inputs(tmp_path)
+    current = state_mod.transition_state(path, role="recovery-required", **inputs)
+    with pytest.raises(state_mod.FirmwareStateError, match="changed before"):
+        state_mod.transition_state(
+            path, role="development", expected_previous_sha256="0" * 64, **inputs
+        )
+    wrong = dict(inputs)
+    wrong["artifact_sha256"] = "0" * 64
+    with pytest.raises(state_mod.FirmwareStateError, match="artifact bytes"):
+        state_mod.transition_state(
+            path, role="development", expected_previous_sha256=current.sha256, **wrong
+        )
+    assert state_mod.load_state(path).sha256 == current.sha256
+
+
+def test_direct_released_to_development_is_forbidden(tmp_path: Path) -> None:
+    path = (tmp_path / "firmware-state.json").resolve()
+    inputs = transition_inputs(tmp_path)
+    release = inputs["previous_known_good_released"]
+    released_inputs = dict(inputs)
+    released_inputs.update(
+        source_commit=release["source_commit"],
+        artifact_path=release["artifact_path"],
+        artifact_sha256=release["artifact_sha256"],
+    )
+    state_mod.transition_state(path, role="released", **released_inputs)
+    with pytest.raises(state_mod.FirmwareStateError, match="not allowed"):
+        state_mod.transition_state(path, role="development", **inputs)

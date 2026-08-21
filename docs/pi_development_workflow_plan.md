@@ -39,8 +39,8 @@ evidence are recorded here.
 | 3 | Bind the shared interpreter and development machine data | `verified` | `733f9e77`, `fd2fc5e4`, `6756b5a0` | 45 focused tests; Pi create/reuse/path-free validation, dependency/environment/data invariance passed |
 | 4 | Launch and qualify the no-hardware development app | `verified` | `c9ed2fda`, `eb4d8fcd` | 72 focused and 5,522 full-suite tests; exact-commit offscreen/visible no-hardware Pi launches and protected invariance passed |
 | 5 | Build, flash, and qualify committed development firmware | `verified` | `3719838c`, `816e0e70` | 74 post-commit focused tests; 461 firmware host tests; headless build; exact Pi development SAFE -> rc.5 restore SAFE and protected invariance passed |
-| 6 | Launch an attended real-hardware development session | `in_progress` | Concrete plan recorded | Focused implementation/refusal qualification pending; attended success deferred |
-| 7 | Track and restore released firmware state | `planned` | Not started | Not run |
+| 6 | Launch an attended real-hardware development session | `implementation_complete` | `1eedc1e8`, `45453212` | 37 focused tests; Pi missing-state, cancellation, no-hardware, and missing-confirmation refusals passed; stale/mismatch cases await real S7 state; attended success deferred |
+| 7 | Track and restore released firmware state | `in_progress` | Concrete plan recorded | Focused and autonomous state/restore qualification pending |
 | 8 | Complete the end-to-end workflow qualification and runbook | `planned` | Not started | Not run |
 
 ## Current verified baseline
@@ -880,16 +880,117 @@ Planned files:
 - Successful hardware-enabled application launch is explicitly deferred.
 - Focused Slice 6 automated gate: 37 passed.
 - Exact commit/push/sync and Pi refusal qualification remain pending.
+- Published `1eedc1e8` plus refusal-order correction `45453212`, then synced the
+  Pi development worktree exactly. Missing durable state blocked with invariant
+  SHA-256 unchanged at
+  `6727b64ac7c267a903737b8ccf19d7bff4d85b21f569cf58be92600456f8ffc8`;
+  cancellation recorded without launch; the hardware supervisor rejected
+  no-hardware mode; missing confirmation failed before SSH. Stale/mismatched
+  Pi cases await the real state file from Slice 7. Successful launch is the
+  only attended behavior and remains deferred.
 
 ## Slice 7 - Firmware state and production restoration
 
-Status: `planned`
+Status: `in_progress`
 
 Record when development firmware is active, prevent the workflow from
 declaring production readiness in that state, and add a released-firmware
 restore action that verifies the release artifact, flashes it, runs its SAFE
 self-test, and clears the development marker only after success. A future
 released production startup guard will consume this state.
+
+### Call path
+
+```text
+Windows development-firmware wrapper
+  -> exact local/Pi artifact + recovery provenance preflight
+  -> external atomic firmware state = recovery-required
+  -> Pi flash_and_test.sh -> DFU BOOT/RESET -> exact artifact
+  -> tools/run_selftest.py --profile SAFE
+  -> strict SAFE validator
+  -> external atomic firmware state = development or released
+  -> transition/restoration receipt
+  -> hardware-development compatibility reader
+  -> production-readiness guard
+
+Exact restoration:
+development/unknown/recovery state
+  -> rc.5 tag + manifest + protected-checkout byte proof
+  -> recovery-required state
+  -> exact released flash -> strict SAFE
+  -> released state and restoration receipt
+```
+
+### Concrete implementation plan
+
+1. Expand `firmware_state.py` from the Slice 6 reader into an atomic,
+   compare-before-write transition store with explicit allowed transitions,
+   monotonic revision, machine identity, roles, artifact/source/transaction,
+   operator/timestamps, flash/SAFE references, and prior released binding.
+2. Require recovery-required state before any flash; allow development/released
+   only after exact artifact bytes, successful flash evidence, and a strict SAFE
+   report are present. Any exception after flash begins leaves or rewrites
+   recovery-required and never claims readiness.
+3. Integrate state transitions into the firmware supervisor for autonomous
+   roundtrip, exact released restoration, attended development activation, and
+   released SAFE verification. Keep activation behind final attended execution;
+   autonomous qualification always restores before returning.
+4. Add atomic external transition/restoration receipts and bind local/Pi reports
+   to pre/post state SHA-256, revisions, transaction IDs, and SAFE evidence.
+5. Make hardware preflight consume current durable state and make status expose
+   production readiness only for verified released state; development, unknown,
+   absent/corrupt, and recovery-required states block production readiness.
+6. Add focused corruption, interruption, stale compare/write, wrong artifact,
+   failed flash, failed SAFE, restore failure, idempotent retry, development
+   activation construction, and successful restoration tests.
+7. Commit/push/sync the exact Slice 7 revision; run autonomous development flash
+   -> SAFE -> development state -> released restore -> SAFE -> released state,
+   then run exact restore retry and Slice 6 stale/mismatched-state Pi refusals.
+8. Verify the final state is released, artifacts/reports/receipts match,
+   protected invariants and shared packages are unchanged, and no related
+   process remains; mark Slice 7 verified.
+
+Expected files:
+
+- `tools/firmware_state.py`
+- `tools/pi_development_firmware.py`
+- `tools/run_pi_development_firmware.ps1`
+- `tools/pi_development_hardware.py`
+- `tools/pi_development_workflow.py`
+- `tests/test_firmware_state.py`
+- `tests/test_pi_development_firmware.py`
+- `tests/test_pi_development_hardware.py`
+- `tests/test_pi_development_workflow.py`
+- `README.md`
+- this live document
+
+### Implementation record
+
+- Expanded the Slice 6 state reader with atomic compare-before-write
+  transitions, monotonic revision, strict transition graph, exact artifact and
+  evidence rehashing, prior released binding, and external per-transition
+  receipts. Direct released -> development and stale/wrong-byte writes fail.
+- Integrated `roundtrip`, `restore-released`, and attended-only
+  `activate-development` actions into the firmware supervisor. Every stage
+  records recovery-required before flashing and records its verified role only
+  after exit-zero flash plus strict SAFE; roundtrip reloads actual state before
+  its mandatory restore even if development state publication fails.
+- Added firmware state to read-only Pi inventory with explicit
+  `production_ready` true only for released role. Hardware preflight consumes
+  the full strict reader and remains bound to current state bytes.
+- Documented daily roundtrip, idempotent exact restore, attended activation,
+  and recovery-required handling.
+
+### Validation record
+
+- Starting installed role is independently proven released by the final Slice 5
+  rc.5 flash plus strict SAFE evidence, but no durable state file exists yet.
+- Focused Slice 7/state/firmware/hardware/workflow gate: 111 passed.
+- Required firmware gate: 461/461 host tests passed; Debug headless build
+  completed with zero errors and refreshed the tracked same-source artifact.
+  Its exact SHA-256 is
+  `bd64f3399f8b0a4b008f1eacc6006dfa633355218a8f989e9ad598744d78d5e0`.
+- Exact commit/push/sync and autonomous Pi state roundtrip remain pending.
 
 ## Slice 8 - End-to-end qualification and runbook
 

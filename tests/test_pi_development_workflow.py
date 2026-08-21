@@ -104,6 +104,16 @@ def _remote(**updates):
             "valid": False,
             "errors": [],
         },
+        "firmware_state": {
+            "path": workflow.DEFAULT_FIRMWARE_STATE,
+            "exists": True,
+            "valid": True,
+            "role": "released",
+            "state_revision": 1,
+            "sha256": "f" * 64,
+            "production_ready": True,
+            "error": None,
+        },
     }
     payload.update(updates)
     return payload
@@ -248,6 +258,19 @@ def test_clean_registered_development_worktree_is_ready():
     blockers, warnings = workflow.classify_status(_local(), remote)
     assert blockers == []
     assert warnings == []
+
+
+def test_nonreleased_firmware_state_never_reports_production_ready():
+    remote = _remote()
+    remote["firmware_state"] = {
+        "exists": True,
+        "valid": True,
+        "role": "development",
+        "production_ready": False,
+    }
+    blockers, warnings = workflow.classify_status(_local(), remote)
+    assert blockers == []
+    assert "firmware_production_not_ready" in _codes(warnings)
 
 
 def test_production_interpreter_process_and_store_failures_block():

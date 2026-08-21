@@ -289,6 +289,49 @@ Do not use `Launch` unattended. Slice 6 automated/Pi qualification exercises
 only dry-run, preflight, cancellation, and fail-closed paths. The first
 successful hardware-enabled window is part of the final attended campaign.
 
+### Durable firmware state and exact restoration
+
+Firmware state is recorded outside every worktree at:
+
+```text
+/home/labcraft/.local/share/LabCraft/LabCraft Printer/development-workflow/firmware-state.json
+```
+
+Every flash first atomically records `recovery-required`. Only an exit-zero
+flash plus a strict plain-SAFE report can transition it to `development` or
+`released`. Each transition increments a revision and writes an external
+receipt containing the state hash. State binds machine, role, exact source
+commit, artifact path/SHA-256, flash transaction/operator/timestamps,
+flash/SAFE evidence, and the previous known-good released artifact. A checkout
+alone never changes or proves installed firmware.
+
+The normal autonomous qualification remains:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\run_pi_development_firmware.ps1 `
+  -Action Roundtrip `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -Operator "Operator Name"
+```
+
+It records recovery-required, flashes/SAFE-verifies development, records
+development, then always records recovery-required and restores/SAFE-verifies
+the released artifact before recording released. Exact released recovery can
+also be requested idempotently with `-Action Restore-Released`.
+
+`-Action Activate-Development` intentionally leaves development firmware
+installed and is available only inside the final attended campaign. It requires
+`-Execute` and the exact physical confirmation. Never run it as an unattended
+test. Hardware-development preflight remains blocked until its resulting
+development state exactly matches the current development commit/artifact; the
+attended campaign must restore released firmware immediately afterward.
+
+Any absent, corrupt, development, unknown, or recovery-required state makes
+production readiness false. If restoration cannot reach released plus strict
+SAFE, preserve all evidence, do not launch either app, and request attended
+recovery rather than editing the JSON.
+
 Do not switch a deployed production checkout to an arbitrary development commit
 and launch it against the production machine-data root. Production stores are
 bound to the exact commit authorized by the protected updater.

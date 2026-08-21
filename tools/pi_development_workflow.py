@@ -31,6 +31,10 @@ DEFAULT_DEVELOPMENT_PARENT = (
     "/home/labcraft/.local/share/LabCraft/LabCraft Printer/development"
 )
 DEFAULT_WORKFLOW_CONFIG = "/home/labcraft/.config/LabCraft/development_workflow.json"
+DEFAULT_FIRMWARE_STATE = (
+    "/home/labcraft/.local/share/LabCraft/LabCraft Printer/"
+    "development-workflow/firmware-state.json"
+)
 DEFAULT_REMOTE_SESSION_ROOT = (
     "/home/labcraft/.local/share/LabCraft/LabCraft Printer/"
     "development-workflow/sessions"
@@ -551,6 +555,41 @@ def inspect_workflow_config(path, production_repo, development_repo, shared_pyth
     return result
 
 
+def inspect_firmware_state(path):
+    target = Path(path).expanduser()
+    result = {
+        "path": str(target), "exists": target.is_file(), "valid": False,
+        "role": None, "state_revision": None, "sha256": None,
+        "production_ready": False, "error": None,
+    }
+    if not target.is_file():
+        result["error"] = "durable firmware state is absent"
+        return result
+    try:
+        raw = target.read_bytes()
+        payload = json.loads(raw)
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema_name") != "labcraft.firmware_state"
+            or payload.get("schema_version") != 1
+            or payload.get("role") not in {
+                "released", "development", "unknown", "recovery-required"
+            }
+            or not isinstance(payload.get("state_revision"), int)
+            or payload["state_revision"] < 1
+        ):
+            raise ValueError("firmware-state schema identity is invalid")
+        result.update({
+            "valid": True, "role": payload["role"],
+            "state_revision": payload["state_revision"],
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "production_ready": payload["role"] == "released",
+        })
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        result["error"] = str(exc)
+    return result
+
+
 def collect_processes():
     needles = (
         "FreeRTOS-interface/App.py",
@@ -701,6 +740,7 @@ def main():
             "selected": selected_store,
         },
         "workflow_config": workflow_config,
+        "firmware_state": inspect_firmware_state(config["firmware_state_path"]),
     }
     print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
@@ -1790,6 +1830,7 @@ def collect_remote_state(
         "development_machine_data_root": development_machine_data_root,
         "development_machine_data_parent": DEFAULT_DEVELOPMENT_PARENT,
         "workflow_config": workflow_config,
+        "firmware_state_path": DEFAULT_FIRMWARE_STATE,
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(config, sort_keys=True).encode("utf-8")
@@ -2124,6 +2165,12 @@ def classify_status(
     workflow_config = remote.get("workflow_config") or {}
     if workflow_config.get("exists") and not workflow_config.get("valid"):
         block("workflow_config_invalid", "The external development workflow configuration is invalid.")
+    firmware_state = remote.get("firmware_state") or {}
+    if not firmware_state.get("production_ready"):
+        warn(
+            "firmware_production_not_ready",
+            "Durable firmware state does not prove verified released firmware.",
+        )
 
     return blockers, warnings
 
