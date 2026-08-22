@@ -191,7 +191,7 @@ def test_production_suite_freezes_geometry_counts_and_strict_evidence():
 
 def test_production_results_use_reduced_metric_contract():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    for result_id in (2087, 2088, 2089, 2090, 2098):
+    for result_id in (2087, 2088, 2089, 2090, 2098, 2105):
         assert f"runOne({result_id}u" in diagnostics
     assert '"i2=%lu;s=%lu;mi=%lu;am=%lu;tm=%lu;fm=%lu;pu=%lu;"' in diagnostics
     assert '"ds=%lu;di=%lu;md=%lu;sl=%lu;dc=%lu;ci=%lu;ns=%lu;"' in diagnostics
@@ -206,11 +206,14 @@ def test_production_results_use_reduced_metric_contract():
         assert removed_metric not in production_suite
 
 
-def test_motion_limits_share_fixed_fifteen_ms_confirmation_without_raw_stop():
+def test_xy_motion_limits_use_edge_aware_tim5_confirmation_without_raw_stop():
     policy = _read("firmware/Core/Inc/MotionLimitDebouncePolicy.h")
     header = _read("firmware/Core/Inc/Stepper.h")
     stepper = _read("firmware/Core/Src/Stepper.cpp")
     gantry = _read("firmware/Core/Src/Gantry.cpp")
+    timer = _read("firmware/Core/Src/MotionLimitDebounceTimer.cpp")
+    main = _read("firmware/Core/Src/main.c")
+    interrupts = _read("firmware/Core/Src/stm32f4xx_it.c")
     pressure = _read("firmware/Core/Src/PressureRegulator.cpp")
 
     assert "kDebounceMs = 15u" in policy
@@ -218,8 +221,13 @@ def test_motion_limits_share_fixed_fifteen_ms_confirmation_without_raw_stop():
     assert "Idle = 0u" in policy
     assert "Pending = 1u" in policy
     assert "Confirmed = 2u" in policy
+    assert "kHardwareDebounceUs = kDebounceMs * 1000u" in policy
+    assert "noteHardwareTransition" in policy
+    assert "evaluateHardwareExpiry" in policy
     assert "TickType_t    debounceMs" not in header
-    assert '"LmtDbnc",\n    stepperMsToAtLeast1Tick(MotionLimitDebouncePolicy::kDebounceMs)' in stepper
+    assert '"LmtDbnc"' in stepper  # Z/P/R retain the software-timer path.
+    assert "GPIO_MODE_IT_RISING_FALLING" in stepper
+    assert "MotionLimitDebounceTimer::attach" in stepper
     assert "s1.attachLimitSwitch(GPIOG, GPIO_PIN_6);" in stepper
     assert "s2.attachLimitSwitch(GPIOG, GPIO_PIN_9);" in stepper
     assert "s4.attachLimitSwitch(GPIOG, GPIO_PIN_11);" in stepper
@@ -234,9 +242,19 @@ def test_motion_limits_share_fixed_fifteen_ms_confirmation_without_raw_stop():
     assert "requestCoordinatedLimitAbort" not in raw_exti
     assert "stop()" not in raw_exti
     assert "_observeLimitLevelFromIsr" in raw_exti
+    assert "MotionLimitDebounceTimer::onExtiFromIsr" in raw_exti
     assert "_takeConfirmedLimitFromIsr" in stepper
     assert "_takeConfirmedLimitFromIsr" in gantry
-    assert "_coordinatedLimitAssertedFast())" not in gantry
+    assert "MotionLimitDebouncePolicy::Phase::Pending" not in gantry
+    assert "_limitDebounceIgnoreUntilRelease" in gantry
+    assert "kExpectedTickHz = 1000000u" in timer
+    assert "TIM_IT_CC1" in timer
+    assert "TIM_IT_CC2" in timer
+    assert "TIM_IT_CC3" in timer
+    assert "stickyTransition" in timer
+    assert "closeUnmaskRace" in timer
+    assert "MX_MotionLimitDebounceTimer_Init();" in main
+    assert "void TIM5_IRQHandler(void)" in interrupts
     assert "pdMS_TO_TICKS(15)" in pressure
 
 
@@ -341,10 +359,10 @@ def test_windows_hil_wrapper_uses_long_shallow_defaults_but_preserves_overrides(
 
 def test_active_coordinated_manifests_share_timing_budgets_and_archive_predecessors():
     production = json.loads(
-        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v5.json")
+        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v6.json")
     )
-    production_v4 = json.loads(
-        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v4.json")
+    production_v5 = json.loads(
+        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v5.json")
     )
     camera = json.loads(
         _read("tools/qualification/manifests/coordinated_xy_camera_transition_v4.json")
@@ -359,8 +377,8 @@ def test_active_coordinated_manifests_share_timing_budgets_and_archive_predecess
         _read("tools/qualification/manifests/coordinated_xy_shallow_edge_v3.json")
     )
     assert production["lifecycle"] == "active"
-    assert production_v4["lifecycle"] == "archived"
-    assert production["expected_test_ids"] == [2087, 2088, 2089, 2090, 2098]
+    assert production_v5["lifecycle"] == "archived"
+    assert production["expected_test_ids"] == [2087, 2088, 2089, 2090, 2098, 2105]
     assert production["analysis_rules"]["2087"]["metrics"]["xe"]["equals"] == 106832
     assert production["analysis_rules"]["2087"]["metrics"]["ye"]["equals"] == 180000
     assert production["analysis_rules"]["2087"]["metrics"]["me"]["equals"] == 220000
@@ -374,6 +392,13 @@ def test_active_coordinated_manifests_share_timing_budgets_and_archive_predecess
     assert debounce["xf"]["equals"] == 0
     assert debounce["yf"]["equals"] == 0
     assert debounce["tv"]["equals"] == 1
+    assert debounce["hz"]["equals"] == 1000000
+    assert debounce["du"]["min"] == 15000
+    assert debounce["du"]["max"] == 16000
+    crossing = production["analysis_rules"]["2105"]["metrics"]
+    assert crossing["n"]["equals"] == 2
+    assert crossing["xb"]["max"] == 50
+    assert crossing["yb"]["max"] == 50
     assert camera["lifecycle"] == "active"
     assert camera_v3["lifecycle"] == "archived"
     assert camera["analysis_rules"]["2071"]["metrics"]["xe"]["equals"] == 16832

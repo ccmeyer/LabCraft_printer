@@ -622,22 +622,16 @@ bool Gantry::_handleCoordinatedTim2BodyFromIsr() {
   bool xLimitConfirmed = false;
   bool yLimitConfirmed = false;
   if (_coordinatedX != nullptr) {
-    const bool asserted = _coordinatedX->_coordinatedLimitAssertedFast();
-    if (asserted ||
-        _coordinatedX->_limitDebounceState.phase ==
-            MotionLimitDebouncePolicy::Phase::Pending ||
-        _coordinatedX->_limitDebounceIgnoreUntilRelease) {
-      _coordinatedX->_observeLimitLevelFromIsr(asserted, entryCycle);
+    if (_coordinatedX->_limitDebounceIgnoreUntilRelease) {
+      _coordinatedX->_observeLimitLevelFromIsr(
+          _coordinatedX->_coordinatedLimitAssertedFast(), entryCycle);
     }
     xLimitConfirmed = _coordinatedX->_takeConfirmedLimitFromIsr();
   }
   if (_coordinatedY != nullptr) {
-    const bool asserted = _coordinatedY->_coordinatedLimitAssertedFast();
-    if (asserted ||
-        _coordinatedY->_limitDebounceState.phase ==
-            MotionLimitDebouncePolicy::Phase::Pending ||
-        _coordinatedY->_limitDebounceIgnoreUntilRelease) {
-      _coordinatedY->_observeLimitLevelFromIsr(asserted, entryCycle);
+    if (_coordinatedY->_limitDebounceIgnoreUntilRelease) {
+      _coordinatedY->_observeLimitLevelFromIsr(
+          _coordinatedY->_coordinatedLimitAssertedFast(), entryCycle);
     }
     if (!xLimitConfirmed) {
       yLimitConfirmed = _coordinatedY->_takeConfirmedLimitFromIsr();

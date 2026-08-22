@@ -23,7 +23,7 @@ def test_discover_suite_entries_lists_current_manifests():
         "motion_timing_v1",
         "profile_lut_benchmark_v1",
         "coordinated_xy_camera_transition_v4",
-        "coordinated_xy_production_mres3_v5",
+        "coordinated_xy_production_mres3_v6",
         "coordinated_xy_shallow_edge_v4",
         "direct_xyz_lut_v1",
         "motion_envelope_v1",
@@ -151,16 +151,17 @@ def test_production_mres3_suite_requires_fixed_conditional_contract():
         entry.manifest_id: entry
         for entry in discover_suite_entries(MANIFEST_ROOT)
     }
-    manifest = entries["coordinated_xy_production_mres3_v5"].manifest
+    manifest = entries["coordinated_xy_production_mres3_v6"].manifest
 
     assert manifest.lifecycle == "active"
     assert manifest.profile == "FULL"
     assert manifest.selftest_args == ("--coordinated-xy-production-mres3-suite",)
     assert required_fixture_ids(manifest) == (
         "coordinated_xy_production_mres3_envelope_clear",
+        "coordinated_xy_production_mres3_limit_crossings_ready",
     )
     assert [row.test_id for row in build_test_plan_rows(manifest)] == [
-        2087, 2088, 2089, 2090, 2098
+        2087, 2088, 2089, 2090, 2098, 2105
     ]
     motion = manifest.analysis_rules["2087"]["metrics"]
     assert motion["n"]["equals"] == 10
@@ -183,6 +184,19 @@ def test_production_mres3_suite_requires_fixed_conditional_contract():
     assert debounce["tv"]["equals"] == 1
     assert debounce["xf"]["equals"] == 0
     assert debounce["yf"]["equals"] == 0
+    assert debounce["hz"]["equals"] == 1000000
+    assert debounce["du"]["min"] == 15000
+    assert debounce["du"]["max"] == 16000
+    assert debounce["hc"]["equals"] == 1
+    assert debounce["af"]["equals"] == 0
+    crossing = manifest.analysis_rules["2105"]["metrics"]
+    assert crossing["n"]["equals"] == 2
+    assert crossing["xa"]["equals"] == 1
+    assert crossing["ya"]["equals"] == 1
+    assert crossing["xb"]["max"] == 50
+    assert crossing["yb"]["max"] == 50
+    assert crossing["xr"]["equals"] == 1
+    assert crossing["yr"]["equals"] == 1
 
 
 def test_shallow_edge_suite_freezes_incident_vector_evidence():

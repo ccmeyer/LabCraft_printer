@@ -1,11 +1,11 @@
 {
   "schema_version": "qualification_manifest_v0",
-  "manifest_id": "coordinated_xy_production_mres3_v5",
-  "name": "Production MRES3 Active-Edge Coordination v5",
+  "manifest_id": "coordinated_xy_production_mres3_v6",
+  "name": "Production MRES3 Active-Edge Coordination v6",
   "profile": "FULL",
-  "lifecycle": "archived",
-  "description": "Production qualification for MRES=3 DEDGE active transitions with exact edge distribution, conditional late rearming, continuous 15 ms X/Y motion-limit confirmation, the evidence-based 2,600-cycle active-handler regression gate, and the shared 3,500-cycle post-motion terminal-handler gate.",
-  "expected_test_ids": [2087, 2088, 2089, 2090, 2098],
+  "lifecycle": "active",
+  "description": "Production qualification for MRES=3 DEDGE active transitions with exact edge distribution, conditional late rearming, edge-aware EXTI plus 1 MHz TIM5 X/Y limit confirmation, bounded physical X/Y limit crossings, the evidence-based 2,600-cycle active-handler regression gate, and the shared 3,500-cycle post-motion terminal-handler gate.",
+  "expected_test_ids": [2087, 2088, 2089, 2090, 2098, 2105],
   "enforce_expected_test_ids": true,
   "requires_operator_prompts": true,
   "selftest_args": ["--coordinated-xy-production-mres3-suite"],
@@ -15,6 +15,11 @@
       "fixture_id": "coordinated_xy_production_mres3_envelope_clear",
       "required_for": [2087, 2088, 2089, 2090, 2098],
       "operator_note": "Confirm both limits are released, the gantry is square, and the full XY/Z envelope is clear. Stop for contact, abnormal sound, lost squareness, excessive travel, missing motion or home, reset, watchdog evidence, or communication loss."
+    },
+    {
+      "fixture_id": "coordinated_xy_production_mres3_limit_crossings_ready",
+      "required_for": [2105],
+      "operator_note": "Confirm the normal optical X and Y limits and hard-stop margins are available for the controlled crossing. Firmware will start each axis at the 100-step home backoff, command only 200 steps toward its limit at 3 kHz, require the correct coordinated limit terminal with both STEP outputs low, and home/release X before attempting Y. Stop immediately for contact, excessive travel, a missing limit stop, or communication loss."
     }
   ],
   "analysis_rules": {
@@ -108,8 +113,33 @@
         "yf": {"maturity": "acceptance", "equals": 0},
         "yp": {"maturity": "acceptance", "equals": 0},
         "tv": {"maturity": "acceptance", "equals": 1},
+        "hz": {"maturity": "acceptance", "equals": 1000000},
+        "du": {"maturity": "acceptance", "min": 15000, "max": 16000},
+        "hc": {"maturity": "acceptance", "equals": 1},
         "tf": {"maturity": "acceptance", "equals": 0},
+        "af": {"maturity": "acceptance", "equals": 0},
         "tr": {"maturity": "acceptance", "equals": 1},
+        "sf": {"maturity": "acceptance", "equals": 0},
+        "to": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "2105": {
+      "category": "safety",
+      "failure_domain": "firmware_motion_limit",
+      "metrics": {
+        "n": {"maturity": "acceptance", "equals": 2},
+        "xf": {"maturity": "acceptance", "equals": 1},
+        "xs": {"maturity": "acceptance", "equals": 1},
+        "xa": {"maturity": "acceptance", "equals": 1},
+        "xp": {"maturity": "acceptance", "equals": 1},
+        "xb": {"maturity": "acceptance", "max": 50},
+        "xr": {"maturity": "acceptance", "equals": 1},
+        "yf": {"maturity": "acceptance", "equals": 1},
+        "ys": {"maturity": "acceptance", "equals": 1},
+        "ya": {"maturity": "acceptance", "equals": 1},
+        "yp": {"maturity": "acceptance", "equals": 1},
+        "yb": {"maturity": "acceptance", "max": 50},
+        "yr": {"maturity": "acceptance", "equals": 1},
         "sf": {"maturity": "acceptance", "equals": 0},
         "to": {"maturity": "acceptance", "equals": 0}
       }

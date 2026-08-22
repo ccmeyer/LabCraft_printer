@@ -215,7 +215,10 @@ public:
   }
   bool isLimitAssertedForDiagnostics() const { return _isLimitAsserted(); }
   MotionLimitDebouncePolicy::Snapshot getLimitDebounceSnapshot() const;
-  bool limitDebounceTimebaseValid() const { return _limitDebounceTimebaseValid; }
+  bool limitDebounceTimebaseValid() const;
+  bool homeDirectionTowardLimitForDiagnostics() const {
+    return _homeTowardLimitDir;
+  }
   bool enableOutputsAssertedForDiagnostics() const {
     if (_enPort == nullptr || (_enPort->ODR & _enPin) != 0u) return false;
     return !_dualDriver ||
@@ -409,6 +412,9 @@ private:
   bool _takeConfirmedLimitFromIsr();
   bool _stopForConfirmedLimitFromIsr();
   void _observeLimitLevelFromTask(bool asserted, uint32_t nowCycle);
+  bool _usesHardwareLimitDebounce() const {
+    return _axis == X_AXIS || _axis == Y_AXIS;
+  }
   bool _confirmReleasedForNextApproach(
       const HomeInterruptionPolicy::CancellationToken* cancelToken = nullptr);
   LimitStableSample _sampleLimitLevelStable(

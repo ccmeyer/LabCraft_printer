@@ -59,13 +59,13 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 
 - `firmware/Core/Src/freertos.c`
   - Static allocation hooks: `vApplicationGetIdleTaskMemory`, `vApplicationGetTimerTaskMemory`
-  - Periodic runtime statistics and their TIM5 counter hooks are disabled. `configUSE_TRACE_FACILITY` remains enabled only for explicitly invoked diagnostics such as the SAFE RTOS memory-headroom self-test.
+  - Periodic runtime statistics and their former TIM5 hooks are disabled. TIM5 is reserved instead for the continuously running 1 MHz X/Y motion-limit debounce service. `configUSE_TRACE_FACILITY` remains enabled only for explicitly invoked diagnostics such as the SAFE RTOS memory-headroom self-test.
 
 ### ISR/callback entry points
 
 - Central IRQ file: `firmware/Core/Src/stm32f4xx_it.c`
   - EXTI handlers: `EXTI9_5_IRQHandler`, `EXTI15_10_IRQHandler`
-  - Timer IRQ handlers: `TIM1_BRK_TIM9_IRQHandler`, `TIM1_UP_TIM10_IRQHandler`, `TIM2_IRQHandler`, `TIM3_IRQHandler`, `TIM4_IRQHandler`, `TIM6_DAC_IRQHandler`, `TIM7_IRQHandler`, `TIM8_*`, etc.
+  - Timer IRQ handlers: `TIM1_BRK_TIM9_IRQHandler`, `TIM1_UP_TIM10_IRQHandler`, `TIM2_IRQHandler`, the user-block `TIM5_IRQHandler`, `TIM3_IRQHandler`, `TIM4_IRQHandler`, `TIM6_DAC_IRQHandler`, `TIM7_IRQHandler`, `TIM8_*`, etc.
   - UART IRQ handlers: `USART1_IRQHandler`, `USART2_IRQHandler`
   - DMA IRQ handler: `DMA2_Stream7_IRQHandler`
 - HAL callback fan-out in `firmware/Core/Src/main.c`
@@ -81,6 +81,8 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 
 - Core classes:
   - `firmware/Core/Inc/Stepper.h`, `firmware/Core/Src/Stepper.cpp`
+  - `firmware/Core/Inc/MotionLimitDebouncePolicy.h`
+  - `firmware/Core/Inc/MotionLimitDebounceTimer.h`, `firmware/Core/Src/MotionLimitDebounceTimer.cpp` (PG6/PG9 both-edge EXTI, TIM5 CC1/CC2 15 ms deadlines, CC3 diagnostic timing proof, retained confirmation attribution)
   - `firmware/Core/Inc/MotionUnitScale.h`
   - `firmware/Core/Inc/StepperIsrInstrumentation.h`, `firmware/Core/Src/StepperIsrInstrumentation.cpp`
   - `firmware/Core/Inc/StepperInstrumentationReport.h`, `firmware/Core/Src/StepperInstrumentationReport.cpp`
@@ -236,7 +238,7 @@ This document maps the `firmware/` directory, startup/runtime entry points, majo
 
 - Strong HAL/IRQ/timer/UART/GPIO dependencies:
   - `main.c`, `stm32f4xx_it.c`, `stm32f4xx_hal_msp.c`, `system_stm32f4xx.c`
-  - `Stepper.cpp`, `Gantry.cpp`, `Printer.cpp`, `PressureSensor.cpp`, `PressureRegulator.cpp`, `Comm.cpp`, `Gripper.cpp`, `LEDStrip.cpp`, `LEDController.cpp`, `Logger.cpp`, `Flash.cpp`, `Heartbeat.c`
+  - `Stepper.cpp`, `MotionLimitDebounceTimer.cpp`, `Gantry.cpp`, `Printer.cpp`, `PressureSensor.cpp`, `PressureRegulator.cpp`, `Comm.cpp`, `Gripper.cpp`, `LEDStrip.cpp`, `LEDController.cpp`, `Logger.cpp`, `Flash.cpp`, `Heartbeat.c`
 - FreeRTOS task/queue/event dependencies are prevalent in:
   - `Orchestrator.cpp`, `Printer.cpp`, `PressureSensor.cpp`, `PressureRegulator.cpp`, `Comm.cpp`, `LEDController.cpp`, `Gripper.cpp`, `Logger.cpp`
 
@@ -276,7 +278,7 @@ Script notes:
   - `--selftest-scheduler-no-yield-suite` and `--selftest-scheduler-cooperative-suite` select P3 values `1039` and `1038`. Both remain SAFE/no-motion; their mode-specific manifests and `tools/compare_selftest_scheduler_ab.py` validate the counterbalanced six-arm experiment.
   - `--motion-timing-suite` selects existing self-test selector `2029`; no protocol layout changes are required.
   - `--profile-lut-benchmark` selects existing P3 selector `2039` and returns only non-motion SAFE result `2030`; `profile_lut_benchmark_v1` supplies the permanent qualification gates.
-  - Coordinated XY has three supported focused selectors in addition to the direct-axis LUT selector. `--coordinated-xy-production-mres3-suite` maps to `2097` and emits `[2087,2088,2089,2090,2098]` under active manifest `coordinated_xy_production_mres3_v5`. It strictly gates the MRES3 active-edge/conditional-rearm implementation, exact 106,832 X/180,000 Y/220,000 master-edge totals, 220,000 callbacks, zero cleanup or spacing violations, complete IRQ/entry/deadline coverage, the shared 2,600/3,500-cycle active/terminal handler budgets, status/watchdog evidence, homes, driver configuration, and continuous 15 ms X/Y limit confirmation. `MotionLimitDebouncePolicy.h` provides the shared wrap-safe `Idle`/`Pending`/`Confirmed` state machine used by coordinated TIM2 and direct X/Y/Z/P/R timer paths; raw EXTI callbacks only start/mask candidates.
+  - Coordinated XY has three supported focused selectors in addition to the direct-axis LUT selector. `--coordinated-xy-production-mres3-suite` maps to `2097` and emits `[2087,2088,2089,2090,2098,2105]` under active manifest `coordinated_xy_production_mres3_v6`. It strictly gates the MRES3 active-edge/conditional-rearm implementation, exact 106,832 X/180,000 Y/220,000 master-edge totals, 220,000 callbacks, zero cleanup or spacing violations, complete IRQ/entry/deadline coverage, the shared 2,600/3,500-cycle active/terminal handler budgets, status/watchdog evidence, homes, driver configuration, and edge-aware X/Y limit handling. Result `2098` requires a running/configured 1 MHz TIM5, a channel-3 15 ms service interval of 15,000-16,000 us, zero infrastructure/arm failures, and zero clean-motion confirmations. Operator-gated result `2105` commands a bounded 200-step window at 3 kHz across each physical optical limit from the 100-step home backoff, requires the correct terminal axis, both STEP outputs low, at most 50 post-edge steps, and successful release/home recovery before continuing. `MotionLimitDebouncePolicy.h` supplies the host-tested wrap-safe edge policy. `MotionLimitDebounceTimer.cpp` owns TIM5 CC1/CC2 and retained EXTI transition evidence; direct/coordinated motion timers only consume confirmed X/Y states and sample release. Z/P/R retain the legacy EXTI/software-timer and direct-step polling path.
   - `--direct-xyz-lut-suite` selects production P3 selector `2096` under `FULL` and emits results `2091`-`2095`. It homes Z/XY, runs direct 14,000-logical-unit X/Y/Z moves plus a 2,000-unit triangular X move at 40 kHz logical rate, then homes again. One RAII-guarded status window remains open across the complete bounded row so sub-second move boundaries cannot hide cadence; while that selector-only window is active, the common self-test emitter resumes status after its mandatory per-frame pause. Aggregate result `2095` reports and gates status frames, a 125 ms maximum period, 100 ms watchdog age, alternation, and snapshot validity. `direct_xyz_lut_v1` requires exact MRES=3 native pulses, complete normalized cursor coverage, bounded X/Y active ISR cost with zero pending/saturation evidence, live host status/progress-watchdog checks, legacy-path homes, no P/R displacement, and the production driver configuration.
   - The completed Z speed-ladder experiment selected the retained production profile of 30 kHz logical rate and 140,000 logical steps/s^2. Diagnostic selector `2199`, `ZAxisSpeedLadderReport`, and the Z-only TIM10 entry/exit instrumentation were removed from firmware. Archived manifests v1-v3 and catalog rows `2190`-`2197` remain host-side for raw historical normalization only; they cannot launch hardware.
   - `--coordinated-xy-camera-transition-suite` maps to `2078`, emits `2071`, and is normalized by active manifest `coordinated_xy_camera_transition_v4`. It checks the production-scaled camera-ratio round trip, exact coordinated failure-mask/timing evidence, and immediate bounded X home.

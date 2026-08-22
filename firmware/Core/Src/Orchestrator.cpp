@@ -6,6 +6,7 @@
  */
 #include "BoardConfig.h"
 #include "Orchestrator.h"
+#include "MotionLimitDebounceTimer.h"
 #include "Diagnostics.h"
 #include "OrchestratorCompletionPolicy.h"
 #include "OrchestratorDecode.h"
@@ -978,6 +979,30 @@ void Orchestrator::latchGantryMotionFailure(
   _directMotionContextValid = false;
   _pauseAfterSeq32 = 0u;
   _pauseWatermarkReached = false;
+  if (context.reason == XY_MOTION_FAULT_X_LIMIT ||
+      context.reason == XY_MOTION_FAULT_Y_LIMIT) {
+    const bool xAxis = context.reason == XY_MOTION_FAULT_X_LIMIT;
+    const MotionLimitDebounceTimer::ConfirmationSnapshot limit =
+        MotionLimitDebounceTimer::lastConfirmation(
+            xAxis ? MotionLimitDebounceTimer::Axis::X
+                  : MotionLimitDebounceTimer::Axis::Y);
+    if (limit.valid) {
+      Logger::instance()->log(
+          "[LimitDebounce] src=exti_tim5 axis=%c gen=%lu cand=%lu dl=%lu svc=%lu late_us=%lu trans=%lu restart=%lu raw=%u arm_fail=%lu edge_pos=%ld consume_pos=%ld\r\n",
+          xAxis ? 'X' : 'Y',
+          (unsigned long)limit.moveGeneration,
+          (unsigned long)limit.candidateTimerCount,
+          (unsigned long)limit.deadlineTimerCount,
+          (unsigned long)limit.serviceTimerCount,
+          (unsigned long)limit.irqLatenessUs,
+          (unsigned long)limit.transitionCount,
+          (unsigned long)limit.restartCount,
+          (unsigned)limit.rawExpiryAsserted,
+          (unsigned long)limit.armFailureCount,
+          (long)limit.candidatePosition,
+          (long)limit.consumedPosition);
+    }
+  }
   Logger::instance()->log("[Gantry] motion failure latched reason=%s\r\n",
                           XyMotionFaultContext_ReasonName(context.reason));
 }

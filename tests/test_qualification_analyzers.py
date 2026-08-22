@@ -600,8 +600,8 @@ def test_production_mres3_v2_rejects_reduced_evidence_regressions():
         assert _analyze(host_failure, manifest)["verdict"]["status"] == "fail"
 
 
-def test_production_mres3_v5_rejects_timing_and_limit_debounce_regressions():
-    manifest = load_manifest("coordinated_xy_production_mres3_v5")
+def test_production_mres3_v6_rejects_timing_and_limit_debounce_regressions():
+    manifest = load_manifest("coordinated_xy_production_mres3_v6")
     results = []
     for test_id in manifest.expected_test_ids:
         metrics = {}
@@ -614,7 +614,7 @@ def test_production_mres3_v5_rejects_timing_and_limit_debounce_regressions():
                 metrics[metric] = 0
         results.append({
             "test_id": test_id,
-            "name": f"production_v5_{test_id}",
+            "name": f"production_v6_{test_id}",
             "pass": True,
             "metrics": metrics,
         })
@@ -624,7 +624,7 @@ def test_production_mres3_v5_rejects_timing_and_limit_debounce_regressions():
         "started_at": "2026-08-13T00:00:00Z",
         "finished_at": "2026-08-13T00:00:10Z",
         "aborted": False,
-        "summary": {"total": 5, "passed": 5, "failed": 0},
+        "summary": {"total": 6, "passed": 6, "failed": 0},
         "results": results,
         "host_checks": [
             {"name": "selftest_progress_watchdog", "pass": True,
@@ -656,7 +656,11 @@ def test_production_mres3_v5_rejects_timing_and_limit_debounce_regressions():
         ("yf", 1),
         ("yp", 1),
         ("tv", 0),
+        ("hz", 999999),
+        ("du", 16001),
+        ("hc", 0),
         ("tf", 1),
+        ("af", 1),
         ("tr", 2),
         ("sf", 1),
         ("to", 1),
@@ -665,9 +669,31 @@ def test_production_mres3_v5_rejects_timing_and_limit_debounce_regressions():
         rejected["results"][debounce_index]["metrics"][metric] = value
         assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
 
+    crossing_index = manifest.expected_test_ids.index(2105)
+    for metric, value in (
+        ("n", 1),
+        ("xf", 0),
+        ("xs", 0),
+        ("xa", 0),
+        ("xp", 0),
+        ("xb", 51),
+        ("xr", 0),
+        ("yf", 0),
+        ("ys", 0),
+        ("ya", 0),
+        ("yp", 0),
+        ("yb", 51),
+        ("yr", 0),
+        ("sf", 1),
+        ("to", 1),
+    ):
+        rejected = deepcopy(valid)
+        rejected["results"][crossing_index]["metrics"][metric] = value
+        assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
+
     incomplete = deepcopy(valid)
     incomplete["results"].pop()
-    incomplete["summary"] = {"total": 4, "passed": 4, "failed": 0}
+    incomplete["summary"] = {"total": 5, "passed": 5, "failed": 0}
     assert _analyze(incomplete, manifest)["verdict"]["status"] == "fail"
 
     for host_index in range(2):

@@ -3651,15 +3651,21 @@ accounts exactly one cleanup falling edge on only that axis, rebases the
 target to the actual position, and terminates with both pins low. Successful
 moves require zero cleanup edges and zero spacing violations.
 
-All X/Y/Z/P/R motion limit inputs use the same continuous 15 ms confirmation
-policy. A raw EXTI edge starts and temporarily masks a candidate; it cannot
-stop motion. The active axis timer (or coordinated TIM2) samples the level and
-stops only after 15 ms of uninterrupted assertion, at a STEP-low boundary. A
-release rejects the candidate and the next assertion must serve a full new
-window. DWT supplies wrap-safe timing; if that timebase is unavailable, an
-asserted input confirms immediately as the fail-safe behavior. Z retains its
-active-high/no-pull electrical configuration. The pressure-regulator PG13/PG14
-inner switches keep their existing independent 15 ms deferred notification.
+X and Y use an edge-aware, hardware-timed 15 ms confirmation path. Both edges
+on PG6/PG9 feed EXTI; the first asserted edge masks only that line and arms its
+independent TIM5 compare channel on the continuously running 1 MHz counter.
+Any intervening edge is retained in hardware/software evidence and rejects the
+old window. An input that ends high must then serve a complete new 15 ms
+window; an input that ends low is safely unmasked. TIM5 publishes only a
+confirmed axis, and the next direct-axis or coordinated motion interrupt uses
+the existing STEP-low abort path. Motion-timer level samples cannot create or
+advance an X/Y assertion candidate. If TIM5 initialization or arming is not
+valid, an asserted candidate confirms immediately as the fail-safe behavior.
+TIM5 channel 3 is reserved for the non-actuating 15,000-16,000 us diagnostic
+timing check. Z/P/R retain their existing EXTI/software-timer and direct-step
+sampling path, including Z's active-high/no-pull electrical configuration.
+The pressure-regulator PG13/PG14 inner switches retain their independent 15 ms
+deferred notification.
 
 The production timing contract uses a 2,600-core-cycle active-handler
 regression budget and a 3,500-cycle post-motion terminal-handler budget. The
@@ -3676,8 +3682,8 @@ diagnostic evidence rather than independent acceptance limits.
 The supported coordinated-motion selectors are now:
 
 ```bash
-python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-production-mres3-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_production_mres3_v5.json
-python3 tools/run_qualification.py --manifest coordinated_xy_production_mres3_v5 --operator-prompts --fixture coordinated_xy_production_mres3_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_production_mres3_v5.json
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-production-mres3-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_production_mres3_v6.json
+python3 tools/run_qualification.py --manifest coordinated_xy_production_mres3_v6 --operator-prompts --fixture coordinated_xy_production_mres3_envelope_clear --fixture coordinated_xy_production_mres3_limit_crossings_ready --machine-id LC-001 --raw-report hil_reports/coordinated_xy_production_mres3_v6.json
 
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-shallow-edge-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_shallow_edge_v4.json
 python3 tools/run_qualification.py --manifest coordinated_xy_shallow_edge_v4 --operator-prompts --fixture coordinated_xy_shallow_edge_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_shallow_edge_v4.json
@@ -3688,6 +3694,16 @@ python3 tools/run_qualification.py --manifest direct_xyz_lut_v1 --operator-promp
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-camera-transition-suite --timeout-ms 180000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_camera_transition_v4.json
 python3 tools/run_qualification.py --manifest coordinated_xy_camera_transition_v4 --operator-prompts --fixture coordinated_xy_camera_transition_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_camera_transition_v4.json
 ```
+
+Production selector `2097` now emits results
+`[2087,2088,2089,2090,2098,2105]`. Result `2098` proves TIM5 is running at
+1 MHz, channel 3 services a 15 ms deadline within 15,000-16,000 us, the timing
+infrastructure has no failures, and ten clean production moves produce no X/Y
+confirmations. Operator-gated result `2105` then performs one bounded physical
+crossing per axis at 3 kHz. Each axis starts at the normal 100-step home
+backoff, receives only a 200-step command toward the optical trigger, must
+report the correct terminal axis with both STEP outputs low and no more than
+50 post-edge steps, and must release/home successfully before the next axis.
 
 The completed Z speed-ladder experiment selected the existing 30 kHz logical
 rate and 140,000 logical steps/s^2 acceleration for production. Its firmware
