@@ -318,6 +318,39 @@ def test_coordinated_terminal_path_uses_one_optimized_debounce_completion():
         assert "MotionLimitDebounceTimer::cancel(" not in finalizer
 
 
+def test_xy_confirmation_clean_path_is_optimized_and_has_no_nested_policy_calls():
+    header = _read("firmware/Core/Inc/Stepper.h")
+    timer = _read("firmware/Core/Src/MotionLimitDebounceTimer.cpp")
+
+    hardware_classifier = header[
+        header.index("bool _usesHardwareLimitDebounce() const") : header.index(
+            "bool _confirmReleasedForNextApproach(",
+            header.index("bool _usesHardwareLimitDebounce() const"),
+        )
+    ]
+    assert "__attribute__((always_inline))" in header[
+        header.rindex("#if defined(__GNUC__)", 0, header.index("bool _usesHardwareLimitDebounce() const")) :
+        header.index("bool _usesHardwareLimitDebounce() const")
+    ]
+    assert "_axis == X_AXIS || _axis == Y_AXIS" in hardware_classifier
+
+    confirmation = timer[
+        timer.index("bool takeConfirmedFromIsr(") : timer.index(
+            "void recordStopPositionFromIsr(",
+            timer.index("bool takeConfirmedFromIsr("),
+        )
+    ]
+    assert '__attribute__((optimize("O2"), hot))' in timer[
+        timer.rindex("#if defined(__GNUC__)", 0, timer.index("bool takeConfirmedFromIsr(")) :
+        timer.index("bool takeConfirmedFromIsr(")
+    ]
+    assert "g_axes[axis == Axis::Y ? 1u : 0u]" in confirmation
+    assert "state.moveGeneration == 0u" in confirmation
+    assert "state.moveGeneration != moveGeneration" in confirmation
+    assert "axisState(" not in confirmation
+    assert "MotionLimitDebouncePolicy::hardwareGenerationMatches(" not in confirmation
+
+
 def test_camera_transition_uses_production_scaling_and_direct_home_counts():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
     assert "aggregate, 2u, 16832u, 60000u, 60000u, limits" in diagnostics

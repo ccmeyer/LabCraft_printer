@@ -412,6 +412,9 @@ private:
   bool _takeConfirmedLimitFromIsr();
   bool _stopForConfirmedLimitFromIsr();
   void _observeLimitLevelFromTask(bool asserted, uint32_t nowCycle);
+#if defined(__GNUC__) && !defined(UNIT_TEST)
+  __attribute__((always_inline))
+#endif
   bool _usesHardwareLimitDebounce() const {
     return _axis == X_AXIS || _axis == Y_AXIS;
   }

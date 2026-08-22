@@ -385,13 +385,20 @@ void onExtiFromIsr(Axis axis,
   beginCandidate(axis, state, moveGeneration, position);
 }
 
+#if defined(__GNUC__) && !defined(UNIT_TEST)
+__attribute__((optimize("O2"), hot))
+#endif
 bool takeConfirmedFromIsr(Axis axis,
                           uint32_t moveGeneration,
                           int32_t consumedPosition) {
-  AxisState& state = axisState(axis);
+  // This runs on every active X/Y motion interrupt. Keep the clean path to
+  // direct loads/comparisons so checking for a TIM5 publication cannot push
+  // TIM2 past its conditional-rearm guard. The nonzero equality below is the
+  // inlined hardwareGenerationMatches() contract.
+  AxisState& state = g_axes[axis == Axis::Y ? 1u : 0u];
   if (state.debounce.phase != MotionLimitDebouncePolicy::Phase::Confirmed ||
-      !MotionLimitDebouncePolicy::hardwareGenerationMatches(
-          state.moveGeneration, moveGeneration) ||
+      state.moveGeneration == 0u ||
+      state.moveGeneration != moveGeneration ||
       !state.confirmation.valid) {
     return false;
   }
