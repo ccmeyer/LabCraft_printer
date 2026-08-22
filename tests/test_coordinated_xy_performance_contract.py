@@ -261,22 +261,28 @@ def test_xy_motion_limits_use_edge_aware_tim5_confirmation_without_raw_stop():
 def test_coordinated_terminal_path_uses_one_optimized_debounce_completion():
     header = _read("firmware/Core/Inc/MotionLimitDebounceTimer.h")
     timer = _read("firmware/Core/Src/MotionLimitDebounceTimer.cpp")
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
     stepper = _read("firmware/Core/Src/Stepper.cpp")
 
-    assert "void completeMoveFromIsr(Axis axis, int32_t stoppedPosition);" in header
+    assert "void completeCoordinatedMoveFromIsr(int32_t xStoppedPosition" in header
     completion = timer[
-        timer.index("void completeMoveFromIsr(") : timer.index(
-            "void cancel(Axis axis", timer.index("void completeMoveFromIsr(")
+        timer.index("void completeCoordinatedMoveFromIsr(") : timer.index(
+            "void cancel(Axis axis",
+            timer.index("void completeCoordinatedMoveFromIsr("),
         )
     ]
     assert '__attribute__((optimize("O2"), hot))' in timer
-    assert "state.confirmation.consumedPosition = stoppedPosition" in completion
-    assert "__HAL_TIM_DISABLE_IT(g_timer, interrupt)" in completion
-    assert "__HAL_TIM_CLEAR_FLAG(g_timer, flag)" in completion
-    assert "state.debounce.phase = MotionLimitDebouncePolicy::Phase::Idle" in completion
-    assert "state.debounce.startCount = 0u" in completion
-    assert "state.debounce.deadlineCount = 0u" in completion
-    assert "state.debounce.transitionSeen = false" in completion
+    assert "xState.confirmation.consumedPosition = xStoppedPosition" in completion
+    assert "yState.confirmation.consumedPosition = yStoppedPosition" in completion
+    assert "__HAL_TIM_DISABLE_IT(g_timer, TIM_IT_CC1 | TIM_IT_CC2)" in completion
+    assert "__HAL_TIM_CLEAR_FLAG(g_timer, TIM_FLAG_CC1 | TIM_FLAG_CC2)" in completion
+    assert "xState.moveGeneration = 0u" in completion
+    assert "yState.moveGeneration = 0u" in completion
+    assert "xState.debounce.phase == MotionLimitDebouncePolicy::Phase::Idle" in completion
+    assert "yState.debounce.phase == MotionLimitDebouncePolicy::Phase::Idle" in completion
+    assert "return;" in completion
+    assert "xState.debounce.phase = MotionLimitDebouncePolicy::Phase::Idle" in completion
+    assert "yState.debounce.phase = MotionLimitDebouncePolicy::Phase::Idle" in completion
     assert "EXTI->PR = mask" in completion
     assert "EXTI->IMR |= mask" in completion
     for out_of_line_helper in (
@@ -289,6 +295,17 @@ def test_coordinated_terminal_path_uses_one_optimized_debounce_completion():
     ):
         assert out_of_line_helper not in completion
 
+    isr_finish = gantry[
+        gantry.index("void Gantry::_finishCoordinatedFromIsr(") : gantry.index(
+            "bool Gantry::_handleCoordinatedTimerFromIsr(",
+            gantry.index("void Gantry::_finishCoordinatedFromIsr("),
+        )
+    ]
+    assert isr_finish.count(
+        "MotionLimitDebounceTimer::completeCoordinatedMoveFromIsr("
+    ) == 1
+    assert "_finishCoordinatedHardware(aborted, true)" in isr_finish
+
     for name in (
         "_finishAbortedCoordinatedAxisFromLow",
         "_finishCompletedCoordinatedAxisFromLow",
@@ -296,7 +313,7 @@ def test_coordinated_terminal_path_uses_one_optimized_debounce_completion():
         start = stepper.index(f"void Stepper::{name}()")
         end = stepper.index("\n}\n", start) + 2
         finalizer = stepper[start:end]
-        assert finalizer.count("MotionLimitDebounceTimer::completeMoveFromIsr(") == 1
+        assert "MotionLimitDebounceTimer::" not in finalizer
         assert "recordStopPositionFromIsr" not in finalizer
         assert "MotionLimitDebounceTimer::cancel(" not in finalizer
 

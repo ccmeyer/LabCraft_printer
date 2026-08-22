@@ -1484,11 +1484,6 @@ void Stepper::_finishAbortedCoordinatedAxisFromLow()
   // current falling edge. Preserve the task-context forced-low finalizer for
   // paths where that invariant has not already been established.
   _targetPos = _pos;
-  MotionLimitDebounceTimer::completeMoveFromIsr(
-      _axis == X_AXIS
-          ? MotionLimitDebounceTimer::Axis::X
-          : MotionLimitDebounceTimer::Axis::Y,
-      _pos);
   _inSoftStop = false;
   _coordinatedReserved = false;
 }
@@ -1499,11 +1494,6 @@ void Stepper::_finishCompletedCoordinatedAxisFromLow()
   // Successful coordinated completion is entered only after the final
   // falling edge. Avoid repeating the STEP-low GPIO write in that bounded
   // terminal path; abort cleanup continues to force all STEP pins low.
-  MotionLimitDebounceTimer::completeMoveFromIsr(
-      _axis == X_AXIS
-          ? MotionLimitDebounceTimer::Axis::X
-          : MotionLimitDebounceTimer::Axis::Y,
-      _pos);
   _inSoftStop = false;
   _coordinatedReserved = false;
 }

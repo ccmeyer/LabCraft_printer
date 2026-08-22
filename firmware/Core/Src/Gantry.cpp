@@ -6,6 +6,7 @@
  */
 
 #include "Gantry.h"
+#include "MotionLimitDebounceTimer.h"
 #include "Stepper.h"
 #include "MotionUnitScale.h"
 #include "Orchestrator.h"
@@ -571,6 +572,9 @@ void Gantry::_finishCoordinatedFromIsr(bool aborted,
     CoordinatedXyIsrInstrumentation::markAborted(_coordinatedTiming);
   }
 #endif
+  MotionLimitDebounceTimer::completeCoordinatedMoveFromIsr(
+      _coordinatedX != nullptr ? _coordinatedX->_pos : 0,
+      _coordinatedY != nullptr ? _coordinatedY->_pos : 0);
   // Executor terminal transitions are accepted only after every active edge
   // has been accounted and both STEP outputs are known low.
   _finishCoordinatedHardware(aborted, true);

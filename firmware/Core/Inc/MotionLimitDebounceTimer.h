@@ -69,7 +69,8 @@ bool takeConfirmedFromIsr(Axis axis,
                           uint32_t moveGeneration,
                           int32_t consumedPosition);
 void recordStopPositionFromIsr(Axis axis, int32_t stoppedPosition);
-void completeMoveFromIsr(Axis axis, int32_t stoppedPosition);
+void completeCoordinatedMoveFromIsr(int32_t xStoppedPosition,
+                                    int32_t yStoppedPosition);
 void cancel(Axis axis, bool rejectPending = false);
 AxisSnapshot snapshot(Axis axis);
 ConfirmationSnapshot lastConfirmation(Axis axis);
