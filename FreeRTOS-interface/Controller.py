@@ -1012,6 +1012,11 @@ class Controller(QObject):
 
         self.expected_position = self.model.machine_model.get_current_position_dict()
         self.expected_location = self.model.machine_model.get_current_location()
+        self._position_reconciliation = {
+            "state": "settled",
+            "reason": "controller_initialization",
+            "expected_position": copy.deepcopy(self.expected_position),
+        }
 
         self._dfu_thread: DfuUpdateWorker | None = None
         self._qualification_worker = None
@@ -1106,7 +1111,9 @@ class Controller(QObject):
         if imaging_ejection_signal is not None:
             imaging_ejection_signal.connect(self._on_machine_ejection_command_event)
         self.model.machine_model.command_numbers_updated.connect(self.update_command_numbers)
-        self.machine.command_queue.commands_completed.connect(self.update_expected_with_current)
+        self.machine.command_queue.commands_completed.connect(
+            self._begin_position_reconciliation
+        )
 
         # self.machine.balance.balance_mass_updated_signal.connect(self.model.calibration_model.update_mass)
         self.machine.all_calibration_droplets_printed.connect(self.start_mass_stabilization_timer)
@@ -1336,6 +1343,7 @@ class Controller(QObject):
     def update_command_numbers(self):
         """Pass the current command and last completed command to the command queue"""
         self.machine.update_command_numbers(*self.model.machine_model.get_command_numbers())
+        self._advance_position_reconciliation()
     
     def update_volumes_in_view(self):
         """Update the volume in the view."""
@@ -6506,6 +6514,163 @@ class Controller(QObject):
             )
             return False
 
+    @staticmethod
+    def _position_axes():
+        return ("X", "Y", "Z")
+
+    def _position_reconciliation_now(self):
+        clock = getattr(self, "_monotonic_fn", None)
+        return float(clock() if callable(clock) else time.monotonic())
+
+    def _position_reconciliation_snapshot(self, *, now_monotonic=None):
+        machine_model = self.model.machine_model
+        getter = getattr(machine_model, "get_position_telemetry_snapshot", None)
+        if not callable(getter):
+            return None
+        now = (
+            self._position_reconciliation_now()
+            if now_monotonic is None
+            else float(now_monotonic)
+        )
+        return getter(now_monotonic=now)
+
+    def _position_reconciliation_timeout_ms(self):
+        guard = getattr(self, "configuration_safety_guard", None)
+        policy = getattr(guard, "policy", None)
+        timeout_ms = getattr(policy, "position_telemetry_max_age_ms", 2500)
+        try:
+            return max(1, int(timeout_ms))
+        except (TypeError, ValueError):
+            return 2500
+
+    def _settle_position_reconciliation(self, *, reason, now_monotonic=None):
+        now = (
+            self._position_reconciliation_now()
+            if now_monotonic is None
+            else float(now_monotonic)
+        )
+        machine_model = self.model.machine_model
+        position_getter = getattr(
+            machine_model,
+            "get_current_position_dict_capital",
+            machine_model.get_current_position_dict,
+        )
+        position = position_getter()
+        self._position_reconciliation = {
+            "state": "settled",
+            "reason": str(reason),
+            "completed_monotonic": now,
+            "expected_position": copy.deepcopy(self.expected_position),
+            "reported_position": {
+                axis: int(position[axis]) for axis in self._position_axes()
+            },
+        }
+        return copy.deepcopy(self._position_reconciliation)
+
+    def _begin_position_reconciliation(self):
+        """Wait for a complete post-drain position cycle before capture."""
+
+        if getattr(self, "configuration_safety_guard", None) is None:
+            self.update_expected_with_current()
+            return
+
+        now = self._position_reconciliation_now()
+        timeout_ms = self._position_reconciliation_timeout_ms()
+        telemetry = self._position_reconciliation_snapshot(now_monotonic=now) or {}
+        axes = telemetry.get("axes", {}) if isinstance(telemetry, dict) else {}
+        position = self.model.machine_model.get_current_position_dict_capital()
+        self._position_reconciliation = {
+            "state": "pending",
+            "reason": "command_queue_drained",
+            "started_monotonic": now,
+            "deadline_monotonic": now + (timeout_ms / 1000.0),
+            "telemetry_max_age_ms": timeout_ms,
+            "trust_epoch": telemetry.get("trust_epoch"),
+            "baseline_generations": {
+                axis: int((axes.get(axis) or {}).get("generation", 0))
+                for axis in self._position_axes()
+            },
+            "observed_generations": {
+                axis: int((axes.get(axis) or {}).get("generation", 0))
+                for axis in self._position_axes()
+            },
+            "expected_position": copy.deepcopy(self.expected_position),
+            "reported_position_at_drain": {
+                axis: int(position[axis]) for axis in self._position_axes()
+            },
+        }
+
+    def _advance_position_reconciliation(self, *, now_monotonic=None):
+        record = getattr(self, "_position_reconciliation", None)
+        if not isinstance(record, dict):
+            return {"state": "settled", "reason": "compatibility_default"}
+        if record.get("state") not in {"pending", "timed_out"}:
+            return copy.deepcopy(record)
+
+        now = (
+            self._position_reconciliation_now()
+            if now_monotonic is None
+            else float(now_monotonic)
+        )
+        telemetry = self._position_reconciliation_snapshot(now_monotonic=now)
+        if not isinstance(telemetry, dict):
+            if now >= float(record.get("deadline_monotonic", now)):
+                record["state"] = "timed_out"
+                record["reason"] = "position_telemetry_unavailable"
+            return copy.deepcopy(record)
+
+        observed_epoch = telemetry.get("trust_epoch")
+        if observed_epoch != record.get("trust_epoch"):
+            record["state"] = "trust_changed"
+            record["reason"] = "motion_trust_epoch_changed"
+            record["observed_trust_epoch"] = observed_epoch
+            record["completed_monotonic"] = now
+            return copy.deepcopy(record)
+
+        try:
+            queue_empty = bool(self.check_if_all_completed())
+        except Exception:
+            queue_empty = False
+        if not queue_empty or bool(self.model.machine_model.is_busy()):
+            if now >= float(record.get("deadline_monotonic", now)):
+                record["state"] = "timed_out"
+                record["reason"] = "motion_not_settled_before_deadline"
+            return copy.deepcopy(record)
+
+        axes = telemetry.get("axes", {})
+        baseline = record.get("baseline_generations", {})
+        observed = {
+            axis: int((axes.get(axis) or {}).get("generation", 0))
+            for axis in self._position_axes()
+        }
+        record["observed_generations"] = observed
+        if not all(
+            observed[axis] > int(baseline.get(axis, 0))
+            for axis in self._position_axes()
+        ):
+            if now >= float(record.get("deadline_monotonic", now)):
+                record["state"] = "timed_out"
+                record["reason"] = "post_drain_position_cycle_incomplete"
+            return copy.deepcopy(record)
+
+        position = self.model.machine_model.get_current_position_dict_capital()
+        reported = {
+            axis: int(position[axis]) for axis in self._position_axes()
+        }
+        expected = {
+            axis: record.get("expected_position", {}).get(axis)
+            for axis in self._position_axes()
+        }
+        record["reported_position"] = reported
+        record["completed_monotonic"] = now
+        if reported == expected:
+            record["state"] = "settled"
+            record["reason"] = "fresh_post_drain_position_matches_expected"
+        else:
+            record["state"] = "mismatch"
+            record["reason"] = "fresh_post_drain_position_mismatch"
+        return copy.deepcopy(record)
+
     def _configuration_capture_readiness(self):
         """Return one JSON-safe, fail-closed current-position evidence snapshot."""
 
@@ -6514,6 +6679,9 @@ class Controller(QObject):
             return {"ready": True, "reason_codes": [], "compatibility_mode": True}
         machine_model = self.model.machine_model
         now = float(self._monotonic_fn())
+        reconciliation = self._advance_position_reconciliation(
+            now_monotonic=now
+        )
         telemetry_getter = getattr(machine_model, "get_position_telemetry_snapshot", None)
         telemetry = telemetry_getter(now_monotonic=now) if callable(telemetry_getter) else None
         reasons = []
@@ -6563,7 +6731,18 @@ class Controller(QObject):
         expected = dict(self.expected_position)
         if any(type(position.get(axis)) is not int for axis in ("X", "Y", "Z")):
             reasons.append("position_invalid")
-        if any(expected.get(axis) != position.get(axis) for axis in ("X", "Y", "Z")):
+        reconciliation_state = str(reconciliation.get("state") or "settled")
+        if reconciliation_state == "pending":
+            reasons.append("position_reconciliation_pending")
+        elif reconciliation_state == "timed_out":
+            reasons.append("position_reconciliation_timeout")
+        elif reconciliation_state == "trust_changed":
+            reasons.append("position_reconciliation_trust_changed")
+        elif reconciliation_state == "mismatch":
+            reasons.append("expected_position_mismatch")
+        elif any(
+            expected.get(axis) != position.get(axis) for axis in ("X", "Y", "Z")
+        ):
             reasons.append("expected_position_mismatch")
         machine_uuid = getattr(getattr(self, "machine_data_paths", None), "machine_uuid", None)
         if not machine_uuid:
@@ -6575,6 +6754,7 @@ class Controller(QObject):
             "trust_epoch": trust_epoch,
             "captured_position": {axis: int(position[axis]) for axis in ("X", "Y", "Z")},
             "expected_position": copy.deepcopy(expected),
+            "position_reconciliation": copy.deepcopy(reconciliation),
             "telemetry": copy.deepcopy(axes),
             "captured_monotonic": now,
             "telemetry_max_age_ms": guard.policy.position_telemetry_max_age_ms,
@@ -6587,7 +6767,10 @@ class Controller(QObject):
         workflow = str(workflow or "").strip()
         evidence = self._configuration_capture_readiness()
         if not evidence.get("ready"):
-            message = "Position capture is not safe: " + ", ".join(evidence["reason_codes"])
+            reason_codes = evidence["reason_codes"]
+            message = "Position capture is not safe: " + ", ".join(reason_codes)
+            if "position_reconciliation_pending" in reason_codes:
+                message += ". Final position telemetry is still settling; wait briefly and retry."
             self.error_occurred_signal.emit("Position Not Captured", message)
             self.record_configuration_attempt(
                 event_type="rejected",
@@ -7110,6 +7293,8 @@ class Controller(QObject):
             self.expected_location = self.model.machine_model.get_current_location()
         except Exception:
             self.expected_location = None
+
+        self._settle_position_reconciliation(reason="explicit_current_resync")
 
         # resync rack expected state when queue drains
         try:
