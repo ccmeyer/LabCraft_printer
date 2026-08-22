@@ -99,6 +99,9 @@ def normalize_report(
             "summary_csv_path": str(artifacts.summary_csv_path),
             "selftest_returncode": int(selftest_returncode),
             "fixture_id": fixture_id,
+            "preauthorize_confirmation_prompts": bool(
+                raw_selftest.get("preauthorize_confirmation_prompts", False)
+            ),
         },
         "overall_status": overall_status,
         "raw_summary": summary,

@@ -82,7 +82,34 @@ def _now_iso() -> str:
 
 def _record_prompt(interactions: list[dict], stage: str, message: str, prompter: OperatorPrompter) -> None:
     prompter(message)
-    interactions.append({"stage": stage, "message": message, "confirmed_at": _now_iso()})
+    interactions.append(
+        {
+            "stage": stage,
+            "message": message,
+            "confirmed_at": _now_iso(),
+            "mode": "interactive",
+        }
+    )
+
+
+def _record_preauthorized_confirmation(interactions: list[dict], stage: str, message: str) -> None:
+    interactions.append(
+        {
+            "stage": stage,
+            "message": message,
+            "confirmed_at": _now_iso(),
+            "mode": "preauthorized",
+        }
+    )
+
+
+def _extend_raw_operator_interactions(interactions: list[dict], raw_selftest: dict) -> None:
+    for item in raw_selftest.get("operator_interactions") or []:
+        if not isinstance(item, dict):
+            continue
+        interaction = dict(item)
+        interaction.setdefault("source", "selftest")
+        interactions.append(interaction)
 
 
 def _fixture_ids(manifest: QualificationManifest) -> set[str]:
@@ -259,6 +286,7 @@ def _build_selftest_command(
     raw_report_path: Path,
     timeout_ms: int | None,
     progress_jsonl: bool = False,
+    preauthorize_confirmation_prompts: bool = False,
     extra_args: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     script = Path(run_selftest_path) if run_selftest_path is not None else _repo_root() / "tools" / "run_selftest.py"
@@ -278,6 +306,8 @@ def _build_selftest_command(
         command.extend(["--timeout-ms", str(int(timeout_ms))])
     if progress_jsonl:
         command.append("--progress-jsonl")
+    if preauthorize_confirmation_prompts:
+        command.append("--preauthorize-confirmation-prompts")
     command.extend(str(item) for item in extra_args)
     return tuple(command)
 
@@ -368,6 +398,7 @@ def run_qualification(
     raw_report_path: str | Path | None = None,
     fixture_id: str | None = None,
     operator_prompts: bool = False,
+    preauthorize_confirmation_prompts: bool = False,
     progress_jsonl: bool = False,
     invoker: SelfTestInvoker = default_selftest_invoker,
     prompter: OperatorPrompter = default_operator_prompter,
@@ -389,6 +420,7 @@ def run_qualification(
     if raw_report_path is not None:
         source_path = Path(raw_report_path)
         raw_selftest = json.loads(source_path.read_text(encoding="utf-8"))
+        _extend_raw_operator_interactions(interactions, raw_selftest)
         valve_artifacts = _maybe_generate_valve_trace_artifacts(manifest, artifacts)
         gripper_artifacts = _maybe_generate_gripper_trace_artifacts(manifest, artifacts)
         report_raw_selftest = _enrich_raw_selftest_with_trace_metrics(raw_selftest, valve_artifacts, gripper_artifacts)
@@ -413,13 +445,25 @@ def run_qualification(
         )
 
     required_fixture_ids = _fixture_ids(manifest)
-    if manifest.requires_operator_prompts:
-        rejection: dict | None = None
+    rejection: dict | None = None
+    if preauthorize_confirmation_prompts and not operator_prompts:
+        rejection = {
+            "name": "operator_prompts_required",
+            "pass": False,
+            "details": {
+                "manifest_id": manifest.manifest_id,
+                "preauthorization_requested": True,
+            },
+        }
+    elif manifest.requires_operator_prompts:
         if not operator_prompts:
             rejection = {
                 "name": "operator_prompts_required",
                 "pass": False,
-                "details": {"manifest_id": manifest.manifest_id},
+                "details": {
+                    "manifest_id": manifest.manifest_id,
+                    "preauthorization_requested": bool(preauthorize_confirmation_prompts),
+                },
             }
         elif required_fixture_ids and fixture_id not in required_fixture_ids:
             rejection = {
@@ -431,36 +475,46 @@ def run_qualification(
                     "allowed_fixture_ids": sorted(required_fixture_ids),
                 },
             }
-        if rejection is not None:
-            raw_selftest = _raw_missing_report(manifest, 3)
-            raw_selftest["host_checks"] = [rejection]
-            write_json_atomic(artifacts.raw_selftest_path, raw_selftest)
-            report = write_qualification_artifacts(
-                raw_selftest,
-                manifest,
-                identity,
-                artifacts,
-                raw_source_path=artifacts.raw_selftest_path,
-                selftest_returncode=3,
-                fixture_id=fixture_id,
-                operator_interactions=interactions,
-            )
-            return QualificationRunResult(
-                returncode=3,
-                run_dir=artifacts.run_dir,
-                raw_selftest_path=artifacts.raw_selftest_path,
-                report_path=artifacts.report_path,
-                summary_csv_path=artifacts.summary_csv_path,
-                report=report,
-            )
 
+    if rejection is not None:
+        raw_selftest = _raw_missing_report(manifest, 3)
+        raw_selftest["host_checks"] = [rejection]
+        write_json_atomic(artifacts.raw_selftest_path, raw_selftest)
+        report = write_qualification_artifacts(
+            raw_selftest,
+            manifest,
+            identity,
+            artifacts,
+            raw_source_path=artifacts.raw_selftest_path,
+            selftest_returncode=3,
+            fixture_id=fixture_id,
+            operator_interactions=interactions,
+        )
+        return QualificationRunResult(
+            returncode=3,
+            run_dir=artifacts.run_dir,
+            raw_selftest_path=artifacts.raw_selftest_path,
+            report_path=artifacts.report_path,
+            summary_csv_path=artifacts.summary_csv_path,
+            report=report,
+        )
+
+    if manifest.requires_operator_prompts:
         if not gripper_seal_manifest:
-            _record_prompt(
-                interactions,
-                "confirm_fixture_setup",
-                _fixture_prompt_message(manifest, fixture_id),
-                prompter,
-            )
+            fixture_message = _fixture_prompt_message(manifest, fixture_id)
+            if preauthorize_confirmation_prompts:
+                _record_preauthorized_confirmation(
+                    interactions,
+                    "confirm_fixture_setup",
+                    fixture_message,
+                )
+            else:
+                _record_prompt(
+                    interactions,
+                    "confirm_fixture_setup",
+                    fixture_message,
+                    prompter,
+                )
 
     hardware_preflight_failed = False
     if manifest.requires_operator_prompts and gripper_seal_manifest:
@@ -565,6 +619,7 @@ def run_qualification(
             raw_report_path=artifacts.raw_selftest_path,
             timeout_ms=timeout_ms,
             progress_jsonl=progress_jsonl,
+            preauthorize_confirmation_prompts=preauthorize_confirmation_prompts,
             extra_args=manifest.selftest_args,
         )
         invocation = SelfTestInvocation(
@@ -591,6 +646,7 @@ def run_qualification(
 
         if artifacts.raw_selftest_path.exists():
             raw_selftest = json.loads(artifacts.raw_selftest_path.read_text(encoding="utf-8"))
+            _extend_raw_operator_interactions(interactions, raw_selftest)
             raw_source_path = artifacts.raw_selftest_path
         else:
             raw_selftest = _raw_missing_report(manifest, selftest_returncode)

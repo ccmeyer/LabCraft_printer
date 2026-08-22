@@ -1648,6 +1648,152 @@ def test_progress_jsonl_prompts_once_and_sends_resume_for_evap_plate_confirm(mon
     assert mod.CMD_RESUME in _sent_command_ids(mod, serial.writes)
 
 
+def test_preauthorized_confirmation_prompt_skips_input_and_is_audited(monkeypatch, tmp_path):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+    stage = "direct_xyz_lut_envelope_clear"
+    inbound = b"".join(
+        [
+            _hello_ack(mod),
+            _selftest_result_metrics(
+                mod,
+                0,
+                "selftest_progress",
+                True,
+                f"kind=progress;stage={stage};elapsed_ms=10;stk_hwm_w=100",
+            ),
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda _prompt="": (_ for _ in ()).throw(AssertionError("preauthorized prompt used input")),
+    )
+
+    out_path = tmp_path / "selftest.json"
+    args = _basic_run_args(out_path)
+    args.profile = "FULL"
+    args.preauthorize_confirmation_prompts = True
+
+    assert mod.run(args) == 0
+
+    report = mod.json.loads(out_path.read_text(encoding="utf-8"))
+    assert report["preauthorize_confirmation_prompts"] is True
+    assert report["operator_interactions"] == [
+        {
+            "stage": stage,
+            "message": mod._operator_prompt_message(stage),
+            "mode": "preauthorized",
+            "accepted": True,
+            "responded_at": report["operator_interactions"][0]["responded_at"],
+        }
+    ]
+    assert mod.CMD_RESUME in _sent_command_ids(mod, serial.writes)
+
+
+def test_preauthorization_keeps_physical_action_prompt_interactive(monkeypatch, tmp_path):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+    stage = "evap_plate_confirm"
+    inbound = b"".join(
+        [
+            _hello_ack(mod),
+            _selftest_result_metrics(
+                mod,
+                0,
+                "selftest_progress",
+                True,
+                f"kind=progress;stage={stage};elapsed_ms=10;stk_hwm_w=100",
+            ),
+            _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+    serial = FakeSerial(inbound)
+    responses: list[str] = []
+
+    def fake_input(prompt=""):
+        responses.append(prompt)
+        return "continue"
+
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    out_path = tmp_path / "selftest.json"
+    args = _basic_run_args(out_path)
+    args.profile = "FULL"
+    args.preauthorize_confirmation_prompts = True
+
+    assert mod.run(args) == 0
+
+    report = mod.json.loads(out_path.read_text(encoding="utf-8"))
+    assert len(responses) == 1
+    assert report["operator_interactions"][0]["stage"] == stage
+    assert report["operator_interactions"][0]["mode"] == "interactive"
+    assert report["operator_interactions"][0]["accepted"] is True
+
+
+def test_long_operator_pause_rebases_all_watchdog_frame_ages(monkeypatch, tmp_path):
+    mod = _load_run_selftest()
+    run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF
+    clock = FakeClock()
+    prompt = _selftest_result_metrics(
+        mod,
+        0,
+        "selftest_progress",
+        True,
+        "kind=progress;stage=direct_xyz_lut_envelope_clear;elapsed_ms=10;stk_hwm_w=100",
+    )
+    resumed = _selftest_result_metrics(
+        mod,
+        0,
+        "selftest_progress",
+        True,
+        "kind=progress;stage=direct_lut_z_home;elapsed_ms=20;stk_hwm_w=100",
+    )
+    serial = ChunkedFakeSerial(
+        [
+            _hello_ack(mod),
+            prompt + resumed + _selftest_done(mod, run_id),
+            _bye_ack(mod, 3),
+            _bye_done(mod, 3, run_id),
+        ]
+    )
+
+    def delayed_input(_prompt=""):
+        clock.now += 30.0
+        return "continue"
+
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=clock.monotonic, time=clock.time))
+    monkeypatch.setattr(mod, "serial", SimpleNamespace(Serial=lambda *args, **kwargs: serial))
+    monkeypatch.setattr("builtins.input", delayed_input)
+
+    out_path = tmp_path / "selftest.json"
+    args = _basic_run_args(out_path)
+    args.profile = "FULL"
+
+    assert mod.run(args) == 0
+
+    report = mod.json.loads(out_path.read_text(encoding="utf-8"))
+    watchdog = next(
+        item for item in report["host_checks"] if item["name"] == "selftest_progress_watchdog"
+    )
+    assert watchdog["pass"] is True
+    assert watchdog["details"]["timeout_reason"] is None
+    assert watchdog["details"]["last_valid_frame_age_ms"] < 1000
+    assert watchdog["details"]["last_rx_byte_age_ms"] < 1000
+    assert watchdog["details"]["last_selftest_frame_age_ms"] < 1000
+
+
 def test_progress_jsonl_sends_abort_when_evap_plate_prompt_is_rejected(monkeypatch, tmp_path, capsys):
     mod = _load_run_selftest()
     run_id = int(1700000000.0 * 1000) & 0xFFFFFFFF

@@ -289,6 +289,7 @@ def _build_campaign_report(
     port: str,
     baud: int,
     operator_prompts: bool,
+    preauthorize_confirmation_prompts: bool,
     progress_jsonl: bool,
     continue_on_failure: bool,
     started_at: str,
@@ -318,6 +319,7 @@ def _build_campaign_report(
             "port": str(port),
             "baud": int(baud),
             "operator_prompts": bool(operator_prompts),
+            "preauthorize_confirmation_prompts": bool(preauthorize_confirmation_prompts),
             "progress_jsonl": bool(progress_jsonl),
             "continue_on_failure": bool(continue_on_failure),
         },
@@ -425,6 +427,7 @@ def run_campaign(
     campaign_output_root: str | Path = DEFAULT_CAMPAIGN_OUTPUT_ROOT,
     suite_output_root: str | Path = DEFAULT_SUITE_OUTPUT_ROOT,
     operator_prompts: bool = False,
+    preauthorize_confirmation_prompts: bool = False,
     progress_jsonl: bool = False,
     continue_on_failure: bool = False,
     run_selftest_path: str | Path | None = None,
@@ -450,7 +453,9 @@ def run_campaign(
         },
     )
 
-    if campaign.requires_operator_prompts and not operator_prompts:
+    if (
+        campaign.requires_operator_prompts or preauthorize_confirmation_prompts
+    ) and not operator_prompts:
         for step in campaign.steps:
             step_results.append(
                 _step_result(
@@ -467,6 +472,7 @@ def run_campaign(
             port=port,
             baud=baud,
             operator_prompts=operator_prompts,
+            preauthorize_confirmation_prompts=preauthorize_confirmation_prompts,
             progress_jsonl=progress_jsonl,
             continue_on_failure=continue_on_failure,
             started_at=started_at,
@@ -522,6 +528,7 @@ def run_campaign(
                 run_selftest_path=run_selftest_path,
                 fixture_id=step.fixture_id,
                 operator_prompts=operator_prompts,
+                preauthorize_confirmation_prompts=preauthorize_confirmation_prompts,
                 progress_jsonl=progress_jsonl,
                 invoker=invoker,
                 prompter=prompter,
@@ -572,6 +579,7 @@ def run_campaign(
         port=port,
         baud=baud,
         operator_prompts=operator_prompts,
+        preauthorize_confirmation_prompts=preauthorize_confirmation_prompts,
         progress_jsonl=progress_jsonl,
         continue_on_failure=continue_on_failure,
         started_at=started_at,

@@ -161,8 +161,10 @@ def test_run_campaign_runs_steps_in_order_and_writes_parent_artifacts(tmp_path):
     ]
     assert [call["timeout_ms"] for call in calls] == [420000, 420000, 420000, 900000]
     assert all(call["operator_prompts"] is True for call in calls)
+    assert all(call["preauthorize_confirmation_prompts"] is False for call in calls)
     assert all(call["progress_jsonl"] is True for call in calls)
     assert all(call["output_root"] == tmp_path / "qualification" for call in calls)
+    assert result.report["run"]["preauthorize_confirmation_prompts"] is False
     rows = list(csv.DictReader(result.summary_csv_path.open(newline="", encoding="utf-8")))
     assert [row["manifest_id"] for row in rows] == [step["manifest_id"] for step in result.report["steps"]]
 
@@ -208,6 +210,29 @@ def test_run_campaign_requires_operator_prompts_before_launching_hardware(tmp_pa
     assert result.report["overall_status"] == "fail"
     assert [step["status"] for step in result.report["steps"]] == ["skipped", "skipped", "skipped", "skipped"]
     assert {step["message"] for step in result.report["steps"]} == {"operator_prompts_required"}
+
+
+def test_run_campaign_propagates_confirmation_preauthorization(tmp_path):
+    calls = []
+
+    def fake_runner(**kwargs):
+        calls.append(kwargs)
+        return _fake_result(tmp_path, kwargs["manifest_ref"], index=len(calls))
+
+    result = run_campaign(
+        campaign_ref="machine_full_qualification_v1",
+        machine_id="LC-TEST",
+        identity_path=_identity_path(tmp_path),
+        campaign_output_root=tmp_path / "campaigns",
+        suite_output_root=tmp_path / "qualification",
+        operator_prompts=True,
+        preauthorize_confirmation_prompts=True,
+        qualification_runner=fake_runner,
+    )
+
+    assert result.returncode == 0
+    assert all(call["preauthorize_confirmation_prompts"] is True for call in calls)
+    assert result.report["run"]["preauthorize_confirmation_prompts"] is True
 
 
 def test_run_campaign_stops_after_first_failed_suite_by_default(tmp_path):
@@ -312,7 +337,10 @@ def test_campaign_cli_dry_run_prints_gripper_only_queue(capsys):
 
 
 def test_campaign_cli_returns_success_and_failure_codes(tmp_path):
+    passing_calls = []
+
     def passing_runner(**kwargs):
+        passing_calls.append(kwargs)
         return _fake_result(tmp_path, kwargs["manifest_ref"])
 
     success = campaign_cli.main(
@@ -328,6 +356,7 @@ def test_campaign_cli_returns_success_and_failure_codes(tmp_path):
             "--suite-output-root",
             str(tmp_path / "qualification_pass"),
             "--operator-prompts",
+            "--preauthorize-confirmation-prompts",
         ],
         qualification_runner=passing_runner,
     )
@@ -354,3 +383,4 @@ def test_campaign_cli_returns_success_and_failure_codes(tmp_path):
 
     assert success == 0
     assert failure == 3
+    assert all(call["preauthorize_confirmation_prompts"] is True for call in passing_calls)

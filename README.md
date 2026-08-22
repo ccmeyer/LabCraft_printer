@@ -3588,6 +3588,39 @@ Run the campaign on the Pi serial port:
 python tools/run_qualification_campaign.py --campaign machine_full_qualification_v1 --operator-prompts --port /dev/ttyAMA0
 ```
 
+After the attending operator has given fresh authorization for the exact
+campaign, known confirmation-only gates can be consumed without pausing for
+another terminal response:
+
+```bash
+python tools/run_qualification_campaign.py --campaign machine_full_qualification_v1 --operator-prompts --preauthorize-confirmation-prompts --port /dev/ttyAMA0
+python tools/run_qualification.py --manifest coordinated_xy_production_mres3_v6 --operator-prompts --preauthorize-confirmation-prompts --fixture coordinated_xy_production_mres3_envelope_clear --port /dev/ttyAMA0
+```
+
+`--preauthorize-confirmation-prompts` is opt-in and requires
+`--operator-prompts`. It auto-resumes only the runner's explicit allowlist of
+confirmation-only stages, including the coordinated XY envelope and bounded
+crossing readiness gates. Every automatic response is retained in the raw and
+normalized reports with `mode=preauthorized`. Prompts that require a physical
+action remain interactive; these include evaporation-plate placement, manual
+X/Y switch press/release, and gripper load/support/removal. An unrecognized
+future operator gate is never automatically resumed and therefore fails closed
+if the host has not been updated to classify it.
+The option is not unattended authority and does not replace the fresh attended
+confirmation, FULL-profile authorization, fixture checks, emergency-stop
+access, or final firmware restoration required by the development workflow.
+
+The raw self-test and legacy HIL pass-throughs use the same explicit option:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --preauthorize-confirmation-prompts --out hil_reports/selftest.json
+powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost 192.168.0.29 -Profile FULL -PreauthorizeConfirmationPrompts
+```
+
+Interactive prompt time is excluded from the self-test hard deadline, and the
+progress/activity watchdog timestamps are rebased when an operator responds so
+a valid long pause cannot cause an immediate stale-progress failure.
+
 Run the dedicated refuel-vacuum pressure-sensor qualification suite:
 
 ```bash

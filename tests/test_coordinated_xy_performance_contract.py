@@ -450,6 +450,18 @@ def test_windows_hil_wrapper_uses_long_shallow_defaults_but_preserves_overrides(
     assert '"--status-only-timeout-ms", $effectiveStatusOnlyTimeoutMs' in script
 
 
+def test_hil_wrappers_forward_confirmation_preauthorization_explicitly():
+    windows = _read("firmware/scripts/run_fw_hil_windows.ps1")
+    pi = _read("firmware/hil/flash_and_test.sh")
+
+    assert "[switch]$PreauthorizeConfirmationPrompts" in windows
+    assert "$PreauthorizeConfirmationPrompts.IsPresent" in windows
+    assert '$flashArgs += "--preauthorize-confirmation-prompts"' in windows
+    assert "PREAUTHORIZE_CONFIRMATION_PROMPTS=0" in pi
+    assert "--preauthorize-confirmation-prompts) PREAUTHORIZE_CONFIRMATION_PROMPTS=1" in pi
+    assert "cmd+=(--preauthorize-confirmation-prompts)" in pi
+
+
 def test_active_coordinated_manifests_share_timing_budgets_and_archive_predecessors():
     production = json.loads(
         _read("tools/qualification/manifests/coordinated_xy_production_mres3_v6.json")

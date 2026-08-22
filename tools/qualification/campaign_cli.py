@@ -20,6 +20,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--campaign-output-root", default=str(Path("hil_reports") / "qualification_campaigns"))
     parser.add_argument("--suite-output-root", default=str(Path("hil_reports") / "qualification"))
     parser.add_argument("--operator-prompts", action="store_true")
+    parser.add_argument(
+        "--preauthorize-confirmation-prompts",
+        action="store_true",
+        help=(
+            "Use prior attended authorization for known confirmation-only gates. "
+            "Requires --operator-prompts; physical-action prompts remain interactive."
+        ),
+    )
     parser.add_argument("--progress-jsonl", action="store_true")
     parser.add_argument("--continue-on-failure", action="store_true")
     parser.add_argument("--run-selftest-path", default=None)
@@ -56,6 +64,7 @@ def main(argv: Sequence[str] | None = None, *, qualification_runner: Qualificati
         campaign_output_root=args.campaign_output_root,
         suite_output_root=args.suite_output_root,
         operator_prompts=args.operator_prompts,
+        preauthorize_confirmation_prompts=args.preauthorize_confirmation_prompts,
         progress_jsonl=args.progress_jsonl,
         continue_on_failure=args.continue_on_failure,
         run_selftest_path=args.run_selftest_path,

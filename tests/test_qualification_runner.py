@@ -783,6 +783,91 @@ def test_default_qualification_manifest_is_factory_acceptance_v3():
     assert gripper_args.manifest == "gripper_seal_v1"
     assert gripper_args.fixture == "dummy_blocked_head_v1"
     assert gripper_args.operator_prompts is True
+    preauthorized_args = parser.parse_args(
+        ["--operator-prompts", "--preauthorize-confirmation-prompts"]
+    )
+    assert preauthorized_args.operator_prompts is True
+    assert preauthorized_args.preauthorize_confirmation_prompts is True
+
+
+def test_confirmation_preauthorization_skips_fixture_prompt_and_reaches_selftest(tmp_path):
+    invocations = []
+
+    def fake_invoker(invocation):
+        invocations.append(invocation)
+        raw = _raw_xy_motion_selftest()
+        raw["preauthorize_confirmation_prompts"] = True
+        invocation.raw_report_path.write_text(
+            json.dumps(raw), encoding="utf-8"
+        )
+        return 0
+
+    result = run_qualification(
+        manifest_ref=_xy_motion_manifest_ref(),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        fixture_id="motion_clear_envelope_v1",
+        operator_prompts=True,
+        preauthorize_confirmation_prompts=True,
+        invoker=fake_invoker,
+        prompter=lambda _message: (_ for _ in ()).throw(
+            AssertionError("preauthorized fixture confirmation used the prompter")
+        ),
+    )
+
+    assert result.returncode == 0
+    assert "--preauthorize-confirmation-prompts" in invocations[0].command
+    assert result.report["operator_interactions"][0]["stage"] == "confirm_fixture_setup"
+    assert result.report["operator_interactions"][0]["mode"] == "preauthorized"
+    assert result.report["run"]["preauthorize_confirmation_prompts"] is True
+
+
+def test_confirmation_preauthorization_requires_attended_operator_mode(tmp_path):
+    result = run_qualification(
+        manifest_ref=_manifest_path(tmp_path),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        preauthorize_confirmation_prompts=True,
+        invoker=lambda _invocation: (_ for _ in ()).throw(
+            AssertionError("invalid preauthorization reached the self-test")
+        ),
+    )
+
+    assert result.returncode == 3
+    check = result.report["host_checks"][0]
+    assert check["name"] == "operator_prompts_required"
+    assert check["details"]["preauthorization_requested"] is True
+
+
+def test_raw_selftest_operator_interactions_are_copied_into_qualification_report(tmp_path):
+    raw = _raw_selftest()
+    raw["operator_interactions"] = [
+        {
+            "stage": "direct_xyz_lut_envelope_clear",
+            "message": "confirm envelope",
+            "mode": "preauthorized",
+            "accepted": True,
+            "responded_at": "2026-08-22T00:00:00Z",
+        }
+    ]
+    raw_path = tmp_path / "existing_raw.json"
+    raw_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    result = run_qualification(
+        manifest_ref=_manifest_path(tmp_path),
+        machine_id="LC-0001",
+        identity_path=tmp_path / "local" / "machine_identity.json",
+        output_root=tmp_path / "qualification",
+        raw_report_path=raw_path,
+    )
+
+    assert result.returncode == 0
+    interaction = result.report["operator_interactions"][0]
+    assert interaction["stage"] == "direct_xyz_lut_envelope_clear"
+    assert interaction["mode"] == "preauthorized"
+    assert interaction["source"] == "selftest"
 
 
 def test_default_gripper_control_preflight_uses_hello_then_print(monkeypatch):
@@ -1394,6 +1479,7 @@ def test_gripper_seal_operator_prompt_order_and_teardown(tmp_path):
     def fake_invoker(invocation):
         events.append("self-test")
         assert "--gripper-seal-suite" in invocation.command
+        assert "--preauthorize-confirmation-prompts" in invocation.command
         invocation.raw_report_path.write_text(json.dumps(_raw_gripper_selftest()), encoding="utf-8")
         return 0
 
@@ -1411,6 +1497,7 @@ def test_gripper_seal_operator_prompt_order_and_teardown(tmp_path):
         timeout_ms=420000,
         fixture_id="dummy_blocked_head_v1",
         operator_prompts=True,
+        preauthorize_confirmation_prompts=True,
         invoker=fake_invoker,
         prompter=fake_prompter,
         gripper_control=fake_gripper_control,
@@ -1436,6 +1523,9 @@ def test_gripper_seal_operator_prompt_order_and_teardown(tmp_path):
         "support_before_release",
         "remove_dummy_head",
     ]
+    assert {
+        item["mode"] for item in result.report["operator_interactions"]
+    } == {"interactive"}
     host_checks = {item["name"]: item for item in result.report["host_checks"]}
     assert host_checks["gripper_valve_preflight_print"]["pass"] is True
     assert host_checks["gripper_valve_preflight_refuel"]["pass"] is True

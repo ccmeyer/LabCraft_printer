@@ -831,19 +831,38 @@ def _operator_prompt_message(stage: str) -> str:
     return "Confirm the operator-gated self-test step is ready to continue."
 
 
-def _is_operator_prompt_stage(stage: str) -> bool:
-    return stage in {
-        "evap_plate_confirm",
-        "coord_x_limit_press",
-        "coord_x_limit_release",
-        "coord_y_limit_press",
-        "coord_y_limit_release",
+PREAUTHORIZABLE_OPERATOR_PROMPT_STAGES = frozenset(
+    {
         "coordinated_xy_camera_transition_envelope_clear",
         "coordinated_xy_production_mres3_envelope_clear",
         "coordinated_xy_production_mres3_limit_crossings_ready",
         "coordinated_xy_shallow_edge_envelope_clear",
         "direct_xyz_lut_envelope_clear",
     }
+)
+
+ACTION_REQUIRED_OPERATOR_PROMPT_STAGES = frozenset(
+    {
+        "evap_plate_confirm",
+        "coord_x_limit_press",
+        "coord_x_limit_release",
+        "coord_y_limit_press",
+        "coord_y_limit_release",
+    }
+)
+
+
+def _is_operator_prompt_stage(stage: str) -> bool:
+    return stage in (
+        PREAUTHORIZABLE_OPERATOR_PROMPT_STAGES
+        | ACTION_REQUIRED_OPERATOR_PROMPT_STAGES
+    )
+
+
+def _should_preauthorize_operator_prompt(args, stage: str) -> bool:
+    return bool(getattr(args, "preauthorize_confirmation_prompts", False)) and (
+        stage in PREAUTHORIZABLE_OPERATOR_PROMPT_STAGES
+    )
 
 
 def _read_operator_prompt_response(args, message: str) -> bool:
@@ -1252,6 +1271,7 @@ def run(args: argparse.Namespace) -> int:
     started_at = now_iso()
     results = []
     host_checks = []
+    operator_interactions = []
     trace_chunks: dict[tuple[int, int, int], dict] = {}
     summary = {"total": 0, "passed": 0, "failed": 0}
     aborted = False
@@ -1275,6 +1295,10 @@ def run(args: argparse.Namespace) -> int:
                 "summary": summary,
                 "results": results,
                 "host_checks": host_checks,
+                "preauthorize_confirmation_prompts": bool(
+                    getattr(args, "preauthorize_confirmation_prompts", False)
+                ),
+                "operator_interactions": operator_interactions,
                 "startup_reset_report": startup_reset_report,
                 "reset_report": reset_report_details,
             }
@@ -1665,22 +1689,49 @@ def run(args: argparse.Namespace) -> int:
                                     "message": prompt_message,
                                 },
                             )
+                            response_mode = (
+                                "preauthorized"
+                                if _should_preauthorize_operator_prompt(args, stage)
+                                else "interactive"
+                            )
                             prompt_started = time.monotonic()
-                            accepted = _read_operator_prompt_response(args, prompt_message)
+                            accepted = (
+                                True
+                                if response_mode == "preauthorized"
+                                else _read_operator_prompt_response(args, prompt_message)
+                            )
                             prompt_finished = time.monotonic()
                             paused_s = max(0.0, prompt_finished - prompt_started)
                             hard_deadline += paused_s
                             idle_deadline = prompt_finished + (progress_timeout_ms / 1000.0)
                             activity_deadline = prompt_finished + (activity_timeout_ms / 1000.0)
+                            # All timestamps derived from the pre-prompt loop value are
+                            # stale after input() returns. Rebase them so an attended
+                            # pause cannot immediately trip the progress watchdog or
+                            # produce misleading frame-age evidence.
+                            now = prompt_finished
+                            last_valid_frame_monotonic = prompt_finished
+                            last_rx_byte_monotonic = prompt_finished
+                            last_selftest_frame_monotonic = prompt_finished
                             operator_cmd = CMD_RESUME if accepted else CMD_SELFTEST_ABORT
                             ser.write(build_control(operator_cmd, operator_control_seq8 & 0xFF, selftest_seq32))
                             operator_control_seq8 = (operator_control_seq8 + 1) & 0xFF
+                            operator_interactions.append(
+                                {
+                                    "stage": stage,
+                                    "message": prompt_message,
+                                    "mode": response_mode,
+                                    "accepted": bool(accepted),
+                                    "responded_at": now_iso(),
+                                }
+                            )
                             _emit_selftest_event(
                                 args,
                                 {
                                     "event": "selftest_operator_prompt_response",
                                     "stage": stage,
                                     "accepted": bool(accepted),
+                                    "mode": response_mode,
                                 },
                             )
                         continue
@@ -2010,6 +2061,10 @@ def run(args: argparse.Namespace) -> int:
             "summary": summary,
             "results": results,
             "host_checks": host_checks,
+            "preauthorize_confirmation_prompts": bool(
+                getattr(args, "preauthorize_confirmation_prompts", False)
+            ),
+            "operator_interactions": operator_interactions,
             "startup_reset_report": startup_reset_report,
             "reset_report": reset_report_details,
         }
@@ -2067,6 +2122,15 @@ def main() -> int:
         ),
     )
     p.add_argument("--progress-jsonl", action="store_true", help="Emit structured SELFTEST_EVENT JSONL progress lines.")
+    p.add_argument(
+        "--preauthorize-confirmation-prompts",
+        action="store_true",
+        help=(
+            "Auto-resume known confirmation-only operator gates after an attended "
+            "campaign has been authorized. Prompts that require a physical action "
+            "remain interactive."
+        ),
+    )
     p.add_argument("--hello-timeout-ms", type=int, default=8000)
     p.add_argument("--hello-retry-ms", type=int, default=250)
     p.add_argument("--fast-fail-on-missing-hello", action="store_true")
