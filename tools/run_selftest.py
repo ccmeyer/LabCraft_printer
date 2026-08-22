@@ -808,6 +808,14 @@ def _operator_prompt_message(stage: str) -> str:
             "XY/Z motion envelope is clear. Remove all hands before the logical-unit MRES=3 "
             "homes, ten-move row (40 kHz active edges), and bounded post-row X/Y homes begin."
         )
+    if stage == "coordinated_xy_production_mres3_limit_crossings_ready":
+        return (
+            "Confirm the prior production row and homes completed normally, both optical X/Y "
+            "limits are released, their hard-stop margins are available, the emergency stop is "
+            "reachable, and all hands are clear. The firmware will command one bounded 200-step "
+            "X crossing at 3 kHz, home/release X, then repeat for Y. Abort immediately for contact, "
+            "excessive travel, a missing limit stop, or communication loss."
+        )
     if stage == "coordinated_xy_shallow_edge_envelope_clear":
         return (
             "Confirm both limit switches are released, the gantry is square, non-dispensing test "
@@ -832,6 +840,7 @@ def _is_operator_prompt_stage(stage: str) -> bool:
         "coord_y_limit_release",
         "coordinated_xy_camera_transition_envelope_clear",
         "coordinated_xy_production_mres3_envelope_clear",
+        "coordinated_xy_production_mres3_limit_crossings_ready",
         "coordinated_xy_shallow_edge_envelope_clear",
         "direct_xyz_lut_envelope_clear",
     }

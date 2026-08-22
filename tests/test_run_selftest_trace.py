@@ -2194,6 +2194,19 @@ def test_production_mres3_fixture_stage_is_an_operator_prompt():
     assert "40 kHz active edges" in message
 
 
+def test_production_mres3_limit_crossing_stage_is_an_operator_prompt():
+    mod = _load_run_selftest()
+    stage = "coordinated_xy_production_mres3_limit_crossings_ready"
+
+    assert mod._is_operator_prompt_stage(stage)
+    message = mod._operator_prompt_message(stage)
+    assert "optical X/Y limits are released" in message
+    assert "bounded 200-step X crossing at 3 kHz" in message
+    assert "home/release X" in message
+    assert "repeat for Y" in message
+    assert "Abort immediately" in message
+
+
 def test_shallow_edge_fixture_stage_is_an_operator_prompt():
     mod = _load_run_selftest()
     stage = "coordinated_xy_shallow_edge_envelope_clear"
