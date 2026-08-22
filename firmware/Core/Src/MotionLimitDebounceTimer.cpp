@@ -407,6 +407,52 @@ void recordStopPositionFromIsr(Axis axis, int32_t stoppedPosition) {
   }
 }
 
+#if defined(__GNUC__) && !defined(UNIT_TEST)
+__attribute__((optimize("O2"), hot))
+#endif
+void completeMoveFromIsr(Axis axis, int32_t stoppedPosition) {
+  // TIM2, TIM5, and EXTI9_5 all run at priority 5, so this terminal TIM2 path
+  // cannot be nested by either debounce producer. Task-context cancellation
+  // continues to use cancel(), which preserves the PRIMASK guard.
+  AxisState& state = g_axes[axis == Axis::Y ? 1u : 0u];
+  if (state.debounce.phase == MotionLimitDebouncePolicy::Phase::Confirmed &&
+      state.confirmation.valid) {
+    state.confirmation.consumedPosition = stoppedPosition;
+  }
+
+  if (g_timer != nullptr && g_timer->Instance != nullptr) {
+    const uint32_t interrupt =
+        axis == Axis::X ? TIM_IT_CC1 : TIM_IT_CC2;
+    const uint32_t flag =
+        axis == Axis::X ? TIM_FLAG_CC1 : TIM_FLAG_CC2;
+    __HAL_TIM_DISABLE_IT(g_timer, interrupt);
+    __HAL_TIM_CLEAR_FLAG(g_timer, flag);
+  }
+
+  // Inline the rejectPending=false policy transition so the measured clean
+  // completion path does not call the Debug/O0 policy wrapper.
+  state.debounce.phase = MotionLimitDebouncePolicy::Phase::Idle;
+  state.debounce.startCount = 0u;
+  state.debounce.deadlineCount = 0u;
+  state.debounce.transitionSeen = false;
+  state.moveGeneration = 0u;
+
+  uint32_t mask = 0u;
+  if (state.configured && state.pin != 0u) {
+    uint8_t line = 0u;
+    uint16_t pin = state.pin;
+    while ((pin >>= 1u) != 0u) {
+      ++line;
+    }
+    // pin is a nonzero uint16_t GPIO mask, so line is always in [0, 15].
+    mask = 1u << line;
+  }
+  if (mask != 0u) {
+    EXTI->PR = mask;
+    EXTI->IMR |= mask;
+  }
+}
+
 void cancel(Axis axis, bool rejectPending) {
   const uint32_t primask = __get_PRIMASK();
   __disable_irq();

@@ -258,6 +258,49 @@ def test_xy_motion_limits_use_edge_aware_tim5_confirmation_without_raw_stop():
     assert "pdMS_TO_TICKS(15)" in pressure
 
 
+def test_coordinated_terminal_path_uses_one_optimized_debounce_completion():
+    header = _read("firmware/Core/Inc/MotionLimitDebounceTimer.h")
+    timer = _read("firmware/Core/Src/MotionLimitDebounceTimer.cpp")
+    stepper = _read("firmware/Core/Src/Stepper.cpp")
+
+    assert "void completeMoveFromIsr(Axis axis, int32_t stoppedPosition);" in header
+    completion = timer[
+        timer.index("void completeMoveFromIsr(") : timer.index(
+            "void cancel(Axis axis", timer.index("void completeMoveFromIsr(")
+        )
+    ]
+    assert '__attribute__((optimize("O2"), hot))' in timer
+    assert "state.confirmation.consumedPosition = stoppedPosition" in completion
+    assert "__HAL_TIM_DISABLE_IT(g_timer, interrupt)" in completion
+    assert "__HAL_TIM_CLEAR_FLAG(g_timer, flag)" in completion
+    assert "state.debounce.phase = MotionLimitDebouncePolicy::Phase::Idle" in completion
+    assert "state.debounce.startCount = 0u" in completion
+    assert "state.debounce.deadlineCount = 0u" in completion
+    assert "state.debounce.transitionSeen = false" in completion
+    assert "EXTI->PR = mask" in completion
+    assert "EXTI->IMR |= mask" in completion
+    for out_of_line_helper in (
+        "axisState(",
+        "disableAxisCompare(",
+        "cancelHardware(",
+        "clearExti(",
+        "unmaskExti(",
+        "ExtiDebounce::lineMask(",
+    ):
+        assert out_of_line_helper not in completion
+
+    for name in (
+        "_finishAbortedCoordinatedAxisFromLow",
+        "_finishCompletedCoordinatedAxisFromLow",
+    ):
+        start = stepper.index(f"void Stepper::{name}()")
+        end = stepper.index("\n}\n", start) + 2
+        finalizer = stepper[start:end]
+        assert finalizer.count("MotionLimitDebounceTimer::completeMoveFromIsr(") == 1
+        assert "recordStopPositionFromIsr" not in finalizer
+        assert "MotionLimitDebounceTimer::cancel(" not in finalizer
+
+
 def test_camera_transition_uses_production_scaling_and_direct_home_counts():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
     assert "aggregate, 2u, 16832u, 60000u, 60000u, limits" in diagnostics
