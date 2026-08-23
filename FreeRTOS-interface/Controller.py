@@ -6917,6 +6917,8 @@ class Controller(QObject):
             )
             return False
         point = copy.deepcopy(evidence.get("captured_position") or self.model.machine_model.get_current_position_dict_capital())
+        evidence["workflow"] = workflow
+        evidence["target_key"] = target_key
         self._configuration_capture_evidence[(workflow, target_key)] = copy.deepcopy(evidence)
         return point
 
@@ -7106,8 +7108,12 @@ class Controller(QObject):
             raise ConfigurationSafetyError("Confirmation is missing or belongs to another proposal.")
         if confirmation.get("acknowledged") is not True:
             raise ConfigurationSafetyError("The displayed coordinate deltas were not acknowledged.")
-        if parsed["result"] == "strong_confirmation" and confirmation.get("typed_phrase") != parsed["required_confirmation_phrase"]:
-            raise ConfigurationSafetyError("The strong confirmation phrase does not match exactly.")
+        if parsed.get("schema_version") == 2 and confirmation.get(
+            "acknowledgement_version"
+        ) != parsed.get("confirmation_version"):
+            raise ConfigurationSafetyError(
+                "The acknowledgement belongs to a different confirmation policy."
+            )
         return parsed
 
     def commit_guarded_configuration_proposal(self, proposal, *, operator, reason, confirmation):
@@ -7345,6 +7351,49 @@ class Controller(QObject):
             if isinstance(exc, ConfigurationRecoveryRequired):
                 self._configuration_recovery_required = True
             self.error_occurred_signal.emit("Configuration Verification Failed", str(exc))
+            return False
+
+    def controlled_calibration_promotion_candidates(self):
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return {}
+        try:
+            guard = getattr(self, "configuration_safety_guard", None)
+            if guard is not None:
+                guard.validate_active_documents(read_governed_documents(service.paths))
+            return service.controlled_calibration_promotion_candidates()
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit(
+                "Calibration Evidence Verification Failed", str(exc)
+            )
+            return False
+
+    def promote_controlled_calibration(
+        self, target_key, source_event_id, *, operator, reason
+    ):
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return False
+        try:
+            guard = getattr(self, "configuration_safety_guard", None)
+            if guard is not None:
+                guard.validate_active_documents(read_governed_documents(service.paths))
+            result = service.promote_controlled_calibration(
+                target_key,
+                source_event_id,
+                operator=operator,
+                reason=reason,
+            )
+            self.saved_target_authorizer = service.saved_target_authorizer
+            return result
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit(
+                "Calibration Evidence Verification Failed", str(exc)
+            )
             return False
 
     def import_configuration_files(self, selected_files, *, operator, reason):

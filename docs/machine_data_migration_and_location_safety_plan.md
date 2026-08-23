@@ -1550,6 +1550,57 @@ writes, audit history, and unverified-target blocking remain.
   classification), not application failures. The final mutating run used a new
   sequence-zero copy.
 
+### Controlled-calibration authorization and confirmation correction
+
+Status: `implementation and focused Windows validation complete` on 2026-08-23
+
+Attended development testing found two usability gaps in the original
+Milestone 5 behavior. A completed rack or plate calibration was saved as
+`revoked_pending_verification` even though its fresh machine-position captures
+were the physical verification, and the strong typed `SAVE ...` phrase added
+transcription burden without adding a second independent safety fact. A plate
+configuration reload also replaced the well-label widgets after their colors
+had been painted, leaving the experiment preview blank until the reagent
+selection changed.
+
+The correction preserves policy v1 and all existing history bytes and adds a
+strict v2 policy for new proposals:
+
+- every guarded proposal remains bound to the exact proposal hash, operator,
+  reason, delta preview, hard checks, and current governed-file hashes;
+- the manual interlock is one target-specific acknowledgement checkbox with an
+  acknowledgement-policy version, rather than a typed phrase;
+- a rack or plate calibration is authorized only when a pure transaction-layer
+  validator proves the exact capture count and order, machine UUID, one motion
+  trust epoch, ready/no-reason state, settled exact position reconciliation,
+  complete fresh X/Y/Z telemetry, exact captured/proposed values, and all hard
+  geometry/derived-target checks;
+- changed configuration bytes, the immutable history event, and
+  `verified_by_controlled_calibration` authorization are committed atomically;
+  an unchanged successful calibration records a non-mutating verification
+  event and refreshes the verification timestamp;
+- a workflow string alone never grants verification, and invalid controlled
+  evidence rejects before any configuration byte, backup, journal, event, or
+  authorization changes;
+- eligible historical v1 rack/plate events can be explicitly promoted by
+  reviewing their point captures, deltas, source event, and verified history
+  integrity. Promotion adds one non-mutating event, never rewrites history,
+  and is rejected after replay, later target changes, value mismatch,
+  incomplete evidence, cross-machine evidence, or integrity failure;
+- imports, restores, generic location edits, and direct unguarded transaction
+  calls continue to use `revoked_pending_verification` and retain exact-JSON
+  verification where applicable;
+- well-grid reconstruction now immediately repaints the selected stock ID, and
+  experiment reload preserves that stock selection when the dropdown is
+  repopulated.
+
+The active attended campaign was closed normally before implementation. Exact
+released firmware restoration and the final clean development status passed;
+the current development-store calibration event and bytes were left unchanged
+for qualification through a disposable copy. Firmware, protocol, release
+metadata, production checkout, and production machine data remain outside this
+correction.
+
 ## Milestone 6: Protect future updates and controlled rollback
 
 Status: `verified`
@@ -2185,6 +2236,7 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-20 | Post-M7 correction | Calibration runtime classification and isolated development lane implemented locally | 73 migration-focused, 36 composition/development, 282 updater/deployment, and 5,461 full-suite tests passed; contained hardware-disabled SIL completed 96/96; production default and release anchor remain unchanged | Run disposable-Pi qualification, production-store recovery verification, and prepare one rc.5 release |
 | 2026-08-20 | Post-M7 correction | Rc.5 behavior commit `65ba38df` passed disposable-Pi and production-store qualification | Pi focused group 53 passed; external clone reopened with `SimulatedMachine`, updater blocked, no physical interface, commit-bound session evidence; private-device SIL 96/96; production 56-file fingerprint `b31394ac...0ad64a` unchanged and sole bootstrap issue was the expected rc.4 deployment-anchor mismatch; metadata-tree focused gate 419 passed and clean full rerun passed 5,461/156 skipped after one unrelated balance cleanup timing retry | Validate and tag rc.5, restore the two rc.4 timestamp-only source bytes from verified evidence, then run the attended protected update |
 | 2026-08-20 | Post-M7 correction | Published rc.5 and completed the attended LC-001 protected update | Tag `v1.3.0-rc.5` peels to `34841fe0` and was published before `main`; exact verified-source restoration changed only the two known timestamp-only runtime bytes; protected update `3255339d...` authorized relaunch/recovery false; first launch passed; closed bootstrap ready; history 8/8 with zero pending; Locations unchanged; no-activity operator attestation; technical archive `FD74FEDE...14784CD2`, attestation `3F037F7B...6F48AB6D` | Retain immutable tags and evidence; proceed only with separately attended representative rc.6/rc.1 pilots and remaining physical Camera/HIL gates |
+| 2026-08-23 | Post-M7 calibration correction | Closed the attended development session, restored exact released firmware, and implemented policy-v2 checkbox confirmation, evidence-validated atomic calibration authorization, historical v1 calibration promotion, and deterministic well-grid repaint | Released restoration evidence `20260823T214105027316Z`; clean status evidence `20260823T214235691644Z`; 156 focused Windows tests passed | Commit/push the exact branch revision, then run isolated Pi no-hardware, SAFE roundtrip, and a fresh attended calibration campaign |
 
 ## Definition of done for v1.3.0-rc.2
 
@@ -2217,6 +2269,7 @@ The work is complete only when:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-23 | Added the post-Milestone 7 controlled-calibration correction: versioned checkbox confirmation, transaction-layer physical-evidence validation, atomic verified calibration authorization, unchanged-calibration verification events, explicit eligible v1 event promotion, and selected-reagent well-grid repaint ordering. |
 | 2026-08-20 | Recorded published rc.5 tag `34841fe0`, exact verified-source recovery of the two rc.4 timestamp-only runtime files, the attended protected rc.4 -> rc.5 update/first launch/closed postflight, no-activity attestation, and independently transferred evidence hashes. |
 | 2026-08-20 | Recorded rc.5 behavior commit `65ba38df`, passing target-Pi focused/development/private-device SIL gates, unchanged production fingerprint, and the verified-source restoration required before the attended rc.4 -> rc.5 protected update. |
 | 2026-08-20 | Recorded immutable local rc.4 tag, successful attended protected rc.3 -> rc.4 update, exact sequence-5 disposable-target recovery, Camera-safe/no-pending/no-motion closed postflight, and matching final archive; retained publication and rollout boundaries. |

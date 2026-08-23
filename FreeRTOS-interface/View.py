@@ -576,7 +576,14 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
         )
         layout.addWidget(checks)
 
-        if workflow == "configuration_restore":
+        authorization_consequence = self.assessment.get("authorization_consequence")
+        if authorization_consequence == "verified_by_controlled_calibration":
+            notice_text = (
+                "This completed calibration contains fresh controlled machine-position "
+                "evidence. Saving records the coordinates and verifies the affected "
+                "rack or plate target in the same audited transaction."
+            )
+        elif workflow == "configuration_restore":
             notice_text = (
                 "This restores the exact bytes from the verified backup shown above. "
                 "Any changed target remains motion-blocked until a separate exact-value "
@@ -594,16 +601,13 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
         form = QtWidgets.QFormLayout()
         self.operator_edit = QtWidgets.QLineEdit(self)
         self.reason_edit = QtWidgets.QLineEdit(self)
-        self.acknowledge = QtWidgets.QCheckBox("I reviewed every displayed coordinate and delta.", self)
+        acknowledgement_text = self.assessment.get("required_acknowledgement")
+        if not acknowledgement_text:
+            acknowledgement_text = "I reviewed every displayed coordinate and delta."
+        self.acknowledge = QtWidgets.QCheckBox(str(acknowledgement_text), self)
         form.addRow("Operator:", self.operator_edit)
         form.addRow("Reason:", self.reason_edit)
         form.addRow("", self.acknowledge)
-        self.phrase_edit = QtWidgets.QLineEdit(self)
-        required_phrase = self.assessment.get("required_confirmation_phrase")
-        if required_phrase:
-            form.addRow(f"Type exactly: {required_phrase}", self.phrase_edit)
-        else:
-            self.phrase_edit.hide()
         layout.addLayout(form)
 
         buttons = QtWidgets.QHBoxLayout()
@@ -611,6 +615,8 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
         self.cancel_button = QtWidgets.QPushButton("Cancel", self)
         if result == "reject":
             action_text = "Record Rejection and Close"
+        elif authorization_consequence == "verified_by_controlled_calibration":
+            action_text = "Save Verified Calibration"
         elif workflow == "configuration_restore":
             action_text = "Restore Exact Backup and Revoke Changed Targets"
         else:
@@ -632,10 +638,6 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
             if not self.acknowledge.isChecked():
                 QMessageBox.warning(self, "Review Required", "Acknowledge the displayed coordinate deltas.")
                 return
-            expected = self.assessment.get("required_confirmation_phrase")
-            if expected and self.phrase_edit.text() != expected:
-                QMessageBox.warning(self, "Phrase Does Not Match", "The strong confirmation phrase must match exactly.")
-                return
             self.outcome = "accepted"
         else:
             self.outcome = "rejected"
@@ -643,6 +645,9 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
 
     def review_result(self):
         self.exec()
+        return self.result_payload()
+
+    def result_payload(self):
         return {
             "outcome": self.outcome,
             "operator": self.operator_edit.text().strip(),
@@ -650,8 +655,104 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
             "confirmation": {
                 "proposal_sha256": self.assessment.get("proposal_sha256"),
                 "acknowledged": self.acknowledge.isChecked(),
-                "typed_phrase": self.phrase_edit.text(),
+                "acknowledgement_version": self.assessment.get(
+                    "confirmation_version"
+                ),
             },
+        }
+
+
+class ControlledCalibrationPromotionDialog(QtWidgets.QDialog):
+    """Review immutable calibration evidence before a non-mutating promotion."""
+
+    def __init__(self, candidate, parent=None):
+        super().__init__(parent)
+        self.candidate = copy.deepcopy(dict(candidate))
+        self.setWindowTitle("Verify Controlled Calibration Evidence")
+        self.resize(760, 620)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(
+            QtWidgets.QLabel(
+                "This target is backed by a completed controlled calibration. "
+                "Promoting it records a new verification event and does not change "
+                "configuration coordinates.",
+                self,
+            )
+        )
+
+        details = QtWidgets.QPlainTextEdit(self)
+        details.setReadOnly(True)
+        capture_rows = []
+        for index, capture in enumerate(self.candidate.get("captures", []), 1):
+            capture_rows.append(
+                {
+                    "point": capture.get("target_key") or f"legacy point {index}",
+                    "captured_position": capture.get("captured_position"),
+                    "expected_position": capture.get("expected_position"),
+                    "ready": capture.get("ready"),
+                    "reason_codes": capture.get("reason_codes"),
+                }
+            )
+        details.setPlainText(
+            json.dumps(
+                {
+                    "target": self.candidate.get("target_key"),
+                    "workflow": self.candidate.get("workflow"),
+                    "source_event": self.candidate.get("source_event_path"),
+                    "source_time": self.candidate.get("source_created_at_utc"),
+                    "history_integrity": self.candidate.get("integrity"),
+                    "proposal_sha256": self.candidate.get("proposal_sha256"),
+                    "captures": capture_rows,
+                    "deltas": self.candidate.get("deltas", []),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        layout.addWidget(details)
+
+        form = QtWidgets.QFormLayout()
+        self.operator_edit = QtWidgets.QLineEdit(self)
+        self.reason_edit = QtWidgets.QLineEdit(self)
+        self.acknowledge = QtWidgets.QCheckBox(
+            "I reviewed the point captures, deltas, source event, and verified history integrity.",
+            self,
+        )
+        form.addRow("Operator:", self.operator_edit)
+        form.addRow("Reason:", self.reason_edit)
+        form.addRow("", self.acknowledge)
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Cancel, parent=self
+        )
+        self.promote_button = buttons.addButton(
+            "Verify From Calibration Evidence",
+            QtWidgets.QDialogButtonBox.AcceptRole,
+        )
+        buttons.rejected.connect(self.reject)
+        self.promote_button.clicked.connect(self._accept_if_complete)
+        layout.addWidget(buttons)
+
+    def _accept_if_complete(self):
+        if not self.operator_edit.text().strip() or not self.reason_edit.text().strip():
+            QMessageBox.warning(
+                self, "Operator and Reason Required", "Enter an operator name and reason."
+            )
+            return
+        if not self.acknowledge.isChecked():
+            QMessageBox.warning(
+                self,
+                "Review Required",
+                "Acknowledge the displayed controlled-calibration evidence.",
+            )
+            return
+        self.accept()
+
+    def review_result(self):
+        return {
+            "operator": self.operator_edit.text().strip(),
+            "reason": self.reason_edit.text().strip(),
         }
 
 
@@ -780,6 +881,14 @@ class ConfigurationHistoryWindow(QtWidgets.QDialog):
             reader = self._reader()
             values = reader.current_target_values()
             state = self.controller.configuration_transactions.refresh(allow_pending=False)
+            promotion_getter = getattr(
+                self.controller, "controlled_calibration_promotion_candidates", None
+            )
+            promotion_candidates = (
+                promotion_getter() if callable(promotion_getter) else {}
+            )
+            if promotion_candidates is False:
+                return
             targets = [
                 key for key in sorted(values)
                 if state.authorization[key]["state"] == "revoked_pending_verification"
@@ -794,6 +903,29 @@ class ConfigurationHistoryWindow(QtWidgets.QDialog):
             self, "Verify Configuration Target", "Target:", targets, 0, False
         )
         if not ok:
+            return
+        candidate = dict((promotion_candidates or {}).get(target) or {})
+        if candidate:
+            dialog = ControlledCalibrationPromotionDialog(candidate, self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            review = dialog.review_result()
+            promote = getattr(
+                self.controller, "promote_controlled_calibration", None
+            )
+            if not callable(promote):
+                self.status_label.setText(
+                    "Controlled calibration promotion is unavailable"
+                )
+                return
+            result = promote(
+                target,
+                candidate["source_event_id"],
+                operator=review["operator"],
+                reason=review["reason"],
+            )
+            if result:
+                self.refresh()
             return
         value = values[target]
         expected_text = json.dumps(value, indent=2, sort_keys=True)
@@ -6889,16 +7021,27 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 label.setAlignment(Qt.AlignCenter)
                 self.grid_layout.addWidget(label, row + 1, col + 1)
                 self.well_labels[row][col] = label
+        if hasattr(self, "reagent_selection"):
+            self.update_well_colors()
 
     def _update_plate_summary(self, name: str, rows: int, cols: int):
         if hasattr(self, "plate_format_value_label"):
             self.plate_format_value_label.setText(f"{name} ({rows}x{cols})")
 
     def _populate_reagent_selection(self):
-        self.reagent_selection.clear()
-        for stock_id in self.model.stock_solutions.get_stock_solution_names():
-            stock_formatted = self.model.stock_solutions.get_formatted_from_stock_id(stock_id)
-            self.reagent_selection.addItem(stock_formatted, userData=stock_id)
+        selected_stock_id = self.reagent_selection.currentData()
+        blocker = QSignalBlocker(self.reagent_selection)
+        try:
+            self.reagent_selection.clear()
+            for stock_id in self.model.stock_solutions.get_stock_solution_names():
+                stock_formatted = self.model.stock_solutions.get_formatted_from_stock_id(stock_id)
+                self.reagent_selection.addItem(stock_formatted, userData=stock_id)
+            selected_index = self.reagent_selection.findData(selected_stock_id)
+            self.reagent_selection.setCurrentIndex(
+                selected_index if selected_index >= 0 else 0
+            )
+        finally:
+            del blocker
 
     def gripper_update_handler(self):
         """Handle when the gripper picks up a new printer head."""
@@ -7107,9 +7250,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         """Handle the experiment loaded signal."""
         # Update the options in the reagent selection combobox
         self._populate_reagent_selection()
-        self.reagent_selection.setCurrentIndex(0)
 
-        self.update_well_colors()  # Update with a default reagent on load
+        self.update_well_colors()
         read_only_view_getter = getattr(
             self.model, "is_read_only_experiment_view_active", None
         )

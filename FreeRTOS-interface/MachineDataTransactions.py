@@ -47,6 +47,11 @@ from ConfigurationSafetyPolicy import (
     parse_restore_guard_precondition,
     proposal_sha256,
 )
+from ControlledCalibration import (
+    ControlledCalibrationError,
+    ControlledCalibrationEvidence,
+    validate_controlled_calibration_evidence,
+)
 
 
 EVENT_SCHEMA_NAME = "labcraft.configuration_event"
@@ -1107,6 +1112,68 @@ def _make_authorization_after(
     return authorization, changes, tuple(sorted(changed_targets))
 
 
+def _apply_controlled_calibration_authorization(
+    authorization: Mapping[str, Mapping[str, object]],
+    documents: Mapping[str, object],
+    after_hashes: Mapping[str, str],
+    evidence: ControlledCalibrationEvidence,
+    *,
+    operator: str,
+    verified_at_utc: str,
+    evidence_reference: str,
+) -> tuple[dict[str, dict[str, object]], list[dict[str, object]]]:
+    """Authorize only targets proven by validated controlled-calibration evidence."""
+
+    snapshot = build_target_snapshot_from_documents(
+        documents["Locations.json"],
+        documents["Plates.json"],
+        documents["Settings.json"],
+    )
+    updated = {
+        key: copy.deepcopy(dict(value)) for key, value in authorization.items()
+    }
+    changes: list[dict[str, object]] = []
+    for key in evidence.authorization_target_keys:
+        target = snapshot.get(key)
+        entry = updated.get(key)
+        if target is None or entry is None:
+            raise ConfigurationValidationError(
+                f"Controlled calibration target is unavailable: {key}"
+            )
+        kind, source_file, value = target
+        source_name = Path(source_file).name
+        before_state = entry["state"]
+        entry.update(
+            target_key=key,
+            kind=kind,
+            value_sha256=canonical_value_sha256(value),
+            source_file=source_file,
+            source_file_sha256=after_hashes[source_name],
+            state="verified_by_controlled_calibration",
+            verified_at_utc=verified_at_utc,
+            verified_by=operator,
+            verification_method="controlled_calibration",
+            evidence_reference=evidence_reference,
+            service_record_reference=None,
+        )
+        changes.append(
+            {
+                "target_key": key,
+                "before_state": before_state,
+                "after_state": "verified_by_controlled_calibration",
+                "value_sha256": entry["value_sha256"],
+                "controlled_calibration": {
+                    "workflow": evidence.workflow,
+                    "primary_target_key": evidence.primary_target_key,
+                    "point_names": list(evidence.point_names),
+                    "trust_epoch": evidence.trust_epoch,
+                    "evidence_reference": evidence_reference,
+                },
+            }
+        )
+    return updated, changes
+
+
 def _head_payload(
     *,
     identity: MachineIdentity,
@@ -1564,8 +1631,72 @@ class ConfigurationTransactionService:
                     )
                 )
             ]
+            controlled_evidence = None
+            controlled_calibration_submission = (
+                event_type == "change"
+                and workflow in {"rack_calibration", "plate_calibration"}
+                and parsed_guard is not None
+                and parsed_guard.get("schema_version") == 2
+            )
+            if controlled_calibration_submission:
+                if (
+                    parsed_guard.get("authorization_consequence")
+                    != "verified_by_controlled_calibration"
+                ):
+                    raise ConfigurationValidationError(
+                        "Controlled calibration cannot fall back to unverified persistence."
+                    )
+                try:
+                    controlled_evidence = validate_controlled_calibration_evidence(
+                        parsed_guard,
+                        complete,
+                        machine_uuid=self.identity.machine_uuid,
+                    )
+                except ControlledCalibrationError as exc:
+                    raise ConfigurationValidationError(
+                        f"Controlled calibration evidence is invalid: {exc}"
+                    ) from exc
+
+            transaction_id = str(self.uuid_factory())
+            event_id = str(self.uuid_factory())
+            _canonical_uuid(transaction_id, "transaction_id")
+            _canonical_uuid(event_id, "event_id")
+            now = _canonical_utc(self.clock(), "transaction time")
+            sequence = current_state.sequence + 1
+            event_relative = _event_relative(sequence, event_id)
+
             if not affected:
-                raise ConfigurationValidationError("The proposed configuration is unchanged.")
+                if controlled_evidence is None:
+                    raise ConfigurationValidationError(
+                        "The proposed configuration is unchanged."
+                    )
+                authorization, verification_changes = (
+                    _apply_controlled_calibration_authorization(
+                        current_state.authorization,
+                        complete,
+                        before_hashes,
+                        controlled_evidence,
+                        operator=actor["operator"],
+                        verified_at_utc=now,
+                        evidence_reference=event_relative,
+                    )
+                )
+                return self._record_nonmutating_locked(
+                    state=current_state,
+                    event_type="verification",
+                    outcome="verified",
+                    actor=actor,
+                    reason=reason,
+                    workflow=workflow,
+                    changes=verification_changes
+                    + [{"guard_assessment": parsed_guard}],
+                    authorization_after=authorization,
+                    transaction_id=transaction_id,
+                    event_id=event_id,
+                    now=now,
+                    event_relative=event_relative,
+                    message="Unchanged calibration reverified and audited.",
+                )
             after_hashes = dict(before_hashes)
             for filename in affected:
                 after_hashes[filename] = sha256_bytes(all_bytes[filename])
@@ -1577,13 +1708,25 @@ class ConfigurationTransactionService:
                 set(affected),
                 semantically_affected,
             )
-            transaction_id = str(self.uuid_factory())
-            event_id = str(self.uuid_factory())
-            _canonical_uuid(transaction_id, "transaction_id")
-            _canonical_uuid(event_id, "event_id")
-            now = _canonical_utc(self.clock(), "transaction time")
-            sequence = current_state.sequence + 1
-            event_relative = _event_relative(sequence, event_id)
+            verification_changes: list[dict[str, object]] = []
+            if controlled_evidence is not None:
+                authorization, verification_changes = (
+                    _apply_controlled_calibration_authorization(
+                        authorization,
+                        complete,
+                        after_hashes,
+                        controlled_evidence,
+                        operator=actor["operator"],
+                        verified_at_utc=now,
+                        evidence_reference=event_relative,
+                    )
+                )
+                changed_targets = tuple(
+                    sorted(
+                        set(changed_targets)
+                        | set(controlled_evidence.authorization_target_keys)
+                    )
+                )
 
             try:
                 backup_reference = self._create_backup(
@@ -1623,6 +1766,7 @@ class ConfigurationTransactionService:
                 "config_after_sha256": after_hashes,
                 "changes": (
                     (changes or [{"affected_files": affected}])
+                    + verification_changes
                     + ([{"guard_assessment": parsed_guard}] if parsed_guard else [])
                 ),
                 "authorization_after": authorization,
@@ -1970,6 +2114,196 @@ class ConfigurationTransactionService:
             authorization_after=updated,
         )
 
+    def controlled_calibration_promotion_candidates(
+        self,
+    ) -> dict[str, dict[str, object]]:
+        """Return current revoked targets backed by valid immutable calibration evidence."""
+
+        state = self.refresh(allow_pending=False)
+        documents = _read_documents(self.paths)
+        return self._controlled_calibration_promotion_candidates_locked(
+            state, documents
+        )
+
+    def _controlled_calibration_promotion_candidates_locked(
+        self,
+        state: ConfigurationState,
+        documents: Mapping[str, object],
+    ) -> dict[str, dict[str, object]]:
+        events: list[tuple[str, dict[str, object]]] = []
+        for path in _all_files(self.paths.configuration_events_root):
+            relative = path.relative_to(self.paths.machine_root).as_posix()
+            events.append(
+                (
+                    relative,
+                    parse_configuration_event(
+                        _read_json(path, "controlled calibration source event")
+                    ),
+                )
+            )
+
+        candidates: dict[str, dict[str, object]] = {}
+        for source_index in range(len(events) - 1, -1, -1):
+            relative, event = events[source_index]
+            if (
+                event["event_type"] != "change"
+                or event["outcome"] != "committed"
+                or event["workflow"]
+                not in {"rack_calibration", "plate_calibration"}
+            ):
+                continue
+            assessments = [
+                change.get("guard_assessment")
+                for change in event["changes"]
+                if isinstance(change, Mapping)
+                and isinstance(change.get("guard_assessment"), Mapping)
+            ]
+            if len(assessments) != 1:
+                continue
+            try:
+                assessment = parse_guard_assessment(assessments[0])
+                evidence = validate_controlled_calibration_evidence(
+                    assessment,
+                    documents,
+                    machine_uuid=self.identity.machine_uuid,
+                    allow_legacy_unlabelled_captures=(
+                        assessment.get("schema_version") == 1
+                    ),
+                )
+            except (ConfigurationSafetyError, ControlledCalibrationError):
+                continue
+            primary = evidence.primary_target_key
+            if primary in candidates:
+                continue
+            entries = [state.authorization.get(key) for key in evidence.authorization_target_keys]
+            if any(
+                entry is None or entry.get("state") != REVOKED_STATE
+                for entry in entries
+            ):
+                continue
+            source_authorization = event["authorization_after"]
+            if any(
+                key not in source_authorization
+                or source_authorization[key]["value_sha256"]
+                != state.authorization[key]["value_sha256"]
+                for key in evidence.authorization_target_keys
+            ):
+                continue
+            later_target_changes = {
+                str(change.get("target_key"))
+                for _, later in events[source_index + 1 :]
+                if later["event_type"] in {"change", "import", "restore", "verification"}
+                for change in later["changes"]
+                if isinstance(change, Mapping) and change.get("target_key")
+            }
+            if later_target_changes.intersection(evidence.authorization_target_keys):
+                continue
+            captures = assessment["preconditions"]["captures"]
+            candidates[primary] = {
+                "target_key": primary,
+                "workflow": evidence.workflow,
+                "source_event_id": event["event_id"],
+                "source_event_path": relative,
+                "source_event_sequence": event["sequence"],
+                "source_created_at_utc": event["created_at_utc"],
+                "point_names": list(evidence.point_names),
+                "captures": copy.deepcopy(captures),
+                "deltas": copy.deepcopy(assessment.get("changes", [])),
+                "proposal_sha256": assessment["proposal_sha256"],
+                "integrity": "verified",
+            }
+        return candidates
+
+    def promote_controlled_calibration(
+        self,
+        target_key: str,
+        source_event_id: str,
+        *,
+        operator: str,
+        reason: str,
+    ) -> ConfigurationTransactionResult:
+        """Promote eligible immutable calibration evidence without changing config bytes."""
+
+        target_key = str(target_key or "").strip()
+        source_event_id = _canonical_uuid(source_event_id, "source_event_id")
+        reason = str(reason or "").strip()
+        actor = self._actor(operator)
+        if not target_key or not reason:
+            raise ConfigurationValidationError("Target and reason are required.")
+        if not self._writer_mutex.acquire(blocking=False):
+            raise ConfigurationConflictError("A configuration operation is already active.")
+        try:
+            self.configuration_lock.assert_owns(self.paths)
+            state = self.refresh(allow_pending=False)
+            documents = _read_documents(self.paths)
+            candidates = self._controlled_calibration_promotion_candidates_locked(
+                state, documents
+            )
+            candidate = candidates.get(target_key)
+            if candidate is None or candidate["source_event_id"] != source_event_id:
+                raise ConfigurationConflictError(
+                    "Controlled calibration evidence is no longer eligible for promotion."
+                )
+            source_path = self.paths.machine_root / candidate["source_event_path"]
+            source_event = parse_configuration_event(
+                _read_json(source_path, "controlled calibration source event")
+            )
+            assessment = next(
+                change["guard_assessment"]
+                for change in source_event["changes"]
+                if isinstance(change, Mapping)
+                and isinstance(change.get("guard_assessment"), Mapping)
+            )
+            parsed = parse_guard_assessment(assessment)
+            evidence = validate_controlled_calibration_evidence(
+                parsed,
+                documents,
+                machine_uuid=self.identity.machine_uuid,
+                allow_legacy_unlabelled_captures=(parsed.get("schema_version") == 1),
+            )
+            transaction_id = str(self.uuid_factory())
+            event_id = str(self.uuid_factory())
+            _canonical_uuid(transaction_id, "transaction_id")
+            _canonical_uuid(event_id, "event_id")
+            now = _canonical_utc(self.clock(), "verification time")
+            event_relative = _event_relative(state.sequence + 1, event_id)
+            authorization, changes = _apply_controlled_calibration_authorization(
+                state.authorization,
+                documents,
+                state.config_sha256,
+                evidence,
+                operator=actor["operator"],
+                verified_at_utc=now,
+                evidence_reference=candidate["source_event_path"],
+            )
+            changes.append(
+                {
+                    "controlled_calibration_promotion": {
+                        "source_event_id": source_event_id,
+                        "source_event_path": candidate["source_event_path"],
+                        "proposal_sha256": candidate["proposal_sha256"],
+                        "integrity": "verified",
+                    }
+                }
+            )
+            return self._record_nonmutating_locked(
+                state=state,
+                event_type="verification",
+                outcome="verified",
+                actor=actor,
+                reason=reason,
+                workflow="controlled_calibration_evidence_promotion",
+                changes=changes,
+                authorization_after=authorization,
+                transaction_id=transaction_id,
+                event_id=event_id,
+                now=now,
+                event_relative=event_relative,
+                message="Controlled calibration evidence promoted and audited.",
+            )
+        finally:
+            self._writer_mutex.release()
+
     def _record_nonmutating(
         self,
         *,
@@ -1992,95 +2326,145 @@ class ConfigurationTransactionService:
             state = self.refresh(allow_pending=False)
             transaction_id = str(self.uuid_factory())
             event_id = str(self.uuid_factory())
+            _canonical_uuid(transaction_id, "transaction_id")
+            _canonical_uuid(event_id, "event_id")
             now = _canonical_utc(self.clock(), "event time")
             sequence = state.sequence + 1
             event_relative = _event_relative(sequence, event_id)
-            authorization = (
-                {key: copy.deepcopy(dict(value)) for key, value in authorization_after.items()}
-                if authorization_after is not None
-                else {key: copy.deepcopy(dict(value)) for key, value in state.authorization.items()}
-            )
-            event = {
-                "schema_name": EVENT_SCHEMA_NAME,
-                "schema_version": EVENT_SCHEMA_VERSION,
-                "event_id": event_id,
-                "sequence": sequence,
-                "previous_event_sha256": state.latest_event_sha256,
-                "transaction_id": transaction_id,
-                "machine_id": self.identity.machine_id,
-                "machine_uuid": self.identity.machine_uuid,
-                "activation_id": self.active.activation_id,
-                "baseline_verification_sha256": state.baseline_verification_sha256,
-                "event_type": event_type,
-                "outcome": outcome,
-                "created_at_utc": now,
-                "actor": actor,
-                "application": {"version": self.app_version, "commit": self.app_commit},
-                "workflow": workflow,
-                "reason": reason,
-                "config_before_sha256": dict(state.config_sha256),
-                "config_after_sha256": dict(state.config_sha256),
-                "changes": changes,
-                "authorization_after": authorization,
-                "backup_manifest": None,
-                "restore_reference": None,
-                "directory_sync_supported": bool(self.io.directory_fsync_supported),
-            }
-            parse_configuration_event(event)
-            try:
-                pending = self._prepare_pending(
-                    transaction_id=transaction_id,
-                    event=event,
-                    event_relative=event_relative,
-                    affected=[],
-                    before_hashes=state.config_sha256,
-                    after_hashes=state.config_sha256,
-                    backup_reference=None,
-                    proposed_bytes={},
-                )
-            except ConfigurationTransactionError:
-                raise
-            except Exception as exc:
-                raise ConfigurationTransactionError(
-                    "Audit commit intent could not be prepared; no event was recorded."
-                ) from exc
-            try:
-                event_path = self.paths.machine_root / event_relative
-                self.io.create_bytes_exclusive(
-                    event_path, _json_bytes(event), checkpoint_prefix="configuration_event"
-                )
-                event_sha = sha256_file(event_path)[0]
-                created_at = now
-                if self.paths.configuration_head_path.exists():
-                    created_at = parse_configuration_head(
-                        _read_json(self.paths.configuration_head_path, "configuration head")
-                    )["created_at_utc"]
-                head = _head_payload(
-                    identity=self.identity,
-                    active=self.active,
-                    verification_sha=state.baseline_verification_sha256,
-                    event=event,
-                    event_relative=event_relative,
-                    event_sha=event_sha,
-                    created_at=created_at,
-                    app_version=self.app_version,
-                    app_commit=self.app_commit,
-                )
-                self.io.atomic_write_json(
-                    self.paths.configuration_head_path, head, checkpoint_prefix="configuration_head"
-                )
-                self._remove_pending(pending)
-            except Exception as exc:
-                raise ConfigurationRecoveryRequired(
-                    "Audit event did not complete; startup reconciliation is required."
-                ) from exc
-            new_state = self.refresh(allow_pending=False)
-            return ConfigurationTransactionResult(
-                "recorded", event_id, transaction_id, event_type, new_state,
-                MappingProxyType({}), tuple(), "Configuration event recorded."
+            return self._record_nonmutating_locked(
+                state=state,
+                event_type=event_type,
+                outcome=outcome,
+                actor=actor,
+                reason=reason,
+                workflow=workflow,
+                changes=changes,
+                authorization_after=authorization_after,
+                transaction_id=transaction_id,
+                event_id=event_id,
+                now=now,
+                event_relative=event_relative,
             )
         finally:
             self._writer_mutex.release()
+
+    def _record_nonmutating_locked(
+        self,
+        *,
+        state: ConfigurationState,
+        event_type: str,
+        outcome: str,
+        actor: Mapping[str, str],
+        reason: str,
+        workflow: str,
+        changes: list[object],
+        authorization_after: Mapping[str, Mapping[str, object]] | None,
+        transaction_id: str,
+        event_id: str,
+        now: str,
+        event_relative: str,
+        message: str = "Configuration event recorded.",
+    ) -> ConfigurationTransactionResult:
+        """Record an immutable event while the caller owns the writer mutex."""
+
+        authorization = (
+            {
+                key: copy.deepcopy(dict(value))
+                for key, value in authorization_after.items()
+            }
+            if authorization_after is not None
+            else {
+                key: copy.deepcopy(dict(value))
+                for key, value in state.authorization.items()
+            }
+        )
+        event = {
+            "schema_name": EVENT_SCHEMA_NAME,
+            "schema_version": EVENT_SCHEMA_VERSION,
+            "event_id": event_id,
+            "sequence": state.sequence + 1,
+            "previous_event_sha256": state.latest_event_sha256,
+            "transaction_id": transaction_id,
+            "machine_id": self.identity.machine_id,
+            "machine_uuid": self.identity.machine_uuid,
+            "activation_id": self.active.activation_id,
+            "baseline_verification_sha256": state.baseline_verification_sha256,
+            "event_type": event_type,
+            "outcome": outcome,
+            "created_at_utc": now,
+            "actor": copy.deepcopy(dict(actor)),
+            "application": {"version": self.app_version, "commit": self.app_commit},
+            "workflow": workflow,
+            "reason": reason,
+            "config_before_sha256": dict(state.config_sha256),
+            "config_after_sha256": dict(state.config_sha256),
+            "changes": copy.deepcopy(changes),
+            "authorization_after": authorization,
+            "backup_manifest": None,
+            "restore_reference": None,
+            "directory_sync_supported": bool(self.io.directory_fsync_supported),
+        }
+        parse_configuration_event(event)
+        try:
+            pending = self._prepare_pending(
+                transaction_id=transaction_id,
+                event=event,
+                event_relative=event_relative,
+                affected=[],
+                before_hashes=state.config_sha256,
+                after_hashes=state.config_sha256,
+                backup_reference=None,
+                proposed_bytes={},
+            )
+        except ConfigurationTransactionError:
+            raise
+        except Exception as exc:
+            raise ConfigurationTransactionError(
+                "Audit commit intent could not be prepared; no event was recorded."
+            ) from exc
+        try:
+            event_path = self.paths.machine_root / event_relative
+            self.io.create_bytes_exclusive(
+                event_path, _json_bytes(event), checkpoint_prefix="configuration_event"
+            )
+            event_sha = sha256_file(event_path)[0]
+            created_at = now
+            if self.paths.configuration_head_path.exists():
+                created_at = parse_configuration_head(
+                    _read_json(self.paths.configuration_head_path, "configuration head")
+                )["created_at_utc"]
+            head = _head_payload(
+                identity=self.identity,
+                active=self.active,
+                verification_sha=state.baseline_verification_sha256,
+                event=event,
+                event_relative=event_relative,
+                event_sha=event_sha,
+                created_at=created_at,
+                app_version=self.app_version,
+                app_commit=self.app_commit,
+            )
+            self.io.atomic_write_json(
+                self.paths.configuration_head_path,
+                head,
+                checkpoint_prefix="configuration_head",
+            )
+            self._remove_pending(pending)
+        except Exception as exc:
+            raise ConfigurationRecoveryRequired(
+                "Audit event did not complete; startup reconciliation is required."
+            ) from exc
+        new_state = self.refresh(allow_pending=False)
+        return ConfigurationTransactionResult(
+            "recorded",
+            event_id,
+            transaction_id,
+            event_type,
+            new_state,
+            MappingProxyType({}),
+            tuple(),
+            message,
+        )
 
     def _restore_inputs(self, transaction_id: str):
         transaction_id = _canonical_uuid(transaction_id, "restore transaction_id")
