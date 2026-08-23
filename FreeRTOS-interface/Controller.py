@@ -8,6 +8,7 @@ from AppVersion import get_app_commit, get_app_version as read_app_version
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import Counter, deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import ast
@@ -34,8 +35,12 @@ from simulation import SIMULATED_PORT
 from CaptureCoordinator import CaptureCoordinator
 from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
 from ApplicationComposition import ExperimentalFeatures, PRODUCTION_RUNTIME_CONTEXT
-from MachineDataVerification import SavedTargetAuthorizationRequest
+from MachineDataVerification import (
+    SavedTargetAuthorizationRequest,
+    canonical_value_sha256,
+)
 from MachineDataTransactions import (
+    CURRENT_VERIFIED_STATES,
     ConfigurationRecoveryRequired,
     ConfigurationTransactionError,
     ConfigurationValidationError,
@@ -896,6 +901,7 @@ class Controller(QObject):
     error_occurred_signal = Signal(str,str)
     transport_fault_ui_signal = Signal(object)
     machine_workflow_interrupted_signal = Signal(object)
+    plate_calibration_state_changed = Signal(object)
     xy_motion_recovery_requested = Signal(object)
     xy_motion_recovery_state_changed = Signal(str)
     experimental_balance_connection_changed = Signal(object)
@@ -975,6 +981,7 @@ class Controller(QObject):
         self.configuration_safety_guard = configuration_safety_guard
         self._configuration_capture_evidence = {}
         self._configuration_recovery_required = False
+        self._plate_calibration_session = None
         self.experimental_features = (
             experimental_features or ExperimentalFeatures()
         )
@@ -1120,6 +1127,14 @@ class Controller(QObject):
         self.machine.command_queue.commands_completed.connect(
             self._begin_position_reconciliation
         )
+        self.machine_workflow_interrupted_signal.connect(
+            self._on_plate_calibration_workflow_interrupted
+        )
+        machine_paused_signal = getattr(
+            self.model.machine_model, "machine_paused", None
+        )
+        if machine_paused_signal is not None:
+            machine_paused_signal.connect(self._on_plate_calibration_pause_changed)
 
         # self.machine.balance.balance_mass_updated_signal.connect(self.model.calibration_model.update_mass)
         self.machine.all_calibration_droplets_printed.connect(self.start_mass_stabilization_timer)
@@ -1350,6 +1365,7 @@ class Controller(QObject):
         """Pass the current command and last completed command to the command queue"""
         self.machine.update_command_numbers(*self.model.machine_model.get_command_numbers())
         self._advance_position_reconciliation()
+        self._advance_plate_calibration_session()
     
     def update_volumes_in_view(self):
         """Update the volume in the view."""
@@ -5864,8 +5880,36 @@ class Controller(QObject):
         requested[axis] = value
         return requested
 
+    def _plate_calibration_motion_is_blocked(self):
+        session = self._plate_calibration_active_session()
+        if session is None:
+            return False
+        return getattr(self, "_plate_calibration_internal_motion_token", None) != session.get(
+            "session_token"
+        )
+
+    def _reject_conflicting_plate_calibration_motion(self):
+        if not self._plate_calibration_motion_is_blocked():
+            return False
+        self.error_occurred_signal.emit(
+            "Plate Calibration Active",
+            "Other motion is blocked while the guarded plate-calibration session is active.",
+        )
+        return True
+
+    @contextmanager
+    def _plate_calibration_motion_scope(self, session_token):
+        previous = getattr(self, "_plate_calibration_internal_motion_token", None)
+        self._plate_calibration_internal_motion_token = session_token
+        try:
+            yield
+        finally:
+            self._plate_calibration_internal_motion_token = previous
+
     def set_relative_X(self, x,manual=False,handler=None,override=False):
         """Set relative X using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
+            return False
         plan = self._prepare_relative_motion_endpoint(
             self._single_axis_requested_displacement("X", x),
             override=override,
@@ -5881,6 +5925,8 @@ class Controller(QObject):
 
     def set_relative_Y(self, y,manual=False,handler=None, override=False):
         """Set relative Y using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
+            return False
         plan = self._prepare_relative_motion_endpoint(
             self._single_axis_requested_displacement("Y", y),
             override=override,
@@ -5896,6 +5942,8 @@ class Controller(QObject):
 
     def set_relative_Z(self, z,manual=False,handler=None, override=False):
         """Set relative Z using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
+            return False
         plan = self._prepare_relative_motion_endpoint(
             self._single_axis_requested_displacement("Z", z),
             override=override,
@@ -5911,6 +5959,8 @@ class Controller(QObject):
     
     def set_absolute_XY(self, x, y, manual=False, handler=None, override=False):
         """Set absolute X/Y using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
+            return False
         requested = dict(self.expected_position)
         requested.update({"X": x, "Y": y})
         plan = self._prepare_motion_endpoint(requested, override=override)
@@ -5927,6 +5977,8 @@ class Controller(QObject):
 
     def set_absolute_X(self, x,manual=False,handler=None, override=False):
         """Set absolute X using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
+            return False
         plan = self._prepare_motion_endpoint(
             self._single_axis_requested_endpoint("X", x),
             override=override,
@@ -5942,6 +5994,8 @@ class Controller(QObject):
 
     def set_absolute_Y(self, y,manual=False,handler=None, override=False):
         """Set absolute Y using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
+            return False
         plan = self._prepare_motion_endpoint(
             self._single_axis_requested_endpoint("Y", y),
             override=override,
@@ -5957,6 +6011,8 @@ class Controller(QObject):
     
     def set_absolute_Z(self, z,manual=False,handler=None, override=False):
         """Set absolute Z using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
+            return False
         plan = self._prepare_motion_endpoint(
             self._single_axis_requested_endpoint("Z", z),
             override=override,
@@ -6022,6 +6078,8 @@ class Controller(QObject):
     
     def set_relative_coordinates(self, x, y, z, manual=False, handler=None,override=False):
         """Set relative Cartesian coordinates using representable deltas."""
+        if self._reject_conflicting_plate_calibration_motion():
+            return False
         plan = self._prepare_relative_motion_endpoint(
             {"X": x, "Y": y, "Z": z},
             override=override,
@@ -6081,6 +6139,8 @@ class Controller(QObject):
     
     def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, kwargs=None, override=False):
         """Set absolute coordinates; always use XY for any X/Y movement."""
+        if self._reject_conflicting_plate_calibration_motion():
+            return False
         requested = {'X': x, 'Y': y, 'Z': z}
         plan = self._prepare_motion_endpoint(requested, override=override)
         if plan is None:
@@ -6551,6 +6611,7 @@ class Controller(QObject):
 
     def pause_machine(self):
         """Pause the machine."""
+        self._emit_machine_workflow_interrupted("machine_paused")
         self.machine.pause_machine()
 
     def LED_on(self):
@@ -6566,6 +6627,7 @@ class Controller(QObject):
         recovery_state = self.get_xy_motion_recovery_state()
         if recovery_state not in {"idle", "home_required"}:
             return False
+        self._emit_machine_workflow_interrupted("homing_started")
         print("Homing machine...")
         self.model.machine_model.reset_home_status()
         self.model.machine_model.home_status_signal.emit()
@@ -6735,6 +6797,15 @@ class Controller(QObject):
         }
         if motion_endpoint is not None:
             self._position_reconciliation["motion_endpoint"] = motion_endpoint
+        session = getattr(self, "_plate_calibration_session", None)
+        if (
+            isinstance(session, dict)
+            and session.get("state") == "reconciling"
+            and session.get("awaiting_queue_drain")
+        ):
+            session["awaiting_queue_drain"] = False
+            session["reconciliation_started_monotonic"] = now
+            self._advance_plate_calibration_session(now_monotonic=now)
 
     def _advance_position_reconciliation(self, *, now_monotonic=None):
         record = getattr(self, "_position_reconciliation", None)
@@ -6895,6 +6966,649 @@ class Controller(QObject):
             "captured_monotonic": now,
             "telemetry_max_age_ms": guard.policy.position_telemetry_max_age_ms,
         }
+
+    @staticmethod
+    def _plate_calibration_points():
+        return ("top_left", "top_right", "bottom_right", "bottom_left")
+
+    @staticmethod
+    def _plate_calibration_terminal_states():
+        return {"failed", "cancelled"}
+
+    def _plate_calibration_session_snapshot(self):
+        session = getattr(self, "_plate_calibration_session", None)
+        if not isinstance(session, dict):
+            return {
+                "session_token": None,
+                "state": "idle",
+                "target_key": None,
+                "target_state": None,
+                "manual_first": False,
+                "expected_endpoint": None,
+                "failure_reason": None,
+            }
+        public_keys = (
+            "session_token",
+            "state",
+            "phase",
+            "machine_uuid",
+            "plate_name",
+            "target_key",
+            "target_state",
+            "manual_first",
+            "expected_endpoint",
+            "expected_point",
+            "next_point_index",
+            "failure_reason",
+        )
+        return {
+            key: copy.deepcopy(session.get(key))
+            for key in public_keys
+        }
+
+    def _emit_plate_calibration_state(self):
+        snapshot = self._plate_calibration_session_snapshot()
+        self._emit_optional("plate_calibration_state_changed", snapshot)
+        return snapshot
+
+    def _set_plate_calibration_state(self, state, **updates):
+        session = getattr(self, "_plate_calibration_session", None)
+        if not isinstance(session, dict):
+            return self._plate_calibration_session_snapshot()
+        session.update(copy.deepcopy(updates))
+        session["state"] = str(state)
+        return self._emit_plate_calibration_state()
+
+    def _plate_calibration_active_session(self, session_token=None):
+        session = getattr(self, "_plate_calibration_session", None)
+        if not isinstance(session, dict):
+            return None
+        if session.get("state") in self._plate_calibration_terminal_states():
+            return None
+        if session_token is not None and session.get("session_token") != session_token:
+            return None
+        return session
+
+    def _fail_plate_calibration_session(self, reason, *, notify=True):
+        session = getattr(self, "_plate_calibration_session", None)
+        if not isinstance(session, dict):
+            return False
+        if session.get("state") in self._plate_calibration_terminal_states():
+            return False
+        reason = str(reason or "plate_calibration_failed")
+        try:
+            self.model.well_plate.discard_temp_calibrations()
+        except Exception:
+            pass
+        self.discard_configuration_capture_evidence("plate_calibration")
+        self._set_plate_calibration_state(
+            "failed",
+            failure_reason=reason,
+            expected_endpoint=None,
+            awaiting_queue_drain=False,
+        )
+        if notify:
+            self.error_occurred_signal.emit(
+                "Plate Calibration Stopped",
+                "Plate calibration stopped safely. No calibration was saved. "
+                f"Start it again after resolving: {reason}.",
+            )
+        return False
+
+    def _on_plate_calibration_workflow_interrupted(self, payload):
+        session = self._plate_calibration_active_session()
+        if session is None:
+            return
+        reason = payload.get("reason") if isinstance(payload, dict) else payload
+        self._fail_plate_calibration_session(
+            f"workflow_interrupted:{reason or 'unknown'}",
+            notify=False,
+        )
+
+    def _on_plate_calibration_pause_changed(self):
+        if not bool(getattr(self.model.machine_model, "paused", False)):
+            return
+        self._fail_plate_calibration_session("machine_paused", notify=False)
+
+    def _plate_calibration_fail_preflight(self, reason_code, message):
+        return {
+            "allowed": False,
+            "reason_code": str(reason_code),
+            "message": str(message),
+            "state": "idle",
+        }
+
+    def plate_calibration_entry_preflight(self):
+        """Inspect the governed plate and machine state without issuing motion."""
+
+        if self._plate_calibration_active_session() is not None:
+            return self._plate_calibration_fail_preflight(
+                "plate_calibration_already_active",
+                "A plate calibration is already active.",
+            )
+
+        machine_model = self.model.machine_model
+        if not machine_model.is_connected():
+            return self._plate_calibration_fail_preflight(
+                "not_connected", "Connect to the machine before calibrating the plate."
+            )
+        if not machine_model.motors_are_enabled() or not machine_model.motors_are_homed():
+            return self._plate_calibration_fail_preflight(
+                "motors_not_ready", "Enable and home the motors before calibrating the plate."
+            )
+        if bool(getattr(machine_model, "paused", False)) or bool(
+            getattr(machine_model, "transport_paused", False)
+        ):
+            return self._plate_calibration_fail_preflight(
+                "motion_paused", "Resume or recover the motion system before calibrating the plate."
+            )
+        if not self.check_if_all_completed() or bool(machine_model.is_busy()):
+            return self._plate_calibration_fail_preflight(
+                "command_queue_not_idle", "Wait for the command queue to become idle."
+            )
+        origin = str(getattr(self, "expected_location", None) or "").strip().casefold()
+        supported_origin = origin in {
+            "home",
+            "loading",
+            "camera",
+            "plate",
+            "pause",
+        } or origin.startswith("slot-")
+        if not supported_origin:
+            return self._plate_calibration_fail_preflight(
+                "unsupported_plate_entry_origin",
+                "Move through a known Home, rack-slot, Camera, or plate route before "
+                "starting plate calibration.",
+            )
+
+        readiness = self._configuration_capture_readiness()
+        if not readiness.get("ready"):
+            reasons = ", ".join(readiness.get("reason_codes") or ["machine_not_ready"])
+            return self._plate_calibration_fail_preflight(
+                "machine_not_ready", f"Machine position is not ready for calibration: {reasons}."
+            )
+
+        rack_model = getattr(self.model, "rack_model", None)
+        head_getter = getattr(rack_model, "get_gripper_printer_head", None)
+        head = head_getter() if callable(head_getter) else getattr(
+            rack_model, "gripper_printer_head", None
+        )
+        is_calibration_chip = getattr(head, "is_calibration_chip", None)
+        if head is None or not callable(is_calibration_chip) or not is_calibration_chip():
+            return self._plate_calibration_fail_preflight(
+                "calibration_head_required",
+                "Load the calibration printer head before calibrating the plate.",
+            )
+
+        service = getattr(self, "configuration_transactions", None)
+        guard = getattr(self, "configuration_safety_guard", None)
+        paths = getattr(self, "machine_data_paths", None)
+        if service is None or guard is None or not getattr(paths, "machine_uuid", None):
+            return self._plate_calibration_fail_preflight(
+                "configuration_safety_unavailable",
+                "The governed machine-data safety service is unavailable.",
+            )
+
+        plate = getattr(self.model, "well_plate", None)
+        try:
+            plate_name = str(plate.get_current_plate_name()).strip()
+            calibrations = copy.deepcopy(
+                plate.get_all_current_plate_calibrations()
+            )
+            required = set(self._plate_calibration_points())
+            if set(calibrations) != required:
+                raise ValueError("the active plate must contain exactly four corners")
+            normalized = {}
+            for point_name in self._plate_calibration_points():
+                point = calibrations[point_name]
+                normalized[point_name] = {
+                    axis: int(point[axis]) for axis in self._position_axes()
+                }
+            guard.validate_active_documents(read_governed_documents(service.paths))
+            state = service.refresh(allow_pending=False)
+        except Exception as exc:
+            return self._plate_calibration_fail_preflight(
+                "plate_configuration_invalid",
+                f"The active plate configuration is not safe to use: {exc}",
+            )
+
+        target_key = f"plate:{plate_name.casefold()}"
+        authorization = dict(state.authorization.get(target_key) or {})
+        if not authorization:
+            return self._plate_calibration_fail_preflight(
+                "plate_authorization_missing",
+                f"Authorization state is missing for {target_key}.",
+            )
+        value_sha256 = canonical_value_sha256(normalized)
+        if authorization.get("value_sha256") != value_sha256:
+            return self._plate_calibration_fail_preflight(
+                "plate_authorization_value_mismatch",
+                "The plate coordinates differ from their authorization record.",
+            )
+
+        target_state = str(authorization.get("state") or "")
+        promotion_candidates = self.controlled_calibration_promotion_candidates()
+        if promotion_candidates is False:
+            return self._plate_calibration_fail_preflight(
+                "calibration_history_invalid",
+                "Existing calibration history could not be verified.",
+            )
+        candidate = copy.deepcopy((promotion_candidates or {}).get(target_key))
+        return {
+            "allowed": True,
+            "reason_code": "ready",
+            "message": "Plate calibration entry is ready.",
+            "state": "idle",
+            "machine_uuid": paths.machine_uuid,
+            "trust_epoch": readiness.get("trust_epoch"),
+            "plate_name": plate_name,
+            "target_key": target_key,
+            "target_state": target_state,
+            "verified": target_state in CURRENT_VERIFIED_STATES,
+            "historical_candidate": candidate,
+            "initial_calibrations": normalized,
+            "initial_value_sha256": value_sha256,
+        }
+
+    def _plate_calibration_session_invariants(self, session):
+        paths = getattr(self, "machine_data_paths", None)
+        if getattr(paths, "machine_uuid", None) != session.get("machine_uuid"):
+            return False, "authorized_machine_changed"
+        telemetry = self._position_reconciliation_snapshot()
+        if not isinstance(telemetry, dict):
+            return False, "position_telemetry_unavailable"
+        if telemetry.get("trust_epoch") != session.get("trust_epoch"):
+            return False, "motion_trust_epoch_changed"
+        plate = getattr(self.model, "well_plate", None)
+        try:
+            if str(plate.get_current_plate_name()).strip() != session.get("plate_name"):
+                return False, "active_plate_changed"
+            calibrations = {
+                point_name: {
+                    axis: int(plate.get_all_current_plate_calibrations()[point_name][axis])
+                    for axis in self._position_axes()
+                }
+                for point_name in self._plate_calibration_points()
+            }
+        except Exception:
+            return False, "active_plate_configuration_invalid"
+        if canonical_value_sha256(calibrations) != session.get("initial_value_sha256"):
+            return False, "active_plate_coordinates_changed"
+        return True, ""
+
+    def begin_plate_calibration_entry(self, *, manual_first):
+        """Queue a safe-height plate entry and return its transient session token."""
+
+        preflight = self.plate_calibration_entry_preflight()
+        if not preflight.get("allowed"):
+            self.error_occurred_signal.emit(
+                "Plate Calibration Not Started", preflight.get("message", "Preflight failed.")
+            )
+            return False
+        manual_first = bool(manual_first)
+        if preflight["verified"] and manual_first:
+            self.error_occurred_signal.emit(
+                "Plate Calibration Not Started",
+                "A verified plate must use its verified automatic first-corner approach.",
+            )
+            return False
+        if not preflight["verified"] and not manual_first:
+            self.error_occurred_signal.emit(
+                "Plate Calibration Not Started",
+                "An unverified plate may only be calibrated from safe height.",
+            )
+            return False
+
+        token = str(uuid.uuid4())
+        top_left = copy.deepcopy(preflight["initial_calibrations"]["top_left"])
+        endpoint = {
+            "X": top_left["X"],
+            "Y": top_left["Y"],
+            "Z": PLATE_DOCK_SAFE_Z if manual_first else top_left["Z"],
+        }
+        self._plate_calibration_session = {
+            "session_token": token,
+            "state": "staging",
+            "phase": "entry",
+            "machine_uuid": preflight["machine_uuid"],
+            "trust_epoch": preflight["trust_epoch"],
+            "plate_name": preflight["plate_name"],
+            "target_key": preflight["target_key"],
+            "target_state": preflight["target_state"],
+            "manual_first": manual_first,
+            "initial_calibrations": copy.deepcopy(preflight["initial_calibrations"]),
+            "initial_value_sha256": preflight["initial_value_sha256"],
+            "captured_points": {},
+            "next_point_index": 0,
+            "expected_point": "top_left",
+            "expected_endpoint": endpoint,
+            "failure_reason": None,
+            "awaiting_queue_drain": False,
+            "reconciliation_started_monotonic": None,
+        }
+        self._emit_plate_calibration_state()
+
+        approach_x = top_left["X"] + PLATE_DOCK_X_OFFSET
+        with self._plate_calibration_motion_scope(token):
+            if self.set_absolute_Z(PLATE_DOCK_SAFE_Z, override=False) is False:
+                return self._fail_plate_calibration_session("safe_z_rejected")
+            if self.set_absolute_coordinates(
+                approach_x, top_left["Y"], PLATE_DOCK_SAFE_Z, override=False
+            ) is False:
+                return self._fail_plate_calibration_session("plate_dogleg_rejected")
+
+            if manual_first:
+                queued = self.set_absolute_coordinates(
+                    top_left["X"],
+                    top_left["Y"],
+                    PLATE_DOCK_SAFE_Z,
+                    override=False,
+                    handler=lambda token=token: self._plate_calibration_motion_completed(token),
+                )
+            else:
+                if self.set_absolute_coordinates(
+                    top_left["X"], top_left["Y"], PLATE_DOCK_SAFE_Z, override=False
+                ) is False:
+                    return self._fail_plate_calibration_session("plate_seated_safe_rejected")
+                queued = self.set_absolute_Z(
+                    top_left["Z"],
+                    override=True,
+                    handler=lambda token=token: self._plate_calibration_motion_completed(token),
+                )
+        if queued is False:
+            return self._fail_plate_calibration_session("plate_entry_endpoint_rejected")
+        self._plate_calibration_session["expected_endpoint"] = copy.deepcopy(
+            self.expected_position
+        )
+        return self._plate_calibration_session_snapshot()
+
+    def _plate_calibration_motion_completed(self, session_token):
+        session = self._plate_calibration_active_session(session_token)
+        if session is None or session.get("state") != "staging":
+            return False
+        self._set_plate_calibration_state(
+            "reconciling",
+            awaiting_queue_drain=True,
+            reconciliation_started_monotonic=None,
+        )
+        timeout_ms = self._position_reconciliation_timeout_ms()
+        QtCore.QTimer.singleShot(
+            timeout_ms + 25,
+            lambda token=session_token: self._plate_calibration_timeout_check(token),
+        )
+        return True
+
+    def _plate_calibration_timeout_check(self, session_token):
+        session = self._plate_calibration_active_session(session_token)
+        if session is None or session.get("state") != "reconciling":
+            return
+        self._advance_plate_calibration_session()
+
+    def _advance_plate_calibration_session(self, *, now_monotonic=None):
+        session = self._plate_calibration_active_session()
+        if session is None or session.get("state") != "reconciling":
+            return self._plate_calibration_session_snapshot()
+        if session.get("awaiting_queue_drain"):
+            return self._plate_calibration_session_snapshot()
+
+        valid, reason = self._plate_calibration_session_invariants(session)
+        if not valid:
+            self._fail_plate_calibration_session(reason)
+            return self._plate_calibration_session_snapshot()
+        reconciliation = self._advance_position_reconciliation(
+            now_monotonic=now_monotonic
+        )
+        state = reconciliation.get("state")
+        if state == "pending":
+            return self._plate_calibration_session_snapshot()
+        if state == "timed_out":
+            self._fail_plate_calibration_session("position_reconciliation_timeout")
+            return self._plate_calibration_session_snapshot()
+        if state == "trust_changed":
+            self._fail_plate_calibration_session("position_reconciliation_trust_changed")
+            return self._plate_calibration_session_snapshot()
+        if state != "settled":
+            self._fail_plate_calibration_session("expected_position_mismatch")
+            return self._plate_calibration_session_snapshot()
+        if reconciliation.get("expected_position") != session.get("expected_endpoint"):
+            self._fail_plate_calibration_session("stale_motion_completion")
+            return self._plate_calibration_session_snapshot()
+
+        readiness = self._configuration_capture_readiness()
+        if not readiness.get("ready"):
+            reasons = readiness.get("reason_codes") or ["position_not_ready"]
+            if "position_reconciliation_pending" in reasons:
+                return self._plate_calibration_session_snapshot()
+            self._fail_plate_calibration_session(";".join(reasons))
+            return self._plate_calibration_session_snapshot()
+        if readiness.get("captured_position") != session.get("expected_endpoint"):
+            self._fail_plate_calibration_session("expected_position_mismatch")
+            return self._plate_calibration_session_snapshot()
+
+        phase = session.get("phase")
+        if phase == "entry":
+            self.expected_location = "plate"
+            self.update_location_handler(name="plate")
+            ready_state = "manual_first_point" if session.get("manual_first") else "automatic_points"
+        elif phase in {"point", "jog"}:
+            ready_state = str(session.get("resume_state") or "automatic_points")
+        elif phase == "final_lift":
+            ready_state = "complete"
+        else:
+            self._fail_plate_calibration_session("invalid_calibration_phase")
+            return self._plate_calibration_session_snapshot()
+        return self._set_plate_calibration_state(
+            ready_state,
+            awaiting_queue_drain=False,
+            reconciliation_started_monotonic=None,
+        )
+
+    def _require_plate_calibration_ready_session(self, session_token):
+        session = self._plate_calibration_active_session(session_token)
+        if session is None:
+            return None
+        if session.get("state") not in {"manual_first_point", "automatic_points"}:
+            return None
+        valid, reason = self._plate_calibration_session_invariants(session)
+        if not valid:
+            self._fail_plate_calibration_session(reason)
+            return None
+        if not self.check_if_all_completed() or bool(self.model.machine_model.is_busy()):
+            return None
+        return session
+
+    def jog_plate_calibration(self, session_token, x=0, y=0, z=0):
+        """Queue one session-bound manual jog and require telemetry reconciliation."""
+
+        session = self._require_plate_calibration_ready_session(session_token)
+        deltas = {"X": int(x), "Y": int(y), "Z": int(z)}
+        if session is None or sum(value != 0 for value in deltas.values()) != 1:
+            return False
+        resume_state = session["state"]
+        self._set_plate_calibration_state(
+            "staging", phase="jog", resume_state=resume_state
+        )
+        with self._plate_calibration_motion_scope(session_token):
+            queued = self.set_relative_coordinates(
+                deltas["X"],
+                deltas["Y"],
+                deltas["Z"],
+                manual=True,
+                override=True,
+                handler=lambda token=session_token: self._plate_calibration_motion_completed(token),
+            )
+        if queued is False:
+            return self._fail_plate_calibration_session("manual_jog_rejected")
+        session["expected_endpoint"] = copy.deepcopy(self.expected_position)
+        return True
+
+    def _predicted_plate_calibration_point(self, session, point_name):
+        initial = session["initial_calibrations"]
+        captures = session["captured_points"]
+        if point_name not in initial or not captures:
+            return None
+        totals = {axis: 0 for axis in self._position_axes()}
+        for captured_name, captured in captures.items():
+            for axis in self._position_axes():
+                totals[axis] += int(captured[axis]) - int(initial[captured_name][axis])
+        count = len(captures)
+        return {
+            axis: int(initial[point_name][axis]) + int(totals[axis] / count)
+            for axis in self._position_axes()
+        }
+
+    def capture_and_advance_plate_calibration(self, session_token, point_name):
+        """Capture the current corner and safely approach the next one."""
+
+        session = self._require_plate_calibration_ready_session(session_token)
+        point_name = str(point_name or "")
+        points = self._plate_calibration_points()
+        if session is None or session.get("expected_point") != point_name:
+            return False
+        point_index = int(session.get("next_point_index", 0))
+        if point_index >= len(points) or points[point_index] != point_name:
+            return False
+
+        captured = self.capture_configuration_point(
+            point_name, workflow="plate_calibration"
+        )
+        if captured is False:
+            return False
+        captured = {
+            axis: int(captured[axis]) for axis in self._position_axes()
+        }
+        session["captured_points"][point_name] = copy.deepcopy(captured)
+        self.model.well_plate.set_calibration_position(point_name, captured)
+
+        next_index = point_index + 1
+        if next_index < len(points):
+            next_name = points[next_index]
+            target = self._predicted_plate_calibration_point(session, next_name)
+            if target is None:
+                return self._fail_plate_calibration_session("next_corner_unavailable")
+            traverse_z = min(int(captured["Z"]) - 500, int(target["Z"]) - 500)
+            endpoint = copy.deepcopy(target)
+            self._set_plate_calibration_state(
+                "staging",
+                phase="point",
+                resume_state="automatic_points",
+                expected_point=next_name,
+                next_point_index=next_index,
+                expected_endpoint=endpoint,
+            )
+            with self._plate_calibration_motion_scope(session_token):
+                if self.set_absolute_Z(traverse_z, override=True) is False:
+                    return self._fail_plate_calibration_session("corner_lift_rejected")
+                if self.set_absolute_XY(target["X"], target["Y"], override=True) is False:
+                    return self._fail_plate_calibration_session("corner_xy_rejected")
+                if self.set_absolute_Z(
+                    target["Z"],
+                    override=True,
+                    handler=lambda token=session_token: self._plate_calibration_motion_completed(token),
+                ) is False:
+                    return self._fail_plate_calibration_session("corner_descent_rejected")
+            session["expected_endpoint"] = copy.deepcopy(self.expected_position)
+            return True
+
+        lift_z = int(captured["Z"]) - 500
+        self._set_plate_calibration_state(
+            "staging",
+            phase="final_lift",
+            next_point_index=len(points),
+            expected_point=None,
+            expected_endpoint={
+                "X": captured["X"], "Y": captured["Y"], "Z": lift_z
+            },
+        )
+        with self._plate_calibration_motion_scope(session_token):
+            if self.set_absolute_Z(
+                lift_z,
+                override=True,
+                handler=lambda token=session_token: self._plate_calibration_motion_completed(token),
+            ) is False:
+                return self._fail_plate_calibration_session("final_lift_rejected")
+        session["expected_endpoint"] = copy.deepcopy(self.expected_position)
+        return True
+
+    def move_plate_calibration_to_captured_point(self, session_token, point_name):
+        """Safely revisit an already captured corner within the active session."""
+
+        session = self._require_plate_calibration_ready_session(session_token)
+        point_name = str(point_name or "")
+        target = copy.deepcopy((session or {}).get("captured_points", {}).get(point_name))
+        if session is None or target is None:
+            return False
+        current = self.model.machine_model.get_current_position_dict_capital()
+        traverse_z = min(int(current["Z"]) - 500, int(target["Z"]) - 500)
+        point_index = self._plate_calibration_points().index(point_name)
+        for obsolete_name in self._plate_calibration_points()[point_index:]:
+            session["captured_points"].pop(obsolete_name, None)
+            try:
+                self.model.well_plate.temp_calibration_data.pop(
+                    obsolete_name, None
+                )
+            except Exception:
+                pass
+            self._configuration_capture_evidence.pop(
+                ("plate_calibration", obsolete_name), None
+            )
+        self._set_plate_calibration_state(
+            "staging",
+            phase="point",
+            resume_state="automatic_points" if point_index else (
+                "manual_first_point" if session.get("manual_first") else "automatic_points"
+            ),
+            expected_point=point_name,
+            next_point_index=point_index,
+            expected_endpoint=copy.deepcopy(target),
+        )
+        with self._plate_calibration_motion_scope(session_token):
+            if self.set_absolute_Z(traverse_z, override=True) is False:
+                return self._fail_plate_calibration_session("corner_lift_rejected")
+            if self.set_absolute_XY(target["X"], target["Y"], override=True) is False:
+                return self._fail_plate_calibration_session("corner_xy_rejected")
+            if self.set_absolute_Z(
+                target["Z"],
+                override=True,
+                handler=lambda token=session_token: self._plate_calibration_motion_completed(token),
+            ) is False:
+                return self._fail_plate_calibration_session("corner_descent_rejected")
+        session["expected_endpoint"] = copy.deepcopy(self.expected_position)
+        return True
+
+    def finish_plate_calibration_session(self, session_token, *, accepted):
+        session = getattr(self, "_plate_calibration_session", None)
+        if not isinstance(session, dict) or session.get("session_token") != session_token:
+            return False
+        if accepted and session.get("state") != "complete":
+            return False
+        if not accepted:
+            try:
+                self.model.well_plate.discard_temp_calibrations()
+            except Exception:
+                pass
+            self.discard_configuration_capture_evidence("plate_calibration")
+            if session.get("state") != "failed":
+                self._set_plate_calibration_state(
+                    "cancelled", failure_reason="operator_cancelled"
+                )
+        snapshot = self._plate_calibration_session_snapshot()
+        self._plate_calibration_session = None
+        self._emit_optional(
+            "plate_calibration_state_changed",
+            {**snapshot, "state": snapshot["state"]},
+        )
+        return True
+
+    def cancel_plate_calibration_entry(self, session_token):
+        """Cancel an idle calibration dialog without interrupting active motion."""
+
+        session = self._plate_calibration_active_session(session_token)
+        if session is None or session.get("state") in {"staging", "reconciling"}:
+            return False
+        return self.finish_plate_calibration_session(
+            session_token, accepted=False
+        )
 
     def capture_configuration_point(self, target_key, *, workflow):
         """Capture one calibration point only from trusted, fresh machine state."""

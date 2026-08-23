@@ -1601,6 +1601,49 @@ for qualification through a disposable copy. Firmware, protocol, release
 metadata, production checkout, and production machine data remain outside this
 correction.
 
+### Fail-closed plate-calibration entry correction
+
+Status: `implementation and focused Windows validation complete` on
+2026-08-23
+
+An attended development run exposed a separate motion-ordering defect after an
+unverified plate target was rejected. The plate button ignored the rejected
+generic saved-target move, constructed the calibration dialog anyway, and the
+dialog constructor immediately issued raw override moves to the stored corner.
+That allowed plate-directed XY travel before the calibration head had reached
+the qualified plate safe height.
+
+The corrected workflow makes plate calibration a transient Controller-owned
+motion session:
+
+- entry preflight requires one authorized machine UUID, valid governed plate
+  geometry, connected/enabled/homed motors, an idle command queue, fresh exact
+  position reconciliation, and the calibration printer head;
+- every entry queues Z=500 first, then the existing X dogleg, then top-left XY
+  at Z=500. A verified plate may descend only after those commands; an
+  unverified plate stops at Z=500 and requires manual first-corner alignment;
+- eligible historical controlled-calibration evidence can be reviewed with
+  zero motion, and calibration requires a new button press after that review;
+- a unique session token binds machine UUID, motion trust epoch, plate name,
+  initial four-corner value hash, authorization state, expected endpoint, and
+  capture order. Unrelated motion is rejected while the session is active;
+- constructors issue no motion. The View can request only token-bound manual
+  jogs, captures, backtracking, or completion; Controller owns all override
+  use and every automatic corner route;
+- after each captured corner, the Controller applies the running average X/Y/Z
+  correction, lifts at least 500 steps clear of both the current and predicted
+  corner, traverses XY, descends, and waits for a complete post-motion X/Y/Z
+  telemetry generation before enabling capture;
+- pause, queue clear, disconnect, reset, transport fault, trust change,
+  timeout, mismatch, cancellation, or stale callback terminates the session,
+  discards temporary points, and never saves or retries automatically;
+- rack calibration retains its existing route, but its constructor is also
+  motion-free and the caller must successfully queue its initial route before
+  showing the dialog.
+
+The later observed pause/resume inactive-Z behavior remains a separate defect
+and is intentionally not changed by this correction.
+
 ## Milestone 6: Protect future updates and controlled rollback
 
 Status: `verified`
@@ -2137,6 +2180,8 @@ Hardware use is last. It requires:
 | 2026-08-20 | Do not claim exclusion safety from the currently empty obstacle list | Physical geometry and route behavior require separate measurement and attended HIL |
 | 2026-08-20 | Approve the all-strong v1 policy for rc.2 without numeric routine thresholds | Target-Pi qualification proved usability and fail-closed behavior, but one disposable machine is insufficient evidence for a safe relaxation |
 | 2026-08-20 | Retain a 2,500 ms per-axis capture freshness ceiling | The qualified synthetic Pi delivery interval was 100 ms and the first over-limit case failed closed; future changes require new evidence |
+| 2026-08-23 | Make plate calibration entry and corner travel Controller-owned and session-bound | A rejected saved-target move must never fall through to constructor-side or View-issued override motion |
+| 2026-08-23 | Treat unverified plate coordinates as XY guidance only at Z=500 | Stored unverified Z cannot safely authorize automatic descent, while the stored XY plus qualified dogleg provides a bounded manual-recovery starting point |
 
 ### Open decisions
 
@@ -2198,6 +2243,7 @@ Hardware use is last. It requires:
 | 2026-08-20 | M7 rc.4 implementation | Restore loading recomputed the current manifest hash instead of retrieving the hash sealed in the source event | Resolve exactly one immutable source event and use its manifest reference so pre-preview or post-preview backup changes fail closed |
 | 2026-08-20 | Post-M7 calibration restart | Active `CalibrationMemory/config.json` and `entities/reagents.json` changed only their runtime `updated_at_utc` fields, but the migration manifest treated every migrated byte as permanently immutable | Keep the copied/unverified phase byte-exact; in the active phase permit validated runtime-owned `CalibrationMemory/` and `calibration/` evolution while retaining exact schema, config, identity, activation, and history checks |
 | 2026-08-20 | Post-M7 development workflow | A direct switch from tagged rc.4 to `main` correctly conflicted with the production deployment anchor, encouraging release creation for every development iteration | Add a separately marked, byte-verified external development clone; bind each launch to its exact commit/operator; default to simulated hardware; require an exact attended confirmation for hardware; never bypass the production anchor in the production root |
+| 2026-08-23 | Plate calibration collision investigation | `move_to_location('plate')` correctly rejected the revoked target, but the View ignored `False`; `BaseCalibrationDialog.__init__` then issued raw override XY/Z moves | Remove constructor motion, require successful Controller staging and telemetry reconciliation before dialog creation, and block non-session motion until calibration ends |
 
 Add findings here as work proceeds. Do not rewrite prior findings to hide an
 earlier assumption; add a correction with date and evidence.
@@ -2237,6 +2283,7 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-20 | Post-M7 correction | Rc.5 behavior commit `65ba38df` passed disposable-Pi and production-store qualification | Pi focused group 53 passed; external clone reopened with `SimulatedMachine`, updater blocked, no physical interface, commit-bound session evidence; private-device SIL 96/96; production 56-file fingerprint `b31394ac...0ad64a` unchanged and sole bootstrap issue was the expected rc.4 deployment-anchor mismatch; metadata-tree focused gate 419 passed and clean full rerun passed 5,461/156 skipped after one unrelated balance cleanup timing retry | Validate and tag rc.5, restore the two rc.4 timestamp-only source bytes from verified evidence, then run the attended protected update |
 | 2026-08-20 | Post-M7 correction | Published rc.5 and completed the attended LC-001 protected update | Tag `v1.3.0-rc.5` peels to `34841fe0` and was published before `main`; exact verified-source restoration changed only the two known timestamp-only runtime bytes; protected update `3255339d...` authorized relaunch/recovery false; first launch passed; closed bootstrap ready; history 8/8 with zero pending; Locations unchanged; no-activity operator attestation; technical archive `FD74FEDE...14784CD2`, attestation `3F037F7B...6F48AB6D` | Retain immutable tags and evidence; proceed only with separately attended representative rc.6/rc.1 pilots and remaining physical Camera/HIL gates |
 | 2026-08-23 | Post-M7 calibration correction | Closed the attended development session, restored exact released firmware, and implemented policy-v2 checkbox confirmation, evidence-validated atomic calibration authorization, historical v1 calibration promotion, and deterministic well-grid repaint | Released restoration evidence `20260823T214105027316Z`; clean status evidence `20260823T214235691644Z`; 156 focused Windows tests passed | Commit/push the exact branch revision, then run isolated Pi no-hardware, SAFE roundtrip, and a fresh attended calibration campaign |
+| 2026-08-23 | Plate-entry collision correction | Replaced ignored generic plate motion and constructor-side overrides with a token-bound Controller route that stages at Z=500, handles unverified plates manually, reconciles telemetry, and fails closed on interruption | 187 focused Windows tests passed on `fix/limit-switch`; compilation and diff checks passed; firmware/protocol/release/data schemas unchanged | Review and commit/push the exact revision, then run isolated Pi plus a fresh attended entry qualification |
 
 ## Definition of done for v1.3.0-rc.2
 
@@ -2270,6 +2317,7 @@ The work is complete only when:
 | Date | Change |
 | --- | --- |
 | 2026-08-23 | Added the post-Milestone 7 controlled-calibration correction: versioned checkbox confirmation, transaction-layer physical-evidence validation, atomic verified calibration authorization, unchanged-calibration verification events, explicit eligible v1 event promotion, and selected-reagent well-grid repaint ordering. |
+| 2026-08-23 | Added the attended plate-entry collision finding and the fail-closed Controller session contract: safe-Z-first entry, manual first point for unverified plates, motion-free dialogs, token-bound corner travel, telemetry reconciliation, and interruption cancellation. |
 | 2026-08-20 | Recorded published rc.5 tag `34841fe0`, exact verified-source recovery of the two rc.4 timestamp-only runtime files, the attended protected rc.4 -> rc.5 update/first launch/closed postflight, no-activity attestation, and independently transferred evidence hashes. |
 | 2026-08-20 | Recorded rc.5 behavior commit `65ba38df`, passing target-Pi focused/development/private-device SIL gates, unchanged production fingerprint, and the verified-source restoration required before the attended rc.4 -> rc.5 protected update. |
 | 2026-08-20 | Recorded immutable local rc.4 tag, successful attended protected rc.3 -> rc.4 update, exact sequence-5 disposable-target recovery, Camera-safe/no-pending/no-motion closed postflight, and matching final archive; retained publication and rollout boundaries. |

@@ -800,7 +800,7 @@ class ConfigurationHistoryWindow(QtWidgets.QDialog):
         self.refresh_button.clicked.connect(self.refresh)
         self.export_button.clicked.connect(self.export_markdown)
         self.import_button.clicked.connect(self.import_governed_file)
-        self.verify_button.clicked.connect(self.verify_current_target)
+        self.verify_button.clicked.connect(lambda: self.verify_current_target())
         self.restore_button.clicked.connect(self.restore_selected)
         self.table.itemSelectionChanged.connect(self._show_selected)
         self.refresh()
@@ -876,7 +876,7 @@ class ConfigurationHistoryWindow(QtWidgets.QDialog):
             return
         self.status_label.setText(f"Exported to {path}")
 
-    def verify_current_target(self):
+    def verify_current_target(self, target_key=None):
         try:
             reader = self._reader()
             values = reader.current_target_values()
@@ -899,11 +899,19 @@ class ConfigurationHistoryWindow(QtWidgets.QDialog):
         if not targets:
             self.status_label.setText("No current target requires verification")
             return
-        target, ok = QtWidgets.QInputDialog.getItem(
-            self, "Verify Configuration Target", "Target:", targets, 0, False
-        )
-        if not ok:
-            return
+        if target_key is None:
+            target, ok = QtWidgets.QInputDialog.getItem(
+                self, "Verify Configuration Target", "Target:", targets, 0, False
+            )
+            if not ok:
+                return
+        else:
+            target = str(target_key)
+            if target not in targets:
+                self.status_label.setText(
+                    f"Target {target} does not currently require verification"
+                )
+                return
         candidate = dict((promotion_candidates or {}).get(target) or {})
         if candidate:
             dialog = ControlledCalibrationPromotionDialog(candidate, self)
@@ -2555,6 +2563,16 @@ class MainWindow(QMainWindow):
         window.show()
         window.raise_()
         window.activateWindow()
+
+    def review_configuration_target(self, target_key):
+        """Open the existing audited verification flow for one exact target."""
+
+        self.show_configuration_history()
+        window = getattr(self, "configuration_history_window", None)
+        if window is None:
+            return False
+        window.verify_current_target(target_key=str(target_key))
+        return True
 
     def show_plate_reader_analysis(self):
         """Open the plate-reader analysis runner window."""
@@ -6626,6 +6644,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.controller = controller
         self.grid_layout = QGridLayout()
         self.well_labels = []
+        self._plate_calibration_session_token = None
+        self._plate_calibration_dialog = None
         # Set the max height of the widget
         self.setMaximumHeight(800)
 
@@ -6643,6 +6663,11 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.model.well_plate.plate_summary_changed_signal.connect(self._update_plate_summary)
         self.model.rack_model.gripper_updated.connect(self.update_start_print_array_button)
         self.controller.array_state_changed.connect(self.update_start_print_array_button)
+        plate_state_signal = getattr(
+            self.controller, "plate_calibration_state_changed", None
+        )
+        if plate_state_signal is not None:
+            plate_state_signal.connect(self._on_plate_calibration_state_changed)
         self.init_ui()
 
     def init_ui(self):
@@ -7285,26 +7310,149 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             )
         if callable(read_only_view_getter) and read_only_view_getter():
             return
-        if not self.model.machine_model.motors_are_enabled() or not self.model.machine_model.motors_are_homed():
-            self.main_window.popup_message("Motors Not Enabled or Homed","Please enable and home the motors before calibrating the well plate.")
-            return
-        if self.model.rack_model.get_gripper_printer_head() != None:
-            print("Gripper is loaded")
-            if not self.model.rack_model.get_gripper_printer_head().is_calibration_chip():
-                self.main_window.popup_message("Calibration Chip Required","Please load the calibration chip into the gripper before calibrating the rack.")
-                return
+        if self._plate_calibration_session_token is not None:
+            self.main_window.popup_message(
+                "Plate Calibration Active",
+                "Wait for the current plate calibration to finish or cancel it.",
+            )
+            return False
+        preflight_getter = getattr(
+            self.controller, "plate_calibration_entry_preflight", None
+        )
+        starter = getattr(self.controller, "begin_plate_calibration_entry", None)
+        if not callable(preflight_getter) or not callable(starter):
+            self.main_window.popup_message(
+                "Plate Calibration Unavailable",
+                "The guarded plate-calibration entry workflow is unavailable.",
+            )
+            return False
+        preflight = preflight_getter()
+        if not preflight.get("allowed"):
+            self.main_window.popup_message(
+                "Plate Calibration Not Started",
+                preflight.get("message", "Plate calibration preflight failed."),
+            )
+            return False
+
+        manual_first = False
+        if not preflight.get("verified"):
+            candidate = preflight.get("historical_candidate")
+            if candidate:
+                choice = self.main_window.popup_choice(
+                    "Plate Calibration Requires Verification",
+                    "The stored plate position is not currently authorized. You may "
+                    "review its existing controlled-calibration evidence without moving, "
+                    "or begin a new calibration from safe height.",
+                    ["Review Existing Calibration", "Calibrate from Safe Height", "Cancel"],
+                    default="Cancel",
+                )
+                if choice == "Review Existing Calibration":
+                    reviewer = getattr(
+                        self.main_window, "review_configuration_target", None
+                    )
+                    if callable(reviewer):
+                        reviewer(preflight["target_key"])
+                    self.main_window.popup_message(
+                        "Calibration Review Complete",
+                        "Press Calibrate Plate again if you want to start calibration. "
+                        "No motion was issued by the review.",
+                    )
+                    return False
+                if choice != "Calibrate from Safe Height":
+                    return False
             else:
-                print("Calibration chip is loaded")
+                choice = self.main_window.popup_choice(
+                    "Unverified Plate Calibration",
+                    "The stored plate height is not authorized. Calibration will raise "
+                    "to safe Z, travel above the stored top-left XY position, and stop. "
+                    "You must manually descend and align the first point.",
+                    ["Calibrate from Safe Height", "Cancel"],
+                    default="Cancel",
+                )
+                if choice != "Calibrate from Safe Height":
+                    return False
+            manual_first = True
+
+        self.calibration_button.setEnabled(False)
+        self.calibration_button.setText("Staging Plate Safely...")
+        result = starter(manual_first=manual_first)
+        if result is False:
+            self._reset_plate_calibration_launch_ui()
+            return False
+        self._plate_calibration_session_token = result["session_token"]
+        return True
+
+    def _reset_plate_calibration_launch_ui(self):
+        self.calibration_button.setText("Calibrate Plate")
+        read_only_getter = getattr(
+            self.model, "is_read_only_experiment_view_active", None
+        )
+        read_only = bool(callable(read_only_getter) and read_only_getter())
+        self.calibration_button.setEnabled(not read_only)
+
+    def _on_plate_calibration_state_changed(self, snapshot):
+        if not isinstance(snapshot, dict):
+            return
+        token = snapshot.get("session_token")
+        if token != self._plate_calibration_session_token:
+            return
+        dialog = self._plate_calibration_dialog
+        if dialog is not None:
+            handler = getattr(dialog, "handle_controller_state", None)
+            if callable(handler):
+                handler(snapshot)
+        state = snapshot.get("state")
+        if state in {"manual_first_point", "automatic_points"} and dialog is None:
+            QtCore.QTimer.singleShot(
+                0,
+                lambda expected_token=token: self._open_staged_plate_calibration_dialog(
+                    expected_token
+                ),
+            )
+        elif state in {"failed", "cancelled"}:
+            self._plate_calibration_session_token = None
+            self._reset_plate_calibration_launch_ui()
+
+    def _open_staged_plate_calibration_dialog(self, session_token):
+        if (
+            session_token != self._plate_calibration_session_token
+            or self._plate_calibration_dialog is not None
+        ):
+            return
+        snapshot_getter = getattr(
+            self.controller, "_plate_calibration_session_snapshot", None
+        )
+        snapshot = snapshot_getter() if callable(snapshot_getter) else {}
+        if snapshot.get("session_token") != session_token or snapshot.get("state") not in {
+            "manual_first_point", "automatic_points"
+        }:
+            return
+        dialog = PlateCalibrationDialog(
+            self.main_window,
+            self.model,
+            self.controller,
+            session_token=session_token,
+            manual_first=bool(snapshot.get("manual_first")),
+        )
+        self._plate_calibration_dialog = dialog
+        accepted = dialog.exec() == QDialog.Accepted
+        if accepted:
+            finisher = getattr(
+                self.controller, "finish_plate_calibration_session", None
+            )
+            if callable(finisher):
+                finisher(session_token, accepted=True)
         else:
-            print("Gripper is empty")
-            response = self.main_window.popup_yes_no("Gripper Empty","Please load the calibration chip into the gripper before calibrating the rack. Proceed anyway?")
-            if self.main_window._is_no_response(response):
-                return
-        self.controller.move_to_location('plate',z_offset=500)
-        plate_calibration_dialog = PlateCalibrationDialog(self.main_window,self.model,self.controller)
-        
-        # Execute the dialog and check if the user completes the calibration
-        if plate_calibration_dialog.exec() == QDialog.Accepted:
+            cancel = getattr(
+                self.controller, "cancel_plate_calibration_entry", None
+            )
+            if callable(cancel):
+                cancel(session_token)
+        self._plate_calibration_dialog = None
+        self._plate_calibration_session_token = None
+        self._reset_plate_calibration_launch_ui()
+
+        if accepted:
             print("Calibration completed successfully.")
             commit = getattr(self.controller, "commit_plate_calibration", None)
             identity_getter = getattr(self.main_window, "request_configuration_identity", None)
@@ -7314,6 +7462,9 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 proposal = prepare()
                 if not proposal or not reviewer(proposal, title="Save Plate Calibration"):
                     self.model.well_plate.discard_temp_calibrations()
+                    self.controller.discard_configuration_capture_evidence(
+                        "plate_calibration"
+                    )
                     return
                 self.model.well_plate.discard_temp_calibrations()
             elif callable(commit) and callable(identity_getter):
@@ -7323,9 +7474,15 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 )
                 if identity is None:
                     self.model.well_plate.discard_temp_calibrations()
+                    self.controller.discard_configuration_capture_evidence(
+                        "plate_calibration"
+                    )
                     return
                 if not commit(operator=identity[0], reason=identity[1]):
                     self.model.well_plate.discard_temp_calibrations()
+                    self.controller.discard_configuration_capture_evidence(
+                        "plate_calibration"
+                    )
                     return
             else:
                 self.model.well_plate.update_calibration_data()
@@ -7333,6 +7490,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         else:
             print("Calibration was canceled or failed.")
             self.model.well_plate.discard_temp_calibrations()
+        return accepted
 
     def open_experiment_designer(self):
         # dialog = ExperimentDesignDialog(self.main_window, self.model)
@@ -8786,6 +8944,8 @@ class BaseCalibrationDialog(QDialog):
         self.color_dict = self.main_window.color_dict
         self.model = model
         self.controller = controller
+        self._automatic_motion_pending = False
+        self._workflow_interrupted = False
         self.shortcut_manager = ShortcutManager(self)
         self.setup_shortcuts()
         self.steps = steps
@@ -8862,18 +9022,32 @@ class BaseCalibrationDialog(QDialog):
         # Update the UI to reflect the initial state
         self.update_step_labels()
 
-        self.move_to_initial_position()
-
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
-        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_coordinates(0, -self.model.machine_model.step_size, 0, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size, 0, 0, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size, 0, 0, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.request_relative_jog(0, -self.model.machine_model.step_size, 0))
+        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.request_relative_jog(0, self.model.machine_model.step_size, 0))
+        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.request_relative_jog(self.model.machine_model.step_size, 0, 0))
+        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.request_relative_jog(-self.model.machine_model.step_size, 0, 0))
+        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.request_relative_jog(0, 0, -self.model.machine_model.step_size))
+        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.request_relative_jog(0, 0, self.model.machine_model.step_size))
         self.shortcut_manager.add_shortcut('Ctrl+Up', 'Increase step size', self.model.machine_model.increase_step_size)
         self.shortcut_manager.add_shortcut('Ctrl+Down', 'Decrease step size', self.model.machine_model.decrease_step_size)
+
+    def request_relative_jog(self, x, y, z):
+        if self._automatic_motion_pending or self._workflow_interrupted:
+            return False
+        return self.controller.set_relative_coordinates(
+            x, y, z, manual=True, override=True
+        )
+
+    def set_automatic_motion_pending(self, pending):
+        self._automatic_motion_pending = bool(pending)
+        enabled = not self._automatic_motion_pending and not self._workflow_interrupted
+        self.next_button.setEnabled(enabled and self.current_step < len(self.steps))
+        self.back_button.setEnabled(enabled and self.current_step > 0)
+        self.submit_button.setEnabled(
+            enabled and self.current_step >= len(self.steps)
+        )
 
     def update_step_labels(self):
         for i, label in enumerate(self.step_labels):
@@ -8989,6 +9163,13 @@ class BaseCalibrationDialog(QDialog):
 
     def closeEvent(self, event):
         """Handle the window close event."""
+        if self._automatic_motion_pending:
+            self.main_window.popup_message(
+                "Calibration Motion In Progress",
+                "Wait for the current calibration move to finish before closing this window.",
+            )
+            event.ignore()
+            return
         reply = QMessageBox.question(
             self,
             "Incomplete Calibration",
@@ -9047,7 +9228,17 @@ class BaseCalibrationDialog(QDialog):
 
 class PlateCalibrationDialog(BaseCalibrationDialog):
     configuration_capture_workflow = "plate_calibration"
-    def __init__(self, main_window, model, controller):
+    def __init__(
+        self,
+        main_window,
+        model,
+        controller,
+        *,
+        session_token,
+        manual_first,
+    ):
+        self.session_token = str(session_token)
+        self.manual_first = bool(manual_first)
         steps = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
         name_dict = {
             "Top-Left": "top_left",
@@ -9061,6 +9252,125 @@ class PlateCalibrationDialog(BaseCalibrationDialog):
             'Z': -500
         }
         super().__init__(main_window, model, controller, "Well Plate Calibration", steps, name_dict,offsets)
+        if self.manual_first:
+            self.instructions_label.setText(
+                "The machine is stopped above Top-Left at safe Z=500. Manually "
+                "descend and align the calibration head, then confirm the position."
+            )
+        else:
+            self.instructions_label.setText(
+                "The machine reached the verified Top-Left position. Align it if "
+                "needed, then confirm the position."
+            )
+
+    def move_to_initial_position(self):
+        """Dialog construction and activation never issue plate motion."""
+
+        return True
+
+    def move_to_offset_position(self):
+        return False
+
+    def request_relative_jog(self, x, y, z):
+        if self._automatic_motion_pending or self._workflow_interrupted:
+            return False
+        jog = getattr(self.controller, "jog_plate_calibration", None)
+        if not callable(jog):
+            return False
+        return jog(self.session_token, x=x, y=y, z=z)
+
+    def handle_controller_state(self, snapshot):
+        if snapshot.get("session_token") != self.session_token:
+            return
+        state = snapshot.get("state")
+        if state in {"staging", "reconciling"}:
+            self.set_automatic_motion_pending(True)
+            self.instructions_label.setText(
+                "Calibration motion is in progress. Wait for position telemetry to settle."
+            )
+            return
+        if state in {"manual_first_point", "automatic_points"}:
+            self.set_automatic_motion_pending(False)
+            if self.current_step < len(self.steps):
+                self.instructions_label.setText(
+                    f"Align the {self.steps[self.current_step]} position and confirm the location."
+                )
+            return
+        if state == "complete":
+            self.current_step = len(self.steps)
+            self._automatic_motion_pending = False
+            self.instructions_label.setText(
+                "Calibration capture is complete and the head is clear of the final corner."
+            )
+            self.next_button.setEnabled(False)
+            self.back_button.setEnabled(False)
+            self.submit_button.setEnabled(True)
+            self.submit_button.setStyleSheet(
+                f"background-color: {self.color_dict['dark_blue']}; color: white;"
+            )
+            self.update_step_labels()
+            self.update_visual_aid()
+            return
+        if state in {"failed", "cancelled"}:
+            self._workflow_interrupted = True
+            self._automatic_motion_pending = False
+            self.next_button.setEnabled(False)
+            self.back_button.setEnabled(False)
+            self.submit_button.setEnabled(False)
+            self.instructions_label.setText(
+                "Calibration was interrupted. Close this window and start again."
+            )
+            QtCore.QTimer.singleShot(0, self.reject)
+
+    def next_step(self):
+        if self._automatic_motion_pending or self._workflow_interrupted:
+            return False
+        if self.current_step >= len(self.steps):
+            return False
+        if self.model.machine_model.is_busy():
+            self.main_window.popup_message(
+                "Machine Busy",
+                "The machine is currently executing a command. Please wait for it to complete.",
+            )
+            return False
+        point_name = self.name_dict[self.steps[self.current_step]]
+        capture = getattr(
+            self.controller, "capture_and_advance_plate_calibration", None
+        )
+        if not callable(capture) or capture(self.session_token, point_name) is False:
+            return False
+        self.current_step += 1
+        self.set_automatic_motion_pending(True)
+        self.update_step_labels()
+        self.update_visual_aid()
+        return True
+
+    def previous_step(self):
+        if (
+            self._automatic_motion_pending
+            or self._workflow_interrupted
+            or self.current_step <= 0
+            or self.current_step >= len(self.steps)
+        ):
+            return False
+        previous_index = self.current_step - 1
+        point_name = self.name_dict[self.steps[previous_index]]
+        mover = getattr(
+            self.controller, "move_plate_calibration_to_captured_point", None
+        )
+        if not callable(mover) or mover(self.session_token, point_name) is False:
+            return False
+        self.current_step = previous_index
+        self.set_automatic_motion_pending(True)
+        self.update_step_labels()
+        self.update_visual_aid()
+        return True
+
+    def submit_calibration(self):
+        if self._automatic_motion_pending or self.current_step != len(self.steps):
+            return False
+        self.accept()
+        return True
 
     def get_initial_calibrations(self):
         return self.model.well_plate.get_all_current_plate_calibrations()
@@ -9751,6 +10061,11 @@ class RackBox(QGroupBox):
 
     def _run_guided_rack_calibration(self, manual_chip_loaded=False, origin_slot_number=None):
         rack_calibration_dialog = RackCalibrationDialog(self.main_window, self.model, self.controller)
+        if rack_calibration_dialog.move_to_initial_position() is False:
+            self.model.rack_model.discard_temp_calibrations()
+            if manual_chip_loaded:
+                self._prompt_manual_rack_calibration_chip_cleanup(origin_slot_number)
+            return False
 
         if rack_calibration_dialog.exec() == QDialog.Accepted:
             print("Rack calibration completed successfully.")
