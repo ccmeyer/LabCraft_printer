@@ -50,6 +50,7 @@ def _capture_controller(clock, *, position=None, timeout_ms=2500):
     controller.machine_data_paths = SimpleNamespace(machine_uuid="test-machine-uuid")
     controller.expected_position = copy.deepcopy(COMMAND_TARGET)
     controller.expected_location = None
+    controller._pending_motion_endpoint_evidence = None
     controller._position_reconciliation = {
         "state": "settled",
         "reason": "test_setup",
@@ -147,6 +148,43 @@ def test_queue_drain_waits_for_complete_post_motion_position_before_capture():
     assert evidence["position_reconciliation"]["state"] == "settled"
 
 
+def test_observed_odd_request_evidence_settles_against_canonical_endpoint():
+    clock = [15.0]
+    controller, machine_model = _capture_controller(clock)
+    motion_endpoint = {
+        "position_quantum": 2,
+        "origin_position": {"X": 43840, "Y": 29870, "Z": 84350},
+        "requested_position": {"X": 33050, "Y": 29875, "Z": 84350},
+        "canonical_position": copy.deepcopy(COMMAND_TARGET),
+        "adjustments": {"X": 0, "Y": -1, "Z": 0},
+        "adjusted_axes": ["Y"],
+        "queue_result": "accepted",
+    }
+    controller._pending_motion_endpoint_evidence = copy.deepcopy(motion_endpoint)
+
+    controller._begin_position_reconciliation()
+
+    assert controller._pending_motion_endpoint_evidence is None
+    assert controller._position_reconciliation["motion_endpoint"] == motion_endpoint
+    _advance_axis(controller, machine_model, clock, "X", COMMAND_TARGET["X"])
+    _advance_axis(controller, machine_model, clock, "Y", COMMAND_TARGET["Y"])
+    settled = _advance_axis(
+        controller, machine_model, clock, "Z", COMMAND_TARGET["Z"]
+    )
+    captured = controller.capture_configuration_point(
+        "plate:test:bottom_right",
+        workflow="plate_calibration",
+    )
+
+    assert settled["state"] == "settled"
+    assert settled["reported_position"] == COMMAND_TARGET
+    assert captured == COMMAND_TARGET
+    capture = controller._configuration_capture_evidence[
+        ("plate_calibration", "plate:test:bottom_right")
+    ]
+    assert capture["position_reconciliation"]["motion_endpoint"] == motion_endpoint
+
+
 def test_coherent_post_drain_disagreement_remains_a_true_mismatch():
     clock = [20.0]
     controller, machine_model = _capture_controller(clock)
@@ -233,12 +271,14 @@ def test_explicit_current_resync_clears_pending_reconciliation():
         {"X": 33049, "Y": 29873, "Z": 84349},
         received_monotonic=clock[0],
     )
+    controller._pending_motion_endpoint_evidence = {"queue_result": "obsolete"}
 
     controller.update_expected_with_current()
 
     assert controller.expected_position == {"X": 33049, "Y": 29873, "Z": 84349}
     assert controller._position_reconciliation["state"] == "settled"
     assert controller._position_reconciliation["reason"] == "explicit_current_resync"
+    assert controller._pending_motion_endpoint_evidence is None
 
 
 def test_rejected_plate_capture_does_not_change_temporary_or_governed_data():

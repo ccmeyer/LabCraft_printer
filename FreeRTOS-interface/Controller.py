@@ -45,6 +45,11 @@ from ConfigurationSafetyPolicy import (
     ConfigurationSafetyError,
     parse_guard_assessment,
 )
+from MotionPositionContract import (
+    MotionPositionContractError,
+    canonicalize_position,
+    canonicalize_relative_position,
+)
 
 ARRAY_PAUSE_DEPARTURE_ACCEL = 32000
 ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
@@ -1017,6 +1022,7 @@ class Controller(QObject):
             "reason": "controller_initialization",
             "expected_position": copy.deepcopy(self.expected_position),
         }
+        self._pending_motion_endpoint_evidence = None
 
         self._dfu_thread: DfuUpdateWorker | None = None
         self._qualification_worker = None
@@ -5766,106 +5772,202 @@ class Controller(QObject):
             return False
         return True
 
+    def _prepare_motion_endpoint(self, requested_position, *, override):
+        """Return the exact firmware-representable endpoint or reject safely."""
+
+        try:
+            plan = canonicalize_position(
+                self.expected_position,
+                requested_position,
+            )
+        except MotionPositionContractError as exc:
+            self._reject_motion_position_contract(exc)
+            return None
+
+        return self._validate_motion_endpoint_plan(plan, override=override)
+
+    def _prepare_relative_motion_endpoint(self, requested_displacement, *, override):
+        """Return a firmware-representable plan for one relative request."""
+
+        try:
+            plan = canonicalize_relative_position(
+                self.expected_position,
+                requested_displacement,
+            )
+        except MotionPositionContractError as exc:
+            self._reject_motion_position_contract(exc)
+            return None
+        return self._validate_motion_endpoint_plan(plan, override=override)
+
+    def _reject_motion_position_contract(self, error):
+        message = f"Motion target cannot be represented safely: {error}"
+        print(message)
+        signal = getattr(self, "error_occurred_signal", None)
+        if signal is not None:
+            signal.emit("Motion Target Rejected", message)
+
+    def _validate_motion_endpoint_plan(self, plan, *, override):
+        """Apply endpoint and path safety checks to a canonical motion plan."""
+
+        requested = plan["requested_position"]
+        canonical = plan["canonical_position"]
+        if not self._hard_endpoint_allowed(requested):
+            return None
+        if canonical != requested and not self._hard_endpoint_allowed(canonical):
+            return None
+        if not override and self.check_collision(plan["origin_position"], canonical):
+            print('Collision detected')
+            return None
+        return plan
+
+    def _remember_motion_endpoint(
+        self,
+        plan,
+        *,
+        queue_result="accepted",
+        accepted_position=None,
+        failed_axis=None,
+    ):
+        """Retain one queue-batch endpoint for reconciliation/audit evidence."""
+
+        evidence = copy.deepcopy(plan)
+        evidence["queue_result"] = str(queue_result)
+        if accepted_position is not None:
+            accepted = {
+                axis: int(accepted_position[axis])
+                for axis in self._position_axes()
+            }
+            if accepted != evidence["canonical_position"]:
+                evidence["accepted_position"] = accepted
+        if failed_axis is not None:
+            evidence["failed_axis"] = str(failed_axis)
+        self._pending_motion_endpoint_evidence = evidence
+        self._log_motion_endpoint_evidence(evidence)
+        return copy.deepcopy(evidence)
+
+    @staticmethod
+    def _log_motion_endpoint_evidence(evidence):
+        if evidence.get("adjusted_axes"):
+            print(
+                "Motion endpoint canonicalized: "
+                + json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+            )
+
+    def _single_axis_requested_endpoint(self, axis, value):
+        requested = dict(self.expected_position)
+        requested[axis] = value
+        return requested
+
+    @staticmethod
+    def _single_axis_requested_displacement(axis, value):
+        requested = {"X": 0, "Y": 0, "Z": 0}
+        requested[axis] = value
+        return requested
+
     def set_relative_X(self, x,manual=False,handler=None,override=False):
-        """Set the relative X coordinate for the machine."""
-        target = {'X': self.expected_position['X'] + x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}
-        if not self._hard_endpoint_allowed(target):
+        """Set relative X using the firmware-representable endpoint."""
+        plan = self._prepare_relative_motion_endpoint(
+            self._single_axis_requested_displacement("X", x),
+            override=override,
+        )
+        if plan is None:
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting relative X: {x}")
-        self.machine.set_relative_X(x,manual=manual,handler=handler)
-        self.expected_position['X'] += x
+        delta = plan["canonical_position"]["X"] - plan["origin_position"]["X"]
+        if self.machine.set_relative_X(delta,manual=manual,handler=handler) is False:
+            return False
+        self.update_expected_position(x=plan["canonical_position"]["X"])
+        self._remember_motion_endpoint(plan)
         return True
 
     def set_relative_Y(self, y,manual=False,handler=None, override=False):
-        """Set the relative Y coordinate for the machine."""
-        target = {'X': self.expected_position['X'], 'Y': self.expected_position['Y'] + y, 'Z': self.expected_position['Z']}
-        if not self._hard_endpoint_allowed(target):
+        """Set relative Y using the firmware-representable endpoint."""
+        plan = self._prepare_relative_motion_endpoint(
+            self._single_axis_requested_displacement("Y", y),
+            override=override,
+        )
+        if plan is None:
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting relative Y: {y}")
-        self.machine.set_relative_Y(y,manual=manual,handler=handler)
-        self.expected_position['Y'] += y
+        delta = plan["canonical_position"]["Y"] - plan["origin_position"]["Y"]
+        if self.machine.set_relative_Y(delta,manual=manual,handler=handler) is False:
+            return False
+        self.update_expected_position(y=plan["canonical_position"]["Y"])
+        self._remember_motion_endpoint(plan)
         return True
 
     def set_relative_Z(self, z,manual=False,handler=None, override=False):
-        """Set the relative Z coordinate for the machine."""
-        target = {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z'] + z}
-        if not self._hard_endpoint_allowed(target):
+        """Set relative Z using the firmware-representable endpoint."""
+        plan = self._prepare_relative_motion_endpoint(
+            self._single_axis_requested_displacement("Z", z),
+            override=override,
+        )
+        if plan is None:
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting relative Z: {z}")
-        self.machine.set_relative_Z(z,manual=manual,handler=handler)
-        self.expected_position['Z'] += z
+        delta = plan["canonical_position"]["Z"] - plan["origin_position"]["Z"]
+        if self.machine.set_relative_Z(delta,manual=manual,handler=handler) is False:
+            return False
+        self.update_expected_position(z=plan["canonical_position"]["Z"])
+        self._remember_motion_endpoint(plan)
         return True
     
     def set_absolute_XY(self, x, y, manual=False, handler=None, override=False):
-        """Set the absolute X and Y coordinates for the machine."""
-        target = {'X': x, 'Y': y, 'Z': self.expected_position['Z']}
-        if not self._hard_endpoint_allowed(target):
+        """Set absolute X/Y using the firmware-representable endpoint."""
+        requested = dict(self.expected_position)
+        requested.update({"X": x, "Y": y})
+        plan = self._prepare_motion_endpoint(requested, override=override)
+        if plan is None:
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting absolute XY: {x}, {y}")
-        if self.machine.set_absolute_XY(x, y, manual=manual, handler=handler) is False:
+        canonical = plan["canonical_position"]
+        if self.machine.set_absolute_XY(
+            canonical["X"], canonical["Y"], manual=manual, handler=handler
+        ) is False:
             return False
-        self.update_expected_position(x=x, y=y)
+        self.update_expected_position(x=canonical["X"], y=canonical["Y"])
+        self._remember_motion_endpoint(plan)
         return True
 
     def set_absolute_X(self, x,manual=False,handler=None, override=False):
-        """Set the absolute X coordinate for the machine."""
-        target = {'X': x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}
-        if not self._hard_endpoint_allowed(target):
+        """Set absolute X using the firmware-representable endpoint."""
+        plan = self._prepare_motion_endpoint(
+            self._single_axis_requested_endpoint("X", x),
+            override=override,
+        )
+        if plan is None:
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting absolute X: {x}")
-        if self.machine.set_absolute_X(x,manual=manual,handler=handler) is False:
+        canonical = plan["canonical_position"]["X"]
+        if self.machine.set_absolute_X(canonical,manual=manual,handler=handler) is False:
             return False
-        self.update_expected_position(x=x)
+        self.update_expected_position(x=canonical)
+        self._remember_motion_endpoint(plan)
         return True
 
     def set_absolute_Y(self, y,manual=False,handler=None, override=False):
-        """Set the absolute Y coordinate for the machine."""
-        target = {'X': self.expected_position['X'], 'Y': y, 'Z': self.expected_position['Z']}
-        if not self._hard_endpoint_allowed(target):
+        """Set absolute Y using the firmware-representable endpoint."""
+        plan = self._prepare_motion_endpoint(
+            self._single_axis_requested_endpoint("Y", y),
+            override=override,
+        )
+        if plan is None:
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting absolute Y: {y}")
-        if self.machine.set_absolute_Y(y,manual=manual,handler=handler) is False:
+        canonical = plan["canonical_position"]["Y"]
+        if self.machine.set_absolute_Y(canonical,manual=manual,handler=handler) is False:
             return False
-        self.update_expected_position(y=y)
+        self.update_expected_position(y=canonical)
+        self._remember_motion_endpoint(plan)
         return True
     
     def set_absolute_Z(self, z,manual=False,handler=None, override=False):
-        """Set the absolute Z coordinate for the machine."""
-        target = {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': z}
-        if not self._hard_endpoint_allowed(target):
+        """Set absolute Z using the firmware-representable endpoint."""
+        plan = self._prepare_motion_endpoint(
+            self._single_axis_requested_endpoint("Z", z),
+            override=override,
+        )
+        if plan is None:
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting absolute Z: {z}")
-        if self.machine.set_absolute_Z(z,manual=manual,handler=handler) is False:
+        canonical = plan["canonical_position"]["Z"]
+        if self.machine.set_absolute_Z(canonical,manual=manual,handler=handler) is False:
             return False
-        self.update_expected_position(z=z)
+        self.update_expected_position(z=canonical)
+        self._remember_motion_endpoint(plan)
         return True
 
     def _hard_endpoint_allowed(self, target_pos):
@@ -5919,90 +6021,101 @@ class Controller(QObject):
         return False
     
     def set_relative_coordinates(self, x, y, z, manual=False, handler=None,override=False):
-        """Set the relative coordinates for the machine."""
-        new_position = {
-            'X': self.expected_position['X'] + x,
-            'Y': self.expected_position['Y'] + y,
-            'Z': self.expected_position['Z'] + z
-        }
-        if not self._hard_endpoint_allowed(new_position):
+        """Set relative Cartesian coordinates using representable deltas."""
+        plan = self._prepare_relative_motion_endpoint(
+            {"X": x, "Y": y, "Z": z},
+            override=override,
+        )
+        if plan is None:
             return False
-        #print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
-        if not override:
-            if self.check_collision(self.expected_position, new_position):
-                print('Collision detected')
-                return False
 
-        # Build list of commands based on the order dictated by z.
-        # Each element is a tuple: (axis, value)
+        origin = plan["origin_position"]
+        canonical = plan["canonical_position"]
+        deltas = {
+            axis: canonical[axis] - origin[axis]
+            for axis in self._position_axes()
+        }
         commands = []
-        if z < 0:
-            if z != 0:
-                commands.append(('Z', z))
-            if y != 0:
-                commands.append(('Y', y))
-            if x != 0:
-                commands.append(('X', x))
+        if deltas["Z"] < 0:
+            order = ("Z", "Y", "X")
         else:
-            if y != 0:
-                commands.append(('Y', y))
-            if x != 0:
-                commands.append(('X', x))
-            if z != 0:
-                commands.append(('Z', z))
+            order = ("Y", "X", "Z")
+        commands = [(axis, deltas[axis]) for axis in order if deltas[axis] != 0]
 
-        # Execute the commands in order, attaching the callback only to the last one.
-        for i, (axis, value) in enumerate(commands):
-            is_last = (i == len(commands) - 1)
-            current_handler = handler if is_last else None
-            if axis == 'X':
-                self.machine.set_relative_X(value, manual=manual, handler=current_handler)
-            elif axis == 'Y':
-                self.machine.set_relative_Y(value, manual=manual, handler=current_handler)
-            elif axis == 'Z':
-                self.machine.set_relative_Z(value, manual=manual, handler=current_handler)
+        if not commands:
+            if handler:
+                handler()
+            self.update_expected_position(**{
+                axis.lower(): canonical[axis] for axis in self._position_axes()
+            })
+            if plan.get("adjusted_axes"):
+                evidence = copy.deepcopy(plan)
+                evidence["queue_result"] = "canonical_noop"
+                self._log_motion_endpoint_evidence(evidence)
+            return True
 
-        # Update the expected position
-        self.expected_position['X'] += x
-        self.expected_position['Y'] += y
-        self.expected_position['Z'] += z
+        current = dict(origin)
+        for index, (axis, value) in enumerate(commands):
+            current_handler = handler if index == len(commands) - 1 else None
+            queue_method = getattr(self.machine, f"set_relative_{axis}")
+            queued = queue_method(value, manual=manual, handler=current_handler)
+            if queued is False:
+                self.update_expected_position(
+                    x=current["X"], y=current["Y"], z=current["Z"]
+                )
+                if current != origin:
+                    self._remember_motion_endpoint(
+                        plan,
+                        queue_result="partial",
+                        accepted_position=current,
+                        failed_axis=axis,
+                    )
+                return False
+            current[axis] = canonical[axis]
+
+        self.update_expected_position(
+            x=canonical["X"], y=canonical["Y"], z=canonical["Z"]
+        )
+        self._remember_motion_endpoint(plan)
         return True
     
     def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, kwargs=None, override=False):
         """Set absolute coordinates; always use XY for any X/Y movement."""
-        new_position = {'X': x, 'Y': y, 'Z': z}
-
-        if not self._hard_endpoint_allowed(new_position):
+        requested = {'X': x, 'Y': y, 'Z': z}
+        plan = self._prepare_motion_endpoint(requested, override=override)
+        if plan is None:
             return False
 
-        # 1) collision check
-        if not override and self.check_collision(self.expected_position, new_position):
-            print('Collision detected')
-            return False
-
-        cur = dict(self.expected_position)
-        needs_xy = (x != cur['X']) or (y != cur['Y'])
-        needs_z  = (z != cur['Z'])
+        canonical = plan["canonical_position"]
+        cur = dict(plan["origin_position"])
+        needs_xy = (canonical["X"] != cur['X']) or (canonical["Y"] != cur['Y'])
+        needs_z  = canonical["Z"] != cur['Z']
 
         # 2) plan ordering: if moving "up", do Z first; otherwise XY first, then Z
         moves = []
-        if needs_z and z < cur['Z']:
+        if needs_z and canonical["Z"] < cur['Z']:
             # up first
-            moves.append(('Z', z))
+            moves.append(('Z', canonical["Z"]))
             if needs_xy:
-                moves.append(('XY', (x, y)))
+                moves.append(('XY', (canonical["X"], canonical["Y"])))
         else:
             # XY first (if any), then Z (if any)
             if needs_xy:
-                moves.append(('XY', (x, y)))
+                moves.append(('XY', (canonical["X"], canonical["Y"])))
             if needs_z:
-                moves.append(('Z', z))
+                moves.append(('Z', canonical["Z"]))
 
         # 3) nothing to do
         if not moves:
             if handler:
                 handler()
-            self.update_expected_position(x=x, y=y, z=z)
+            self.update_expected_position(
+                x=canonical["X"], y=canonical["Y"], z=canonical["Z"]
+            )
+            if plan.get("adjusted_axes"):
+                evidence = copy.deepcopy(plan)
+                evidence["queue_result"] = "canonical_noop"
+                self._log_motion_endpoint_evidence(evidence)
             return True
 
         # 4) dispatch (XY is used even if only one axis actually changes)
@@ -6024,6 +6137,13 @@ class Controller(QObject):
                         y=cur['Y'],
                         z=cur['Z'],
                     )
+                    if cur != plan["origin_position"]:
+                        self._remember_motion_endpoint(
+                            plan,
+                            queue_result="partial",
+                            accepted_position=cur,
+                            failed_axis=axis,
+                        )
                     return False
                 cur['X'], cur['Y'] = x_val, y_val
             elif axis == 'Z':
@@ -6039,13 +6159,23 @@ class Controller(QObject):
                         y=cur['Y'],
                         z=cur['Z'],
                     )
+                    if cur != plan["origin_position"]:
+                        self._remember_motion_endpoint(
+                            plan,
+                            queue_result="partial",
+                            accepted_position=cur,
+                            failed_axis=axis,
+                        )
                     return False
                 cur['Z'] = val
             else:
                 raise ValueError(f"Unknown axis {axis}")
 
         # 5) update expected end position
-        self.update_expected_position(x=x, y=y, z=z)
+        self.update_expected_position(
+            x=canonical["X"], y=canonical["Y"], z=canonical["Z"]
+        )
+        self._remember_motion_endpoint(plan)
         return True
 
     def set_relative_print_pressure(self, pressure,manual=False):
@@ -6570,6 +6700,10 @@ class Controller(QObject):
     def _begin_position_reconciliation(self):
         """Wait for a complete post-drain position cycle before capture."""
 
+        motion_endpoint = copy.deepcopy(
+            getattr(self, "_pending_motion_endpoint_evidence", None)
+        )
+        self._pending_motion_endpoint_evidence = None
         if getattr(self, "configuration_safety_guard", None) is None:
             self.update_expected_with_current()
             return
@@ -6599,6 +6733,8 @@ class Controller(QObject):
                 axis: int(position[axis]) for axis in self._position_axes()
             },
         }
+        if motion_endpoint is not None:
+            self._position_reconciliation["motion_endpoint"] = motion_endpoint
 
     def _advance_position_reconciliation(self, *, now_monotonic=None):
         record = getattr(self, "_position_reconciliation", None)
@@ -7289,6 +7425,7 @@ class Controller(QObject):
     def update_expected_with_current(self):
         """Update the expected position with the current position."""
         self.expected_position = self.model.machine_model.get_current_position_dict()
+        self._pending_motion_endpoint_evidence = None
         try:
             self.expected_location = self.model.machine_model.get_current_location()
         except Exception:
