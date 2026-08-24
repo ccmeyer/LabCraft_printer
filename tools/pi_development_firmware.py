@@ -29,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_NAME = "labcraft.pi_development_firmware_roundtrip"
 SCHEMA_VERSION = 1
 ARTIFACT_RELATIVE_PATH = "firmware/artifacts/LabCraft_firmware.bin"
-DEFAULT_RELEASED_TAG = "v1.3.0-rc.7"
+DEFAULT_RELEASED_TAG = "v1.3.0-rc.8"
 DEFAULT_REMOTE_ROOT = (
     "/home/labcraft/.local/share/LabCraft/LabCraft Printer/"
     "development-workflow/firmware-sessions"

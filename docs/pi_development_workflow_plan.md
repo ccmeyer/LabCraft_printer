@@ -1117,7 +1117,7 @@ $confirmation = 'I CONFIRM MOTOR POWER IS INHIBITED, THE MOTION ENVELOPE IS CLEA
      -Action Activate-Development `
      -PiHost 192.168.0.33 `
      -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
-     -ReleasedTag v1.3.0-rc.7 `
+     -ReleasedTag v1.3.0-rc.8 `
      -Operator Conary-Codex `
      -AttendedConfirmation $confirmation `
      -Execute
@@ -1159,7 +1159,7 @@ $confirmation = 'I CONFIRM MOTOR POWER IS INHIBITED, THE MOTION ENVELOPE IS CLEA
      -Action Restore-Released `
      -PiHost 192.168.0.33 `
      -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
-     -ReleasedTag v1.3.0-rc.7 `
+     -ReleasedTag v1.3.0-rc.8 `
      -Operator Conary-Codex
    ```
 

@@ -253,7 +253,7 @@ the clean detached Pi development worktree, use the dedicated firmware wrapper:
 powershell -ExecutionPolicy Bypass -File tools\run_pi_development_firmware.ps1 `
   -PiHost 192.168.0.33 `
   -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
-  -ReleasedTag v1.3.0-rc.7 `
+  -ReleasedTag v1.3.0-rc.8 `
   -Operator "Operator Name"
 ```
 
@@ -4650,7 +4650,7 @@ powershell -ExecutionPolicy Bypass -File tools\run_pi_upgrade_rehearsal.ps1 `
   -PiHost 192.168.0.33 `
   -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
   -SourceRelease v1.2.0-rc.6 `
-  -TargetRelease v1.3.0-rc.7 `
+  -TargetRelease v1.3.0-rc.8 `
   -SourceWrapper "/absolute/pi/path/to/preserved-wrapper" `
   -ExpectedMachineId "EXPECTED-MACHINE-ID" `
   -Operator "Operator Name"

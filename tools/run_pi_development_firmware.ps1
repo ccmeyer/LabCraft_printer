@@ -10,7 +10,7 @@ param(
   [string]$DevelopmentRepo = "/home/labcraft/LabCraft_printer-dev",
   [string]$SharedPython = "/home/labcraft/LabCraft_printer/env/bin/python",
   [string]$WorkflowConfig = "/home/labcraft/.config/LabCraft/development_workflow.json",
-  [string]$ReleasedTag = "v1.3.0-rc.7",
+  [string]$ReleasedTag = "v1.3.0-rc.8",
   [string]$Port = "/dev/ttyAMA0",
   [string]$Operator = $env:USERNAME,
   [string]$FirmwareStatePath = "/home/labcraft/.local/share/LabCraft/LabCraft Printer/development-workflow/firmware-state.json",

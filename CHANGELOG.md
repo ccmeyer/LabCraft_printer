@@ -1,5 +1,34 @@
 # Changelog
 
+## v1.3.0-rc.8 - 2026-08-24
+
+### Fixed
+
+- Restored direct first-start migration from `v1.2.0`, `v1.2.0-rc.6`, and `v1.3.0-rc.1` by allowing rc.8 to create the initial deployment anchor only while completing the currently reviewed activation transaction.
+- Bound genesis enrollment to the exact immutable migration receipt, verified backup, machine identity, activation receipt, verification receipt, target version, and full target commit. Unsupported source releases remain blocked.
+- Made the deployment anchor durable before publishing `active_machine.json`. An enrollment failure now leaves no apparently active machine and retains the staged evidence for support-guided recovery.
+- Prevented ordinary startup from creating or recreating a missing deployment anchor, including a deleted anchor on the same rc.8 commit.
+
+### Added
+
+- Added an exact-tag upgrade-rehearsal workflow that runs each preserved legacy cohort through its original updater, visible cancellation and source review, isolated activation, exact migration verification, and second-checkout reuse without touching production data or firmware.
+
+### Safety and compatibility
+
+- Machine-data schema version 1, the update preservation contract, configuration history, and device protocol are unchanged.
+- The bundled firmware is byte-identical to rc.7: 367,968 bytes with SHA-256 `1FEC7C6C8D3C0022844695CDF51A860539BCFBDA291BB18C12A99062C7A32577`. Legacy-source machines must deploy and verify that exact firmware; application update success alone is not firmware provenance.
+- Rc.7 remains immutable but is not approved for direct rc.6/rc.1 rollout. Failed rehearsal roots are retained and never reused.
+
+### Validation
+
+- Focused bootstrap, migration, deployment-anchor, updater-rehearsal, and recovery tests passed on Windows and the isolated Pi development worktree.
+- The exact correction commit passed Pi `Status -> Sync -> Validate` and the five-second physically isolated no-hardware launch with protected invariants unchanged.
+- Complete Python suite passed 5,785 tests with 156 expected skips; release-metadata validation, strict release-JSON parsing, and static diff checks passed before tagging. Exact-tag rc.1/rc.6 rehearsal remains the fleet-rollout gate.
+
+### Rollback
+
+- The reviewed application rollback target remains stable `v1.2.0`. Because it predates external machine data, use only the support-guided compatibility export and restore its paired firmware.
+
 ## v1.3.0-rc.7 - 2026-08-24
 
 ### Fixed

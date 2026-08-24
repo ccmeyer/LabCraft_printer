@@ -1,10 +1,11 @@
 {
-  "release_candidate": "v1.3.0-rc.7",
+  "release_candidate": "v1.3.0-rc.8",
   "release_candidate_series": {
     "minimum": "v1.3.0-rc.1",
     "tag_prefix": "v1.3.0-rc."
   },
   "releases": [
+    "v1.3.0-rc.8",
     "v1.3.0-rc.7",
     "v1.3.0-rc.6",
     "v1.3.0-rc.5",
