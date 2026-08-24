@@ -48,12 +48,17 @@ def _active_context(
     *,
     app_version="v1.3.0-rc.2",
     app_commit=SOURCE_COMMIT,
+    cohort="v1.3.0-rc.1",
+    release_contract=None,
 ):
     wrapper, _ = write_wrapper(
-        tmp_path / "source", cohort="v1.3.0-rc.1", custom_camera=True
+        tmp_path / "source", cohort=cohort, custom_camera=True
     )
     candidate = inspect_wrapper(wrapper)
     base, _ = machine_data_paths(tmp_path)
+    bootstrap_kwargs = {}
+    if release_contract is not None:
+        bootstrap_kwargs["release_contract"] = release_contract
     bootstrap = MachineDataBootstrap.MachineDataBootstrap(
         base,
         app_version=app_version,
@@ -61,6 +66,7 @@ def _active_context(
         migration_policy=migration_policy(),
         clock=lambda: FIXED_TIME,
         uuid_factory=lambda: MIGRATION_ID,
+        **bootstrap_kwargs,
     )
     context = bootstrap.bootstrap_from_candidate(
         MachineDataBootstrap.BootstrapSubmission(

@@ -1,18 +1,17 @@
 # Exact-Tag Pi Upgrade Rehearsal
 
-Status: `implemented - focused Windows validation passed; Pi qualification pending`
+Status: `rc.7 blocked for direct legacy migration; corrective rc.8 required`
 
 This runbook proves the public online update and first-start migration path from
 two preserved legacy cohorts to one exact release. It never rolls back either
 established Pi worktree and never removes or repoints an existing machine-data
 store.
 
-Implementation validation on 2026-08-24 passed 229 focused Windows tests
+Implementation validation on 2026-08-24 passed 230 focused Windows tests
 covering the supervisor, bootstrap-only runner, migration/bootstrap services,
 update preservation, and legacy updater. The initial harness passed Pi dry-run,
-exact development sync/validation, and 222 Pi tests with two Windows-only
-skips. The corrected harness must be republished and requalified before a fresh
-rc.1 run; the real rc.6 source-wrapper path is still pending.
+exact development sync/validation, and 228 Pi tests with two Windows-only
+skips. The real rc.6 source-wrapper path is still pending.
 
 The first rc.1 `Prepare` attempt, run
 `6b974bd5-74fe-4c54-a557-8a62a86ca5a4`, failed before preparation because the
@@ -34,6 +33,18 @@ bootstrap-only runner compared the migration service's normalized
 `wrapper/local` source with the wrapper directory itself. The run remains
 quarantined at `updated`. The corrected runner binds both the selected wrapper
 kind and its exact normalized `local/` directory before any UI is shown.
+
+Fresh rc.1 run `a9e1dd18-c391-4a28-965f-8fdc1c8ef6fb` passed Prepare, Status,
+the exact rc.1 updater to rc.7, and the visible cancellation gate with an empty
+destination. Activation then failed closed because rc.7 permits genesis
+deployment-anchor enrollment only for rc.2/rc.3 first starts. The disposable
+transaction reached `pointer_written` but could not create a deployment anchor;
+its root is quarantined and non-reusable. A copied-root diagnostic reproduced
+`recovery_required` without touching an established store. Protected
+production/development data, firmware state, and process invariants remained
+unchanged. Therefore rc.7 is not approved for direct rc.6/rc.1 rollout; the
+campaign moves to an immutable rc.8 successor with activation-only enrollment
+performed before active-pointer publication.
 
 For the rc.7 campaign the required source and target bindings are:
 

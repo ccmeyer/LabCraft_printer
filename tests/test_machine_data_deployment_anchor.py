@@ -123,6 +123,54 @@ def test_rc3_direct_first_start_can_create_genesis_anchor(tmp_path):
         context.close()
 
 
+@pytest.mark.parametrize("cohort", ("v1.2.0-rc.6", "v1.3.0-rc.1"))
+def test_rc8_direct_first_start_creates_exact_legacy_genesis_anchor(
+    tmp_path, cohort
+):
+    commit = "8" * 40
+    context = _active_context(
+        tmp_path,
+        app_version="v1.3.0-rc.8",
+        app_commit=commit,
+        cohort=cohort,
+        release_contract=CONTRACT,
+    )
+    try:
+        assert context.deployment_anchor["authorization_kind"] == "genesis"
+        assert context.deployment_anchor["app_version"] == "v1.3.0-rc.8"
+        assert context.deployment_anchor["app_commit"] == commit
+    finally:
+        context.close()
+
+
+def test_rc8_missing_anchor_cannot_be_reenrolled_during_ordinary_startup(tmp_path):
+    commit = "8" * 40
+    context = _active_context(
+        tmp_path,
+        app_version="v1.3.0-rc.8",
+        app_commit=commit,
+        release_contract=CONTRACT,
+    )
+    base = context.paths.base
+    anchor_path = context.paths.deployment_anchor_path
+    context.close()
+    anchor_path.unlink()
+
+    bootstrap = MachineDataBootstrap(
+        base,
+        app_version="v1.3.0-rc.8",
+        app_commit=commit,
+        release_contract=CONTRACT,
+    )
+    inspection = bootstrap.inspect()
+
+    assert inspection.state.value == "recovery_required"
+    assert "ordinary startup" in inspection.issues[0].message
+    with pytest.raises(BootstrapError, match="current reviewed activation"):
+        bootstrap.open_ready()
+    assert not anchor_path.exists()
+
+
 def test_unfinished_update_transaction_blocks_bootstrap(tmp_path):
     context = _active_context(tmp_path)
     base = context.paths.base
