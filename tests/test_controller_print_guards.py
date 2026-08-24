@@ -235,6 +235,7 @@ def _make_controller(
         experiment_model=SimpleNamespace(
             create_progress_file=Mock(),
             get_progress_status=Mock(return_value=progress_status),
+            get_execution_plan_snapshot=Mock(return_value=None),
             validate_applied_imaging_calibration_for_print=Mock(
                 return_value={
                     "ok": bool(imaging_guard_ok),
@@ -276,6 +277,188 @@ def _make_controller(
     c.model.machine_model.clear_evap_plate_dock_check_required = _clear_dock_checks
     c.model.machine_model.clear_evap_plate_dock_check_required_after_reset = _clear_reset_dock_check
     return c
+
+
+@pytest.mark.parametrize(
+    ("plan_state", "expected"),
+    [
+        (
+            "completed",
+            {
+                "blocked": True,
+                "code": "terminal_completed",
+                "plan_state": "completed",
+                "message": (
+                    "This experiment is complete and cannot be resumed. "
+                    "Create or load a new experiment before printing again."
+                ),
+            },
+        ),
+        (
+            "aborted",
+            {
+                "blocked": True,
+                "code": "terminal_aborted",
+                "plan_state": "aborted",
+                "message": (
+                    "This experiment was aborted and cannot be resumed. "
+                    "Create or load a new experiment before printing again."
+                ),
+            },
+        ),
+        (
+            "active",
+            {
+                "blocked": False,
+                "code": "ok",
+                "plan_state": "active",
+                "message": "",
+            },
+        ),
+    ],
+)
+def test_print_array_terminal_guard_normalizes_plan_state(plan_state, expected):
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 3, target=7)]),
+        printer_head=_make_printer_head(),
+    )
+    c.model.experiment_model.get_execution_plan_snapshot.return_value = SimpleNamespace(
+        state=SimpleNamespace(value=plan_state)
+    )
+
+    assert Controller.get_print_array_terminal_guard(c) == expected
+
+
+@pytest.mark.parametrize(
+    ("plan_state", "expected_message"),
+    [
+        (
+            "completed",
+            "This experiment is complete and cannot be resumed. "
+            "Create or load a new experiment before printing again.",
+        ),
+        (
+            "aborted",
+            "This experiment was aborted and cannot be resumed. "
+            "Create or load a new experiment before printing again.",
+        ),
+    ],
+)
+def test_terminal_plan_print_request_reports_lifecycle_reason_without_preflight_or_commands(
+    plan_state,
+    expected_message,
+):
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 3, target=7)]),
+        printer_head=_make_printer_head(),
+        initial_state="resume_ready",
+    )
+    experiment_model = c.model.experiment_model
+    experiment_model.get_execution_plan_snapshot.return_value = SimpleNamespace(
+        state=SimpleNamespace(value=plan_state)
+    )
+    experiment_model.validate_authoritative_print_context = Mock()
+
+    Controller.print_array(c)
+
+    assert c.error_occurred_signal.calls == [
+        ("Print Array Unavailable", expected_message)
+    ]
+    experiment_model.validate_authoritative_print_context.assert_not_called()
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+    c.print_droplets.assert_not_called()
+    c.machine.clear_command_queue.assert_not_called()
+    c.machine.resume_commands.assert_not_called()
+
+
+def test_nonterminal_authoritative_head_binding_failure_keeps_existing_message():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    experiment_model = c.model.experiment_model
+    experiment_model.get_execution_plan_snapshot.return_value = SimpleNamespace(
+        state=SimpleNamespace(value="active")
+    )
+    experiment_model.validate_authoritative_print_context = Mock(
+        return_value={
+            "ok": False,
+            "code": "authoritative_context_invalid",
+            "message": "The loaded printer head differs from the saved execution binding.",
+        }
+    )
+
+    Controller.print_array(c)
+
+    assert c.error_occurred_signal.calls == [
+        (
+            "Error",
+            "The loaded printer head or its saved calibration does not match this "
+            "experiment. Printing is unavailable.",
+        )
+    ]
+    experiment_model.validate_authoritative_print_context.assert_called_once_with(
+        c.model.rack_model.get_gripper_printer_head()
+    )
+    c.close_gripper.assert_not_called()
+
+
+def test_hard_abort_terminal_guard_is_visible_before_idle_state_notification():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 3, target=7)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    active_plan = SimpleNamespace(state=SimpleNamespace(value="active"))
+    aborted_plan = SimpleNamespace(
+        state=SimpleNamespace(value="aborted"),
+        plan_revision=2,
+    )
+    plan_holder = {"plan": active_plan}
+    experiment_model = c.model.experiment_model
+    experiment_model.get_execution_plan_snapshot = Mock(
+        side_effect=lambda: plan_holder["plan"]
+    )
+
+    def transition_to_aborted(*_args):
+        plan_holder["plan"] = aborted_plan
+        return aborted_plan
+
+    experiment_model.transition_execution_plan_terminal = Mock(
+        side_effect=transition_to_aborted
+    )
+    c._array_context = {}
+    c._build_print_array_snapshot = Mock(return_value={})
+    c._invalidate_paused_array_soft_stop_attempt = Mock()
+    c._record_print_array_audit_event = Mock()
+    observed = []
+
+    def observe_state_change(state):
+        observed.append((state, Controller.get_print_array_terminal_guard(c)))
+        c._array_state = state
+
+    c._set_array_run_state = observe_state_change
+
+    Controller._finish_array_finalize(c, "hard_abort")
+
+    experiment_model.transition_execution_plan_terminal.assert_called_once_with(
+        "aborted", "controller_hard_abort"
+    )
+    assert observed == [
+        (
+            "idle",
+            {
+                "blocked": True,
+                "code": "terminal_aborted",
+                "plan_state": "aborted",
+                "message": (
+                    "This experiment was aborted and cannot be resumed. "
+                    "Create or load a new experiment before printing again."
+                ),
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(

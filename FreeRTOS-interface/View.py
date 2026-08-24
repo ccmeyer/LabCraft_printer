@@ -6763,7 +6763,38 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             )
         }
 
+    def _print_array_terminal_guard(self):
+        getter = getattr(self.controller, "get_print_array_terminal_guard", None)
+        if callable(getter):
+            try:
+                result = dict(getter() or {})
+            except Exception:
+                result = {}
+        else:
+            result = {}
+        return {
+            "blocked": bool(result.get("blocked", False)),
+            "code": str(result.get("code") or "ok"),
+            "plan_state": result.get("plan_state"),
+            "message": str(result.get("message") or ""),
+        }
+
     def update_start_print_array_button(self, *_args):
+        self.start_print_array_button.setToolTip("")
+        terminal_guard = self._print_array_terminal_guard()
+        state_getter = getattr(self.controller, "get_array_run_state", None)
+        array_state = state_getter() if callable(state_getter) else "idle"
+
+        if array_state == "running":
+            self.start_print_array_button.setText("Stop After Well")
+            self._set_array_button_state(self.start_print_array_button, True, 'dark_red')
+            return
+
+        if array_state == "stop_requested":
+            self.start_print_array_button.setText("Stop Pending")
+            self._set_array_button_state(self.start_print_array_button, False, 'dark_red')
+            return
+
         read_only_view_getter = getattr(
             self.model, "is_read_only_experiment_view_active", None
         )
@@ -6779,6 +6810,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             self.start_print_array_button.setText(
                 "Experiment Complete" if completed else "Experiment Read-Only"
             )
+            if completed and bool(terminal_guard.get("blocked")):
+                self.start_print_array_button.setToolTip(terminal_guard["message"])
             self._set_array_button_state(
                 self.start_print_array_button,
                 False,
@@ -6786,22 +6819,31 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             )
             return
 
-        state_getter = getattr(self.controller, "get_array_run_state", None)
-        array_state = state_getter() if callable(state_getter) else "idle"
-
-        if array_state == "running":
-            self.start_print_array_button.setText("Stop After Well")
-            self._set_array_button_state(self.start_print_array_button, True, 'dark_red')
-            return
-
-        if array_state == "stop_requested":
-            self.start_print_array_button.setText("Stop Pending")
-            self._set_array_button_state(self.start_print_array_button, False, 'dark_red')
+        if (
+            bool(terminal_guard.get("blocked"))
+            and terminal_guard.get("code") == "terminal_aborted"
+        ):
+            self.start_print_array_button.setText("Experiment Aborted")
+            self.start_print_array_button.setToolTip(terminal_guard["message"])
+            self._set_array_button_state(
+                self.start_print_array_button, False, 'dark_blue'
+            )
             return
 
         loaded_array_state = self._loaded_array_control_state().get("state")
         if loaded_array_state == "complete":
             self.start_print_array_button.setText("Array Complete")
+            self._set_array_button_state(
+                self.start_print_array_button, False, 'dark_blue'
+            )
+            return
+
+        if (
+            bool(terminal_guard.get("blocked"))
+            and terminal_guard.get("code") == "terminal_completed"
+        ):
+            self.start_print_array_button.setText("Experiment Complete")
+            self.start_print_array_button.setToolTip(terminal_guard["message"])
             self._set_array_button_state(
                 self.start_print_array_button, False, 'dark_blue'
             )
@@ -6852,6 +6894,9 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             return
 
         if array_state == "stop_requested":
+            return
+
+        if bool(self._print_array_terminal_guard().get("blocked")):
             return
 
         loaded_array_state = self._loaded_array_control_state().get("state")

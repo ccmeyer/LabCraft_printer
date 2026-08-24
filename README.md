@@ -64,6 +64,11 @@ the safe default.
 aborts the active experiment and the interrupted well may be uncertain. Every
 application queue clear is classified and guarded by the Controller. An
 automatic calibration cleanup cannot clear an active or uncertain experiment.
+After a confirmed abort, the print-array control changes to disabled
+`Experiment Aborted`; the terminal experiment cannot be resumed even when its
+loaded reagent still has partial progress. Create or load a new experiment
+before printing again. A completed terminal experiment is likewise
+non-resumable and remains represented by a disabled completion control.
 
 While a queue clear is pending or could not be confirmed, new print arrays and
 printer-head transfers remain blocked. Keep the machine clear and use the

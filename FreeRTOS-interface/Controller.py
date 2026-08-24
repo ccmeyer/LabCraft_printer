@@ -4418,6 +4418,52 @@ class Controller(QObject):
         """Return the current array runner state."""
         return str(getattr(self, "_array_state", "idle") or "idle")
 
+    def get_print_array_terminal_guard(self):
+        """Return whether the current execution plan permanently blocks printing."""
+        result = {
+            "blocked": False,
+            "code": "ok",
+            "plan_state": None,
+            "message": "",
+        }
+        try:
+            experiment_model = getattr(
+                getattr(self, "model", None), "experiment_model", None
+            )
+            plan_getter = getattr(
+                experiment_model, "get_execution_plan_snapshot", None
+            )
+            plan = plan_getter() if callable(plan_getter) else None
+            state = getattr(plan, "state", None)
+            plan_state = str(getattr(state, "value", state) or "").strip().casefold()
+        except Exception:
+            return result
+
+        result["plan_state"] = plan_state or None
+        if plan_state == "completed":
+            result.update(
+                {
+                    "blocked": True,
+                    "code": "terminal_completed",
+                    "message": (
+                        "This experiment is complete and cannot be resumed. "
+                        "Create or load a new experiment before printing again."
+                    ),
+                }
+            )
+        elif plan_state == "aborted":
+            result.update(
+                {
+                    "blocked": True,
+                    "code": "terminal_aborted",
+                    "message": (
+                        "This experiment was aborted and cannot be resumed. "
+                        "Create or load a new experiment before printing again."
+                    ),
+                }
+            )
+        return result
+
     def get_loaded_array_control_state(self):
         """Return print progress for the reagent in the loaded printer head."""
         result = {
@@ -10628,6 +10674,12 @@ class Controller(QObject):
         required number of droplets for the currently loaded printer head.
         '''
         experiment_model = getattr(self.model, "experiment_model", None)
+        terminal_guard = self.get_print_array_terminal_guard()
+        if bool(terminal_guard.get("blocked")):
+            message = str(terminal_guard.get("message") or "Printing is unavailable.")
+            self.error_occurred_signal.emit("Print Array Unavailable", message)
+            print(f"Cannot print: {message}")
+            return
         read_only_view_getter = getattr(
             self.model, "is_read_only_experiment_view_active", None
         )

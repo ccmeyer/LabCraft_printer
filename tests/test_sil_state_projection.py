@@ -607,3 +607,48 @@ def test_reconciliation_projects_loaded_reagent_array_controls(
 
     assert reconciliation["status"] == "ok"
     assert reconciliation["domains"]["controller_ui"] == 2
+
+
+@pytest.mark.parametrize(
+    ("array_state", "loaded_state", "terminal_code", "text", "enabled"),
+    [
+        ("idle", "in_progress", "terminal_aborted", "Experiment Aborted", False),
+        ("resume_ready", "in_progress", "terminal_completed", "Experiment Complete", False),
+        ("idle", "complete", "terminal_completed", "Array Complete", False),
+        ("running", "in_progress", "terminal_aborted", "Stop After Well", True),
+        ("stop_requested", "in_progress", "terminal_aborted", "Stop Pending", False),
+    ],
+)
+def test_reconciliation_projects_terminal_plan_array_controls(
+    array_state,
+    loaded_state,
+    terminal_code,
+    text,
+    enabled,
+):
+    reconciliation = StateProjectionBuilder._reconcile(
+        {
+            "simulator": {"available": True, "state": {}},
+            "model_machine": {"available": True, "state": {}},
+            "controller": {
+                "available": True,
+                "state": {
+                    "array_state": array_state,
+                    "loaded_array": {"state": loaded_state},
+                    "print_array_terminal_guard": {
+                        "blocked": terminal_code != "ok",
+                        "code": terminal_code,
+                    },
+                },
+            },
+            "ui": {
+                "available": True,
+                "state": {
+                    "primary_controls": [{"text": text, "enabled": enabled}]
+                },
+            },
+        }
+    )
+
+    assert reconciliation["status"] == "ok"
+    assert reconciliation["domains"]["controller_ui"] == 2
