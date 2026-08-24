@@ -64,7 +64,8 @@ def _install_fake_modules(monkeypatch, tmp_path, *, accepted=False):
 
         def inspect_candidate(self, _selection):
             return SimpleNamespace(
-                normalized_source=source.resolve(),
+                source_kind=CandidateSourceKind.OPERATOR_SELECTED_WRAPPER,
+                normalized_source=(source / "local").resolve(),
                 is_importable=True,
                 legacy_identity=None,
                 identity_status="unassigned",
@@ -75,9 +76,10 @@ def _install_fake_modules(monkeypatch, tmp_path, *, accepted=False):
     bootstrap_module.MachineDataBootstrap = FakeBootstrap
 
     migration_module = ModuleType("MachineDataMigration")
-    migration_module.CandidateSourceKind = SimpleNamespace(
-        OPERATOR_SELECTED_WRAPPER="operator_selected_wrapper"
-    )
+    class CandidateSourceKind(Enum):
+        OPERATOR_SELECTED_WRAPPER = "operator_selected_wrapper"
+
+    migration_module.CandidateSourceKind = CandidateSourceKind
     migration_module.CandidateSelection = lambda *args: args
 
     class FakeDialog:
@@ -210,6 +212,35 @@ def test_cancelled_bootstrap_locks_source_and_writes_no_machine_data(qapp, monke
     assert dialog.operator.read_only is True
     assert dialog.source_reason.read_only is True
     assert result["forbidden_imports"] == []
+
+
+def test_wrapper_candidate_must_normalize_to_bound_local_directory(
+    qapp, monkeypatch, tmp_path
+):
+    source, repo, machine_data, dialog_type = _install_fake_modules(
+        monkeypatch, tmp_path, accepted=False
+    )
+    original = sys.modules["MachineDataBootstrap"].MachineDataBootstrap.inspect_candidate
+
+    def inspect_wrong_directory(self, selection):
+        candidate = original(self, selection)
+        candidate.normalized_source = source.resolve()
+        return candidate
+
+    monkeypatch.setattr(
+        sys.modules["MachineDataBootstrap"].MachineDataBootstrap,
+        "inspect_candidate",
+        inspect_wrong_directory,
+    )
+    try:
+        runner.run_bootstrap_only(
+            _args(source, repo, machine_data, tmp_path / "result.json", "cancelled")
+        )
+    except runner.BootstrapOnlyError as exc:
+        assert "bound wrapper/local directory" in str(exc)
+    else:
+        raise AssertionError("A wrapper candidate normalized to the wrong root was accepted")
+    assert dialog_type.instance is None
 
 
 def test_destination_and_source_must_be_disjoint(monkeypatch, tmp_path):

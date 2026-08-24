@@ -303,8 +303,14 @@ def run_bootstrap_only(arguments: argparse.Namespace) -> dict[str, Any]:
             "exact-tag upgrade rehearsal source",
         )
         candidate = bootstrap.inspect_candidate(selection)
-        if candidate.normalized_source != source:
-            raise BootstrapOnlyError("Inspected source differs from the bound wrapper.")
+        expected_normalized_source = (source / "local").resolve(strict=True)
+        if (
+            candidate.source_kind is not CandidateSourceKind.OPERATOR_SELECTED_WRAPPER
+            or candidate.normalized_source != expected_normalized_source
+        ):
+            raise BootstrapOnlyError(
+                "Inspected source differs from the bound wrapper/local directory."
+            )
         if not candidate.is_importable:
             raise BootstrapOnlyError("Bound source is not importable.")
         if (

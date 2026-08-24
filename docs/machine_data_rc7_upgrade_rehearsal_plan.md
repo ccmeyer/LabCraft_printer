@@ -27,6 +27,14 @@ because the Pi Git version reports a missing ref as exit 128 unless
 uses Git's quiet exact-ref predicate so an absent target tag passes while a
 present tag or any other command failure remains blocking.
 
+Fresh rc.1 run `8007ee51-bb73-4c89-9e9c-6afc29cd4c17` prepared and updated
+successfully, proving the exact legacy updater path and protected invariants.
+Its cancellation gate then failed before opening a window because the
+bootstrap-only runner compared the migration service's normalized
+`wrapper/local` source with the wrapper directory itself. The run remains
+quarantined at `updated`. The corrected runner binds both the selected wrapper
+kind and its exact normalized `local/` directory before any UI is shown.
+
 For the rc.7 campaign the required source and target bindings are:
 
 | Role | Tag | Peeled commit |
