@@ -50,6 +50,8 @@ struct CoordinatedXySnapshot {
   uint32_t resumeStartRateHz = 0u;
   uint32_t resumeStartArr = 0u;
   uint32_t resumeStartFailures = 0u;
+  uint32_t resumeDriverRearmCount = 0u;
+  uint32_t resumeDriverRearmFailures = 0u;
   uint32_t timer2Interrupts = 0u;
   uint32_t timer7Interrupts = 0u;
   uint32_t plannedEdgeEvents = 0u;
@@ -129,6 +131,7 @@ private:
   void _pauseCoordinatedTask();
   MotionResumeStatus _resumeCoordinatedTask();
   MotionResumeStatus _failCoordinatedResume(CoordinatedStartStatus status);
+  bool _rearmCoordinatedDriversForResume(bool rearmX, bool rearmY);
   void _accumulateCoordinatedSegment();
   bool _cancelCoordinatedTask();
   void _finishCoordinatedHardware(bool aborted,
@@ -179,6 +182,8 @@ private:
   uint32_t _coordinatedResumeStartRateHz = 0u;
   uint32_t _coordinatedResumeStartArr = 0u;
   uint32_t _coordinatedResumeStartFailures = 0u;
+  uint32_t _coordinatedResumeDriverRearmCount = 0u;
+  uint32_t _coordinatedResumeDriverRearmFailures = 0u;
   CoordinatedXyIsrInstrumentation::State _coordinatedTiming{};
 
 };

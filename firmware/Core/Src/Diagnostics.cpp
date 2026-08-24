@@ -2815,12 +2815,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         Stepper* stepperZ = Stepper::stepperZ();
                         Gantry* gantry = Gantry::instance();
                         auto emitSkipped = [&](const char* gate) {
-                          char metrics[160] = {};
+                          char metrics[192] = {};
                           (void)snprintf(
                               metrics,
                               sizeof(metrics),
                               "gate=%s;n=0;hz=0;rs=0;rc=0;hold=0;pl=0;hs=0;"
-                              "ep=0;ar=0;ce=0;xd=0;yd=0;zd=0;en=0;sf=1;to=1",
+                              "ep=0;ar=0;dr=0;df=1;ce=0;xd=0;yd=0;zd=0;"
+                              "en=0;sf=1;to=1",
                               gate);
                           (void)runOne(2106u,
                                        "coord_xy_pause_resume_replan",
@@ -2958,6 +2959,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           uint32_t holdStable = 0u;
                           uint32_t endpoints = 0u;
                           uint32_t arrMatches = 0u;
+                          uint32_t driverRearms = 0u;
+                          uint32_t driverRearmFailures = 0u;
                           uint32_t cleanupEdges = 0u;
                           uint32_t failures = 0u;
                           uint32_t timeouts = 0u;
@@ -3009,6 +3012,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         // the host cadence gate observes real traffic during
                         // both the coordinated and direct motion phases.
                         (void)Comm::resetStatusMetrics();
+                        resumeStatusAfterEmission = true;
                         comm->setStatusPaused(false);
                         const bool xyAnchorReached = moveGantryToWithTimeout(
                             5000, 5000, kXyRateHz, kMoveTimeoutMs);
@@ -3115,12 +3119,20 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               terminal.resumeStartFailures == 0u) {
                             ++xy.arrMatches;
                           }
+                          if (terminal.resumeDriverRearmCount == 1u &&
+                              terminal.resumeDriverRearmFailures == 0u) {
+                            ++xy.driverRearms;
+                          }
+                          xy.driverRearmFailures +=
+                              terminal.resumeDriverRearmFailures;
                           xy.cleanupEdges += terminal.cleanupEdgeEvents;
                           if (!pinsLow || !holdStable || !endpointReached ||
                               terminal.resumeStartRateHz != kResumeRateHz ||
                               terminal.resumeStartArr != kExpectedResumeArr ||
                               terminal.resumeCount != 1u ||
-                              terminal.resumeStartFailures != 0u) {
+                              terminal.resumeStartFailures != 0u ||
+                              terminal.resumeDriverRearmCount != 1u ||
+                              terminal.resumeDriverRearmFailures != 0u) {
                             ++xy.failures;
                             xy.safeToContinue = false;
                             Gantry::cancelXYZMotors();
@@ -3157,6 +3169,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             xy.holdStable == kCaseCount &&
                             xy.endpoints == kCaseCount &&
                             xy.arrMatches == kCaseCount &&
+                            xy.driverRearms == kCaseCount &&
+                            xy.driverRearmFailures == 0u &&
                             xy.cleanupEdges <= kCaseCount &&
                             xDrift <= kHomeDriftLimitSteps &&
                             yDrift <= kHomeDriftLimitSteps && xyEnabled &&
@@ -3172,8 +3186,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             xyMetrics,
                             sizeof(xyMetrics),
                             "n=%lu;hz=%lu;rs=%lu;rc=%lu;hold=%lu;pl=%lu;"
-                            "hs=%lu;ep=%lu;ar=%lu;ce=%lu;xd=%lu;yd=%lu;"
-                            "en=%u;sf=%lu;to=%lu",
+                            "hs=%lu;ep=%lu;ar=%lu;dr=%lu;df=%lu;ce=%lu;"
+                            "xd=%lu;yd=%lu;en=%u;sf=%lu;to=%lu",
                             (unsigned long)xy.attempted,
                             (unsigned long)kXyRateHz,
                             (unsigned long)kResumeRateHz,
@@ -3183,12 +3197,15 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             (unsigned long)xy.holdStable,
                             (unsigned long)xy.endpoints,
                             (unsigned long)xy.arrMatches,
+                            (unsigned long)xy.driverRearms,
+                            (unsigned long)xy.driverRearmFailures,
                             (unsigned long)xy.cleanupEdges,
                             (unsigned long)xDrift,
                             (unsigned long)yDrift,
                             xyEnabled ? 1u : 0u,
                             (unsigned long)xySafetyFailures,
                             (unsigned long)xy.timeouts);
+                        resumeStatusAfterEmission = false;
                         comm->setStatusPaused(true);
                         const bool xyEmitted = runOne(
                             2106u,
@@ -3203,11 +3220,12 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               2107u,
                               "direct_z_pause_resume_replan",
                               false,
-                              "gate=xy_recovery;n=0;hz=30000;rs=3000;rc=0;hold=2000;pl=0;hs=0;ep=0;ar=0;ce=0;zd=0;en=1;sf=1;to=1");
+                              "gate=xy_recovery;n=0;hz=30000;rs=3000;rc=0;hold=2000;pl=0;hs=0;ep=0;ar=0;dr=0;df=1;ce=0;zd=0;en=1;sf=1;to=1");
                           return false;
                         }
 
                         (void)Comm::resetStatusMetrics();
+                        resumeStatusAfterEmission = true;
                         comm->setStatusPaused(false);
                         const bool zAnchorReached = moveAxisToWithTimeout(
                             stepperZ,
@@ -3319,12 +3337,20 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               terminal.resumeStartFailures == 0u) {
                             ++z.arrMatches;
                           }
+                          if (terminal.resumeDriverRearmCount == 1u &&
+                              terminal.resumeDriverRearmFailures == 0u) {
+                            ++z.driverRearms;
+                          }
+                          z.driverRearmFailures +=
+                              terminal.resumeDriverRearmFailures;
                           z.cleanupEdges += terminal.pauseCleanupEdges;
                           if (!pinsLow || !holdStable || !endpointReached ||
                               terminal.resumeStartRateHz != kResumeRateHz ||
                               terminal.resumeStartArr != kExpectedResumeArr ||
                               terminal.resumeCount != 1u ||
-                              terminal.resumeStartFailures != 0u) {
+                              terminal.resumeStartFailures != 0u ||
+                              terminal.resumeDriverRearmCount != 1u ||
+                              terminal.resumeDriverRearmFailures != 0u) {
                             ++z.failures;
                             z.safeToContinue = false;
                             stepperZ->stop();
@@ -3341,6 +3367,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                                 3000u,
                                 kHomeBackoffSteps,
                                 kHomeTimeoutMs);
+                        const Stepper::HomeDiagnosticSnapshot zAfterDiag =
+                            stepperZ->getLastHomeDiagnosticSnapshot();
                         const uint32_t zDrift = zAfterHome
                             ? MotionQualificationMath::absDiffSteps(
                                   zAfter.limitTriggerSteps,
@@ -3355,6 +3383,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             z.holdStable == kCaseCount &&
                             z.endpoints == kCaseCount &&
                             z.arrMatches == kCaseCount &&
+                            z.driverRearms == kCaseCount &&
+                            z.driverRearmFailures == 0u &&
                             z.cleanupEdges <= kCaseCount &&
                             zDrift <= kHomeDriftLimitSteps && zEnabled &&
                             z.failures == 0u && z.timeouts == 0u;
@@ -3363,13 +3393,13 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                               zDrift > kHomeDriftLimitSteps || !zEnabled)
                                  ? 1u
                                  : 0u);
-                        char zMetrics[192] = {};
+                        char zMetrics[224] = {};
                         const int zWritten = snprintf(
                             zMetrics,
                             sizeof(zMetrics),
                             "n=%lu;hz=%lu;rs=%lu;rc=%lu;hold=%lu;pl=%lu;"
-                            "hs=%lu;ep=%lu;ar=%lu;ce=%lu;zd=%lu;en=%u;"
-                            "sf=%lu;to=%lu",
+                            "hs=%lu;ep=%lu;ar=%lu;dr=%lu;df=%lu;ce=%lu;"
+                            "zd=%lu;en=%u;sf=%lu;to=%lu;hp=%u;ho=%u;hm=%lu",
                             (unsigned long)z.attempted,
                             (unsigned long)kZRateHz,
                             (unsigned long)kResumeRateHz,
@@ -3379,11 +3409,17 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             (unsigned long)z.holdStable,
                             (unsigned long)z.endpoints,
                             (unsigned long)z.arrMatches,
+                            (unsigned long)z.driverRearms,
+                            (unsigned long)z.driverRearmFailures,
                             (unsigned long)z.cleanupEdges,
                             (unsigned long)zDrift,
                             zEnabled ? 1u : 0u,
                             (unsigned long)zSafetyFailures,
-                            (unsigned long)z.timeouts);
+                            (unsigned long)z.timeouts,
+                            (unsigned)zAfterDiag.phase,
+                            (unsigned)zAfterDiag.outcome,
+                            (unsigned long)zAfterDiag.moveTimeoutCount);
+                        resumeStatusAfterEmission = false;
                         comm->setStatusPaused(true);
                         const bool zEmitted = runOne(
                             2107u,

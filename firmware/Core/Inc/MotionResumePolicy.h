@@ -10,6 +10,13 @@ namespace MotionResumePolicy {
 // logical motion units per second.
 constexpr uint32_t kResumeStartRateHz = 3000u;
 
+// TMC2208 short-protection flags are cleared by disabling the power stage
+// through ENN. Keep the pulse visible across multiple task/timer intervals,
+// then allow the re-enabled driver the datasheet's bounded StealthChop
+// standstill-tuning interval before issuing the first resumed STEP edge.
+constexpr uint32_t kDriverDisablePulseMs = 2u;
+constexpr uint32_t kDriverPoweredSettleMs = 130u;
+
 inline constexpr uint32_t selectStartRateHz(uint32_t requestedRateHz) {
   if (requestedRateHz == 0u) return kResumeStartRateHz;
   return requestedRateHz < kResumeStartRateHz

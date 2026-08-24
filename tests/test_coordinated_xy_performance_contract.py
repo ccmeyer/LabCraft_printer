@@ -183,6 +183,22 @@ def test_pause_resume_qualification_settles_home_and_opens_status_windows():
     assert suite.count("(void)Comm::resetStatusMetrics();") == 2
     assert suite.count("comm->setStatusPaused(false);") == 2
     assert suite.count("comm->setStatusPaused(true);") == 2
+    assert suite.count("resumeStatusAfterEmission = true;") == 2
+    assert suite.count("resumeStatusAfterEmission = false;") == 2
+
+
+def test_pause_resume_rearms_tmc_drivers_before_fresh_plans():
+    policy = _read("firmware/Core/Inc/MotionResumePolicy.h")
+    stepper = _read("firmware/Core/Src/Stepper.cpp")
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+
+    assert "kDriverDisablePulseMs = 2u" in policy
+    assert "kDriverPoweredSettleMs = 130u" in policy
+    assert "if (!_rearmDriverForResume())" in stepper
+    assert "_rearmCoordinatedDriversForResume(xParticipates, yParticipates)" in gantry
+    assert "resumeDriverRearmCount != 1u" in diagnostics
+    assert "resumeDriverRearmFailures != 0u" in diagnostics
 
 
 def test_production_suite_freezes_geometry_counts_and_strict_evidence():
@@ -521,6 +537,10 @@ def test_active_coordinated_manifests_share_timing_budgets_and_archive_predecess
     assert production["analysis_rules"]["2107"]["metrics"]["hz"]["equals"] == 30000
     assert production["analysis_rules"]["2106"]["metrics"]["rs"]["equals"] == 3000
     assert production["analysis_rules"]["2107"]["metrics"]["rs"]["equals"] == 3000
+    assert production["analysis_rules"]["2106"]["metrics"]["dr"]["equals"] == 6
+    assert production["analysis_rules"]["2107"]["metrics"]["dr"]["equals"] == 6
+    assert production["analysis_rules"]["2106"]["metrics"]["df"]["equals"] == 0
+    assert production["analysis_rules"]["2107"]["metrics"]["df"]["equals"] == 0
     crossing = production["analysis_rules"]["2105"]["metrics"]
     assert crossing["n"]["equals"] == 2
     assert crossing["xb"]["max"] == 50

@@ -4,7 +4,7 @@
   "name": "XY/Z Pause-Resume Fresh Replan",
   "profile": "FULL",
   "lifecycle": "active",
-  "description": "Focused physical qualification of six coordinated XY pause/resume cycles at the 40 kHz application maximum and six direct Z cycles at the 30 kHz application maximum. Every pause holds STEP low and position stable for two seconds, resumes the remaining endpoint from 3 kHz without an enable cycle, and ends with home-drift checks that expose loss of physical motor response.",
+  "description": "Focused physical qualification of six coordinated XY pause/resume cycles at the 40 kHz application maximum and six direct Z cycles at the 30 kHz application maximum. Every pause holds STEP low and position stable for two seconds, performs one bounded TMC ENN rearm with a powered settle, resumes the remaining endpoint from 3 kHz, and ends with home-drift checks that expose loss of physical motor response.",
   "expected_test_ids": [2106, 2107],
   "enforce_expected_test_ids": true,
   "requires_operator_prompts": true,
@@ -14,7 +14,7 @@
     {
       "fixture_id": "motion_pause_resume_envelope_clear",
       "required_for": [2106, 2107],
-      "operator_note": "Confirm non-dispensing test heads are installed, both optical X/Y limits are released, the XY envelope through X=25000/Y=25000 and Z travel through 25000 are clear, the emergency stop is reachable, and all hands are clear. Firmware performs unmeasured settling homes and measured reference homes for XY/Z, runs six two-second paused XY cycles at 40 kHz and six Z cycles at 30 kHz, and re-homes without cycling the motor enable outputs."
+      "operator_note": "Confirm non-dispensing test heads are installed, both optical X/Y limits are released, the XY envelope through X=25000/Y=25000 and Z travel through 25000 are clear, the emergency stop is reachable, and all hands are clear. Firmware performs unmeasured settling homes and measured reference homes for XY/Z, runs six two-second paused XY cycles at 40 kHz and six Z cycles at 30 kHz, performs one bounded ENN rearm and 130 ms powered settle before each fresh resume, and then re-homes."
     }
   ],
   "analysis_rules": {
@@ -31,6 +31,8 @@
         "hs": {"maturity": "acceptance", "equals": 6},
         "ep": {"maturity": "acceptance", "equals": 6},
         "ar": {"maturity": "acceptance", "equals": 6},
+        "dr": {"maturity": "acceptance", "equals": 6},
+        "df": {"maturity": "acceptance", "equals": 0},
         "ce": {"maturity": "acceptance", "max": 6},
         "xd": {"maturity": "acceptance", "max": 25},
         "yd": {"maturity": "acceptance", "max": 25},
@@ -52,6 +54,8 @@
         "hs": {"maturity": "acceptance", "equals": 6},
         "ep": {"maturity": "acceptance", "equals": 6},
         "ar": {"maturity": "acceptance", "equals": 6},
+        "dr": {"maturity": "acceptance", "equals": 6},
+        "df": {"maturity": "acceptance", "equals": 0},
         "ce": {"maturity": "acceptance", "max": 6},
         "zd": {"maturity": "acceptance", "max": 25},
         "en": {"maturity": "acceptance", "equals": 1},

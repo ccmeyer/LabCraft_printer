@@ -2385,7 +2385,8 @@ def test_motion_pause_resume_fixture_stage_is_preauthorizable():
     assert "six XY moves at 40 kHz" in message
     assert "six Z moves at 30 kHz" in message
     assert "3 kHz" in message
-    assert "without cycling motor enable" in message
+    assert "motor-enable rearm" in message
+    assert "130 ms powered settle" in message
 
 
 def test_active_production_selector_is_mutually_exclusive_with_direct_lut(

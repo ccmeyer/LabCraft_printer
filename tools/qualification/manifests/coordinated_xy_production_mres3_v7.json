@@ -4,7 +4,7 @@
   "name": "Production MRES3 Active-Edge Coordination v7",
   "profile": "FULL",
   "lifecycle": "active",
-  "description": "Production qualification for MRES=3 DEDGE active transitions, edge-aware EXTI plus TIM5 X/Y limit confirmation, fresh-plan XY/Z pause-resume at the 40 kHz XY and 30 kHz Z application maxima, and bounded physical X/Y limit crossings.",
+  "description": "Production qualification for MRES=3 DEDGE active transitions, edge-aware EXTI plus TIM5 X/Y limit confirmation, fresh-plan XY/Z pause-resume with bounded TMC ENN rearm at the 40 kHz XY and 30 kHz Z application maxima, and bounded physical X/Y limit crossings.",
   "expected_test_ids": [2087, 2088, 2089, 2090, 2098, 2106, 2107, 2105],
   "enforce_expected_test_ids": true,
   "requires_operator_prompts": true,
@@ -14,7 +14,7 @@
     {
       "fixture_id": "coordinated_xy_production_mres3_envelope_clear",
       "required_for": [2087, 2088, 2089, 2090, 2098, 2106, 2107],
-      "operator_note": "Confirm both limits are released, non-dispensing test heads are installed, the gantry is square, the XY envelope through X=25000/Y=30500 and Z travel through 25000 are clear, and the emergency stop is reachable. Firmware runs the ten-move 40 kHz production row, performs unmeasured settling homes and measured reference homes, then runs six two-second XY pauses at 40 kHz and six Z pauses at 30 kHz with 3 kHz fresh replans and no enable cycle. Stop for contact, abnormal sound, lost squareness, missing motion or home, reset, watchdog evidence, or communication loss."
+      "operator_note": "Confirm both limits are released, non-dispensing test heads are installed, the gantry is square, the XY envelope through X=25000/Y=30500 and Z travel through 25000 are clear, and the emergency stop is reachable. Firmware runs the ten-move 40 kHz production row, performs unmeasured settling homes and measured reference homes, then runs six two-second XY pauses at 40 kHz and six Z pauses at 30 kHz with one bounded ENN rearm, a 130 ms powered settle, and a 3 kHz fresh replan per resume. Stop for contact, abnormal sound, lost squareness, missing motion or home, reset, watchdog evidence, or communication loss."
     },
     {
       "fixture_id": "coordinated_xy_production_mres3_limit_crossings_ready",
@@ -136,6 +136,8 @@
         "hs": {"maturity": "acceptance", "equals": 6},
         "ep": {"maturity": "acceptance", "equals": 6},
         "ar": {"maturity": "acceptance", "equals": 6},
+        "dr": {"maturity": "acceptance", "equals": 6},
+        "df": {"maturity": "acceptance", "equals": 0},
         "ce": {"maturity": "acceptance", "max": 6},
         "xd": {"maturity": "acceptance", "max": 25},
         "yd": {"maturity": "acceptance", "max": 25},
@@ -157,6 +159,8 @@
         "hs": {"maturity": "acceptance", "equals": 6},
         "ep": {"maturity": "acceptance", "equals": 6},
         "ar": {"maturity": "acceptance", "equals": 6},
+        "dr": {"maturity": "acceptance", "equals": 6},
+        "df": {"maturity": "acceptance", "equals": 0},
         "ce": {"maturity": "acceptance", "max": 6},
         "zd": {"maturity": "acceptance", "max": 25},
         "en": {"maturity": "acceptance", "equals": 1},

@@ -3741,8 +3741,9 @@ infrastructure has no failures, and ten clean production moves produce no X/Y
 confirmations. Results `2106` and `2107` run six two-second pause/resume cases
 each at the application maxima (40 kHz coordinated XY and 30 kHz direct Z),
 require STEP-low stable holds, exact 3 kHz fresh-plan starts, endpoints, enabled
-outputs, and at most 25 logical units of post-run home drift without an enable
-cycle. Each axis first performs an unmeasured settling home so the measured
+outputs, exactly one bounded TMC ENN rearm plus a 130 ms powered settle per
+resume, and at most 25 logical units of post-run home drift. Each axis first
+performs an unmeasured settling home so the measured
 reference and post-run homes share the same calibrated coordinate frame.
 Status telemetry is enabled only across the XY and Z motion windows so the
 focused run also provides a real cadence gate. Operator-gated result `2105`

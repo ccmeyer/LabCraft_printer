@@ -673,10 +673,14 @@ def test_production_mres3_v7_rejects_timing_pause_and_limit_regressions():
         (2106, "hz", 39999),
         (2106, "rs", 3001),
         (2106, "hs", 5),
+        (2106, "dr", 5),
+        (2106, "df", 1),
         (2106, "xd", 26),
         (2107, "hz", 40000),
         (2107, "rs", 3001),
         (2107, "pl", 5),
+        (2107, "dr", 5),
+        (2107, "df", 1),
         (2107, "zd", 26),
     ):
         rejected = deepcopy(valid)

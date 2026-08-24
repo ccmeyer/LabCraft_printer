@@ -807,7 +807,8 @@ def _operator_prompt_message(stage: str) -> str:
             "Confirm both limit switches are released, the gantry is square, and the complete "
             "XY/Z motion envelope is clear. Remove all hands before the logical-unit MRES=3 "
             "homes, ten-move row (40 kHz active edges), six two-second XY pauses at 40 kHz, "
-            "six Z pauses at 30 kHz, and bounded post-row homes begin."
+            "six Z pauses at 30 kHz with bounded motor-enable rearms, and bounded post-row "
+            "homes begin."
         )
     if stage == "coordinated_xy_production_mres3_limit_crossings_ready":
         return (
@@ -822,8 +823,9 @@ def _operator_prompt_message(stage: str) -> str:
             "Confirm both optical X/Y limits are released, the XY/Z motion envelope is clear, "
             "non-dispensing test heads are installed, the emergency stop is reachable, and all "
             "hands are clear. The firmware will home XY/Z, pause six XY moves at 40 kHz and six "
-            "Z moves at 30 kHz for two seconds each, resume each from 3 kHz without cycling motor "
-            "enable, and then re-home to check for lost physical position."
+            "Z moves at 30 kHz for two seconds each, perform one bounded motor-enable rearm plus "
+            "a 130 ms powered settle, resume each from 3 kHz, and then re-home to check for lost "
+            "physical position."
         )
     if stage == "coordinated_xy_shallow_edge_envelope_clear":
         return (

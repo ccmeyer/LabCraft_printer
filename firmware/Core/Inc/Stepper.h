@@ -82,6 +82,8 @@ public:
     uint32_t resumeStartArr = 0u;
     uint32_t pauseCleanupEdges = 0u;
     uint32_t resumeStartFailures = 0u;
+    uint32_t resumeDriverRearmCount = 0u;
+    uint32_t resumeDriverRearmFailures = 0u;
     bool direction = true;
     bool movingTowardLimit = false;
     bool limitAssertedAtStart = false;
@@ -230,6 +232,11 @@ public:
     return !_dualDriver ||
            (_enPort2 != nullptr && (_enPort2->ODR & _enPin2) == 0u);
   }
+  bool enableOutputsDeassertedForDiagnostics() const {
+    if (_enPort == nullptr || (_enPort->ODR & _enPin) == 0u) return false;
+    return !_dualDriver ||
+           (_enPort2 != nullptr && (_enPort2->ODR & _enPin2) != 0u);
+  }
 
 
   void configureLimitPin(GPIO_TypeDef* port, uint16_t pin);
@@ -281,6 +288,7 @@ private:
                                              uint32_t targetHz,
                                              uint32_t accelSteps,
                                              uint32_t initialRateHz);
+  bool _rearmDriverForResume();
 
   // hardware bindings
   TIM_HandleTypeDef* _htim      = nullptr;

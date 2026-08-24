@@ -14,6 +14,11 @@ TEST(MotionResumePolicy, StartRateIsCappedAndHonorsSlowerCommands) {
       3000u, MotionResumePolicy::selectStartRateHz(0u));
 }
 
+TEST(MotionResumePolicy, DriverRearmUsesBoundedDisableAndPoweredSettle) {
+  UNSIGNED_LONGS_EQUAL(2u, MotionResumePolicy::kDriverDisablePulseMs);
+  UNSIGNED_LONGS_EQUAL(130u, MotionResumePolicy::kDriverPoweredSettleMs);
+}
+
 TEST(MotionResumePolicy, RemainingMoveUsesWideArithmetic) {
   const auto positive = MotionResumePolicy::remainingMove(-100, 500);
   CHECK_TRUE(positive.valid);

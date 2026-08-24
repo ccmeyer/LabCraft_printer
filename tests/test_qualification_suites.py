@@ -217,6 +217,8 @@ def test_pause_resume_suite_uses_application_maxima_and_fresh_start_gate():
     assert xy["rs"]["equals"] == z["rs"]["equals"] == 3000
     assert xy["hold"]["equals"] == z["hold"]["equals"] == 2000
     assert xy["rc"]["equals"] == z["rc"]["equals"] == 6
+    assert xy["dr"]["equals"] == z["dr"]["equals"] == 6
+    assert xy["df"]["equals"] == z["df"]["equals"] == 0
     assert xy["xd"]["max"] == xy["yd"]["max"] == z["zd"]["max"] == 25
 
 

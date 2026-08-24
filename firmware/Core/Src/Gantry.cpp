@@ -321,6 +321,8 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
     _coordinatedResumeStartRateHz = 0u;
     _coordinatedResumeStartArr = 0u;
     _coordinatedResumeStartFailures = 0u;
+    _coordinatedResumeDriverRearmCount = 0u;
+    _coordinatedResumeDriverRearmFailures = 0u;
     _coordinatedPlan = plan;
     (void)CoordinatedXyExecutor::arm(plan, _coordinatedCursor);
     sx->_targetPos = sx->_pos;
@@ -472,6 +474,8 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
   _coordinatedResumeStartRateHz = 0u;
   _coordinatedResumeStartArr = 0u;
   _coordinatedResumeStartFailures = 0u;
+  _coordinatedResumeDriverRearmCount = 0u;
+  _coordinatedResumeDriverRearmFailures = 0u;
   _coordinatedPlan = plan;
   _coordinatedCursor = executorCursor;
   _coordinatedX = sx;
@@ -1095,6 +1099,43 @@ MotionResumeStatus Gantry::_failCoordinatedResume(
   return MotionResumeStatus::Failed;
 }
 
+bool Gantry::_rearmCoordinatedDriversForResume(bool rearmX, bool rearmY) {
+  Stepper* sx = _coordinatedX;
+  Stepper* sy = _coordinatedY;
+  const bool axesValid = (!rearmX || sx != nullptr) && (!rearmY || sy != nullptr);
+  const bool stepsLow = axesValid &&
+      (!rearmX || sx->stepIsLow()) && (!rearmY || sy->stepIsLow());
+  if (!stepsLow) {
+    if (rearmX && sx != nullptr) sx->disableMotor();
+    if (rearmY && sy != nullptr) sy->disableMotor();
+    ++_coordinatedResumeDriverRearmFailures;
+    return false;
+  }
+
+  if (rearmX) sx->disableMotor();
+  if (rearmY) sy->disableMotor();
+  vTaskDelay(pdMS_TO_TICKS(MotionResumePolicy::kDriverDisablePulseMs));
+  const bool disabled =
+      (!rearmX || sx->enableOutputsDeassertedForDiagnostics()) &&
+      (!rearmY || sy->enableOutputsDeassertedForDiagnostics());
+
+  if (rearmX) sx->enableMotor();
+  if (rearmY) sy->enableMotor();
+  vTaskDelay(pdMS_TO_TICKS(MotionResumePolicy::kDriverPoweredSettleMs));
+  const bool ready = disabled &&
+      (!rearmX || (sx->enableOutputsAssertedForDiagnostics() && sx->stepIsLow())) &&
+      (!rearmY || (sy->enableOutputsAssertedForDiagnostics() && sy->stepIsLow()));
+  if (!ready) {
+    if (rearmX) sx->disableMotor();
+    if (rearmY) sy->disableMotor();
+    ++_coordinatedResumeDriverRearmFailures;
+    return false;
+  }
+
+  ++_coordinatedResumeDriverRearmCount;
+  return true;
+}
+
 MotionResumeStatus Gantry::_resumeCoordinatedTask() {
   Stepper* sx = _coordinatedX;
   Stepper* sy = _coordinatedY;
@@ -1227,6 +1268,14 @@ MotionResumeStatus Gantry::_resumeCoordinatedTask() {
     xEventGroupSetBits(Orchestrator::getDoneEvents(),
                        BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
     return MotionResumeStatus::Ready;
+  }
+
+  if (!_rearmCoordinatedDriversForResume(xParticipates, yParticipates)) {
+    return _failCoordinatedResume(CoordinatedStartStatus::HardwareMismatch);
+  }
+  if (limitBlocksResume(sx, xParticipates, xDirection) ||
+      limitBlocksResume(sy, yParticipates, yDirection)) {
+    return _failCoordinatedResume(CoordinatedStartStatus::LimitAsserted);
   }
 
   if (!gantryCycleCounterReady() ||
@@ -1376,6 +1425,9 @@ CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
   snapshot.resumeStartRateHz = _coordinatedResumeStartRateHz;
   snapshot.resumeStartArr = _coordinatedResumeStartArr;
   snapshot.resumeStartFailures = _coordinatedResumeStartFailures;
+  snapshot.resumeDriverRearmCount = _coordinatedResumeDriverRearmCount;
+  snapshot.resumeDriverRearmFailures =
+      _coordinatedResumeDriverRearmFailures;
   snapshot.timer2Interrupts =
       _coordinatedTimer2Offset + _coordinatedCursor.timerInterrupts;
   snapshot.timer7Interrupts = _coordinatedTim7Interrupts;

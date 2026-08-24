@@ -1555,6 +1555,30 @@ void Stepper::disableMotor() {
   }
 }
 
+bool Stepper::_rearmDriverForResume() {
+  if (!stepIsLow()) {
+    _stepPort->BSRR = static_cast<uint32_t>(_stepPin) << 16u;
+    if (_dualDriver) {
+      _stepPort2->BSRR = static_cast<uint32_t>(_stepPin2) << 16u;
+    }
+    disableMotor();
+    return false;
+  }
+
+  disableMotor();
+  vTaskDelay(pdMS_TO_TICKS(MotionResumePolicy::kDriverDisablePulseMs));
+  const bool disabled = enableOutputsDeassertedForDiagnostics();
+
+  enableMotor();
+  vTaskDelay(pdMS_TO_TICKS(MotionResumePolicy::kDriverPoweredSettleMs));
+  const bool ready = disabled &&
+      enableOutputsAssertedForDiagnostics() && stepIsLow();
+  if (!ready) {
+    disableMotor();
+  }
+  return ready;
+}
+
 void Stepper::pauseMove() {
   if (!_htim || _coordinatedReserved || _togglesRemaining == 0u) return;
   HAL_TIM_Base_Stop_IT(_htim);
@@ -1629,11 +1653,28 @@ Stepper::DirectMoveStartStatus Stepper::resumeMove() {
 	const uint32_t resumeAccel = _lastAccel;
 	const uint32_t resumeStartHz =
 	    MotionResumePolicy::selectStartRateHz(resumeHz);
+	if (!_rearmDriverForResume()) {
+	  DirectStepperProfile::abort(_directProfileState);
+	  taskENTER_CRITICAL();
+	  _directMoveSnapshot = paused;
+	  _directMoveSnapshot.startStatus = DirectMoveStartStatus::Unavailable;
+	  _directMoveSnapshot.state = DirectMoveState::Faulted;
+	  _directMoveSnapshot.terminalReason =
+	      DirectMoveTerminalReason::StartRejected;
+	  _directMoveSnapshot.endPosition = _pos;
+	  ++_directMoveSnapshot.resumeCount;
+	  _directMoveSnapshot.resumeStartRateHz = resumeStartHz;
+	  ++_directMoveSnapshot.resumeStartFailures;
+	  ++_directMoveSnapshot.resumeDriverRearmFailures;
+	  taskEXIT_CRITICAL();
+	  return DirectMoveStartStatus::Unavailable;
+	}
 	DirectStepperProfile::abort(_directProfileState);
 	taskENTER_CRITICAL();
 	_directMoveResumeSnapshot = paused;
 	++_directMoveResumeSnapshot.resumeCount;
 	_directMoveResumeSnapshot.resumeStartRateHz = resumeStartHz;
+	++_directMoveResumeSnapshot.resumeDriverRearmCount;
 	_directMoveResumePending = true;
 	_togglesRemaining = _togglesDone = 0u;
 	_accelToggles = _decelToggles = 0u;
