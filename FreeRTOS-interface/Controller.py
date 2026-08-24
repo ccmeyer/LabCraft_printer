@@ -83,7 +83,8 @@ QUEUE_CLEAR_INTENTS = frozenset(
 QUEUE_CLEAR_BOUNDARY_PROOFS = frozenset(
     {"watermark_reached", "frozen_barrier_retired"}
 )
-PLATE_DOCK_SAFE_Z = 500
+CALIBRATION_TRAVEL_SAFE_Z = 500
+PLATE_DOCK_SAFE_Z = CALIBRATION_TRAVEL_SAFE_Z
 PLATE_DOCK_X_OFFSET = -5000
 PLATE_SEATED_LOCATIONS = {"pause", "plate"}
 APP_UPDATE_QT_ENV_VARS_TO_REMOVE = (
@@ -923,6 +924,7 @@ class Controller(QObject):
     transport_fault_ui_signal = Signal(object)
     machine_workflow_interrupted_signal = Signal(object)
     plate_calibration_state_changed = Signal(object)
+    rack_calibration_state_changed = Signal(object)
     xy_motion_recovery_requested = Signal(object)
     xy_motion_recovery_state_changed = Signal(str)
     experimental_balance_connection_changed = Signal(object)
@@ -1003,6 +1005,7 @@ class Controller(QObject):
         self._configuration_capture_evidence = {}
         self._configuration_recovery_required = False
         self._plate_calibration_session = None
+        self._rack_calibration_session = None
         self.experimental_features = (
             experimental_features or ExperimentalFeatures()
         )
@@ -1156,11 +1159,15 @@ class Controller(QObject):
         self.machine_workflow_interrupted_signal.connect(
             self._on_plate_calibration_workflow_interrupted
         )
+        self.machine_workflow_interrupted_signal.connect(
+            self._on_rack_calibration_workflow_interrupted
+        )
         machine_paused_signal = getattr(
             self.model.machine_model, "machine_paused", None
         )
         if machine_paused_signal is not None:
             machine_paused_signal.connect(self._on_plate_calibration_pause_changed)
+            machine_paused_signal.connect(self._on_rack_calibration_pause_changed)
 
         # self.machine.balance.balance_mass_updated_signal.connect(self.model.calibration_model.update_mass)
         self.machine.all_calibration_droplets_printed.connect(self.start_mass_stabilization_timer)
@@ -1393,6 +1400,7 @@ class Controller(QObject):
         self.machine.update_command_numbers(*self.model.machine_model.get_command_numbers())
         self._advance_position_reconciliation()
         self._advance_plate_calibration_session()
+        self._advance_rack_calibration_session()
     
     def update_volumes_in_view(self):
         """Update the volume in the view."""
@@ -6536,18 +6544,26 @@ class Controller(QObject):
 
     def _plate_calibration_motion_is_blocked(self):
         session = self._plate_calibration_active_session()
-        if session is None:
-            return False
-        return getattr(self, "_plate_calibration_internal_motion_token", None) != session.get(
-            "session_token"
-        )
+        if session is not None:
+            return getattr(
+                self, "_plate_calibration_internal_motion_token", None
+            ) != session.get("session_token")
+        rack_session = self._rack_calibration_active_session()
+        if rack_session is not None:
+            return getattr(
+                self, "_rack_calibration_internal_motion_token", None
+            ) != rack_session.get("session_token")
+        return False
 
     def _reject_conflicting_plate_calibration_motion(self):
         if not self._plate_calibration_motion_is_blocked():
             return False
+        rack_active = self._rack_calibration_active_session() is not None
+        title = "Rack Calibration Active" if rack_active else "Plate Calibration Active"
+        workflow = "rack" if rack_active else "plate"
         self.error_occurred_signal.emit(
-            "Plate Calibration Active",
-            "Other motion is blocked while the guarded plate-calibration session is active.",
+            title,
+            f"Other motion is blocked while the guarded {workflow}-calibration session is active.",
         )
         return True
 
@@ -6559,6 +6575,15 @@ class Controller(QObject):
             yield
         finally:
             self._plate_calibration_internal_motion_token = previous
+
+    @contextmanager
+    def _rack_calibration_motion_scope(self, session_token):
+        previous = getattr(self, "_rack_calibration_internal_motion_token", None)
+        self._rack_calibration_internal_motion_token = session_token
+        try:
+            yield
+        finally:
+            self._rack_calibration_internal_motion_token = previous
 
     def set_relative_X(self, x,manual=False,handler=None,override=False):
         """Set relative X using the firmware-representable endpoint."""
@@ -7417,25 +7442,27 @@ class Controller(QObject):
         }
         return copy.deepcopy(self._position_reconciliation)
 
-    def _begin_position_reconciliation(self):
-        """Wait for a complete post-drain position cycle before capture."""
-
-        motion_endpoint = copy.deepcopy(
-            getattr(self, "_pending_motion_endpoint_evidence", None)
-        )
-        self._pending_motion_endpoint_evidence = None
-        if getattr(self, "configuration_safety_guard", None) is None:
-            self.update_expected_with_current()
-            return
+    def _start_position_reconciliation(
+        self,
+        *,
+        reason,
+        expected_position=None,
+        motion_endpoint=None,
+    ):
+        """Start one all-axis telemetry barrier for an exact expected endpoint."""
 
         now = self._position_reconciliation_now()
         timeout_ms = self._position_reconciliation_timeout_ms()
         telemetry = self._position_reconciliation_snapshot(now_monotonic=now) or {}
         axes = telemetry.get("axes", {}) if isinstance(telemetry, dict) else {}
         position = self.model.machine_model.get_current_position_dict_capital()
+        expected = expected_position or self.expected_position
+        expected = {
+            axis: int(expected[axis]) for axis in self._position_axes()
+        }
         self._position_reconciliation = {
             "state": "pending",
-            "reason": "command_queue_drained",
+            "reason": str(reason),
             "started_monotonic": now,
             "deadline_monotonic": now + (timeout_ms / 1000.0),
             "telemetry_max_age_ms": timeout_ms,
@@ -7448,13 +7475,34 @@ class Controller(QObject):
                 axis: int((axes.get(axis) or {}).get("generation", 0))
                 for axis in self._position_axes()
             },
-            "expected_position": copy.deepcopy(self.expected_position),
+            "expected_position": copy.deepcopy(expected),
             "reported_position_at_drain": {
                 axis: int(position[axis]) for axis in self._position_axes()
             },
         }
         if motion_endpoint is not None:
-            self._position_reconciliation["motion_endpoint"] = motion_endpoint
+            self._position_reconciliation["motion_endpoint"] = copy.deepcopy(
+                motion_endpoint
+            )
+        return copy.deepcopy(self._position_reconciliation)
+
+    def _begin_position_reconciliation(self):
+        """Wait for a complete post-drain position cycle before capture."""
+
+        motion_endpoint = copy.deepcopy(
+            getattr(self, "_pending_motion_endpoint_evidence", None)
+        )
+        self._pending_motion_endpoint_evidence = None
+        if getattr(self, "configuration_safety_guard", None) is None:
+            self.update_expected_with_current()
+            return
+
+        record = self._start_position_reconciliation(
+            reason="command_queue_drained",
+            expected_position=self.expected_position,
+            motion_endpoint=motion_endpoint,
+        )
+        now = record["started_monotonic"]
         session = getattr(self, "_plate_calibration_session", None)
         if (
             isinstance(session, dict)
@@ -7464,6 +7512,15 @@ class Controller(QObject):
             session["awaiting_queue_drain"] = False
             session["reconciliation_started_monotonic"] = now
             self._advance_plate_calibration_session(now_monotonic=now)
+        rack_session = getattr(self, "_rack_calibration_session", None)
+        if (
+            isinstance(rack_session, dict)
+            and rack_session.get("state") == "reconciling"
+            and rack_session.get("awaiting_queue_drain")
+        ):
+            rack_session["awaiting_queue_drain"] = False
+            rack_session["reconciliation_started_monotonic"] = now
+            self._advance_rack_calibration_session(now_monotonic=now)
 
     def _advance_position_reconciliation(self, *, now_monotonic=None):
         record = getattr(self, "_position_reconciliation", None)
@@ -7746,6 +7803,11 @@ class Controller(QObject):
                 "plate_calibration_already_active",
                 "A plate calibration is already active.",
             )
+        if self._rack_calibration_active_session() is not None:
+            return self._plate_calibration_fail_preflight(
+                "rack_calibration_active",
+                "Finish or cancel the rack calibration before calibrating the plate.",
+            )
 
         machine_model = self.model.machine_model
         if not machine_model.is_connected():
@@ -7781,13 +7843,6 @@ class Controller(QObject):
                 "starting plate calibration.",
             )
 
-        readiness = self._configuration_capture_readiness()
-        if not readiness.get("ready"):
-            reasons = ", ".join(readiness.get("reason_codes") or ["machine_not_ready"])
-            return self._plate_calibration_fail_preflight(
-                "machine_not_ready", f"Machine position is not ready for calibration: {reasons}."
-            )
-
         rack_model = getattr(self.model, "rack_model", None)
         head_getter = getattr(rack_model, "get_gripper_printer_head", None)
         head = head_getter() if callable(head_getter) else getattr(
@@ -7798,6 +7853,13 @@ class Controller(QObject):
             return self._plate_calibration_fail_preflight(
                 "calibration_head_required",
                 "Load the calibration printer head before calibrating the plate.",
+            )
+
+        readiness = self._configuration_capture_readiness()
+        if not readiness.get("ready"):
+            reasons = ", ".join(readiness.get("reason_codes") or ["machine_not_ready"])
+            return self._plate_calibration_fail_preflight(
+                "machine_not_ready", f"Machine position is not ready for calibration: {reasons}."
             )
 
         service = getattr(self, "configuration_transactions", None)
@@ -8267,6 +8329,687 @@ class Controller(QObject):
         if session is None or session.get("state") in {"staging", "reconciling"}:
             return False
         return self.finish_plate_calibration_session(
+            session_token, accepted=False
+        )
+
+    @staticmethod
+    def _rack_calibration_points():
+        return ("rack_position_Left", "rack_position_Right")
+
+    @staticmethod
+    def _rack_calibration_terminal_states():
+        return {"failed", "cancelled"}
+
+    def _rack_calibration_session_snapshot(self):
+        session = getattr(self, "_rack_calibration_session", None)
+        if not isinstance(session, dict):
+            return {
+                "session_token": None,
+                "state": "idle",
+                "target_key": None,
+                "target_state": None,
+                "manual_first": False,
+                "expected_endpoint": None,
+                "failure_reason": None,
+            }
+        public_keys = (
+            "session_token",
+            "state",
+            "phase",
+            "machine_uuid",
+            "target_key",
+            "target_state",
+            "manual_first",
+            "expected_endpoint",
+            "expected_point",
+            "next_point_index",
+            "failure_reason",
+        )
+        return {
+            key: copy.deepcopy(session.get(key))
+            for key in public_keys
+        }
+
+    def _emit_rack_calibration_state(self):
+        snapshot = self._rack_calibration_session_snapshot()
+        self._emit_optional("rack_calibration_state_changed", snapshot)
+        return snapshot
+
+    def _set_rack_calibration_state(self, state, **updates):
+        session = getattr(self, "_rack_calibration_session", None)
+        if not isinstance(session, dict):
+            return self._rack_calibration_session_snapshot()
+        session.update(copy.deepcopy(updates))
+        session["state"] = str(state)
+        return self._emit_rack_calibration_state()
+
+    def _rack_calibration_active_session(self, session_token=None):
+        session = getattr(self, "_rack_calibration_session", None)
+        if not isinstance(session, dict):
+            return None
+        if session.get("state") in self._rack_calibration_terminal_states():
+            return None
+        if session_token is not None and session.get("session_token") != session_token:
+            return None
+        return session
+
+    def _fail_rack_calibration_session(self, reason, *, notify=True):
+        session = getattr(self, "_rack_calibration_session", None)
+        if not isinstance(session, dict):
+            return False
+        if session.get("state") in self._rack_calibration_terminal_states():
+            return False
+        reason = str(reason or "rack_calibration_failed")
+        try:
+            self.model.rack_model.discard_temp_calibrations()
+        except Exception:
+            pass
+        self.discard_configuration_capture_evidence("rack_calibration")
+        self._set_rack_calibration_state(
+            "failed",
+            failure_reason=reason,
+            expected_endpoint=None,
+            awaiting_queue_drain=False,
+        )
+        if notify:
+            self.error_occurred_signal.emit(
+                "Rack Calibration Stopped",
+                "Rack calibration stopped safely. No calibration was saved. "
+                f"Start it again after resolving: {reason}.",
+            )
+        return False
+
+    def _on_rack_calibration_workflow_interrupted(self, payload):
+        session = self._rack_calibration_active_session()
+        if session is None:
+            return
+        reason = payload.get("reason") if isinstance(payload, dict) else payload
+        self._fail_rack_calibration_session(
+            f"workflow_interrupted:{reason or 'unknown'}",
+            notify=False,
+        )
+
+    def _on_rack_calibration_pause_changed(self):
+        if not bool(getattr(self.model.machine_model, "paused", False)):
+            return
+        self._fail_rack_calibration_session("machine_paused", notify=False)
+
+    @staticmethod
+    def _rack_calibration_fail_preflight(reason_code, message):
+        return {
+            "allowed": False,
+            "reason_code": str(reason_code),
+            "message": str(message),
+            "state": "idle",
+        }
+
+    def rack_calibration_entry_preflight(self):
+        """Inspect governed rack and machine state without issuing motion."""
+
+        if self._rack_calibration_active_session() is not None:
+            return self._rack_calibration_fail_preflight(
+                "rack_calibration_already_active",
+                "A rack calibration is already active.",
+            )
+        if self._plate_calibration_active_session() is not None:
+            return self._rack_calibration_fail_preflight(
+                "plate_calibration_active",
+                "Finish or cancel the plate calibration before calibrating the rack.",
+            )
+
+        machine_model = self.model.machine_model
+        if not machine_model.is_connected():
+            return self._rack_calibration_fail_preflight(
+                "not_connected", "Connect to the machine before calibrating the rack."
+            )
+        if not machine_model.motors_are_enabled() or not machine_model.motors_are_homed():
+            return self._rack_calibration_fail_preflight(
+                "motors_not_ready", "Enable and home the motors before calibrating the rack."
+            )
+        if bool(getattr(machine_model, "paused", False)) or bool(
+            getattr(machine_model, "transport_paused", False)
+        ):
+            return self._rack_calibration_fail_preflight(
+                "motion_paused", "Resume or recover the motion system before calibrating the rack."
+            )
+        if not self.check_if_all_completed() or bool(machine_model.is_busy()):
+            return self._rack_calibration_fail_preflight(
+                "command_queue_not_idle", "Wait for the command queue to become idle."
+            )
+        origin = str(getattr(self, "expected_location", None) or "").strip().casefold()
+        supported_origin = origin in {
+            "home",
+            "loading",
+            "camera",
+            "plate",
+            "pause",
+            "rack_calibration",
+        } or origin.startswith("slot-")
+        if not supported_origin:
+            return self._rack_calibration_fail_preflight(
+                "unsupported_rack_entry_origin",
+                "Move through a known Home, rack-slot, Camera, or plate route before "
+                "starting rack calibration.",
+            )
+
+        rack_model = getattr(self.model, "rack_model", None)
+        head_getter = getattr(rack_model, "get_gripper_printer_head", None)
+        head = head_getter() if callable(head_getter) else getattr(
+            rack_model, "gripper_printer_head", None
+        )
+        is_calibration_chip = getattr(head, "is_calibration_chip", None)
+        if head is None or not callable(is_calibration_chip) or not is_calibration_chip():
+            return self._rack_calibration_fail_preflight(
+                "calibration_head_required",
+                "Load the calibration printer head before calibrating the rack.",
+            )
+
+        readiness = self._configuration_capture_readiness()
+        if not readiness.get("ready"):
+            reasons = ", ".join(readiness.get("reason_codes") or ["machine_not_ready"])
+            return self._rack_calibration_fail_preflight(
+                "machine_not_ready", f"Machine position is not ready for calibration: {reasons}."
+            )
+
+        service = getattr(self, "configuration_transactions", None)
+        guard = getattr(self, "configuration_safety_guard", None)
+        paths = getattr(self, "machine_data_paths", None)
+        if service is None or guard is None or not getattr(paths, "machine_uuid", None):
+            return self._rack_calibration_fail_preflight(
+                "configuration_safety_unavailable",
+                "The governed machine-data safety service is unavailable.",
+            )
+
+        try:
+            documents = read_governed_documents(service.paths)
+            guard.validate_active_documents(documents)
+            locations = documents["Locations.json"]
+            normalized = {
+                point_name: {
+                    axis: int(locations[point_name][axis])
+                    for axis in self._position_axes()
+                }
+                for point_name in self._rack_calibration_points()
+            }
+            target_value = {
+                "Left": copy.deepcopy(normalized["rack_position_Left"]),
+                "Right": copy.deepcopy(normalized["rack_position_Right"]),
+            }
+            state = service.refresh(allow_pending=False)
+        except Exception as exc:
+            return self._rack_calibration_fail_preflight(
+                "rack_configuration_invalid",
+                f"The rack configuration is not safe to use: {exc}",
+            )
+
+        target_key = "rack:primary"
+        authorization = dict(state.authorization.get(target_key) or {})
+        if not authorization:
+            return self._rack_calibration_fail_preflight(
+                "rack_authorization_missing",
+                "Authorization state is missing for rack:primary.",
+            )
+        value_sha256 = canonical_value_sha256(target_value)
+        if authorization.get("value_sha256") != value_sha256:
+            return self._rack_calibration_fail_preflight(
+                "rack_authorization_value_mismatch",
+                "The rack coordinates differ from their authorization record.",
+            )
+        target_state = str(authorization.get("state") or "")
+        return {
+            "allowed": True,
+            "reason_code": "ready",
+            "message": "Rack calibration entry is ready.",
+            "state": "idle",
+            "machine_uuid": paths.machine_uuid,
+            "trust_epoch": readiness.get("trust_epoch"),
+            "target_key": target_key,
+            "target_state": target_state,
+            "verified": target_state in CURRENT_VERIFIED_STATES,
+            "initial_calibrations": normalized,
+            "initial_value_sha256": value_sha256,
+        }
+
+    def _rack_calibration_session_invariants(self, session):
+        paths = getattr(self, "machine_data_paths", None)
+        if getattr(paths, "machine_uuid", None) != session.get("machine_uuid"):
+            return False, "authorized_machine_changed"
+        machine_model = self.model.machine_model
+        if not machine_model.is_connected():
+            return False, "machine_disconnected"
+        if not machine_model.motors_are_enabled() or not machine_model.motors_are_homed():
+            return False, "motors_not_ready"
+        telemetry = self._position_reconciliation_snapshot()
+        if not isinstance(telemetry, dict):
+            return False, "position_telemetry_unavailable"
+        if telemetry.get("trust_epoch") != session.get("trust_epoch"):
+            return False, "motion_trust_epoch_changed"
+        rack_model = self.model.rack_model
+        head_getter = getattr(rack_model, "get_gripper_printer_head", None)
+        head = head_getter() if callable(head_getter) else getattr(
+            rack_model, "gripper_printer_head", None
+        )
+        is_calibration_chip = getattr(head, "is_calibration_chip", None)
+        if head is None or not callable(is_calibration_chip) or not is_calibration_chip():
+            return False, "calibration_head_changed"
+        try:
+            calibrations = {
+                point_name: {
+                    axis: int(rack_model.get_all_current_rack_calibrations()[point_name][axis])
+                    for axis in self._position_axes()
+                }
+                for point_name in self._rack_calibration_points()
+            }
+            target_value = {
+                "Left": calibrations["rack_position_Left"],
+                "Right": calibrations["rack_position_Right"],
+            }
+        except Exception:
+            return False, "active_rack_configuration_invalid"
+        if canonical_value_sha256(target_value) != session.get("initial_value_sha256"):
+            return False, "active_rack_coordinates_changed"
+        return True, ""
+
+    @staticmethod
+    def _rack_clearance_position(position, *, z=None):
+        return {
+            "X": int(position["X"]) + 2500,
+            "Y": int(position["Y"]),
+            "Z": int(position["Z"] if z is None else z),
+        }
+
+    def begin_rack_calibration_entry(self, *, manual_first):
+        """Queue the guarded rack entry route and return its session snapshot."""
+
+        preflight = self.rack_calibration_entry_preflight()
+        if not preflight.get("allowed"):
+            self.error_occurred_signal.emit(
+                "Rack Calibration Not Started", preflight.get("message", "Preflight failed.")
+            )
+            return False
+        manual_first = bool(manual_first)
+        if preflight["verified"] and manual_first:
+            self.error_occurred_signal.emit(
+                "Rack Calibration Not Started",
+                "A verified rack must use its guarded automatic first-anchor approach.",
+            )
+            return False
+        if not preflight["verified"] and not manual_first:
+            self.error_occurred_signal.emit(
+                "Rack Calibration Not Started",
+                "An unverified rack may only be calibrated from safe height.",
+            )
+            return False
+
+        token = str(uuid.uuid4())
+        left = copy.deepcopy(preflight["initial_calibrations"]["rack_position_Left"])
+        clearance = self._rack_clearance_position(
+            left, z=CALIBRATION_TRAVEL_SAFE_Z
+        )
+        endpoint = clearance if manual_first else left
+        self._rack_calibration_session = {
+            "session_token": token,
+            "state": "staging",
+            "phase": "entry",
+            "machine_uuid": preflight["machine_uuid"],
+            "trust_epoch": preflight["trust_epoch"],
+            "target_key": preflight["target_key"],
+            "target_state": preflight["target_state"],
+            "manual_first": manual_first,
+            "initial_calibrations": copy.deepcopy(preflight["initial_calibrations"]),
+            "initial_value_sha256": preflight["initial_value_sha256"],
+            "captured_points": {},
+            "next_point_index": 0,
+            "expected_point": "rack_position_Left",
+            "expected_endpoint": copy.deepcopy(endpoint),
+            "failure_reason": None,
+            "awaiting_queue_drain": False,
+            "reconciliation_started_monotonic": None,
+        }
+        self._emit_rack_calibration_state()
+
+        with self._rack_calibration_motion_scope(token):
+            if self.set_absolute_Z(CALIBRATION_TRAVEL_SAFE_Z, override=False) is False:
+                return self._fail_rack_calibration_session("safe_z_rejected")
+            if manual_first:
+                queued = self.set_absolute_XY(
+                    clearance["X"],
+                    clearance["Y"],
+                    override=False,
+                    handler=lambda token=token: self._rack_calibration_motion_completed(token),
+                )
+            else:
+                if self.set_absolute_XY(
+                    clearance["X"], clearance["Y"], override=False
+                ) is False:
+                    return self._fail_rack_calibration_session("rack_clearance_xy_rejected")
+                if self.set_absolute_Z(left["Z"], override=True) is False:
+                    return self._fail_rack_calibration_session("rack_clearance_descent_rejected")
+                queued = self.set_absolute_XY(
+                    left["X"],
+                    left["Y"],
+                    override=True,
+                    handler=lambda token=token: self._rack_calibration_motion_completed(token),
+                )
+        if queued is False:
+            return self._fail_rack_calibration_session("rack_entry_endpoint_rejected")
+        self._rack_calibration_session["expected_endpoint"] = copy.deepcopy(
+            self.expected_position
+        )
+        return self._rack_calibration_session_snapshot()
+
+    def _rack_calibration_motion_completed(self, session_token):
+        session = self._rack_calibration_active_session(session_token)
+        if session is None or session.get("state") != "staging":
+            return False
+        self._set_rack_calibration_state(
+            "reconciling",
+            awaiting_queue_drain=True,
+            reconciliation_started_monotonic=None,
+        )
+        timeout_ms = self._position_reconciliation_timeout_ms()
+        QtCore.QTimer.singleShot(
+            timeout_ms + 25,
+            lambda token=session_token: self._rack_calibration_timeout_check(token),
+        )
+        return True
+
+    def _rack_calibration_timeout_check(self, session_token):
+        session = self._rack_calibration_active_session(session_token)
+        if session is None or session.get("state") != "reconciling":
+            return
+        self._advance_rack_calibration_session()
+
+    def _advance_rack_calibration_session(self, *, now_monotonic=None):
+        session = self._rack_calibration_active_session()
+        if session is None or session.get("state") != "reconciling":
+            return self._rack_calibration_session_snapshot()
+        if session.get("awaiting_queue_drain"):
+            return self._rack_calibration_session_snapshot()
+
+        valid, reason = self._rack_calibration_session_invariants(session)
+        if not valid:
+            self._fail_rack_calibration_session(reason)
+            return self._rack_calibration_session_snapshot()
+        reconciliation = self._advance_position_reconciliation(
+            now_monotonic=now_monotonic
+        )
+        state = reconciliation.get("state")
+        if state == "pending":
+            return self._rack_calibration_session_snapshot()
+        if state == "timed_out":
+            self._fail_rack_calibration_session("position_reconciliation_timeout")
+            return self._rack_calibration_session_snapshot()
+        if state == "trust_changed":
+            self._fail_rack_calibration_session("position_reconciliation_trust_changed")
+            return self._rack_calibration_session_snapshot()
+        if state != "settled":
+            self._fail_rack_calibration_session("expected_position_mismatch")
+            return self._rack_calibration_session_snapshot()
+        if reconciliation.get("expected_position") != session.get("expected_endpoint"):
+            self._fail_rack_calibration_session("stale_motion_completion")
+            return self._rack_calibration_session_snapshot()
+
+        readiness = self._configuration_capture_readiness()
+        if not readiness.get("ready"):
+            reasons = readiness.get("reason_codes") or ["position_not_ready"]
+            if "position_reconciliation_pending" in reasons:
+                return self._rack_calibration_session_snapshot()
+            self._fail_rack_calibration_session(";".join(reasons))
+            return self._rack_calibration_session_snapshot()
+        if readiness.get("captured_position") != session.get("expected_endpoint"):
+            self._fail_rack_calibration_session("expected_position_mismatch")
+            return self._rack_calibration_session_snapshot()
+
+        phase = session.get("phase")
+        if phase == "entry":
+            self.expected_location = "rack_calibration"
+            ready_state = "manual_first_point" if session.get("manual_first") else "automatic_points"
+        elif phase in {"point", "jog"}:
+            ready_state = str(session.get("resume_state") or "automatic_points")
+        elif phase == "final_lift":
+            ready_state = "complete"
+        else:
+            self._fail_rack_calibration_session("invalid_calibration_phase")
+            return self._rack_calibration_session_snapshot()
+        return self._set_rack_calibration_state(
+            ready_state,
+            awaiting_queue_drain=False,
+            reconciliation_started_monotonic=None,
+        )
+
+    def _require_rack_calibration_ready_session(self, session_token):
+        session = self._rack_calibration_active_session(session_token)
+        if session is None or session.get("state") not in {
+            "manual_first_point",
+            "automatic_points",
+        }:
+            return None
+        valid, reason = self._rack_calibration_session_invariants(session)
+        if not valid:
+            self._fail_rack_calibration_session(reason)
+            return None
+        if not self.check_if_all_completed() or bool(self.model.machine_model.is_busy()):
+            return None
+        return session
+
+    def jog_rack_calibration(self, session_token, x=0, y=0, z=0):
+        """Queue one session-bound rack jog and reconcile before capture."""
+
+        session = self._require_rack_calibration_ready_session(session_token)
+        deltas = {"X": int(x), "Y": int(y), "Z": int(z)}
+        if session is None or sum(value != 0 for value in deltas.values()) != 1:
+            return False
+        resume_state = session["state"]
+        self._set_rack_calibration_state(
+            "staging", phase="jog", resume_state=resume_state
+        )
+        with self._rack_calibration_motion_scope(session_token):
+            queued = self.set_relative_coordinates(
+                deltas["X"],
+                deltas["Y"],
+                deltas["Z"],
+                manual=True,
+                override=True,
+                handler=lambda token=session_token: self._rack_calibration_motion_completed(token),
+            )
+        if queued is False:
+            return self._fail_rack_calibration_session("manual_jog_rejected")
+        session["expected_endpoint"] = copy.deepcopy(self.expected_position)
+        return True
+
+    def _predicted_rack_calibration_point(self, session, point_name):
+        initial = session["initial_calibrations"]
+        captures = session["captured_points"]
+        if point_name not in initial or not captures:
+            return None
+        totals = {axis: 0 for axis in self._position_axes()}
+        for captured_name, captured in captures.items():
+            for axis in self._position_axes():
+                totals[axis] += int(captured[axis]) - int(initial[captured_name][axis])
+        count = len(captures)
+        return {
+            axis: int(initial[point_name][axis]) + int(totals[axis] / count)
+            for axis in self._position_axes()
+        }
+
+    def _queue_rack_transition(self, session_token, *, departure, target, final_handler):
+        departure_clearance = self._rack_clearance_position(departure)
+        target_clearance = self._rack_clearance_position(
+            target, z=CALIBRATION_TRAVEL_SAFE_Z
+        )
+        with self._rack_calibration_motion_scope(session_token):
+            if self.set_absolute_XY(
+                departure_clearance["X"], departure_clearance["Y"], override=True
+            ) is False:
+                return False, "rack_departure_rejected"
+            if self.set_absolute_Z(CALIBRATION_TRAVEL_SAFE_Z, override=False) is False:
+                return False, "safe_z_rejected"
+            if self.set_absolute_XY(
+                target_clearance["X"], target_clearance["Y"], override=False
+            ) is False:
+                return False, "rack_traverse_rejected"
+            if self.set_absolute_Z(target["Z"], override=True) is False:
+                return False, "rack_clearance_descent_rejected"
+            if self.set_absolute_XY(
+                target["X"],
+                target["Y"],
+                override=True,
+                handler=final_handler,
+            ) is False:
+                return False, "rack_approach_rejected"
+        return True, ""
+
+    def capture_and_advance_rack_calibration(self, session_token, point_name):
+        """Capture one rack anchor and approach the next anchor safely."""
+
+        session = self._require_rack_calibration_ready_session(session_token)
+        point_name = str(point_name or "")
+        points = self._rack_calibration_points()
+        if session is None or session.get("expected_point") != point_name:
+            return False
+        point_index = int(session.get("next_point_index", 0))
+        if point_index >= len(points) or points[point_index] != point_name:
+            return False
+
+        captured = self.capture_configuration_point(
+            point_name, workflow="rack_calibration"
+        )
+        if captured is False:
+            return False
+        captured = {
+            axis: int(captured[axis]) for axis in self._position_axes()
+        }
+        session["captured_points"][point_name] = copy.deepcopy(captured)
+        self.model.rack_model.set_calibration_position(point_name, captured)
+
+        next_index = point_index + 1
+        if next_index < len(points):
+            next_name = points[next_index]
+            target = self._predicted_rack_calibration_point(session, next_name)
+            if target is None:
+                return self._fail_rack_calibration_session("next_anchor_unavailable")
+            self._set_rack_calibration_state(
+                "staging",
+                phase="point",
+                resume_state="automatic_points",
+                expected_point=next_name,
+                next_point_index=next_index,
+                expected_endpoint=copy.deepcopy(target),
+            )
+            queued, reason = self._queue_rack_transition(
+                session_token,
+                departure=captured,
+                target=target,
+                final_handler=lambda token=session_token: self._rack_calibration_motion_completed(token),
+            )
+            if not queued:
+                return self._fail_rack_calibration_session(reason)
+            session["expected_endpoint"] = copy.deepcopy(self.expected_position)
+            return True
+
+        clearance = self._rack_clearance_position(captured)
+        endpoint = {
+            "X": clearance["X"],
+            "Y": clearance["Y"],
+            "Z": CALIBRATION_TRAVEL_SAFE_Z,
+        }
+        self._set_rack_calibration_state(
+            "staging",
+            phase="final_lift",
+            next_point_index=len(points),
+            expected_point=None,
+            expected_endpoint=endpoint,
+        )
+        with self._rack_calibration_motion_scope(session_token):
+            if self.set_absolute_XY(
+                clearance["X"], clearance["Y"], override=True
+            ) is False:
+                return self._fail_rack_calibration_session("rack_departure_rejected")
+            if self.set_absolute_Z(
+                CALIBRATION_TRAVEL_SAFE_Z,
+                override=False,
+                handler=lambda token=session_token: self._rack_calibration_motion_completed(token),
+            ) is False:
+                return self._fail_rack_calibration_session("final_lift_rejected")
+        session["expected_endpoint"] = copy.deepcopy(self.expected_position)
+        return True
+
+    def move_rack_calibration_to_point(self, session_token, point_name):
+        """Safely revisit one captured rack anchor within the active session."""
+
+        session = self._require_rack_calibration_ready_session(session_token)
+        point_name = str(point_name or "")
+        target = copy.deepcopy((session or {}).get("captured_points", {}).get(point_name))
+        if session is None or target is None:
+            return False
+        points = self._rack_calibration_points()
+        point_index = points.index(point_name)
+        current = self.model.machine_model.get_current_position_dict_capital()
+        current = {axis: int(current[axis]) for axis in self._position_axes()}
+        for obsolete_name in points[point_index:]:
+            session["captured_points"].pop(obsolete_name, None)
+            try:
+                self.model.rack_model.temp_calibration_data.pop(obsolete_name, None)
+            except Exception:
+                pass
+            self._configuration_capture_evidence.pop(
+                ("rack_calibration", obsolete_name), None
+            )
+        self._set_rack_calibration_state(
+            "staging",
+            phase="point",
+            resume_state=(
+                "manual_first_point"
+                if point_index == 0 and session.get("manual_first")
+                else "automatic_points"
+            ),
+            expected_point=point_name,
+            next_point_index=point_index,
+            expected_endpoint=copy.deepcopy(target),
+        )
+        queued, reason = self._queue_rack_transition(
+            session_token,
+            departure=current,
+            target=target,
+            final_handler=lambda token=session_token: self._rack_calibration_motion_completed(token),
+        )
+        if not queued:
+            return self._fail_rack_calibration_session(reason)
+        session["expected_endpoint"] = copy.deepcopy(self.expected_position)
+        return True
+
+    def finish_rack_calibration_session(self, session_token, *, accepted):
+        session = getattr(self, "_rack_calibration_session", None)
+        if not isinstance(session, dict) or session.get("session_token") != session_token:
+            return False
+        if accepted and session.get("state") != "complete":
+            return False
+        if not accepted:
+            try:
+                self.model.rack_model.discard_temp_calibrations()
+            except Exception:
+                pass
+            self.discard_configuration_capture_evidence("rack_calibration")
+            if session.get("state") != "failed":
+                self._set_rack_calibration_state(
+                    "cancelled", failure_reason="operator_cancelled"
+                )
+        snapshot = self._rack_calibration_session_snapshot()
+        self._rack_calibration_session = None
+        self._emit_optional(
+            "rack_calibration_state_changed",
+            {**snapshot, "state": snapshot["state"]},
+        )
+        return True
+
+    def cancel_rack_calibration_entry(self, session_token):
+        """Cancel an idle rack dialog without clearing active motion."""
+
+        session = self._rack_calibration_active_session(session_token)
+        if session is None or session.get("state") in {"staging", "reconciling"}:
+            return False
+        return self.finish_rack_calibration_session(
             session_token, accepted=False
         )
 
@@ -9010,6 +9753,16 @@ class Controller(QObject):
             self.expected_location = self.model.machine_model.get_current_location()
         except Exception:
             self.expected_location = "Home"
+        self._pending_motion_endpoint_evidence = None
+        if getattr(self, "configuration_safety_guard", None) is None:
+            self._settle_position_reconciliation(
+                reason="homing_completed_compatibility"
+            )
+        else:
+            self._start_position_reconciliation(
+                reason="homing_completed",
+                expected_position={"X": 500, "Y": 500, "Z": 500},
+            )
 
     def update_expected_position(self, x=None, y=None, z=None):
         """Update the expected position after a move."""

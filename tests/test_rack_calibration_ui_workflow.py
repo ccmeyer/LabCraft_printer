@@ -86,6 +86,34 @@ class FakeController:
         self.begin_remove_message = "open failed"
         self.complete_remove_result = True
         self.complete_remove_message = "close failed"
+        self.rack_entry_result = True
+        self.rack_session = None
+
+    def rack_calibration_entry_preflight(self):
+        return {
+            "allowed": True,
+            "verified": True,
+            "target_state": "verified_by_controlled_calibration",
+        }
+
+    def begin_rack_calibration_entry(self, *, manual_first):
+        if self.rack_entry_result is False:
+            return False
+        self.rack_session = {
+            "session_token": "rack-session",
+            "state": "automatic_points",
+            "manual_first": bool(manual_first),
+        }
+        return dict(self.rack_session)
+
+    def _rack_calibration_session_snapshot(self):
+        return dict(self.rack_session or {"state": "idle"})
+
+    def finish_rack_calibration_session(self, session_token, *, accepted):
+        if not self.rack_session or session_token != self.rack_session["session_token"]:
+            return False
+        self.rack_session = None
+        return True
 
     def begin_manual_calibration_chip_load(self, origin_slot_number=None, on_open=None, on_failed=None):
         self.events.append(("begin_load", origin_slot_number))
@@ -140,20 +168,33 @@ class FakeController:
 
 def install_fake_rack_dialog(monkeypatch, events, result):
     class FakeRackCalibrationDialog:
-        def __init__(self, main_window, model, controller):
+        def __init__(
+            self,
+            main_window,
+            model,
+            controller,
+            *,
+            session_token,
+            manual_first,
+        ):
             self.main_window = main_window
             self.model = model
             self.controller = controller
             events.append(("dialog_init",))
 
-        def move_to_initial_position(self):
-            return True
+        def handle_controller_state(self, _snapshot):
+            return None
 
         def exec(self):
             events.append(("dialog_exec",))
             return result
 
     monkeypatch.setattr(View, "RackCalibrationDialog", FakeRackCalibrationDialog)
+    monkeypatch.setattr(
+        View.QtCore.QTimer,
+        "singleShot",
+        lambda _delay, callback: callback(),
+    )
 
 
 def make_widget(
@@ -178,6 +219,14 @@ def make_widget(
     widget.main_window = main_window
     widget.rack_model = rack_model
     widget.controller = controller
+    widget._rack_calibration_session_token = None
+    widget._rack_calibration_dialog = None
+    widget._rack_calibration_manual_chip_loaded = False
+    widget._rack_calibration_origin_slot_number = None
+    widget.calibrate_button = SimpleNamespace(
+        setEnabled=lambda _enabled: None,
+        setText=lambda _text: None,
+    )
     widget.model = SimpleNamespace(
         machine_model=SimpleNamespace(
             motors_are_enabled=lambda: motors_enabled,
@@ -216,33 +265,20 @@ def test_cancelled_guided_rack_dialog_discards_temp_calibrations(monkeypatch):
     assert rack_model.discard_calls == 1
 
 
-def test_rejected_initial_rack_route_aborts_before_showing_dialog(monkeypatch):
+def test_rejected_controller_staging_aborts_before_showing_dialog(monkeypatch):
     chip = FakePrinterHead()
     widget, events, rack_model, _main_window = make_widget(
         gripper_printer_head=chip
     )
 
-    class RejectingRackCalibrationDialog:
-        def __init__(self, *_args, **_kwargs):
-            events.append(("dialog_init",))
-
-        def move_to_initial_position(self):
-            events.append(("initial_route_rejected",))
-            return False
-
-        def exec(self):
-            events.append(("unexpected_dialog_exec",))
-            return QtWidgets.QDialog.Accepted
-
-    monkeypatch.setattr(
-        View, "RackCalibrationDialog", RejectingRackCalibrationDialog
-    )
+    install_fake_rack_dialog(monkeypatch, events, QtWidgets.QDialog.Accepted)
+    widget.controller.rack_entry_result = False
 
     result = View.RackBox.open_rack_calibration_dialog(widget)
 
     assert result is False
-    assert events == [("dialog_init",), ("initial_route_rejected",)]
-    assert rack_model.discard_calls == 1
+    assert events == []
+    assert rack_model.discard_calls == 0
 
 
 def test_rack_calibration_blocks_when_motors_are_not_ready(monkeypatch):
