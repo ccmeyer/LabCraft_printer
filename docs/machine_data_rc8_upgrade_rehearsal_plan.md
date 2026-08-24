@@ -1,6 +1,6 @@
 # Rc.8 Exact-Tag Legacy Upgrade Rehearsal
 
-Status: `rc.8 published; exact-tag cohort qualification in progress`
+Status: `rc.8 published; exact-tag legacy rehearsal qualified; physical pilots pending`
 
 This live record qualifies direct public updates from genuine preserved legacy
 machine data to immutable `v1.3.0-rc.8`. It uses the reusable interface in
@@ -80,10 +80,11 @@ action starts the normal app or constructs hardware.
 
 ## Live cohort status
 
-| Cohort | Source available | Run ID | Stage | Result |
+| Cohort/attempt | Source | Run ID | Stage | Result |
 | --- | --- | --- | --- | --- |
-| rc.1 | Yes, preserved Pi backup | `b33c56e7-dfde-4557-b6e2-a8eb3fed2b61` | Activation passed; verify retained | Harness verifier expected a non-persisted `activation_allowed` field; protected invariants remained unchanged |
-| rc.6 | External backup drive not mounted | Pending | Not started | Pending |
+| rc.1 retained verifier failure | Genuine preserved Pi backup | `b33c56e7-dfde-4557-b6e2-a8eb3fed2b61` | Activation passed; verify failed | Harness verifier expected a non-persisted `activation_allowed` field; protected invariants remained unchanged |
+| rc.1 qualified | Genuine preserved Pi backup | `64b5253c-c634-414b-a32c-115cf2debda1` | Verified and sealed | Passed updater, cancellation, activation, exact migration, genesis anchor, authorization, two-checkout reopen, and invariance gates |
+| rc.6 qualified | Genuine transferred machine backup | `fc946a27-8398-4986-8b51-7ebb2860fdf8` | Verified and sealed | Passed updater, cancellation, activation, exact migration, genesis anchor, authorization, two-checkout reopen, and invariance gates |
 
 The first rc.1 rc.8 run proved the old updater, cancellation, activation,
 genesis-anchor creation, and ready reopen. Its sealing step then exposed a
@@ -92,15 +93,25 @@ rehearsal-only schema mismatch: ownership decisions persist
 root and failure receipt are retained. The verifier correction validates the
 real persisted fields, accepts only `canonical` or `archive_only`, and rejects
 malformed, unsafe, duplicated, prohibited, or unclassified entries. The rc.1
-cohort restarts under a fresh run ID after the corrected harness is committed,
-pushed, synchronized, and validated.
+cohort was restarted under a fresh run ID after the corrected harness was
+committed, pushed, synchronized, and validated. Harness commit `d924e153` then
+passed 45 focused Windows supervisor tests, 37 ownership/bootstrap tests, and
+43 focused Pi tests with two expected Windows-only skips before the successful
+reruns.
+
+The two successful seals were aggregated as campaign
+`c3c80b1e-6dbd-4f00-a7b1-fc5ff73440e8`. The campaign binds distinct genuine
+`v1.2.0-rc.6` and `v1.3.0-rc.1` source tags to the same exact rc.8 commit and
+records `all_gates_passed=true`. Both runs used the same protected-invariant
+baseline and ended with zero related processes. Source coordinates and bytes
+remain private on the Pi.
 
 ## Fleet-rollout gate
 
-Rc.8 is not approved for other machines until both genuine cohorts are sealed
-and aggregated. A passing data/updater rehearsal still does not replace one
-paused physical pilot per cohort for machine identity, firmware pairing, and
-physically meaningful saved-position review.
+The updater and migration path is qualified for both legacy cohorts. Fleet
+rollout still requires one paused physical pilot per cohort for machine
+identity, firmware pairing, and physically meaningful saved-position review.
+The rehearsal alone does not authorize unattended fleet deployment.
 
 ## Recovery
 
