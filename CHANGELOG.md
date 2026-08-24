@@ -1,5 +1,43 @@
 # Changelog
 
+## v1.3.0-rc.6 - 2026-08-24
+
+### Fixed
+
+- Debounced the X/Y optical limit inputs with a continuously running 1 MHz TIM5 service and bounded 15 ms confirmation deadlines. Both coordinated and direct motion paths now share the same wrap-safe confirmation policy and retain exact limit attribution through terminal cleanup.
+- Reworked pause/resume so coordinated X/Y and direct-axis moves resume from a fresh remaining-distance plan, begin at the bounded 3 kHz restart rate, rearm disabled stepper drivers exactly once, wait for the powered-settle interval, and retain the original commanded endpoint.
+- Guarded queue clearing and Resume against active or invalid terminal plans. Clearing, pausing, disconnecting, resetting, or changing motion trust now cancels dependent workflows instead of allowing stale commands or UI state to continue.
+- Canonicalized exact-integral host motion endpoints and reconciled queue completion against one coherent post-motion X/Y/Z telemetry generation, preventing stale partial telemetry from replacing the commanded endpoint.
+- Made plate-calibration entry fail closed. Every entry raises Z to 500 before the plate dogleg or XY travel; unverified plates stop at safe height for manual first-point alignment, and verified plates descend only after exact telemetry reconciliation.
+- Removed calibration-dialog constructor motion and moved remaining plate-corner planning into a token-bound Controller session. Interruption, mismatch, timeout, stale callbacks, or trust changes discard temporary captures without saving.
+- Corrected pause/action-button layout and sizing while preserving keyboard and disconnect behavior.
+
+### Changed
+
+- Successful rack and plate calibrations now atomically save the governed configuration event and authorize their exact targets as `verified_by_controlled_calibration`. Eligible older controlled-calibration evidence can be reviewed and promoted without motion or coordinate transcription.
+- Guarded configuration confirmation now uses one proposal-bound acknowledgement checkbox instead of a typed `SAVE ...` phrase. Imports, restores, and ordinary edits still revoke changed targets until separately verified.
+- Rebuilt the well-plate preview immediately after calibration while preserving the selected reagent by stock ID.
+
+### Safety and compatibility
+
+- This release changes the bundled firmware. All upgrades from `v1.2.0`, `v1.2.0-rc.6`, or `v1.3.0-rc.1` through rc.5 require deployment and verification of the exact rc.6 artifact. The application update alone does not prove that the controller was flashed.
+- The rc.6 firmware artifact is 366,144 bytes with SHA-256 `CFC1103B7A4EAB58688CDD3303DB0174C8B3FDF8887FA0C7C90B931FDB87DFA5`.
+- Device command framing and payload layouts are unchanged. SAFE remains non-actuating, and FULL or physical motion qualification remains attended-only.
+- Machine-data schema version 1 and the external preservation contract are unchanged. Existing migrated target authorization and history are preserved when their exact values remain unchanged; only targets changed by a guarded operation are revoked.
+
+### Validation
+
+- Firmware gate: 480/480 host tests passed and the STM32CubeIDE Debug target built successfully from the merged source.
+- All 36 Python test modules changed by this branch passed: 697 tests.
+- Complete Python suite: 5,686 passed and 156 skipped.
+- Release metadata validation, strict parsing of every release JSON file, and static diff checks passed on the untagged candidate.
+- The safe-height plate-entry, controlled plate/rack authorization, cancellation, and repaint paths completed an attended isolated-development qualification on LC-001 at implementation checkpoint `02fdd92c`; the final rc.6 candidate is separately required to pass exact-artifact SAFE 30/30 with released-firmware restoration.
+
+### Rollback
+
+- The reviewed application rollback target remains stable `v1.2.0`. Because that release predates the external machine-data preservation contract, use only the support-guided compatibility export in `docs/machine_data_update_and_rollback_runbook.md`.
+- Restore and verify the firmware artifact paired with the rollback release; application rollback does not automatically establish installed-firmware provenance.
+
 ## v1.3.0-rc.5 - 2026-08-20
 
 ### Fixed
