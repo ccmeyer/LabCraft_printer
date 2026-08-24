@@ -331,6 +331,23 @@ def test_public_tag_requires_an_annotated_peeled_ref(monkeypatch):
         rehearsal.remote_public_tag("https://example.invalid/repo.git", "v1.3.0-rc.7")
 
 
+def test_absent_target_ref_uses_quiet_exact_ref_check(monkeypatch, tmp_path):
+    observed = {}
+
+    def fake_git(repo, *arguments, allowed=(0,)):
+        observed["repo"] = repo
+        observed["arguments"] = arguments
+        observed["allowed"] = allowed
+        return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(rehearsal, "remote_git", fake_git)
+    assert rehearsal.remote_ref_exists(tmp_path, "refs/tags/v1.3.0-rc.7") is False
+    assert observed["arguments"] == (
+        "show-ref", "--verify", "--quiet", "refs/tags/v1.3.0-rc.7"
+    )
+    assert observed["allowed"] == (0, 1)
+
+
 def test_source_wrapper_validation_and_copy_are_exact(tmp_path):
     wrapper = tmp_path / "source"
     local = wrapper / "local"

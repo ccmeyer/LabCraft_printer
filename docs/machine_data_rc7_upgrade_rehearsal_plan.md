@@ -7,7 +7,7 @@ two preserved legacy cohorts to one exact release. It never rolls back either
 established Pi worktree and never removes or repoints an existing machine-data
 store.
 
-Implementation validation on 2026-08-24 passed 228 focused Windows tests
+Implementation validation on 2026-08-24 passed 229 focused Windows tests
 covering the supervisor, bootstrap-only runner, migration/bootstrap services,
 update preservation, and legacy updater. The initial harness passed Pi dry-run,
 exact development sync/validation, and 222 Pi tests with two Windows-only
@@ -20,6 +20,12 @@ supervisor expected a persisted `production_ready` firmware field. Firmware
 state v1 derives that value from `role == released`. The failed root remains
 quarantined; the corrected harness validates the real schema and derives the
 readiness result without altering firmware state.
+
+Fresh rc.1 run `2b9668d7-ed43-4883-9c65-9a6782a23362` then failed closed
+because the Pi Git version reports a missing ref as exit 128 unless
+`show-ref --quiet` is used. The run is also quarantined. The corrected harness
+uses Git's quiet exact-ref predicate so an absent target tag passes while a
+present tag or any other command failure remains blocking.
 
 For the rc.7 campaign the required source and target bindings are:
 

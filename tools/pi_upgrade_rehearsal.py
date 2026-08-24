@@ -513,6 +513,18 @@ def remote_git(repo: Path, *arguments: str, allowed=(0,)):
     return remote_run(["git", "-C", str(repo), *arguments], allowed=allowed)
 
 
+def remote_ref_exists(repo: Path, ref: str) -> bool:
+    result = remote_git(
+        repo,
+        "show-ref",
+        "--verify",
+        "--quiet",
+        ref,
+        allowed=(0, 1),
+    )
+    return result.returncode == 0
+
+
 def remote_file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
@@ -1112,10 +1124,7 @@ def remote_action_prepare(request: Mapping[str, Any], root: Path) -> dict[str, A
     branch = f"rehearsal-{run_id}"
     remote_git(clone, "switch", "-c", branch, fetched_source)
     remote_git(clone, "branch", "--set-upstream-to=origin/main", branch)
-    target_absent = remote_git(
-        clone, "show-ref", "--verify", f"refs/tags/{target_tag}", allowed=(0, 1)
-    )
-    if target_absent.returncode == 0:
+    if remote_ref_exists(clone, f"refs/tags/{target_tag}"):
         raise RehearsalError("Target tag was unexpectedly present before the legacy update.")
     if (clone / "VERSION").read_text(encoding="utf-8").strip() != source_tag:
         raise RehearsalError("Legacy checkout VERSION differs from its source tag.")
@@ -1222,7 +1231,7 @@ def remote_action_update(request: Mapping[str, Any], root: Path) -> dict[str, An
         or clone_state.get("branch") != state["branch"]
     ):
         raise RehearsalError("Legacy checkout no longer matches the prepared source state.")
-    if remote_git(clone, "show-ref", "--verify", f"refs/tags/{state['target_release']}", allowed=(0, 1)).returncode == 0:
+    if remote_ref_exists(clone, f"refs/tags/{state['target_release']}"):
         raise RehearsalError("Target tag appeared before the legacy updater ran.")
 
     evidence = run_root / "evidence"
