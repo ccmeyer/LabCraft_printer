@@ -504,7 +504,13 @@ def test_migration_comparison_detects_exact_members_and_authorizations(tmp_path)
                 "location:camera": {"state": "verified_from_trusted_existing_calibration"}
             },
             "ownership_decisions": [
-                {"relative_path": "CalibrationMemory", "activation_allowed": True}
+                {
+                    "relative_path": "update_logs/result.json",
+                    "classification": "archive_only",
+                    "rule_id": "legacy-update-logs-v1",
+                    "reason": "Legacy updater logs remain in the verified archive.",
+                    "canonical_destination": None,
+                }
             ],
         },
         "activation_receipt.json": {},
@@ -529,6 +535,102 @@ def test_migration_comparison_detects_exact_members_and_authorizations(tmp_path)
             run_root,
             {"target_release": "v1.3.0-rc.7", "target_commit": "a" * 40},
         )
+
+
+def test_persisted_ownership_validation_accepts_the_real_decision_schema():
+    decisions = [
+        {
+            "relative_path": "update_logs/result.json",
+            "classification": "archive_only",
+            "rule_id": "legacy-update-logs-v1",
+            "reason": "Legacy updater logs remain in the verified archive.",
+            "canonical_destination": None,
+        },
+        {
+            "relative_path": "Optics/Camera.json",
+            "classification": "canonical",
+            "rule_id": "legacy-optics-v1",
+            "reason": "Optics data has a governed calibration destination.",
+            "canonical_destination": "calibration/Optics/Camera.json",
+        },
+    ]
+
+    assert rehearsal._validated_ownership_decisions(decisions) == decisions
+
+
+@pytest.mark.parametrize(
+    "decision, message",
+    [
+        (
+            {
+                "relative_path": "update_logs/result.json",
+                "classification": "archive_only",
+                "rule_id": "legacy-update-logs-v1",
+                "reason": "Reviewed.",
+                "canonical_destination": None,
+                "activation_allowed": True,
+            },
+            "malformed",
+        ),
+        (
+            {
+                "relative_path": "unknown.bin",
+                "classification": "unclassified",
+                "rule_id": "unexpected-rule",
+                "reason": "Not reviewed.",
+                "canonical_destination": None,
+            },
+            "unresolved",
+        ),
+        (
+            {
+                "relative_path": "../escape.bin",
+                "classification": "archive_only",
+                "rule_id": "legacy-update-logs-v1",
+                "reason": "Reviewed.",
+                "canonical_destination": None,
+            },
+            "malformed",
+        ),
+        (
+            {
+                "relative_path": "update_logs/result.json",
+                "classification": "canonical",
+                "rule_id": "legacy-update-logs-v1",
+                "reason": "Reviewed.",
+                "canonical_destination": None,
+            },
+            "destination is malformed",
+        ),
+        (
+            {
+                "relative_path": "update_logs/result.json",
+                "classification": "archive_only",
+                "rule_id": "legacy-update-logs-v1",
+                "reason": "Reviewed.",
+                "canonical_destination": "calibration/result.json",
+            },
+            "cannot name",
+        ),
+    ],
+)
+def test_persisted_ownership_validation_fails_closed(decision, message):
+    with pytest.raises(rehearsal.RehearsalError, match=message):
+        rehearsal._validated_ownership_decisions([decision])
+
+
+def test_persisted_ownership_validation_rejects_case_colliding_paths():
+    first = {
+        "relative_path": "update_logs/result.json",
+        "classification": "archive_only",
+        "rule_id": "legacy-update-logs-v1",
+        "reason": "Reviewed.",
+        "canonical_destination": None,
+    }
+    second = dict(first, relative_path="UPDATE_LOGS/RESULT.JSON")
+
+    with pytest.raises(rehearsal.RehearsalError, match="duplicate paths"):
+        rehearsal._validated_ownership_decisions([first, second])
 
 
 def test_sanitized_response_contains_no_identity_coordinates_or_private_paths():

@@ -1568,6 +1568,83 @@ def _canonical_json_hash(payload: object) -> str:
     ).hexdigest()
 
 
+_OWNERSHIP_DECISION_FIELDS = frozenset(
+    {
+        "relative_path",
+        "classification",
+        "rule_id",
+        "reason",
+        "canonical_destination",
+    }
+)
+_ACTIVATION_ALLOWED_OWNERSHIP_CLASSIFICATIONS = frozenset(
+    {"canonical", "archive_only"}
+)
+
+
+def _validated_ownership_decisions(value: object) -> list[dict[str, object]]:
+    """Validate the persisted ownership-decision schema without inventing fields."""
+
+    if not isinstance(value, list):
+        raise RehearsalError("Migration ownership decisions are malformed.")
+    decisions: list[dict[str, object]] = []
+    seen_paths: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != _OWNERSHIP_DECISION_FIELDS:
+            raise RehearsalError("Migration ownership decisions are malformed.")
+        relative_path = item["relative_path"]
+        classification = item["classification"]
+        rule_id = item["rule_id"]
+        reason = item["reason"]
+        destination = item["canonical_destination"]
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or relative_path != relative_path.strip()
+            or "\\" in relative_path
+            or not isinstance(classification, str)
+            or not isinstance(rule_id, str)
+            or not rule_id.strip()
+            or not isinstance(reason, str)
+            or not reason.strip()
+        ):
+            raise RehearsalError("Migration ownership decisions are malformed.")
+        path = PurePosixPath(relative_path)
+        if (
+            path.is_absolute()
+            or path.as_posix() in {"", "."}
+            or path.as_posix() != relative_path
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise RehearsalError("Migration ownership decisions are malformed.")
+        folded = relative_path.casefold()
+        if folded in seen_paths:
+            raise RehearsalError("Migration ownership decisions contain duplicate paths.")
+        seen_paths.add(folded)
+        if classification not in _ACTIVATION_ALLOWED_OWNERSHIP_CLASSIFICATIONS:
+            raise RehearsalError("Migration legacy-path ownership is unresolved.")
+        if classification == "canonical":
+            if (
+                not isinstance(destination, str)
+                or not destination
+                or destination != destination.strip()
+                or "\\" in destination
+            ):
+                raise RehearsalError("Migration canonical ownership destination is malformed.")
+            canonical_path = PurePosixPath(destination)
+            if (
+                canonical_path.is_absolute()
+                or canonical_path.as_posix() in {"", "."}
+                or canonical_path.as_posix() != destination
+                or any(part in {"", ".", ".."} for part in canonical_path.parts)
+            ):
+                raise RehearsalError("Migration canonical ownership destination is malformed.")
+        elif destination is not None:
+            raise RehearsalError("Archive-only ownership cannot name a canonical destination.")
+        decisions.append(dict(item))
+    return decisions
+
+
 def remote_compare_migration(run_root: Path, state: Mapping[str, Any]) -> dict[str, Any]:
     source_local = run_root / "source-wrapper" / "local"
     machine_data = run_root / "activation" / "machine-data"
@@ -1683,15 +1760,9 @@ def remote_compare_migration(run_root: Path, state: Mapping[str, Any]) -> dict[s
     states = [target.get("state") for target in targets.values() if isinstance(target, dict)]
     if len(states) != len(targets) or any(value not in accepted_states for value in states):
         raise RehearsalError("Migration left one or more targets unauthorized.")
-    ownership = verification.get("ownership_decisions")
-    if (
-        not isinstance(ownership, list)
-        or any(
-            not isinstance(item, dict) or item.get("activation_allowed") is not True
-            for item in ownership
-        )
-    ):
-        raise RehearsalError("Migration calibration ownership is unresolved.")
+    ownership = _validated_ownership_decisions(
+        verification.get("ownership_decisions")
+    )
     receipt = json.loads((metadata / "migration_receipt.json").read_text(encoding="utf-8"))
     try:
         migration_id = str(UUID(str(receipt["migration_id"])))

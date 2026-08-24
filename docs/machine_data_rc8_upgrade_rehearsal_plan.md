@@ -82,8 +82,18 @@ action starts the normal app or constructs hardware.
 
 | Cohort | Source available | Run ID | Stage | Result |
 | --- | --- | --- | --- | --- |
-| rc.1 | Yes, preserved Pi backup | Pending | Not started | Pending |
+| rc.1 | Yes, preserved Pi backup | `b33c56e7-dfde-4557-b6e2-a8eb3fed2b61` | Activation passed; verify retained | Harness verifier expected a non-persisted `activation_allowed` field; protected invariants remained unchanged |
 | rc.6 | External backup drive not mounted | Pending | Not started | Pending |
+
+The first rc.1 rc.8 run proved the old updater, cancellation, activation,
+genesis-anchor creation, and ready reopen. Its sealing step then exposed a
+rehearsal-only schema mismatch: ownership decisions persist
+`classification`, not the derived Python property `activation_allowed`. The
+root and failure receipt are retained. The verifier correction validates the
+real persisted fields, accepts only `canonical` or `archive_only`, and rejects
+malformed, unsafe, duplicated, prohibited, or unclassified entries. The rc.1
+cohort restarts under a fresh run ID after the corrected harness is committed,
+pushed, synchronized, and validated.
 
 ## Fleet-rollout gate
 
