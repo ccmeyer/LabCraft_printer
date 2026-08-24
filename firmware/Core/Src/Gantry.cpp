@@ -7,6 +7,7 @@
 
 #include "Gantry.h"
 #include "MotionLimitDebounceTimer.h"
+#include "MotionResumePolicy.h"
 #include "Stepper.h"
 #include "MotionUnitScale.h"
 #include "Orchestrator.h"
@@ -309,6 +310,17 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
   const CoordinatedXyPlanner::PlanStatus planStatus =
       CoordinatedXyPlanner::prepare(request, plan);
   if (planStatus == CoordinatedXyPlanner::PlanStatus::Immediate) {
+    _coordinatedRequestedRateHz = plan.masterRateHz;
+    _coordinatedRequestedXEdges = plan.xEdges;
+    _coordinatedRequestedYEdges = plan.yEdges;
+    _coordinatedXEdgeOffset = _coordinatedYEdgeOffset = 0u;
+    _coordinatedTimer2Offset = _coordinatedPlannedOffset = 0u;
+    _coordinatedCleanupOffset = 0u;
+    _coordinatedXCleanupOffset = _coordinatedYCleanupOffset = 0u;
+    _coordinatedResumeCount = 0u;
+    _coordinatedResumeStartRateHz = 0u;
+    _coordinatedResumeStartArr = 0u;
+    _coordinatedResumeStartFailures = 0u;
     _coordinatedPlan = plan;
     (void)CoordinatedXyExecutor::arm(plan, _coordinatedCursor);
     sx->_targetPos = sx->_pos;
@@ -449,6 +461,17 @@ CoordinatedStartStatus Gantry::startCoordinatedXY(int64_t dx,
       yDirection,
       yMove.target);
 
+  _coordinatedRequestedRateHz = plan.masterRateHz;
+  _coordinatedRequestedXEdges = plan.xEdges;
+  _coordinatedRequestedYEdges = plan.yEdges;
+  _coordinatedXEdgeOffset = _coordinatedYEdgeOffset = 0u;
+  _coordinatedTimer2Offset = _coordinatedPlannedOffset = 0u;
+  _coordinatedCleanupOffset = 0u;
+  _coordinatedXCleanupOffset = _coordinatedYCleanupOffset = 0u;
+  _coordinatedResumeCount = 0u;
+  _coordinatedResumeStartRateHz = 0u;
+  _coordinatedResumeStartArr = 0u;
+  _coordinatedResumeStartFailures = 0u;
   _coordinatedPlan = plan;
   _coordinatedCursor = executorCursor;
   _coordinatedX = sx;
@@ -1043,26 +1066,213 @@ void Gantry::_pauseCoordinatedTask() {
   taskEXIT_CRITICAL();
 }
 
-void Gantry::_resumeCoordinatedTask() {
-  bool signalDone = false;
+void Gantry::_accumulateCoordinatedSegment() {
+  _coordinatedXEdgeOffset += _coordinatedCursor.xActiveEdges;
+  _coordinatedYEdgeOffset += _coordinatedCursor.yActiveEdges;
+  _coordinatedTimer2Offset += _coordinatedCursor.timerInterrupts;
+  _coordinatedPlannedOffset += _coordinatedCursor.plannedEdgeEvents;
+  _coordinatedCleanupOffset += _coordinatedCursor.cleanupEdgeEvents;
+  _coordinatedXCleanupOffset += _coordinatedCursor.xCleanupEdges;
+  _coordinatedYCleanupOffset += _coordinatedCursor.yCleanupEdges;
+}
+
+MotionResumeStatus Gantry::_failCoordinatedResume(
+    CoordinatedStartStatus status) {
   taskENTER_CRITICAL();
-  const CoordinatedXyExecutor::ControlDisposition disposition =
-      CoordinatedXyExecutor::resume(_coordinatedCursor);
-  if (disposition == CoordinatedXyExecutor::ControlDisposition::Deferred &&
-      _coordinatedMasterTimer != nullptr) {
-    const uint32_t programmedArr = _coordinatedCursor.cachedEvent.arr;
-    _coordinatedProgrammedArr = programmedArr;
-    __HAL_TIM_SET_AUTORELOAD(_coordinatedMasterTimer, programmedArr);
-    __HAL_TIM_SET_COUNTER(_coordinatedMasterTimer, 0u);
-    __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
-    NVIC_ClearPendingIRQ(TIM2_IRQn);
-    (void)HAL_TIM_Base_Start_IT(_coordinatedMasterTimer);
-  }
+  CoordinatedXyExecutor::TickResult fault{};
+  (void)CoordinatedXyExecutor::forcePlannerFault(
+      _coordinatedCursor, fault);
+  ++_coordinatedResumeStartFailures;
+  _coordinatedStartStatus = status;
+  _finishCoordinatedHardware(true);
+#if LC_COORDINATED_XY_ISR_INSTRUMENTATION_ENABLE != 0
+  CoordinatedXyIsrInstrumentation::finishWithoutSample(
+      _coordinatedTiming, gantryCycleNow(), true);
+#endif
   taskEXIT_CRITICAL();
-  if (signalDone) {
+  xEventGroupSetBits(Orchestrator::getDoneEvents(),
+                     BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+  return MotionResumeStatus::Failed;
+}
+
+MotionResumeStatus Gantry::_resumeCoordinatedTask() {
+  Stepper* sx = _coordinatedX;
+  Stepper* sy = _coordinatedY;
+  if (sx == nullptr || sy == nullptr || _coordinatedMasterTimer == nullptr) {
+    return _failCoordinatedResume(CoordinatedStartStatus::HardwareMismatch);
+  }
+
+  int32_t currentX = 0;
+  int32_t currentY = 0;
+  int32_t targetX = 0;
+  int32_t targetY = 0;
+  taskENTER_CRITICAL();
+  if (_coordinatedCursor.pendingControl ==
+          CoordinatedXyExecutor::PendingControl::Pause ||
+      (_coordinatedCursor.state == CoordinatedXyExecutor::State::Running &&
+       !_coordinatedTimerOwned)) {
+    taskEXIT_CRITICAL();
+    return MotionResumeStatus::Deferred;
+  }
+  if (_coordinatedCursor.state != CoordinatedXyExecutor::State::Paused ||
+      !_coordinatedTimerOwned) {
+    taskEXIT_CRITICAL();
+    return MotionResumeStatus::Failed;
+  }
+  currentX = sx->_pos;
+  currentY = sy->_pos;
+  targetX = sx->_targetPos;
+  targetY = sy->_targetPos;
+  taskEXIT_CRITICAL();
+
+  const MotionResumePolicy::RemainingMove xRemaining =
+      MotionResumePolicy::remainingMove(currentX, targetX);
+  const MotionResumePolicy::RemainingMove yRemaining =
+      MotionResumePolicy::remainingMove(currentY, targetY);
+  if (!xRemaining.valid || !yRemaining.valid) {
+    return _failCoordinatedResume(CoordinatedStartStatus::PositionOutOfRange);
+  }
+
+  const int64_t edgeDx = xRemaining.positive
+      ? static_cast<int64_t>(MotionUnitScale::toCoordinatedActiveEdges(
+            xRemaining.magnitude))
+      : -static_cast<int64_t>(MotionUnitScale::toCoordinatedActiveEdges(
+            xRemaining.magnitude));
+  const int64_t edgeDy = yRemaining.positive
+      ? static_cast<int64_t>(MotionUnitScale::toCoordinatedActiveEdges(
+            yRemaining.magnitude))
+      : -static_cast<int64_t>(MotionUnitScale::toCoordinatedActiveEdges(
+            yRemaining.magnitude));
+
+  auto accelerationLimit = [](Stepper* stepper) -> uint32_t {
+    const float acceleration = stepper->accelStepsPerSec2();
+    if (!std::isfinite(acceleration) || acceleration < 1.0f ||
+        acceleration > static_cast<float>(std::numeric_limits<uint32_t>::max())) {
+      return 0u;
+    }
+    return static_cast<uint32_t>(acceleration);
+  };
+
+  CoordinatedXyPlanner::PlanRequest request{};
+  request.deltaX = edgeDx;
+  request.deltaY = edgeDy;
+  request.requestedMasterRateHz = _coordinatedRequestedRateHz;
+  request.initialMasterRateHz = MotionResumePolicy::selectStartRateHz(
+      _coordinatedRequestedRateHz);
+  request.xLimits = {sx->maxSpeedHz(), accelerationLimit(sx)};
+  request.yLimits = {sy->maxSpeedHz(), accelerationLimit(sy)};
+  request.timer = {
+      gantryTimerInputHz(sx->_htim, sx->_prescaler),
+      gantryTimerMaxArr(sx->_htim),
+      2000u,
+  };
+
+  CoordinatedXyPlanner::CoordinatedXyPlan plan{};
+  const CoordinatedXyPlanner::PlanStatus planStatus =
+      CoordinatedXyPlanner::prepare(request, plan);
+  if (planStatus != CoordinatedXyPlanner::PlanStatus::Ready &&
+      planStatus != CoordinatedXyPlanner::PlanStatus::Immediate) {
+    return _failCoordinatedResume(CoordinatedStartStatus::InvalidPlan);
+  }
+
+  const bool xParticipates = plan.xEdges != 0u;
+  const bool yParticipates = plan.yEdges != 0u;
+  const bool xDirection =
+      plan.xDirection == CoordinatedXyPlanner::Direction::Positive;
+  const bool yDirection =
+      plan.yDirection == CoordinatedXyPlanner::Direction::Positive;
+  auto limitBlocksResume = [](Stepper* stepper,
+                              bool participates,
+                              bool direction) {
+    if (!participates) return false;
+    if (direction != stepper->_homeTowardLimitDir &&
+        stepper->_isLimitAsserted()) {
+      return false;
+    }
+    if (direction == stepper->_homeTowardLimitDir &&
+        stepper->_limitDebounceIgnoreUntilRelease &&
+        !stepper->_confirmReleasedForNextApproach(nullptr)) {
+      return true;
+    }
+    return stepper->_sampleLimitStable(nullptr).stable;
+  };
+  if (limitBlocksResume(sx, xParticipates, xDirection) ||
+      limitBlocksResume(sy, yParticipates, yDirection)) {
+    return _failCoordinatedResume(CoordinatedStartStatus::LimitAsserted);
+  }
+
+  bool xStepHigh = false;
+  bool yStepHigh = false;
+  if (!sx->_readCoordinatedStepHigh(xStepHigh) ||
+      !sy->_readCoordinatedStepHigh(yStepHigh) ||
+      xStepHigh || yStepHigh) {
+    return _failCoordinatedResume(CoordinatedStartStatus::HardwareMismatch);
+  }
+
+  if (planStatus == CoordinatedXyPlanner::PlanStatus::Immediate) {
+    CoordinatedXyExecutor::Cursor completed{};
+    if (CoordinatedXyExecutor::arm(plan, completed) !=
+        CoordinatedXyExecutor::ArmStatus::Immediate) {
+      return _failCoordinatedResume(CoordinatedStartStatus::InvalidPlan);
+    }
+    taskENTER_CRITICAL();
+    _accumulateCoordinatedSegment();
+    _coordinatedPlan = plan;
+    _coordinatedCursor = completed;
+    ++_coordinatedResumeCount;
+    _coordinatedResumeStartRateHz = request.initialMasterRateHz;
+    _coordinatedResumeStartArr = 0u;
+    _finishCoordinatedHardware(false, true);
+    taskEXIT_CRITICAL();
     xEventGroupSetBits(Orchestrator::getDoneEvents(),
                        BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+    return MotionResumeStatus::Ready;
   }
+
+  if (!gantryCycleCounterReady() ||
+      plan.targetArr < CoordinatedXyTimerSchedulePolicy::kConditionalGuardTicks) {
+    return _failCoordinatedResume(CoordinatedStartStatus::HardwareMismatch);
+  }
+
+  CoordinatedXyExecutor::Cursor executorCursor{};
+  if (CoordinatedXyExecutor::arm(plan, executorCursor) !=
+      CoordinatedXyExecutor::ArmStatus::Ready) {
+    return _failCoordinatedResume(CoordinatedStartStatus::InvalidPlan);
+  }
+
+  taskENTER_CRITICAL();
+  if (_coordinatedCursor.state != CoordinatedXyExecutor::State::Paused ||
+      sx->_pos != currentX || sy->_pos != currentY) {
+    taskEXIT_CRITICAL();
+    return MotionResumeStatus::Deferred;
+  }
+  _accumulateCoordinatedSegment();
+  sx->_prepareCoordinatedAxis(xParticipates, xDirection, targetX);
+  sy->_prepareCoordinatedAxis(yParticipates, yDirection, targetY);
+  _coordinatedPlan = plan;
+  _coordinatedCursor = executorCursor;
+  ++_coordinatedResumeCount;
+  _coordinatedResumeStartRateHz = request.initialMasterRateHz;
+  _coordinatedResumeStartArr = executorCursor.cachedEvent.arr;
+  _resetCoordinatedInstrumentation(executorCursor.cachedEvent.arr);
+
+  __HAL_TIM_SET_PRESCALER(_coordinatedMasterTimer, sx->_prescaler);
+  _coordinatedProgrammedArr = executorCursor.cachedEvent.arr;
+  __HAL_TIM_SET_AUTORELOAD(
+      _coordinatedMasterTimer, executorCursor.cachedEvent.arr);
+  __HAL_TIM_SET_COUNTER(_coordinatedMasterTimer, 0u);
+  __HAL_TIM_CLEAR_FLAG(_coordinatedMasterTimer, TIM_FLAG_UPDATE);
+  NVIC_ClearPendingIRQ(TIM2_IRQn);
+  const CoordinatedXyExecutor::ControlDisposition startDisposition =
+      CoordinatedXyExecutor::start(_coordinatedCursor);
+  taskEXIT_CRITICAL();
+
+  if (startDisposition != CoordinatedXyExecutor::ControlDisposition::Deferred ||
+      HAL_TIM_Base_Start_IT(_coordinatedMasterTimer) != HAL_OK) {
+    return _failCoordinatedResume(CoordinatedStartStatus::HardwareMismatch);
+  }
+  _coordinatedStartStatus = CoordinatedStartStatus::Started;
+  return MotionResumeStatus::Ready;
 }
 
 bool Gantry::_cancelCoordinatedTask() {
@@ -1110,16 +1320,32 @@ void Gantry::pauseXYZMotors() {
 	if (auto s = Stepper::getAxis(axis)) s->pauseMove();
   }
 }
-void Gantry::resumeXYZMotors() {
+MotionResumeStatus Gantry::resumeXYZMotors() {
   if (_instance != nullptr &&
       CoordinatedXyExecutor::isActive(_instance->_coordinatedCursor)) {
-    _instance->_resumeCoordinatedTask();
-    if (auto* z = Stepper::stepperZ()) z->resumeMove();
-    return;
+    const MotionResumeStatus coordinated =
+        _instance->_resumeCoordinatedTask();
+    if (coordinated != MotionResumeStatus::Ready) return coordinated;
+    if (auto* z = Stepper::stepperZ()) {
+      const Stepper::DirectMoveStartStatus status = z->resumeMove();
+      if (status != Stepper::DirectMoveStartStatus::Started &&
+          status != Stepper::DirectMoveStartStatus::Immediate) {
+        return MotionResumeStatus::Failed;
+      }
+    }
+    return MotionResumeStatus::Ready;
   }
+  MotionResumeStatus result = MotionResumeStatus::Ready;
   for (auto axis : { Stepper::X_AXIS, Stepper::Y_AXIS, Stepper::Z_AXIS }) {
-	if (auto s = Stepper::getAxis(axis)) s->resumeMove();
+	if (auto s = Stepper::getAxis(axis)) {
+      const Stepper::DirectMoveStartStatus status = s->resumeMove();
+      if (status != Stepper::DirectMoveStartStatus::Started &&
+          status != Stepper::DirectMoveStartStatus::Immediate) {
+        result = MotionResumeStatus::Failed;
+      }
+    }
   }
+  return result;
 }
 void Gantry::cancelXYZMotors() {
   if (_instance != nullptr &&
@@ -1139,17 +1365,28 @@ CoordinatedXySnapshot Gantry::coordinatedSnapshot() const {
   snapshot.startStatus = _coordinatedStartStatus;
   snapshot.state = _coordinatedCursor.state;
   snapshot.terminalReason = _coordinatedCursor.terminalReason;
-  snapshot.requestedXEdges = _coordinatedPlan.xEdges;
-  snapshot.requestedYEdges = _coordinatedPlan.yEdges;
-  snapshot.emittedXEdges = _coordinatedCursor.xActiveEdges;
-  snapshot.emittedYEdges = _coordinatedCursor.yActiveEdges;
+  snapshot.requestedXEdges = _coordinatedRequestedXEdges;
+  snapshot.requestedYEdges = _coordinatedRequestedYEdges;
+  snapshot.emittedXEdges =
+      _coordinatedXEdgeOffset + _coordinatedCursor.xActiveEdges;
+  snapshot.emittedYEdges =
+      _coordinatedYEdgeOffset + _coordinatedCursor.yActiveEdges;
   snapshot.masterEdges = _coordinatedPlan.masterEdges;
-  snapshot.timer2Interrupts = _coordinatedCursor.timerInterrupts;
+  snapshot.resumeCount = _coordinatedResumeCount;
+  snapshot.resumeStartRateHz = _coordinatedResumeStartRateHz;
+  snapshot.resumeStartArr = _coordinatedResumeStartArr;
+  snapshot.resumeStartFailures = _coordinatedResumeStartFailures;
+  snapshot.timer2Interrupts =
+      _coordinatedTimer2Offset + _coordinatedCursor.timerInterrupts;
   snapshot.timer7Interrupts = _coordinatedTim7Interrupts;
-  snapshot.plannedEdgeEvents = _coordinatedCursor.plannedEdgeEvents;
-  snapshot.cleanupEdgeEvents = _coordinatedCursor.cleanupEdgeEvents;
-  snapshot.xCleanupEdges = _coordinatedCursor.xCleanupEdges;
-  snapshot.yCleanupEdges = _coordinatedCursor.yCleanupEdges;
+  snapshot.plannedEdgeEvents =
+      _coordinatedPlannedOffset + _coordinatedCursor.plannedEdgeEvents;
+  snapshot.cleanupEdgeEvents =
+      _coordinatedCleanupOffset + _coordinatedCursor.cleanupEdgeEvents;
+  snapshot.xCleanupEdges =
+      _coordinatedXCleanupOffset + _coordinatedCursor.xCleanupEdges;
+  snapshot.yCleanupEdges =
+      _coordinatedYCleanupOffset + _coordinatedCursor.yCleanupEdges;
   snapshot.xSpacingViolations = _coordinatedCursor.xSpacingViolations;
   snapshot.ySpacingViolations = _coordinatedCursor.ySpacingViolations;
   snapshot.arrMin = _coordinatedArrMin;

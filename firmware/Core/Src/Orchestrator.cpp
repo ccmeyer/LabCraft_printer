@@ -433,11 +433,14 @@ void Orchestrator::pauseCurrent() {
   }
 }
 
-void Orchestrator::resumeCurrent() {
+MotionResumeStatus Orchestrator::resumeCurrent() {
   Logger::instance()->log("resumeCurrent\r\n");
-  Gantry::instance()->resumeXYZMotors();
+  const MotionResumeStatus motionStatus =
+      Gantry::instance()->resumeXYZMotors();
+  if (motionStatus != MotionResumeStatus::Ready) return motionStatus;
   Printer::instance()->resumeDispense();
   resumePressureRegulators();
+  return MotionResumeStatus::Ready;
 }
 void Orchestrator::cancelCurrent() {
 //  Logger::instance()->log("cancelCurrent\r\n");
@@ -1424,8 +1427,13 @@ void Orchestrator::_run() {
 			continue;
 		}
 		_pressurePauseDeferred = false;
-		resumeCurrent();
+		const MotionResumeStatus resumeStatus = resumeCurrent();
+		if (resumeStatus == MotionResumeStatus::Deferred) {
+		  _paused = true;
+		  continue;
+		}
 		_resumeRequested = false;
+		_paused = resumeStatus != MotionResumeStatus::Ready;
 		bool resumedCommandCompleted = !_hasInFlightCommand;
 		if (_hasInFlightCommand) {
 		  switch (_lastPausedCmd.cmd) {
@@ -1438,10 +1446,12 @@ void Orchestrator::_run() {
 			  resumedCommandCompleted = validateResumedDirectAxis(_lastPausedCmd);
 			  break;
 			case CMD_ABS_XY:
-			  resumedCommandCompleted =
-			      waitForBits(BIT_STEPPER1_DONE | BIT_STEPPER2_DONE) &&
-			      validateResumedAbsoluteXy(_lastPausedCmd.p1s(),
-			                                _lastPausedCmd.p2s());
+			  resumedCommandCompleted = resumeStatus == MotionResumeStatus::Failed
+			      ? validateResumedAbsoluteXy(_lastPausedCmd.p1s(),
+			                                  _lastPausedCmd.p2s())
+			      : (waitForBits(BIT_STEPPER1_DONE | BIT_STEPPER2_DONE) &&
+			         validateResumedAbsoluteXy(_lastPausedCmd.p1s(),
+			                                   _lastPausedCmd.p2s()));
 			  break;
 			case CMD_DISPENSE:
 			case CMD_DISPENSE_PRINT:

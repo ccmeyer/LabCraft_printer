@@ -16,7 +16,7 @@
     {
       "fixture_id": "direct_xyz_lut_envelope_clear",
       "required_for": [2091, 2092, 2093, 2094, 2095],
-      "operator_note": "Confirm the production image is flashed, both limit switches are released, and the direct X/Y/Z envelope is clear. Firmware homes Z and XY, makes one 14,000-logical-unit move on each axis and one 2,000-unit triangular X move at 40 kHz logical rate, then homes again. Stop for contact, abnormal sound, missing motion/home, reset, or watchdog evidence."
+      "operator_note": "Confirm the production image is flashed, both limit switches are released, and the direct X/Y/Z envelope is clear. Firmware homes Z and XY, makes one 14,000-logical-unit move on each axis at the application maxima (40 kHz X/Y and 30 kHz Z) and one 2,000-unit triangular X move at 40 kHz, then homes again. Stop for contact, abnormal sound, missing motion/home, reset, or watchdog evidence."
     }
   ],
   "analysis_rules": {
@@ -86,7 +86,7 @@
       "metrics": {
         "ax": {"maturity": "acceptance", "equals": 2},
         "ds": {"maturity": "acceptance", "equals": 14000},
-        "hz": {"maturity": "acceptance", "equals": 40000},
+        "hz": {"maturity": "acceptance", "equals": 30000},
         "np": {"maturity": "acceptance", "equals": 7000},
         "to": {"maturity": "acceptance", "equals": 0},
         "ep": {"maturity": "acceptance", "equals": 1},
@@ -96,10 +96,10 @@
         "rf": {"maturity": "acceptance", "equals": 0},
         "ab": {"maturity": "acceptance", "equals": 0},
         "tt": {"maturity": "acceptance", "equals": 14000},
-        "ai": {"maturity": "acceptance", "equals": 5716},
-        "ac": {"maturity": "acceptance", "equals": 5716},
-        "di": {"maturity": "acceptance", "equals": 5716},
-        "dc": {"maturity": "acceptance", "equals": 5715},
+        "ai": {"maturity": "acceptance", "equals": 3216},
+        "ac": {"maturity": "acceptance", "equals": 3216},
+        "di": {"maturity": "acceptance", "equals": 3216},
+        "dc": {"maturity": "acceptance", "equals": 3215},
         "en": {"maturity": "acceptance", "equals": 0},
         "pc": {"maturity": "acceptance", "equals": 0},
         "po": {"maturity": "acceptance", "equals": 0},

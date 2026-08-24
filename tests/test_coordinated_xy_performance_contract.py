@@ -159,6 +159,7 @@ def test_diagnostics_exposes_production_shallow_direct_lut_and_camera_selectors(
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
     assert "selectedDiagnosticId == 2097u" in diagnostics
     assert "selectedDiagnosticId == 2096u" in diagnostics
+    assert "selectedDiagnosticId == 2109u" in diagnostics
     assert "selectedDiagnosticId == 2078u" in diagnostics
     assert "selectedDiagnosticId == 2099u" in diagnostics
     assert '2100u, "coord_xy_terminal_timing"' in diagnostics
@@ -191,7 +192,7 @@ def test_production_suite_freezes_geometry_counts_and_strict_evidence():
 
 def test_production_results_use_reduced_metric_contract():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    for result_id in (2087, 2088, 2089, 2090, 2098, 2105):
+    for result_id in (2087, 2088, 2089, 2090, 2098, 2106, 2107, 2105):
         assert f"runOne({result_id}u" in diagnostics
     assert '"i2=%lu;s=%lu;mi=%lu;am=%lu;tm=%lu;fm=%lu;pu=%lu;"' in diagnostics
     assert '"ds=%lu;di=%lu;md=%lu;sl=%lu;dc=%lu;ci=%lu;ns=%lu;"' in diagnostics
@@ -464,10 +465,10 @@ def test_hil_wrappers_forward_confirmation_preauthorization_explicitly():
 
 def test_active_coordinated_manifests_share_timing_budgets_and_archive_predecessors():
     production = json.loads(
-        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v6.json")
+        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v7.json")
     )
-    production_v5 = json.loads(
-        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v5.json")
+    production_v6 = json.loads(
+        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v6.json")
     )
     camera = json.loads(
         _read("tools/qualification/manifests/coordinated_xy_camera_transition_v4.json")
@@ -482,8 +483,8 @@ def test_active_coordinated_manifests_share_timing_budgets_and_archive_predecess
         _read("tools/qualification/manifests/coordinated_xy_shallow_edge_v3.json")
     )
     assert production["lifecycle"] == "active"
-    assert production_v5["lifecycle"] == "archived"
-    assert production["expected_test_ids"] == [2087, 2088, 2089, 2090, 2098, 2105]
+    assert production_v6["lifecycle"] == "archived"
+    assert production["expected_test_ids"] == [2087, 2088, 2089, 2090, 2098, 2106, 2107, 2105]
     assert production["analysis_rules"]["2087"]["metrics"]["xe"]["equals"] == 106832
     assert production["analysis_rules"]["2087"]["metrics"]["ye"]["equals"] == 180000
     assert production["analysis_rules"]["2087"]["metrics"]["me"]["equals"] == 220000
@@ -500,6 +501,10 @@ def test_active_coordinated_manifests_share_timing_budgets_and_archive_predecess
     assert debounce["hz"]["equals"] == 1000000
     assert debounce["du"]["min"] == 15000
     assert debounce["du"]["max"] == 16000
+    assert production["analysis_rules"]["2106"]["metrics"]["hz"]["equals"] == 40000
+    assert production["analysis_rules"]["2107"]["metrics"]["hz"]["equals"] == 30000
+    assert production["analysis_rules"]["2106"]["metrics"]["rs"]["equals"] == 3000
+    assert production["analysis_rules"]["2107"]["metrics"]["rs"]["equals"] == 3000
     crossing = production["analysis_rules"]["2105"]["metrics"]
     assert crossing["n"]["equals"] == 2
     assert crossing["xb"]["max"] == 50

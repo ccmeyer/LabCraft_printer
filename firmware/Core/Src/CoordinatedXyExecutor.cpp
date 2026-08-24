@@ -58,6 +58,8 @@ uint8_t controlPriority(PendingControl control) {
 LC_COORDINATED_EDGE_ALWAYS_INLINE
 TickStatus terminalStatus(PendingControl control) {
   switch (control) {
+    case PendingControl::Pause:
+      return TickStatus::Paused;
     case PendingControl::Cancel:
       return TickStatus::Canceled;
     case PendingControl::XLimit:
@@ -101,6 +103,16 @@ void finishTerminal(Cursor& cursor,
   result.status = terminalStatus(control);
   result.stopTimer = true;
   result.signalDone = true;
+}
+
+LC_COORDINATED_EDGE_ALWAYS_INLINE
+void finishPause(Cursor& cursor, TickResult& result) {
+  cursor.pendingControl = PendingControl::None;
+  cursor.state = State::Paused;
+  cursor.terminalReason = TerminalReason::None;
+  result.status = TickStatus::Paused;
+  result.stopTimer = true;
+  result.signalDone = false;
 }
 
 LC_COORDINATED_EDGE_ALWAYS_INLINE
@@ -157,7 +169,11 @@ TickStatus emitCleanupEdge(Cursor& cursor, TickResult& result) {
   if (cursor.xStepHigh) cleanupMask = cleanupMask | EdgeMask::X;
   if (cursor.yStepHigh) cleanupMask = cleanupMask | EdgeMask::Y;
   if (cleanupMask == EdgeMask::None) {
-    finishTerminal(cursor, terminalControl, result);
+    if (terminalControl == PendingControl::Pause) {
+      finishPause(cursor, result);
+    } else {
+      finishTerminal(cursor, terminalControl, result);
+    }
     return result.status;
   }
 
@@ -171,7 +187,11 @@ TickStatus emitCleanupEdge(Cursor& cursor, TickResult& result) {
   if (CoordinatedXyPlanner::contains(cleanupMask, EdgeMask::Y)) {
     saturatingIncrement(cursor.yCleanupEdges);
   }
-  finishTerminal(cursor, terminalControl, result);
+  if (terminalControl == PendingControl::Pause) {
+    finishPause(cursor, result);
+  } else {
+    finishTerminal(cursor, terminalControl, result);
+  }
   return result.status;
 }
 
@@ -209,6 +229,10 @@ ControlDisposition requestControl(Cursor& cursor, PendingControl requested) {
   if (requested == PendingControl::Pause) {
     if (cursor.state == State::Paused) {
       return ControlDisposition::AlreadySatisfied;
+    }
+    if (anyStepHigh(cursor)) {
+      cursor.pendingControl = PendingControl::Pause;
+      return ControlDisposition::Deferred;
     }
     cursor.pendingControl = PendingControl::None;
     cursor.state = State::Paused;
@@ -270,17 +294,6 @@ ControlDisposition start(Cursor& cursor) {
 
 ControlDisposition requestPause(Cursor& cursor) {
   return requestControl(cursor, PendingControl::Pause);
-}
-
-ControlDisposition resume(Cursor& cursor) {
-  if (cursor.state == State::Running) {
-    return ControlDisposition::AlreadySatisfied;
-  }
-  if (cursor.state != State::Paused) {
-    return ControlDisposition::InvalidState;
-  }
-  cursor.state = State::Running;
-  return ControlDisposition::Deferred;
 }
 
 ControlDisposition requestCancel(Cursor& cursor) {

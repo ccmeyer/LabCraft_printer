@@ -600,8 +600,8 @@ def test_production_mres3_v2_rejects_reduced_evidence_regressions():
         assert _analyze(host_failure, manifest)["verdict"]["status"] == "fail"
 
 
-def test_production_mres3_v6_rejects_timing_and_limit_debounce_regressions():
-    manifest = load_manifest("coordinated_xy_production_mres3_v6")
+def test_production_mres3_v7_rejects_timing_pause_and_limit_regressions():
+    manifest = load_manifest("coordinated_xy_production_mres3_v7")
     results = []
     for test_id in manifest.expected_test_ids:
         metrics = {}
@@ -614,7 +614,7 @@ def test_production_mres3_v6_rejects_timing_and_limit_debounce_regressions():
                 metrics[metric] = 0
         results.append({
             "test_id": test_id,
-            "name": f"production_v6_{test_id}",
+            "name": f"production_v7_{test_id}",
             "pass": True,
             "metrics": metrics,
         })
@@ -624,7 +624,7 @@ def test_production_mres3_v6_rejects_timing_and_limit_debounce_regressions():
         "started_at": "2026-08-13T00:00:00Z",
         "finished_at": "2026-08-13T00:00:10Z",
         "aborted": False,
-        "summary": {"total": 6, "passed": 6, "failed": 0},
+        "summary": {"total": 8, "passed": 8, "failed": 0},
         "results": results,
         "host_checks": [
             {"name": "selftest_progress_watchdog", "pass": True,
@@ -667,6 +667,21 @@ def test_production_mres3_v6_rejects_timing_and_limit_debounce_regressions():
     ):
         rejected = deepcopy(valid)
         rejected["results"][debounce_index]["metrics"][metric] = value
+        assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
+
+    for result_id, metric, value in (
+        (2106, "hz", 39999),
+        (2106, "rs", 3001),
+        (2106, "hs", 5),
+        (2106, "xd", 26),
+        (2107, "hz", 40000),
+        (2107, "rs", 3001),
+        (2107, "pl", 5),
+        (2107, "zd", 26),
+    ):
+        rejected = deepcopy(valid)
+        result_index = manifest.expected_test_ids.index(result_id)
+        rejected["results"][result_index]["metrics"][metric] = value
         assert _analyze(rejected, manifest)["verdict"]["status"] == "fail"
 
     crossing_index = manifest.expected_test_ids.index(2105)

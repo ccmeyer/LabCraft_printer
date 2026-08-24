@@ -66,10 +66,14 @@ uint32_t integerSquareRoot(uint64_t value) {
 }
 
 uint64_t requiredProfileRampEdges(uint32_t rateHz,
-                                  uint32_t accelerationEdgesPerSec2) {
+                                  uint32_t accelerationEdgesPerSec2,
+                                  uint32_t initialRateHz = 0u) {
   const uint64_t rateSquared = static_cast<uint64_t>(rateHz) * rateHz;
+  const uint64_t initialSquared =
+      static_cast<uint64_t>(initialRateHz) * initialRateHz;
+  if (initialSquared >= rateSquared) return 0u;
   const uint64_t numerator =
-      rateSquared * kProfileAccelerationNumerator;
+      (rateSquared - initialSquared) * kProfileAccelerationNumerator;
   const uint64_t denominator =
       static_cast<uint64_t>(accelerationEdgesPerSec2) *
       kProfileAccelerationDenominator;
@@ -78,13 +82,17 @@ uint64_t requiredProfileRampEdges(uint32_t rateHz,
 
 uint32_t maximumTriangularRate(uint32_t requestedRateHz,
                                uint32_t accelerationEdgesPerSec2,
-                               uint32_t rampEdges) {
-  uint32_t accepted = 0u;
-  uint32_t low = 1u;
+                               uint32_t rampEdges,
+                               uint32_t initialRateHz = 0u) {
+  uint32_t accepted = initialRateHz;
+  uint32_t low = initialRateHz == std::numeric_limits<uint32_t>::max()
+      ? initialRateHz
+      : initialRateHz + 1u;
   uint32_t high = requestedRateHz;
   while (low <= high) {
     const uint32_t middle = low + ((high - low) / 2u);
-    if (requiredProfileRampEdges(middle, accelerationEdgesPerSec2) <=
+    if (requiredProfileRampEdges(
+            middle, accelerationEdgesPerSec2, initialRateHz) <=
         rampEdges) {
       accepted = middle;
       if (middle == std::numeric_limits<uint32_t>::max()) break;
@@ -250,9 +258,13 @@ PlanStatus prepare(const PlanRequest& request, CoordinatedXyPlan& plan) {
     return plan.status;
   }
 
-  const uint64_t requestedAccelerationEdges =
-      requiredProfileRampEdges(plan.masterRateHz,
-                               plan.masterAccelerationEdgesPerSec2);
+  plan.initialMasterRateHz = request.initialMasterRateHz == 0u
+      ? 0u
+      : std::min(request.initialMasterRateHz, plan.masterRateHz);
+  const uint64_t requestedAccelerationEdges = requiredProfileRampEdges(
+      plan.masterRateHz,
+      plan.masterAccelerationEdgesPerSec2,
+      plan.initialMasterRateHz);
 
   if ((requestedAccelerationEdges * 2u) <= plan.masterEdges) {
     plan.accelerationEdges = static_cast<uint32_t>(requestedAccelerationEdges);
@@ -264,11 +276,18 @@ PlanStatus prepare(const PlanRequest& request, CoordinatedXyPlan& plan) {
     plan.decelerationEdges = plan.accelerationEdges;
     plan.cruiseEdges = plan.masterEdges - plan.accelerationEdges -
                        plan.decelerationEdges;
-    uint32_t peakRate = plan.accelerationEdges == 0u
-        ? integerSquareRoot(plan.masterAccelerationEdgesPerSec2)
-        : maximumTriangularRate(plan.masterRateHz,
-                                plan.masterAccelerationEdgesPerSec2,
-                                plan.accelerationEdges);
+    uint32_t peakRate = 0u;
+    if (plan.accelerationEdges == 0u) {
+      peakRate = plan.initialMasterRateHz == 0u
+          ? integerSquareRoot(plan.masterAccelerationEdgesPerSec2)
+          : plan.initialMasterRateHz;
+    } else {
+      peakRate = maximumTriangularRate(
+          plan.masterRateHz,
+          plan.masterAccelerationEdgesPerSec2,
+          plan.accelerationEdges,
+          plan.initialMasterRateHz);
+    }
     if (peakRate == 0u) peakRate = 1u;
     plan.masterRateHz = std::min(peakRate, plan.masterRateCapHz);
     plan.triangular = true;
@@ -292,9 +311,20 @@ PlanStatus prepare(const PlanRequest& request, CoordinatedXyPlan& plan) {
 
   plan.timer = request.timer;
   plan.targetArr = static_cast<uint32_t>(targetArr);
-  plan.startArr = static_cast<uint32_t>(std::min<uint64_t>(
-      static_cast<uint64_t>(plan.targetArr) * 5u,
-      request.timer.maxArr));
+  if (plan.initialMasterRateHz != 0u) {
+    const uint64_t startArrPlusOne =
+        request.timer.inputClockHz / plan.initialMasterRateHz;
+    if (startArrPlusOne < 2u) {
+      plan.status = PlanStatus::InvalidLimits;
+      return plan.status;
+    }
+    plan.startArr = static_cast<uint32_t>(std::min<uint64_t>(
+        startArrPlusOne - 1u, request.timer.maxArr));
+  } else {
+    plan.startArr = static_cast<uint32_t>(std::min<uint64_t>(
+        static_cast<uint64_t>(plan.targetArr) * 5u,
+        request.timer.maxArr));
+  }
   if (plan.startArr < plan.minArr) plan.startArr = plan.minArr;
 
   plan.xRateHz = scaledComponent(

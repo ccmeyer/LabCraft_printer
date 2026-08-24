@@ -49,3 +49,50 @@ TEST(StepperProfileMath, TargetArrRespectsMinimumPulseWidth) {
     const auto plan = StepperProfileMath::planMove(input);
     CHECK_TRUE(plan.targetArr >= plan.minArr);
 }
+
+TEST(StepperProfileMath, ExplicitInitialRateProducesFreshResumePlan) {
+    StepperProfileMath::MovePlanInput input{};
+    input.steps = 10000u;
+    input.requestedHz = 30000u;
+    input.initialHz = 3000u;
+    input.maxSpeedHz = 40000u;
+    input.accelStepsPerSec2 = 140000.0f;
+    input.timerClockHz = 1000000u;
+    input.timerMaxArr = 0xFFFFFFFFu;
+
+    const auto plan = StepperProfileMath::planMove(input);
+    UNSIGNED_LONGS_EQUAL(3000u, plan.initialHz);
+    UNSIGNED_LONGS_EQUAL(165u, plan.startArr);
+    CHECK_TRUE(plan.startArr > plan.targetArr);
+    UNSIGNED_LONGS_EQUAL(3183u, plan.accelSteps);
+}
+
+TEST(StepperProfileMath, LegacyInitialRateRemainsOneFifthOfCruise) {
+    StepperProfileMath::MovePlanInput input{};
+    input.steps = 10000u;
+    input.requestedHz = 30000u;
+    input.maxSpeedHz = 40000u;
+    input.accelStepsPerSec2 = 140000.0f;
+    input.timerClockHz = 1000000u;
+    input.timerMaxArr = 0xFFFFFFFFu;
+
+    const auto plan = StepperProfileMath::planMove(input);
+    UNSIGNED_LONGS_EQUAL(0u, plan.initialHz);
+    UNSIGNED_LONGS_EQUAL(plan.targetArr * 5u, plan.startArr);
+}
+
+TEST(StepperProfileMath, DirectZLogicalResumeMapsToExactThreeKilohertzArr) {
+    StepperProfileMath::MovePlanInput input{};
+    input.steps = 10000u;
+    input.requestedHz = 15000u;
+    input.initialHz = 1500u;
+    input.maxSpeedHz = 15000u;
+    input.accelStepsPerSec2 = 70000.0f;
+    input.timerClockHz = 90000000u;
+    input.timerMaxArr = 0xFFFFFFFFu;
+
+    const auto plan = StepperProfileMath::planMove(input);
+    UNSIGNED_LONGS_EQUAL(1500u, plan.initialHz);
+    UNSIGNED_LONGS_EQUAL(29999u, plan.startArr);
+    UNSIGNED_LONGS_EQUAL(1592u, plan.accelSteps);
+}

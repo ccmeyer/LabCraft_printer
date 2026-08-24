@@ -3594,7 +3594,7 @@ another terminal response:
 
 ```bash
 python tools/run_qualification_campaign.py --campaign machine_full_qualification_v1 --operator-prompts --preauthorize-confirmation-prompts --port /dev/ttyAMA0
-python tools/run_qualification.py --manifest coordinated_xy_production_mres3_v6 --operator-prompts --preauthorize-confirmation-prompts --fixture coordinated_xy_production_mres3_envelope_clear --port /dev/ttyAMA0
+python tools/run_qualification.py --manifest coordinated_xy_production_mres3_v7 --operator-prompts --preauthorize-confirmation-prompts --fixture coordinated_xy_production_mres3_envelope_clear --port /dev/ttyAMA0
 ```
 
 `--preauthorize-confirmation-prompts` is opt-in and requires
@@ -3677,12 +3677,15 @@ one edge of cross-track error. At 40 kHz with the 90 MHz timer clock, ARR
 remains 2249; callback load and nominal move duration do not increase.
 
 X and Y retain independent STEP phases initialized from the output GPIOs.
-Pause stops between active edges and preserves the cached trace. Cancel,
-confirmed limits, and post-edge scheduling faults stop immediately when both
-pins are low. If a pin is high, the next valid timer interval emits and
-accounts exactly one cleanup falling edge on only that axis, rebases the
-target to the actual position, and terminates with both pins low. Successful
-moves require zero cleanup edges and zero spacing violations.
+Pause stops immediately when both STEP pins are low. If either pin is high,
+the next valid timer interval emits and accounts the required cleanup falling
+edge before entering the paused state, so no STEP output is held high during a
+pause. Resume discards the old profile cursor and plans only the remaining
+distance to the retained endpoint, starting at no more than 3 kHz and
+accelerating under the original move's cruise and acceleration limits. Direct
+X/Y/Z resume uses the same remaining-endpoint rule. Ordinary unpaused starts
+retain their existing profile. Cancel, confirmed limits, and post-edge
+scheduling faults continue to use the bounded STEP-low terminal path.
 
 X and Y use an edge-aware, hardware-timed 15 ms confirmation path. Both edges
 on PG6/PG9 feed EXTI; the first asserted edge masks only that line and arms its
@@ -3715,8 +3718,11 @@ diagnostic evidence rather than independent acceptance limits.
 The supported coordinated-motion selectors are now:
 
 ```bash
-python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-production-mres3-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_production_mres3_v6.json
-python3 tools/run_qualification.py --manifest coordinated_xy_production_mres3_v6 --operator-prompts --fixture coordinated_xy_production_mres3_envelope_clear --fixture coordinated_xy_production_mres3_limit_crossings_ready --machine-id LC-001 --raw-report hil_reports/coordinated_xy_production_mres3_v6.json
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-production-mres3-suite --timeout-ms 300000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_production_mres3_v7.json
+python3 tools/run_qualification.py --manifest coordinated_xy_production_mres3_v7 --operator-prompts --fixture coordinated_xy_production_mres3_envelope_clear --fixture coordinated_xy_production_mres3_limit_crossings_ready --machine-id LC-001 --raw-report hil_reports/coordinated_xy_production_mres3_v7.json
+
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --motion-pause-resume-suite --timeout-ms 180000 --status-only-timeout-ms 120000 --out hil_reports/motion_pause_resume_v1.json
+python3 tools/run_qualification.py --manifest motion_pause_resume_v1 --operator-prompts --fixture motion_pause_resume_envelope_clear --machine-id LC-001 --raw-report hil_reports/motion_pause_resume_v1.json
 
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-shallow-edge-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_shallow_edge_v4.json
 python3 tools/run_qualification.py --manifest coordinated_xy_shallow_edge_v4 --operator-prompts --fixture coordinated_xy_shallow_edge_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_shallow_edge_v4.json
@@ -3729,10 +3735,14 @@ python3 tools/run_qualification.py --manifest coordinated_xy_camera_transition_v
 ```
 
 Production selector `2097` now emits results
-`[2087,2088,2089,2090,2098,2105]`. Result `2098` proves TIM5 is running at
+`[2087,2088,2089,2090,2098,2106,2107,2105]`. Result `2098` proves TIM5 is running at
 1 MHz, channel 3 services a 15 ms deadline within 15,000-16,000 us, the timing
 infrastructure has no failures, and ten clean production moves produce no X/Y
-confirmations. Operator-gated result `2105` then performs one bounded physical
+confirmations. Results `2106` and `2107` run six two-second pause/resume cases
+each at the application maxima (40 kHz coordinated XY and 30 kHz direct Z),
+require STEP-low stable holds, exact 3 kHz fresh-plan starts, endpoints, enabled
+outputs, and at most 25 logical units of post-run home drift without an enable
+cycle. Operator-gated result `2105` then performs one bounded physical
 crossing per axis at 3 kHz. Each axis starts at the normal 100-step home
 backoff, receives only a 200-step command toward the optical trigger, must
 report the correct terminal axis with both STEP outputs low and no more than
@@ -4140,7 +4150,7 @@ python3 tools/run_qualification.py --manifest direct_xyz_lut_v1 \
 ```
 
 The selector homes Z and XY, runs a 14,000-logical-unit cruise-capable move on
-X, Y, and Z plus a 2,000-unit triangular X move at the 40 kHz logical rate,
+X and Y at 40 kHz and Z at 30 kHz, plus a 2,000-unit triangular X move at 40 kHz,
 then homes again. Results `2091`-`2094` require exact MRES=3 native pulse and
 LUT cursor coverage; `2095` requires both home sets to remain on the legacy
 path, no P/R displacement, and the production MRES=3/DEDGE/filter settings.

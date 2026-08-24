@@ -128,7 +128,6 @@ ArmStatus arm(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,
               bool initialYStepHigh = false);
 ControlDisposition start(Cursor& cursor);
 ControlDisposition requestPause(Cursor& cursor);
-ControlDisposition resume(Cursor& cursor);
 ControlDisposition requestCancel(Cursor& cursor);
 ControlDisposition requestLimitAbort(Cursor& cursor, LimitAxis axis);
 TickStatus onTimerUpdate(const CoordinatedXyPlanner::CoordinatedXyPlan& plan,

@@ -31,6 +31,7 @@ add_executable(fw_tests
     tests/test_pressure_sensor_watchdog_telemetry.cpp
     tests/test_selftest_scheduling_policy.cpp
     tests/test_motion_qualification_math.cpp
+    tests/test_motion_resume_policy.cpp
     tests/test_stepper_profile_math.cpp
     tests/test_direct_stepper_profile.cpp
     tests/test_direct_stepper_profile_report.cpp

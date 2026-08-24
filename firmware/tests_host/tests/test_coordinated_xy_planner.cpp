@@ -357,3 +357,28 @@ TEST(CoordinatedXyPlanner, CursorCachingAndBusyStateAreDeterministic) {
                 static_cast<int>(completeCurrentEdge(plan, second)));
   }
 }
+
+TEST(CoordinatedXyPlanner, ExplicitResumeRateStartsAtThreeKilohertz) {
+  PlanRequest request = normalRequest(20000, 20000);
+  request.requestedMasterRateHz = 40000u;
+  request.initialMasterRateHz = 3000u;
+  CoordinatedXyPlan plan{};
+  CHECK_EQUAL(static_cast<int>(PlanStatus::Ready),
+              static_cast<int>(prepare(request, plan)));
+  UNSIGNED_LONGS_EQUAL(3000u, plan.initialMasterRateHz);
+  UNSIGNED_LONGS_EQUAL(29999u, plan.startArr);
+  CHECK_TRUE(plan.startArr > plan.targetArr);
+  CHECK_TRUE(plan.accelerationEdges < plan.masterEdges / 2u);
+}
+
+TEST(CoordinatedXyPlanner, ResumeRateClampsToShortMovePeak) {
+  PlanRequest request = normalRequest(10, 10);
+  request.requestedMasterRateHz = 2000u;
+  request.initialMasterRateHz = 3000u;
+  CoordinatedXyPlan plan{};
+  CHECK_EQUAL(static_cast<int>(PlanStatus::Ready),
+              static_cast<int>(prepare(request, plan)));
+  UNSIGNED_LONGS_EQUAL(plan.masterRateHz, plan.initialMasterRateHz);
+  UNSIGNED_LONGS_EQUAL(0u, plan.accelerationEdges);
+  UNSIGNED_LONGS_EQUAL(plan.targetArr, plan.startArr);
+}

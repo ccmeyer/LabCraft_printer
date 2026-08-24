@@ -1055,6 +1055,7 @@ def test_run_sends_selftest_scheduler_selector(monkeypatch, tmp_path, flag_name,
         ("coordinated_xy_production_mres3_suite", 2097),
         ("coordinated_xy_shallow_edge_suite", 2099),
         ("direct_xyz_lut_suite", 2096),
+        ("motion_pause_resume_suite", 2109),
         ("coordinated_xy_camera_transition_suite", 2078),
     ),
 )
@@ -2371,7 +2372,20 @@ def test_direct_xyz_lut_fixture_stage_is_an_operator_prompt():
     message = mod._operator_prompt_message(stage)
     assert "direct X/Y/Z motion envelope" in message
     assert "14,000-unit move" in message
-    assert "40 kHz logical rate" in message
+    assert "40 kHz XY / 30 kHz Z logical rates" in message
+
+
+def test_motion_pause_resume_fixture_stage_is_preauthorizable():
+    mod = _load_run_selftest()
+    stage = "motion_pause_resume_envelope_clear"
+
+    assert mod._is_operator_prompt_stage(stage)
+    assert stage in mod.PREAUTHORIZABLE_OPERATOR_PROMPT_STAGES
+    message = mod._operator_prompt_message(stage)
+    assert "six XY moves at 40 kHz" in message
+    assert "six Z moves at 30 kHz" in message
+    assert "3 kHz" in message
+    assert "without cycling motor enable" in message
 
 
 def test_active_production_selector_is_mutually_exclusive_with_direct_lut(

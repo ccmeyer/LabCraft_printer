@@ -56,6 +56,9 @@ struct PlanRequest {
   int64_t deltaX = 0;
   int64_t deltaY = 0;
   uint32_t requestedMasterRateHz = 0u;
+  // Zero retains the legacy one-fifth-of-cruise start. A nonzero value is an
+  // explicit initial master-edge rate, used by fresh resume plans.
+  uint32_t initialMasterRateHz = 0u;
   AxisLimits xLimits{};
   AxisLimits yLimits{};
   TimerLimits timer{};
@@ -74,6 +77,7 @@ struct CoordinatedXyPlan {
 
   uint32_t masterRateCapHz = 0u;
   uint32_t masterRateHz = 0u;
+  uint32_t initialMasterRateHz = 0u;
   uint32_t xRateHz = 0u;
   uint32_t yRateHz = 0u;
   uint32_t masterAccelerationCapEdgesPerSec2 = 0u;

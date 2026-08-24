@@ -1,11 +1,11 @@
 {
   "schema_version": "qualification_manifest_v0",
-  "manifest_id": "coordinated_xy_production_mres3_v6",
-  "name": "Production MRES3 Active-Edge Coordination v6",
+  "manifest_id": "coordinated_xy_production_mres3_v7",
+  "name": "Production MRES3 Active-Edge Coordination v7",
   "profile": "FULL",
-  "lifecycle": "archived",
-  "description": "Production qualification for MRES=3 DEDGE active transitions with exact edge distribution, conditional late rearming, edge-aware EXTI plus 1 MHz TIM5 X/Y limit confirmation, bounded physical X/Y limit crossings, the evidence-based 2,600-cycle active-handler regression gate, and the shared 3,500-cycle post-motion terminal-handler gate.",
-  "expected_test_ids": [2087, 2088, 2089, 2090, 2098, 2105],
+  "lifecycle": "active",
+  "description": "Production qualification for MRES=3 DEDGE active transitions, edge-aware EXTI plus TIM5 X/Y limit confirmation, fresh-plan XY/Z pause-resume at the 40 kHz XY and 30 kHz Z application maxima, and bounded physical X/Y limit crossings.",
+  "expected_test_ids": [2087, 2088, 2089, 2090, 2098, 2106, 2107, 2105],
   "enforce_expected_test_ids": true,
   "requires_operator_prompts": true,
   "selftest_args": ["--coordinated-xy-production-mres3-suite"],
@@ -13,8 +13,8 @@
   "fixtures": [
     {
       "fixture_id": "coordinated_xy_production_mres3_envelope_clear",
-      "required_for": [2087, 2088, 2089, 2090, 2098],
-      "operator_note": "Confirm both limits are released, the gantry is square, and the full XY/Z envelope is clear. Stop for contact, abnormal sound, lost squareness, excessive travel, missing motion or home, reset, watchdog evidence, or communication loss."
+      "required_for": [2087, 2088, 2089, 2090, 2098, 2106, 2107],
+      "operator_note": "Confirm both limits are released, non-dispensing test heads are installed, the gantry is square, the XY envelope through X=25000/Y=30500 and Z travel through 25000 are clear, and the emergency stop is reachable. Firmware runs the ten-move 40 kHz production row, then six two-second XY pauses at 40 kHz and six Z pauses at 30 kHz with 3 kHz fresh replans and no enable cycle. Stop for contact, abnormal sound, lost squareness, missing motion or home, reset, watchdog evidence, or communication loss."
     },
     {
       "fixture_id": "coordinated_xy_production_mres3_limit_crossings_ready",
@@ -119,6 +119,47 @@
         "tf": {"maturity": "acceptance", "equals": 0},
         "af": {"maturity": "acceptance", "equals": 0},
         "tr": {"maturity": "acceptance", "equals": 1},
+        "sf": {"maturity": "acceptance", "equals": 0},
+        "to": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "2106": {
+      "category": "motion",
+      "failure_domain": "firmware_motion",
+      "metrics": {
+        "n": {"maturity": "acceptance", "equals": 6},
+        "hz": {"maturity": "acceptance", "equals": 40000},
+        "rs": {"maturity": "acceptance", "equals": 3000},
+        "rc": {"maturity": "acceptance", "equals": 6},
+        "hold": {"maturity": "acceptance", "equals": 2000},
+        "pl": {"maturity": "acceptance", "equals": 6},
+        "hs": {"maturity": "acceptance", "equals": 6},
+        "ep": {"maturity": "acceptance", "equals": 6},
+        "ar": {"maturity": "acceptance", "equals": 6},
+        "ce": {"maturity": "acceptance", "max": 6},
+        "xd": {"maturity": "acceptance", "max": 25},
+        "yd": {"maturity": "acceptance", "max": 25},
+        "en": {"maturity": "acceptance", "equals": 1},
+        "sf": {"maturity": "acceptance", "equals": 0},
+        "to": {"maturity": "acceptance", "equals": 0}
+      }
+    },
+    "2107": {
+      "category": "motion",
+      "failure_domain": "firmware_motion",
+      "metrics": {
+        "n": {"maturity": "acceptance", "equals": 6},
+        "hz": {"maturity": "acceptance", "equals": 30000},
+        "rs": {"maturity": "acceptance", "equals": 3000},
+        "rc": {"maturity": "acceptance", "equals": 6},
+        "hold": {"maturity": "acceptance", "equals": 2000},
+        "pl": {"maturity": "acceptance", "equals": 6},
+        "hs": {"maturity": "acceptance", "equals": 6},
+        "ep": {"maturity": "acceptance", "equals": 6},
+        "ar": {"maturity": "acceptance", "equals": 6},
+        "ce": {"maturity": "acceptance", "max": 6},
+        "zd": {"maturity": "acceptance", "max": 25},
+        "en": {"maturity": "acceptance", "equals": 1},
         "sf": {"maturity": "acceptance", "equals": 0},
         "to": {"maturity": "acceptance", "equals": 0}
       }

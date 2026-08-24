@@ -14,6 +14,9 @@ enum class Profile : uint8_t {
 struct MovePlanInput {
   uint32_t steps = 0;
   uint32_t requestedHz = 0;
+  // Zero retains the legacy one-fifth-of-cruise start. A nonzero value is an
+  // explicit initial rate, used by fresh resume plans.
+  uint32_t initialHz = 0;
   uint32_t maxSpeedHz = 0;
   float accelStepsPerSec2 = 1.0f;
   uint32_t timerClockHz = 0;
@@ -23,6 +26,7 @@ struct MovePlanInput {
 
 struct MovePlan {
   uint32_t cruiseHz = 0;
+  uint32_t initialHz = 0;
   uint32_t accelSteps = 0;
   uint32_t accelToggles = 0;
   uint32_t decelToggles = 0;

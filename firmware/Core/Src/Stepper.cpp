@@ -8,6 +8,7 @@
 #include "Stepper.h"
 #include "ExtiDebounce.h"
 #include "MotionLimitDebounceTimer.h"
+#include "MotionResumePolicy.h"
 #include "MotionUnitScale.h"
 #include "StepperProfileMath.h"
 #include "Orchestrator.h"          // for getDoneEvents()
@@ -286,7 +287,16 @@ Stepper::DirectMoveStartStatus Stepper::moveTo(bool sign,
 Stepper::DirectMoveStartStatus Stepper::move(bool direction,
                                              uint32_t steps,
                                              uint32_t freqHz,
-                                             uint32_t /*accelSteps ignored*/) {
+                                             uint32_t accelSteps) {
+  return _moveWithInitialRate(direction, steps, freqHz, accelSteps, 0u);
+}
+
+Stepper::DirectMoveStartStatus Stepper::_moveWithInitialRate(
+    bool direction,
+    uint32_t steps,
+    uint32_t freqHz,
+    uint32_t /*accelSteps ignored*/,
+    uint32_t initialRateHz) {
   if (!_htim) {
     taskENTER_CRITICAL();
     _directMoveSnapshot = DirectMoveSnapshot{};
@@ -340,6 +350,7 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
     }
     _directMoveSnapshot.endPosition = _pos;
     _directMoveSnapshot.emittedEdges = resuming ? resumedFrom.emittedEdges : 0u;
+    if (resuming) ++_directMoveSnapshot.resumeStartFailures;
     _directMoveSnapshot.direction = direction;
     _directMoveSnapshot.movingTowardLimit = direction == _homeTowardLimitDir;
     _directMoveSnapshot.limitAssertedAtStart = _isLimitAsserted();
@@ -438,6 +449,7 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
     _directMoveSnapshot.terminalReason = DirectMoveTerminalReason::StartRejected;
     _directMoveSnapshot.endPosition = _pos;
     _targetPos = _pos;
+    if (resuming) ++_directMoveSnapshot.resumeStartFailures;
     taskEXIT_CRITICAL();
     xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
     return DirectMoveStartStatus::LimitBlocked;
@@ -448,6 +460,9 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
   StepperProfileMath::MovePlanInput planInput{};
   planInput.steps = nativeSteps;
   planInput.requestedHz = MotionUnitScale::toNativeRate(freqHz);
+  planInput.initialHz = initialRateHz == 0u
+      ? 0u
+      : MotionUnitScale::toNativeRate(initialRateHz);
   planInput.maxSpeedHz = MotionUnitScale::toNativeRate(_max_speed_hz);
   planInput.accelStepsPerSec2 =
       MotionUnitScale::toNativeAcceleration(_accel_sps2);
@@ -471,6 +486,11 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
 
   _targetARR = plan.targetArr;
   _startARR = plan.startArr;
+  if (resuming) {
+    taskENTER_CRITICAL();
+    _directMoveSnapshot.resumeStartArr = plan.startArr;
+    taskEXIT_CRITICAL();
+  }
 
   const bool useNormalizedCosineProfile =
       (_axis == X_AXIS || _axis == Y_AXIS || _axis == Z_AXIS) &&
@@ -492,6 +512,7 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
     _directMoveSnapshot.terminalReason = DirectMoveTerminalReason::ProfileFault;
     _directMoveSnapshot.endPosition = _pos;
     _directMoveSnapshot.emittedEdges = _directMoveEmittedOffset;
+    if (resuming) ++_directMoveSnapshot.resumeStartFailures;
     _targetPos = _pos;
     taskEXIT_CRITICAL();
     xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
@@ -534,6 +555,7 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
     _directMoveSnapshot.terminalReason = DirectMoveTerminalReason::StartRejected;
     _directMoveSnapshot.endPosition = _pos;
     _directMoveSnapshot.emittedEdges = _directMoveEmittedOffset;
+    if (resuming) ++_directMoveSnapshot.resumeStartFailures;
     _targetPos = _pos;
     taskEXIT_CRITICAL();
     xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
@@ -1548,6 +1570,7 @@ void Stepper::pauseMove() {
       _pos += (_direction ? logicalStep : -logicalStep);
       ++_togglesDone;
       --_togglesRemaining;
+      ++_directMoveSnapshot.pauseCleanupEdges;
       _stepPort->BSRR = static_cast<uint32_t>(_stepPin) << 16u;
       if (_dualDriver) {
         _stepPort2->BSRR = static_cast<uint32_t>(_stepPin2) << 16u;
@@ -1579,35 +1602,53 @@ Stepper::DirectMoveStartStatus Stepper::resumeMove() {
 	if (paused.state != DirectMoveState::Paused) {
 	  return DirectMoveStartStatus::Busy;
 	}
-	const int64_t remainingDelta =
-	    static_cast<int64_t>(paused.targetPosition) - static_cast<int64_t>(_pos);
-	const uint64_t remainingMagnitude = remainingDelta < 0
-	    ? static_cast<uint64_t>(-(remainingDelta + 1)) + 1u
-	    : static_cast<uint64_t>(remainingDelta);
-	if (remainingMagnitude == 0u || remainingMagnitude > UINT32_MAX) {
+	const MotionResumePolicy::RemainingMove remaining =
+	    MotionResumePolicy::remainingMove(_pos, paused.targetPosition);
+	if (!remaining.valid) {
 	  taskENTER_CRITICAL();
 	  _directMoveSnapshot.startStatus = DirectMoveStartStatus::InvalidRequest;
 	  _directMoveSnapshot.state = DirectMoveState::Faulted;
 	  _directMoveSnapshot.terminalReason = DirectMoveTerminalReason::StartRejected;
 	  _directMoveSnapshot.endPosition = _pos;
+	  ++_directMoveSnapshot.resumeStartFailures;
 	  taskEXIT_CRITICAL();
 	  return DirectMoveStartStatus::InvalidRequest;
+	}
+	if (remaining.immediate) {
+	  taskENTER_CRITICAL();
+	  _togglesRemaining = _togglesDone = 0u;
+	  _directMoveSnapshot.state = DirectMoveState::Completed;
+	  _directMoveSnapshot.terminalReason = DirectMoveTerminalReason::Completed;
+	  _directMoveSnapshot.endPosition = _pos;
+	  taskEXIT_CRITICAL();
+	  xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
+	  return DirectMoveStartStatus::Immediate;
 	}
 
 	const uint32_t resumeHz = _lastFreqHz;
 	const uint32_t resumeAccel = _lastAccel;
+	const uint32_t resumeStartHz =
+	    MotionResumePolicy::selectStartRateHz(resumeHz);
 	DirectStepperProfile::abort(_directProfileState);
 	taskENTER_CRITICAL();
 	_directMoveResumeSnapshot = paused;
+	++_directMoveResumeSnapshot.resumeCount;
+	_directMoveResumeSnapshot.resumeStartRateHz = resumeStartHz;
 	_directMoveResumePending = true;
 	_togglesRemaining = _togglesDone = 0u;
 	_accelToggles = _decelToggles = 0u;
 	taskEXIT_CRITICAL();
 
-	return move(remainingDelta > 0,
-	            static_cast<uint32_t>(remainingMagnitude),
-	            resumeHz,
-	            resumeAccel);
+	return _moveWithInitialRate(remaining.positive,
+	                            remaining.magnitude,
+	                            resumeHz,
+	                            resumeAccel,
+	                            resumeStartHz);
+}
+
+bool Stepper::stepIsLow() const {
+  bool high = false;
+  return _readCoordinatedStepHigh(high) && !high;
 }
 
 void Stepper::cancelMove() {

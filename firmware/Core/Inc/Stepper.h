@@ -77,6 +77,11 @@ public:
     int32_t endPosition = 0;
     uint32_t requestedEdges = 0u;
     uint32_t emittedEdges = 0u;
+    uint32_t resumeCount = 0u;
+    uint32_t resumeStartRateHz = 0u;
+    uint32_t resumeStartArr = 0u;
+    uint32_t pauseCleanupEdges = 0u;
+    uint32_t resumeStartFailures = 0u;
     bool direction = true;
     bool movingTowardLimit = false;
     bool limitAssertedAtStart = false;
@@ -176,6 +181,7 @@ public:
   int32_t getPosition() const { return _pos; }
   int32_t getTargetPosition() const { return _targetPos; }
   DirectMoveSnapshot getLastDirectMoveSnapshot() const;
+  bool stepIsLow() const;
 
   struct HomeDiagnosticSnapshot {
     enum class Phase : uint8_t {
@@ -270,6 +276,11 @@ public:
 
 private:
   friend class Gantry;
+  DirectMoveStartStatus _moveWithInitialRate(bool direction,
+                                             uint32_t steps,
+                                             uint32_t targetHz,
+                                             uint32_t accelSteps,
+                                             uint32_t initialRateHz);
 
   // hardware bindings
   TIM_HandleTypeDef* _htim      = nullptr;
