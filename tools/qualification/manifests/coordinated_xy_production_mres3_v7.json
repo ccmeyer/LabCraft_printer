@@ -14,7 +14,7 @@
     {
       "fixture_id": "coordinated_xy_production_mres3_envelope_clear",
       "required_for": [2087, 2088, 2089, 2090, 2098, 2106, 2107],
-      "operator_note": "Confirm both limits are released, non-dispensing test heads are installed, the gantry is square, the XY envelope through X=25000/Y=30500 and Z travel through 25000 are clear, and the emergency stop is reachable. Firmware runs the ten-move 40 kHz production row, then six two-second XY pauses at 40 kHz and six Z pauses at 30 kHz with 3 kHz fresh replans and no enable cycle. Stop for contact, abnormal sound, lost squareness, missing motion or home, reset, watchdog evidence, or communication loss."
+      "operator_note": "Confirm both limits are released, non-dispensing test heads are installed, the gantry is square, the XY envelope through X=25000/Y=30500 and Z travel through 25000 are clear, and the emergency stop is reachable. Firmware runs the ten-move 40 kHz production row, performs unmeasured settling homes and measured reference homes, then runs six two-second XY pauses at 40 kHz and six Z pauses at 30 kHz with 3 kHz fresh replans and no enable cycle. Stop for contact, abnormal sound, lost squareness, missing motion or home, reset, watchdog evidence, or communication loss."
     },
     {
       "fixture_id": "coordinated_xy_production_mres3_limit_crossings_ready",

@@ -169,6 +169,22 @@ def test_diagnostics_exposes_production_shallow_direct_lut_and_camera_selectors(
     assert "runDirectXyzLutSuite" in diagnostics
 
 
+def test_pause_resume_qualification_settles_home_and_opens_status_windows():
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+    start = diagnostics.index("auto runMotionPauseResumeQualification")
+    end = diagnostics.index("if (runMotionPauseResumeSuite)", start)
+    suite = diagnostics[start:end]
+
+    for axis in ("z", "xy"):
+        settle = suite.index(f'pause_resume_{axis}_settle_home')
+        reference = suite.index(f'pause_resume_{axis}_reference_home')
+        assert settle < reference
+    assert 'emitSkipped("settle_home")' in suite
+    assert suite.count("(void)Comm::resetStatusMetrics();") == 2
+    assert suite.count("comm->setStatusPaused(false);") == 2
+    assert suite.count("comm->setStatusPaused(true);") == 2
+
+
 def test_production_suite_freezes_geometry_counts_and_strict_evidence():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
     start = diagnostics.index("if (runCoordinatedXyPerformanceSuite)")

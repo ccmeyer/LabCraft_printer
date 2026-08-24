@@ -14,7 +14,7 @@
     {
       "fixture_id": "motion_pause_resume_envelope_clear",
       "required_for": [2106, 2107],
-      "operator_note": "Confirm non-dispensing test heads are installed, both optical X/Y limits are released, the XY envelope through X=25000/Y=25000 and Z travel through 25000 are clear, the emergency stop is reachable, and all hands are clear. Firmware homes XY/Z, performs six two-second paused XY cycles at 40 kHz and six Z cycles at 30 kHz, and re-homes without cycling the motor enable outputs."
+      "operator_note": "Confirm non-dispensing test heads are installed, both optical X/Y limits are released, the XY envelope through X=25000/Y=25000 and Z travel through 25000 are clear, the emergency stop is reachable, and all hands are clear. Firmware performs unmeasured settling homes and measured reference homes for XY/Z, runs six two-second paused XY cycles at 40 kHz and six Z cycles at 30 kHz, and re-homes without cycling the motor enable outputs."
     }
   ],
   "analysis_rules": {

@@ -2897,6 +2897,35 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                         stepperY->setAccelProfile(Stepper::PROFILE_SCURVE_COSINE);
                         stepperZ->setAccelProfile(Stepper::PROFILE_SCURVE_COSINE);
 
+                        // The MCU's tracked coordinate is arbitrary immediately
+                        // after reset. Establish the physical home coordinate
+                        // once before capturing the measured reference used for
+                        // post-motion drift comparisons.
+                        MotionQualificationMath::AxisHomeSample xSettle{};
+                        MotionQualificationMath::AxisHomeSample ySettle{};
+                        MotionQualificationMath::AxisHomeSample zSettle{};
+                        sendProgressStage("pause_resume_z_settle_home");
+                        const bool zSettleHome = runAxisHomeDiagnosticAttempt(
+                            stepperZ,
+                            BIT_HOME_Z_DONE,
+                            zSettle,
+                            30000u,
+                            3000u,
+                            kHomeBackoffSteps,
+                            kHomeTimeoutMs);
+                        sendProgressStage("pause_resume_xy_settle_home");
+                        const bool xySettleHome = runXyHomeDiagnosticAttempt(
+                            xSettle,
+                            ySettle,
+                            3000u,
+                            1000u,
+                            kHomeBackoffSteps,
+                            kHomeTimeoutMs);
+                        if (!zSettleHome || !xySettleHome) {
+                          emitSkipped("settle_home");
+                          return false;
+                        }
+
                         MotionQualificationMath::AxisHomeSample xReference{};
                         MotionQualificationMath::AxisHomeSample yReference{};
                         MotionQualificationMath::AxisHomeSample zReference{};
@@ -2976,6 +3005,11 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return false;
                         };
 
+                        // This focused selector owns its own status windows so
+                        // the host cadence gate observes real traffic during
+                        // both the coordinated and direct motion phases.
+                        (void)Comm::resetStatusMetrics();
+                        comm->setStatusPaused(false);
                         const bool xyAnchorReached = moveGantryToWithTimeout(
                             5000, 5000, kXyRateHz, kMoveTimeoutMs);
                         static constexpr int32_t kXyTargets[kCaseCount][2] = {
@@ -3155,6 +3189,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             xyEnabled ? 1u : 0u,
                             (unsigned long)xySafetyFailures,
                             (unsigned long)xy.timeouts);
+                        comm->setStatusPaused(true);
                         const bool xyEmitted = runOne(
                             2106u,
                             "coord_xy_pause_resume_replan",
@@ -3172,6 +3207,8 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                           return false;
                         }
 
+                        (void)Comm::resetStatusMetrics();
+                        comm->setStatusPaused(false);
                         const bool zAnchorReached = moveAxisToWithTimeout(
                             stepperZ,
                             BIT_STEPPER3_DONE,
@@ -3347,6 +3384,7 @@ DiagnosticsSummary DiagnosticsRunner::runSelfTest(Orchestrator& orchestrator,
                             zEnabled ? 1u : 0u,
                             (unsigned long)zSafetyFailures,
                             (unsigned long)z.timeouts);
+                        comm->setStatusPaused(true);
                         const bool zEmitted = runOne(
                             2107u,
                             "direct_z_pause_resume_replan",

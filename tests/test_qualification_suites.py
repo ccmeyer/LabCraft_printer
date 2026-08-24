@@ -207,6 +207,8 @@ def test_pause_resume_suite_uses_application_maxima_and_fresh_start_gate():
     assert manifest.profile == "FULL"
     assert manifest.selftest_args == ("--motion-pause-resume-suite",)
     assert required_fixture_ids(manifest) == ("motion_pause_resume_envelope_clear",)
+    assert "unmeasured settling homes" in manifest.fixtures[0]["operator_note"]
+    assert "measured reference homes" in manifest.fixtures[0]["operator_note"]
     assert [row.test_id for row in build_test_plan_rows(manifest)] == [2106, 2107]
     xy = manifest.analysis_rules["2106"]["metrics"]
     z = manifest.analysis_rules["2107"]["metrics"]
