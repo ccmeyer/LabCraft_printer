@@ -8,16 +8,6 @@ from Model import LocationModel, WellPlate
 from View import WellPlateWidget
 
 
-class _AcceptedPlateCalibrationDialog:
-    def __init__(self, main_window, model, controller):
-        self.main_window = main_window
-        self.model = model
-        self.controller = controller
-
-    def exec(self):
-        return QDialog.Accepted
-
-
 def _make_plate_data(initial_cals):
     return [{
         "name": "plate-a",
@@ -29,7 +19,7 @@ def _make_plate_data(initial_cals):
     }]
 
 
-def test_open_calibration_dialog_persists_plate_corners_without_touching_locations(tmp_path, monkeypatch):
+def test_open_calibration_dialog_uses_guarded_entry_without_generic_plate_move(tmp_path):
     initial_cals = {
         "top_left": {"X": 100, "Y": 200, "Z": 300},
         "top_right": {"X": 100, "Y": 400, "Z": 300},
@@ -56,24 +46,29 @@ def test_open_calibration_dialog_persists_plate_corners_without_touching_locatio
     obstacles_tmp.write_text(json.dumps({"boundaries": [], "obstacles": []}), encoding="utf-8")
 
     well_plate = WellPlate(_make_plate_data(initial_cals), str(plates_tmp))
-    well_plate.temp_calibration_data = updated_cals.copy()
-
     location_model = LocationModel(
         json_file_path=str(locations_tmp),
         obstacle_path=str(obstacles_tmp),
     )
     location_model.load_locations()
 
-    move_calls = []
+    entry_calls = []
     controller = SimpleNamespace(
-        move_to_location=lambda *args, **kwargs: move_calls.append((args, kwargs))
+        plate_calibration_entry_preflight=lambda: {
+            "allowed": True,
+            "verified": True,
+            "target_key": "plate:plate-a",
+        },
+        begin_plate_calibration_entry=lambda **kwargs: entry_calls.append(kwargs) or {
+            "session_token": "session-1",
+            "state": "staging",
+        },
     )
 
     widget = WellPlateWidget.__new__(WellPlateWidget)
     widget.main_window = SimpleNamespace(
         popup_message=lambda *args, **kwargs: None,
-        popup_yes_no=lambda *args, **kwargs: QDialog.Accepted,
-        _is_no_response=lambda response: False,
+        popup_choice=lambda *args, **kwargs: "Cancel",
     )
     widget.model = SimpleNamespace(
         machine_model=SimpleNamespace(
@@ -87,16 +82,52 @@ def test_open_calibration_dialog_persists_plate_corners_without_touching_locatio
         location_model=location_model,
     )
     widget.controller = controller
+    widget._plate_calibration_session_token = None
+    widget._plate_calibration_dialog = None
+    widget.calibration_button = SimpleNamespace(
+        setEnabled=lambda _value: None,
+        setText=lambda _value: None,
+    )
 
-    monkeypatch.setattr(View, "PlateCalibrationDialog", _AcceptedPlateCalibrationDialog)
+    assert WellPlateWidget.open_calibration_dialog(widget) is True
 
-    WellPlateWidget.open_calibration_dialog(widget)
-
-    assert move_calls == [(("plate",), {"z_offset": 500})]
-    assert well_plate.calibrations == updated_cals
+    assert entry_calls == [{"manual_first": False}]
+    assert widget._plate_calibration_session_token == "session-1"
+    assert well_plate.calibrations == initial_cals
     saved_plates = json.loads(plates_tmp.read_text(encoding="utf-8"))
-    assert saved_plates[0]["calibrations"] == updated_cals
+    assert saved_plates[0]["calibrations"] == initial_cals
     assert json.loads(locations_tmp.read_text(encoding="utf-8")) == locations_baseline
+
+
+def test_historical_calibration_review_issues_no_motion_and_requires_new_launch():
+    calls = []
+    widget = WellPlateWidget.__new__(WellPlateWidget)
+    widget._plate_calibration_session_token = None
+    widget._plate_calibration_dialog = None
+    widget.model = SimpleNamespace()
+    widget.controller = SimpleNamespace(
+        plate_calibration_entry_preflight=lambda: {
+            "allowed": True,
+            "verified": False,
+            "target_key": "plate:plate-a",
+            "historical_candidate": {"source_event_id": "event-1"},
+        },
+        begin_plate_calibration_entry=lambda **kwargs: calls.append(
+            ("motion", kwargs)
+        ),
+    )
+    widget.main_window = SimpleNamespace(
+        popup_choice=lambda *args, **kwargs: "Review Existing Calibration",
+        review_configuration_target=lambda target: calls.append(("review", target)),
+        popup_message=lambda *args, **kwargs: calls.append(("message", args)),
+    )
+
+    result = WellPlateWidget.open_calibration_dialog(widget)
+
+    assert result is False
+    assert calls[0] == ("review", "plate:plate-a")
+    assert not any(call[0] == "motion" for call in calls)
+    assert widget._plate_calibration_session_token is None
 
 
 def test_well_plate_calibration_save_updates_local_copy_without_touching_preset(tmp_path):

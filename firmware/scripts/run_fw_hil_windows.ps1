@@ -14,6 +14,7 @@ param(
   [int]$ProgressTimeoutMs = 30000,
   [int]$ActivityTimeoutMs = 120000,
   [int]$StatusOnlyTimeoutMs = 10000,
+  [switch]$PreauthorizeConfirmationPrompts,
   [switch]$CoordinatedXyShallowEdgeSuite,
   [switch]$CameraBenchmark,
   [int]$CameraBenchmarkCycles = 100,
@@ -159,6 +160,9 @@ try {
   }
   if ($CoordinatedXyShallowEdgeSuite.IsPresent) {
     $flashArgs += "--coordinated-xy-shallow-edge-suite"
+  }
+  if ($PreauthorizeConfirmationPrompts.IsPresent) {
+    $flashArgs += "--preauthorize-confirmation-prompts"
   }
 
   $cmd = @"

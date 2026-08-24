@@ -77,6 +77,13 @@ public:
     int32_t endPosition = 0;
     uint32_t requestedEdges = 0u;
     uint32_t emittedEdges = 0u;
+    uint32_t resumeCount = 0u;
+    uint32_t resumeStartRateHz = 0u;
+    uint32_t resumeStartArr = 0u;
+    uint32_t pauseCleanupEdges = 0u;
+    uint32_t resumeStartFailures = 0u;
+    uint32_t resumeDriverRearmCount = 0u;
+    uint32_t resumeDriverRearmFailures = 0u;
     bool direction = true;
     bool movingTowardLimit = false;
     bool limitAssertedAtStart = false;
@@ -176,6 +183,7 @@ public:
   int32_t getPosition() const { return _pos; }
   int32_t getTargetPosition() const { return _targetPos; }
   DirectMoveSnapshot getLastDirectMoveSnapshot() const;
+  bool stepIsLow() const;
 
   struct HomeDiagnosticSnapshot {
     enum class Phase : uint8_t {
@@ -215,11 +223,19 @@ public:
   }
   bool isLimitAssertedForDiagnostics() const { return _isLimitAsserted(); }
   MotionLimitDebouncePolicy::Snapshot getLimitDebounceSnapshot() const;
-  bool limitDebounceTimebaseValid() const { return _limitDebounceTimebaseValid; }
+  bool limitDebounceTimebaseValid() const;
+  bool homeDirectionTowardLimitForDiagnostics() const {
+    return _homeTowardLimitDir;
+  }
   bool enableOutputsAssertedForDiagnostics() const {
     if (_enPort == nullptr || (_enPort->ODR & _enPin) != 0u) return false;
     return !_dualDriver ||
            (_enPort2 != nullptr && (_enPort2->ODR & _enPin2) == 0u);
+  }
+  bool enableOutputsDeassertedForDiagnostics() const {
+    if (_enPort == nullptr || (_enPort->ODR & _enPin) == 0u) return false;
+    return !_dualDriver ||
+           (_enPort2 != nullptr && (_enPort2->ODR & _enPin2) != 0u);
   }
 
 
@@ -267,6 +283,12 @@ public:
 
 private:
   friend class Gantry;
+  DirectMoveStartStatus _moveWithInitialRate(bool direction,
+                                             uint32_t steps,
+                                             uint32_t targetHz,
+                                             uint32_t accelSteps,
+                                             uint32_t initialRateHz);
+  bool _rearmDriverForResume();
 
   // hardware bindings
   TIM_HandleTypeDef* _htim      = nullptr;
@@ -409,6 +431,12 @@ private:
   bool _takeConfirmedLimitFromIsr();
   bool _stopForConfirmedLimitFromIsr();
   void _observeLimitLevelFromTask(bool asserted, uint32_t nowCycle);
+#if defined(__GNUC__) && !defined(UNIT_TEST)
+  __attribute__((always_inline))
+#endif
+  bool _usesHardwareLimitDebounce() const {
+    return _axis == X_AXIS || _axis == Y_AXIS;
+  }
   bool _confirmReleasedForNextApproach(
       const HomeInterruptionPolicy::CancellationToken* cancelToken = nullptr);
   LimitStableSample _sampleLimitLevelStable(

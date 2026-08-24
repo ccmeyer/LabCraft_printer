@@ -101,7 +101,7 @@ def test_absolute_coordinates_rejection_leaves_expected_position_and_skips_handl
     assert controller.machine.calls == [
         (
             "xy",
-            -501,
+            -500,
             1200,
             {"manual": False, "handler": handler, "kwargs": None},
         ),

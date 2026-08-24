@@ -3,7 +3,7 @@
   "manifest_id": "coordinated_xy_production_mres3_v5",
   "name": "Production MRES3 Active-Edge Coordination v5",
   "profile": "FULL",
-  "lifecycle": "active",
+  "lifecycle": "archived",
   "description": "Production qualification for MRES=3 DEDGE active transitions with exact edge distribution, conditional late rearming, continuous 15 ms X/Y motion-limit confirmation, the evidence-based 2,600-cycle active-handler regression gate, and the shared 3,500-cycle post-motion terminal-handler gate.",
   "expected_test_ids": [2087, 2088, 2089, 2090, 2098],
   "enforce_expected_test_ids": true,

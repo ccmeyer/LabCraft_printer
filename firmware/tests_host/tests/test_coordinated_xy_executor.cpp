@@ -162,47 +162,40 @@ TEST(CoordinatedXyExecutor, ReverseDirectionsDoNotChangeEdgeTrace) {
                        reverseCursor.arrChecksum);
 }
 
-TEST(CoordinatedXyExecutor, PauseStopsAtBoundaryAndPreservesCachedTrace) {
+TEST(CoordinatedXyExecutor, PauseHighEmitsOneAccountedCleanupFall) {
   const CoordinatedXyPlan plan = readyPlan(8, 4);
-  Cursor uninterrupted = runningCursor(plan);
   Cursor paused = runningCursor(plan);
+  TickResult first{};
+  (void)onTimerUpdate(plan, paused, first);
+  CHECK_TRUE(paused.xStepHigh || paused.yStepHigh);
 
-  TickResult firstA{};
-  TickResult firstB{};
-  (void)onTimerUpdate(plan, uninterrupted, firstA);
-  (void)onTimerUpdate(plan, paused, firstB);
-  CHECK_EQUAL(static_cast<int>(firstA.edgeMask),
-              static_cast<int>(firstB.edgeMask));
-  const EdgeEvent cached = paused.cachedEvent;
-  const bool xPhase = paused.xStepHigh;
-  const bool yPhase = paused.yStepHigh;
-
-  CHECK_EQUAL(static_cast<int>(ControlDisposition::StopNow),
+  CHECK_EQUAL(static_cast<int>(ControlDisposition::Deferred),
               static_cast<int>(requestPause(paused)));
+  CHECK_EQUAL(static_cast<int>(PendingControl::Pause),
+              static_cast<int>(paused.pendingControl));
+
+  TickResult cleanup{};
+  CHECK_EQUAL(static_cast<int>(TickStatus::Paused),
+              static_cast<int>(onTimerUpdate(plan, paused, cleanup)));
+  CHECK_TRUE(cleanup.stopTimer);
+  CHECK_FALSE(cleanup.signalDone);
+  CHECK_FALSE(paused.xStepHigh);
+  CHECK_FALSE(paused.yStepHigh);
   CHECK_EQUAL(static_cast<int>(State::Paused),
               static_cast<int>(paused.state));
-  CHECK_EQUAL(xPhase, paused.xStepHigh);
-  CHECK_EQUAL(yPhase, paused.yStepHigh);
-  UNSIGNED_LONGS_EQUAL(cached.masterEdgeIndex,
-                       paused.cachedEvent.masterEdgeIndex);
-  CHECK_EQUAL(static_cast<int>(ControlDisposition::Deferred),
-              static_cast<int>(resume(paused)));
+  CHECK_TRUE(cleanup.cleanupEdgeMask != EdgeMask::None);
+}
 
-  while (!isTerminal(uninterrupted)) {
-    TickResult lhs{};
-    TickResult rhs{};
-    (void)onTimerUpdate(plan, uninterrupted, lhs);
-    (void)onTimerUpdate(plan, paused, rhs);
-    CHECK_EQUAL(static_cast<int>(lhs.edgeMask),
-                static_cast<int>(rhs.edgeMask));
-    CHECK_EQUAL(static_cast<int>(lhs.highMask),
-                static_cast<int>(rhs.highMask));
-    CHECK_EQUAL(static_cast<int>(lhs.lowMask),
-                static_cast<int>(rhs.lowMask));
-  }
-  CHECK_TRUE(isTerminal(paused));
-  UNSIGNED_LONGS_EQUAL(uninterrupted.maskChecksum, paused.maskChecksum);
-  UNSIGNED_LONGS_EQUAL(uninterrupted.arrChecksum, paused.arrChecksum);
+TEST(CoordinatedXyExecutor, PauseLowStopsImmediatelyWithoutCleanup) {
+  const CoordinatedXyPlan plan = readyPlan(8, 4);
+  Cursor cursor = runningCursor(plan);
+  CHECK_FALSE(cursor.xStepHigh);
+  CHECK_FALSE(cursor.yStepHigh);
+  CHECK_EQUAL(static_cast<int>(ControlDisposition::StopNow),
+              static_cast<int>(requestPause(cursor)));
+  CHECK_EQUAL(static_cast<int>(State::Paused),
+              static_cast<int>(cursor.state));
+  UNSIGNED_LONGS_EQUAL(0u, cursor.cleanupEdgeEvents);
 }
 
 TEST(CoordinatedXyExecutor, CancelLowStopsWithoutPhysicalEdge) {
@@ -272,15 +265,13 @@ TEST(CoordinatedXyExecutor, LimitOverridesCancelBeforeCleanup) {
   UNSIGNED_LONGS_EQUAL(1u, cursor.xCleanupEdges);
 }
 
-TEST(CoordinatedXyExecutor, CancelWhilePausedHighRestartsCleanupState) {
+TEST(CoordinatedXyExecutor, CancelOverridesPendingPauseCleanup) {
   const CoordinatedXyPlan plan = readyPlan(8, 0);
   Cursor cursor = runningCursor(plan);
   TickResult tick{};
   (void)onTimerUpdate(plan, cursor, tick);
-  CHECK_EQUAL(static_cast<int>(ControlDisposition::StopNow),
+  CHECK_EQUAL(static_cast<int>(ControlDisposition::Deferred),
               static_cast<int>(requestPause(cursor)));
-  CHECK_EQUAL(static_cast<int>(State::Paused),
-              static_cast<int>(cursor.state));
   CHECK_EQUAL(static_cast<int>(ControlDisposition::Deferred),
               static_cast<int>(requestCancel(cursor)));
   CHECK_EQUAL(static_cast<int>(State::Running),

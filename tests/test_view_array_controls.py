@@ -13,6 +13,7 @@ class DummyButton:
         self.text = ""
         self.enabled = None
         self.style = ""
+        self.tooltip = ""
 
     def setText(self, text):
         self.text = text
@@ -22,6 +23,9 @@ class DummyButton:
 
     def setStyleSheet(self, style):
         self.style = style
+
+    def setToolTip(self, tooltip):
+        self.tooltip = str(tooltip)
 
 
 def _make_widget(
@@ -36,6 +40,7 @@ def _make_widget(
     bypass_result=None,
     completed_view=False,
     loaded_array_state=None,
+    terminal_plan_state=None,
 ):
     if preflight is None:
         preflight = {"ok": True, "code": "ok", "message": "", "record": None}
@@ -53,6 +58,25 @@ def _make_widget(
             if array_state == "resume_ready"
             else "not_started"
         )
+    terminal_messages = {
+        "completed": (
+            "This experiment is complete and cannot be resumed. "
+            "Create or load a new experiment before printing again."
+        ),
+        "aborted": (
+            "This experiment was aborted and cannot be resumed. "
+            "Create or load a new experiment before printing again."
+        ),
+    }
+    terminal_code = (
+        f"terminal_{terminal_plan_state}" if terminal_plan_state else "ok"
+    )
+    terminal_guard = {
+        "blocked": terminal_plan_state in terminal_messages,
+        "code": terminal_code,
+        "plan_state": terminal_plan_state,
+        "message": terminal_messages.get(terminal_plan_state, ""),
+    }
     widget = WellPlateWidget.__new__(WellPlateWidget)
     widget.color_dict = {
         "dark_blue": "#123456",
@@ -65,6 +89,7 @@ def _make_widget(
         request_array_soft_stop=Mock(),
         get_array_run_state=lambda: array_state,
         get_loaded_array_control_state=lambda: {"state": loaded_array_state},
+        get_print_array_terminal_guard=lambda: dict(terminal_guard),
         get_print_array_imaging_calibration_preflight=Mock(return_value=preflight),
         get_print_array_refuel_check_preflight=Mock(return_value=refuel_preflight),
         record_manual_refuel_check_bypass=Mock(return_value=bypass_result),
@@ -185,6 +210,94 @@ def test_loaded_reagent_progress_controls_start_and_resume_independent_of_global
         "Start Print Array",
         "Are you sure you want to start the print array?",
     )
+
+
+@pytest.mark.parametrize(
+    ("terminal_plan_state", "expected_text", "message_fragment"),
+    [
+        ("completed", "Experiment Complete", "experiment is complete"),
+        ("aborted", "Experiment Aborted", "experiment was aborted"),
+    ],
+)
+def test_terminal_execution_disables_actionable_array_control_and_dispatch(
+    terminal_plan_state,
+    expected_text,
+    message_fragment,
+):
+    widget = _make_widget(
+        array_state="resume_ready",
+        loaded_array_state="in_progress",
+        terminal_plan_state=terminal_plan_state,
+    )
+
+    WellPlateWidget.update_start_print_array_button(widget)
+    WellPlateWidget.start_print_array(widget)
+
+    assert widget.start_print_array_button.text == expected_text
+    assert widget.start_print_array_button.enabled is False
+    assert message_fragment in widget.start_print_array_button.tooltip
+    widget.main_window.popup_yes_no.assert_not_called()
+    widget.controller.print_array.assert_not_called()
+
+
+def test_array_runner_safety_controls_take_precedence_over_terminal_projection():
+    running = _make_widget(
+        array_state="running",
+        loaded_array_state="in_progress",
+        terminal_plan_state="aborted",
+    )
+    pending = _make_widget(
+        array_state="stop_requested",
+        loaded_array_state="in_progress",
+        terminal_plan_state="aborted",
+    )
+
+    WellPlateWidget.update_start_print_array_button(running)
+    WellPlateWidget.update_start_print_array_button(pending)
+
+    assert (running.start_print_array_button.text, running.start_print_array_button.enabled) == (
+        "Stop After Well",
+        True,
+    )
+    assert (pending.start_print_array_button.text, pending.start_print_array_button.enabled) == (
+        "Stop Pending",
+        False,
+    )
+
+
+def test_terminal_tooltip_clears_when_execution_returns_to_resumable_state():
+    widget = _make_widget(
+        array_state="resume_ready",
+        loaded_array_state="in_progress",
+        terminal_plan_state="aborted",
+    )
+    WellPlateWidget.update_start_print_array_button(widget)
+    assert widget.start_print_array_button.tooltip
+
+    widget.controller.get_print_array_terminal_guard = lambda: {
+        "blocked": False,
+        "code": "ok",
+        "plan_state": "active",
+        "message": "",
+    }
+    WellPlateWidget.update_start_print_array_button(widget)
+
+    assert widget.start_print_array_button.text == "Resume Print"
+    assert widget.start_print_array_button.enabled is True
+    assert widget.start_print_array_button.tooltip == ""
+
+
+def test_completed_terminal_plan_preserves_loaded_array_complete_projection():
+    widget = _make_widget(
+        array_state="idle",
+        loaded_array_state="complete",
+        terminal_plan_state="completed",
+    )
+
+    WellPlateWidget.update_start_print_array_button(widget)
+
+    assert widget.start_print_array_button.text == "Array Complete"
+    assert widget.start_print_array_button.enabled is False
 
 
 def test_completed_execution_view_disables_start_and_never_dispatches():

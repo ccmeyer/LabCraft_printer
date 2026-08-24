@@ -52,6 +52,9 @@ def test_direct_lut_selector_uses_direct_axis_ownership_and_complete_inventory()
     body = diagnostics[branch:end]
 
     assert "moveAxisToWithTimeout" in body
+    assert "kXyRateHz = 40000u" in body
+    assert "kZRateHz = 30000u" in body
+    assert "stepperZ->setMaxSpeedHz(kZRateHz)" in body
     assert "Gantry::instance()->moveTo" not in body
     assert all(f"{{{test_id}u," in body for test_id in range(2091, 2096))
     assert "runZClearanceHomePreflight" in body

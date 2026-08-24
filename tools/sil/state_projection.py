@@ -185,6 +185,18 @@ class StateProjectionBuilder:
         )
         if not isinstance(loaded_array, Mapping):
             loaded_array = {"state": "unavailable"}
+        terminal_guard = _safe_call(
+            controller,
+            "get_print_array_terminal_guard",
+            {"blocked": False, "code": "ok", "plan_state": None, "message": ""},
+        )
+        if not isinstance(terminal_guard, Mapping):
+            terminal_guard = {
+                "blocked": False,
+                "code": "ok",
+                "plan_state": None,
+                "message": "",
+            }
         pass_summary = {
             key: _value(context.get(key))
             for key in (
@@ -198,6 +210,7 @@ class StateProjectionBuilder:
         return {
             "array_state": controller.get_array_run_state(),
             "loaded_array": dict(loaded_array),
+            "print_array_terminal_guard": dict(terminal_guard),
             "active_pass": pass_summary or None,
             "last_transport_fault": bool(
                 _safe_attr(controller, "_last_transport_fault_debug_bundle_context")
@@ -656,10 +669,22 @@ class StateProjectionBuilder:
                 (controller.get("loaded_array") or {}).get("state")
                 or "unavailable"
             )
+            terminal_guard = controller.get("print_array_terminal_guard") or {}
+            terminal_code = (
+                str(terminal_guard.get("code") or "ok")
+                if bool(terminal_guard.get("blocked"))
+                else "ok"
+            )
             if array_state == "running":
                 expected_text, expected_enabled = "Stop After Well", True
             elif array_state == "stop_requested":
                 expected_text, expected_enabled = "Stop Pending", False
+            elif terminal_code == "terminal_aborted":
+                expected_text, expected_enabled = "Experiment Aborted", False
+            elif loaded_array_state == "complete":
+                expected_text, expected_enabled = "Array Complete", False
+            elif terminal_code == "terminal_completed":
+                expected_text, expected_enabled = "Experiment Complete", False
             else:
                 expected_text, expected_enabled = {
                     "complete": ("Array Complete", False),
@@ -679,6 +704,8 @@ class StateProjectionBuilder:
                     "Stop Pending",
                     "Resume Print",
                     "Array Complete",
+                    "Experiment Complete",
+                    "Experiment Aborted",
                     "No Array",
                     "Array Unavailable",
                 }

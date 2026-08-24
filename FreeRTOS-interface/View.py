@@ -576,7 +576,14 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
         )
         layout.addWidget(checks)
 
-        if workflow == "configuration_restore":
+        authorization_consequence = self.assessment.get("authorization_consequence")
+        if authorization_consequence == "verified_by_controlled_calibration":
+            notice_text = (
+                "This completed calibration contains fresh controlled machine-position "
+                "evidence. Saving records the coordinates and verifies the affected "
+                "rack or plate target in the same audited transaction."
+            )
+        elif workflow == "configuration_restore":
             notice_text = (
                 "This restores the exact bytes from the verified backup shown above. "
                 "Any changed target remains motion-blocked until a separate exact-value "
@@ -594,16 +601,13 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
         form = QtWidgets.QFormLayout()
         self.operator_edit = QtWidgets.QLineEdit(self)
         self.reason_edit = QtWidgets.QLineEdit(self)
-        self.acknowledge = QtWidgets.QCheckBox("I reviewed every displayed coordinate and delta.", self)
+        acknowledgement_text = self.assessment.get("required_acknowledgement")
+        if not acknowledgement_text:
+            acknowledgement_text = "I reviewed every displayed coordinate and delta."
+        self.acknowledge = QtWidgets.QCheckBox(str(acknowledgement_text), self)
         form.addRow("Operator:", self.operator_edit)
         form.addRow("Reason:", self.reason_edit)
         form.addRow("", self.acknowledge)
-        self.phrase_edit = QtWidgets.QLineEdit(self)
-        required_phrase = self.assessment.get("required_confirmation_phrase")
-        if required_phrase:
-            form.addRow(f"Type exactly: {required_phrase}", self.phrase_edit)
-        else:
-            self.phrase_edit.hide()
         layout.addLayout(form)
 
         buttons = QtWidgets.QHBoxLayout()
@@ -611,6 +615,8 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
         self.cancel_button = QtWidgets.QPushButton("Cancel", self)
         if result == "reject":
             action_text = "Record Rejection and Close"
+        elif authorization_consequence == "verified_by_controlled_calibration":
+            action_text = "Save Verified Calibration"
         elif workflow == "configuration_restore":
             action_text = "Restore Exact Backup and Revoke Changed Targets"
         else:
@@ -632,10 +638,6 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
             if not self.acknowledge.isChecked():
                 QMessageBox.warning(self, "Review Required", "Acknowledge the displayed coordinate deltas.")
                 return
-            expected = self.assessment.get("required_confirmation_phrase")
-            if expected and self.phrase_edit.text() != expected:
-                QMessageBox.warning(self, "Phrase Does Not Match", "The strong confirmation phrase must match exactly.")
-                return
             self.outcome = "accepted"
         else:
             self.outcome = "rejected"
@@ -643,6 +645,9 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
 
     def review_result(self):
         self.exec()
+        return self.result_payload()
+
+    def result_payload(self):
         return {
             "outcome": self.outcome,
             "operator": self.operator_edit.text().strip(),
@@ -650,8 +655,104 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
             "confirmation": {
                 "proposal_sha256": self.assessment.get("proposal_sha256"),
                 "acknowledged": self.acknowledge.isChecked(),
-                "typed_phrase": self.phrase_edit.text(),
+                "acknowledgement_version": self.assessment.get(
+                    "confirmation_version"
+                ),
             },
+        }
+
+
+class ControlledCalibrationPromotionDialog(QtWidgets.QDialog):
+    """Review immutable calibration evidence before a non-mutating promotion."""
+
+    def __init__(self, candidate, parent=None):
+        super().__init__(parent)
+        self.candidate = copy.deepcopy(dict(candidate))
+        self.setWindowTitle("Verify Controlled Calibration Evidence")
+        self.resize(760, 620)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(
+            QtWidgets.QLabel(
+                "This target is backed by a completed controlled calibration. "
+                "Promoting it records a new verification event and does not change "
+                "configuration coordinates.",
+                self,
+            )
+        )
+
+        details = QtWidgets.QPlainTextEdit(self)
+        details.setReadOnly(True)
+        capture_rows = []
+        for index, capture in enumerate(self.candidate.get("captures", []), 1):
+            capture_rows.append(
+                {
+                    "point": capture.get("target_key") or f"legacy point {index}",
+                    "captured_position": capture.get("captured_position"),
+                    "expected_position": capture.get("expected_position"),
+                    "ready": capture.get("ready"),
+                    "reason_codes": capture.get("reason_codes"),
+                }
+            )
+        details.setPlainText(
+            json.dumps(
+                {
+                    "target": self.candidate.get("target_key"),
+                    "workflow": self.candidate.get("workflow"),
+                    "source_event": self.candidate.get("source_event_path"),
+                    "source_time": self.candidate.get("source_created_at_utc"),
+                    "history_integrity": self.candidate.get("integrity"),
+                    "proposal_sha256": self.candidate.get("proposal_sha256"),
+                    "captures": capture_rows,
+                    "deltas": self.candidate.get("deltas", []),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        layout.addWidget(details)
+
+        form = QtWidgets.QFormLayout()
+        self.operator_edit = QtWidgets.QLineEdit(self)
+        self.reason_edit = QtWidgets.QLineEdit(self)
+        self.acknowledge = QtWidgets.QCheckBox(
+            "I reviewed the point captures, deltas, source event, and verified history integrity.",
+            self,
+        )
+        form.addRow("Operator:", self.operator_edit)
+        form.addRow("Reason:", self.reason_edit)
+        form.addRow("", self.acknowledge)
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Cancel, parent=self
+        )
+        self.promote_button = buttons.addButton(
+            "Verify From Calibration Evidence",
+            QtWidgets.QDialogButtonBox.AcceptRole,
+        )
+        buttons.rejected.connect(self.reject)
+        self.promote_button.clicked.connect(self._accept_if_complete)
+        layout.addWidget(buttons)
+
+    def _accept_if_complete(self):
+        if not self.operator_edit.text().strip() or not self.reason_edit.text().strip():
+            QMessageBox.warning(
+                self, "Operator and Reason Required", "Enter an operator name and reason."
+            )
+            return
+        if not self.acknowledge.isChecked():
+            QMessageBox.warning(
+                self,
+                "Review Required",
+                "Acknowledge the displayed controlled-calibration evidence.",
+            )
+            return
+        self.accept()
+
+    def review_result(self):
+        return {
+            "operator": self.operator_edit.text().strip(),
+            "reason": self.reason_edit.text().strip(),
         }
 
 
@@ -699,7 +800,7 @@ class ConfigurationHistoryWindow(QtWidgets.QDialog):
         self.refresh_button.clicked.connect(self.refresh)
         self.export_button.clicked.connect(self.export_markdown)
         self.import_button.clicked.connect(self.import_governed_file)
-        self.verify_button.clicked.connect(self.verify_current_target)
+        self.verify_button.clicked.connect(lambda: self.verify_current_target())
         self.restore_button.clicked.connect(self.restore_selected)
         self.table.itemSelectionChanged.connect(self._show_selected)
         self.refresh()
@@ -775,11 +876,19 @@ class ConfigurationHistoryWindow(QtWidgets.QDialog):
             return
         self.status_label.setText(f"Exported to {path}")
 
-    def verify_current_target(self):
+    def verify_current_target(self, target_key=None):
         try:
             reader = self._reader()
             values = reader.current_target_values()
             state = self.controller.configuration_transactions.refresh(allow_pending=False)
+            promotion_getter = getattr(
+                self.controller, "controlled_calibration_promotion_candidates", None
+            )
+            promotion_candidates = (
+                promotion_getter() if callable(promotion_getter) else {}
+            )
+            if promotion_candidates is False:
+                return
             targets = [
                 key for key in sorted(values)
                 if state.authorization[key]["state"] == "revoked_pending_verification"
@@ -790,10 +899,41 @@ class ConfigurationHistoryWindow(QtWidgets.QDialog):
         if not targets:
             self.status_label.setText("No current target requires verification")
             return
-        target, ok = QtWidgets.QInputDialog.getItem(
-            self, "Verify Configuration Target", "Target:", targets, 0, False
-        )
-        if not ok:
+        if target_key is None:
+            target, ok = QtWidgets.QInputDialog.getItem(
+                self, "Verify Configuration Target", "Target:", targets, 0, False
+            )
+            if not ok:
+                return
+        else:
+            target = str(target_key)
+            if target not in targets:
+                self.status_label.setText(
+                    f"Target {target} does not currently require verification"
+                )
+                return
+        candidate = dict((promotion_candidates or {}).get(target) or {})
+        if candidate:
+            dialog = ControlledCalibrationPromotionDialog(candidate, self)
+            if dialog.exec() != QDialog.Accepted:
+                return
+            review = dialog.review_result()
+            promote = getattr(
+                self.controller, "promote_controlled_calibration", None
+            )
+            if not callable(promote):
+                self.status_label.setText(
+                    "Controlled calibration promotion is unavailable"
+                )
+                return
+            result = promote(
+                target,
+                candidate["source_event_id"],
+                operator=review["operator"],
+                reason=review["reason"],
+            )
+            if result:
+                self.refresh()
             return
         value = values[target]
         expected_text = json.dumps(value, indent=2, sort_keys=True)
@@ -1509,31 +1649,38 @@ class MainWindow(QMainWindow):
         self.resize(width, height)
 
     def _add_right_panel_action_buttons(self, right_layout):
-        """Add compact right-panel actions above the experiment guide."""
-        action_row = QtWidgets.QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
+        """Add right-panel actions in a readable two-by-two grid."""
+        action_grid = QtWidgets.QGridLayout()
+        action_grid.setObjectName("rightPanelActionGrid")
+        action_grid.setContentsMargins(0, 0, 0, 0)
+        action_grid.setHorizontalSpacing(6)
+        action_grid.setVerticalSpacing(4)
+        action_grid.setColumnStretch(0, 1)
+        action_grid.setColumnStretch(1, 1)
 
         self.audit_timeline_button = QtWidgets.QPushButton("Audit Timeline")
         self.audit_timeline_button.clicked.connect(self.show_experiment_audit)
-        action_row.addWidget(self.audit_timeline_button, 1)
+        action_grid.addWidget(self.audit_timeline_button, 0, 0)
 
         self.configuration_history_button = QtWidgets.QPushButton("Configuration History")
         self.configuration_history_button.clicked.connect(self.show_configuration_history)
-        action_row.addWidget(self.configuration_history_button, 1)
+        action_grid.addWidget(self.configuration_history_button, 0, 1)
 
-        self.plate_reader_analysis_button = QtWidgets.QPushButton("Analyze Plate Reader...")
+        self.plate_reader_analysis_button = QtWidgets.QPushButton(
+            "Analyze Plate Reader Data"
+        )
         self.plate_reader_analysis_button.setObjectName("plateReaderAnalysisButton")
         self.plate_reader_analysis_button.setToolTip("Associate plate-reader data with the concentration key and run analysis")
         self.plate_reader_analysis_button.clicked.connect(self.show_plate_reader_analysis)
-        action_row.addWidget(self.plate_reader_analysis_button, 1)
+        action_grid.addWidget(self.plate_reader_analysis_button, 1, 0)
 
         self.keyboard_shortcuts_button = QtWidgets.QPushButton("Shortcuts")
         self.keyboard_shortcuts_button.setToolTip("Show keyboard shortcuts")
         self.keyboard_shortcuts_button.clicked.connect(self.show_keyboard_shortcuts)
-        action_row.addWidget(self.keyboard_shortcuts_button)
+        action_grid.addWidget(self.keyboard_shortcuts_button, 1, 1)
 
-        right_layout.addLayout(action_row)
-        return action_row
+        right_layout.addLayout(action_grid)
+        return action_grid
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2424,6 +2571,16 @@ class MainWindow(QMainWindow):
         window.raise_()
         window.activateWindow()
 
+    def review_configuration_target(self, target_key):
+        """Open the existing audited verification flow for one exact target."""
+
+        self.show_configuration_history()
+        window = getattr(self, "configuration_history_window", None)
+        if window is None:
+            return False
+        window.verify_current_target(target_key=str(target_key))
+        return True
+
     def show_plate_reader_analysis(self):
         """Open the plate-reader analysis runner window."""
         window = getattr(self, "_plate_reader_analysis_window", None)
@@ -2585,7 +2742,7 @@ class MainWindow(QMainWindow):
             )
             self._pause_action_dialog = confirmation_dialog
             if confirmation_dialog.exec_confirmed():
-                self.controller.clear_command_queue()
+                self.controller.clear_command_queue(confirmed=True)
         finally:
             self._pause_action_dialog = None
             self._pause_action_flow_active = False
@@ -2938,13 +3095,22 @@ class ConnectionWidget(QGroupBox):
         layout.addWidget(QLabel("Device"), 0, 0)
         layout.addWidget(QLabel("Port"),   0, 1)
         layout.addWidget(QLabel("Connect"),0, 2)
-        layout.addWidget(QLabel("Safety"), 0, 3)
 
-        self.pause_machine_button = QPushButton("Pause Machine Now")
+        self.pause_machine_button = QPushButton("Pause")
         self.pause_machine_button.setObjectName("pauseMachineButton")
         self.pause_machine_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        pause_button_size_policy = self.pause_machine_button.sizePolicy()
+        pause_button_size_policy.setVerticalPolicy(QSizePolicy.Expanding)
+        self.pause_machine_button.setSizePolicy(pause_button_size_policy)
         self.pause_machine_button.clicked.connect(self.main_window.pause_machine)
-        layout.addWidget(self.pause_machine_button, 1, 3)
+        connection_row_count = 3 if self.legacy_mode else 2
+        layout.addWidget(
+            self.pause_machine_button,
+            0,
+            3,
+            connection_row_count,
+            1,
+        )
 
         if not self.legacy_mode:
             # ----- CURRENT MODE (unchanged behavior) -----
@@ -3152,7 +3318,7 @@ class ConnectionWidget(QGroupBox):
                 "mid_gray",
                 self.color_dict.get("dark_gray", "#6e6e6e"),
             )
-            self.pause_machine_button.setText("Pause Machine Now")
+            self.pause_machine_button.setText("Pause")
             self.pause_machine_button.setEnabled(False)
             self.pause_machine_button.setStyleSheet(
                 f"background-color: {color}; color: white;"
@@ -3164,13 +3330,13 @@ class ConnectionWidget(QGroupBox):
 
         if bool(getattr(machine_model, "paused", False)):
             color = self.color_dict.get("orange", "#f4743b")
-            self.pause_machine_button.setText("Paused — Actions…")
+            self.pause_machine_button.setText("Paused\nActions…")
             self.pause_machine_button.setToolTip(
                 "Machine commands are paused. Reopen the resume, keep paused, or clear choices."
             )
         else:
             color = self.color_dict.get("dark_red", "#8a0303")
-            self.pause_machine_button.setText("Pause Machine Now")
+            self.pause_machine_button.setText("Pause")
             self.pause_machine_button.setToolTip(
                 "Immediately pause machine commands and open explicit pause actions."
             )
@@ -5334,13 +5500,30 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             return True
 
         try:
-            self.controller.clear_command_queue()
+            request_clear = getattr(
+                self.controller,
+                "request_calibration_cleanup_queue_clear",
+                None,
+            )
+            clear_requested = bool(callable(request_clear) and request_clear())
         except Exception as exc:
+            clear_requested = False
             cleanup_error = f"{cleanup_error} Queue-clear fallback also failed: {exc}"
-        self.popup_message_signal.emit(
-            "Calibration Profile Cleanup Failed",
-            f"{cleanup_error} Verify the machine is idle before continuing.",
-        )
+
+        if clear_requested:
+            self.popup_message_signal.emit(
+                "Calibration Profile Cleanup Failed",
+                f"{cleanup_error} A guarded queue-clear fallback was requested. "
+                "Verify the machine is idle before continuing.",
+            )
+        else:
+            self.popup_message_signal.emit(
+                "Calibration Profile Cleanup Blocked",
+                f"{cleanup_error} The queue was not cleared because an experiment "
+                "or queue-clear recovery may still be active. The experiment was "
+                "preserved; keep the machine paused and use the confirmed abort "
+                "workflow if clearing is required.",
+            )
         return False
 
     def calibration_session_is_idle(self):
@@ -6494,6 +6677,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.controller = controller
         self.grid_layout = QGridLayout()
         self.well_labels = []
+        self._plate_calibration_session_token = None
+        self._plate_calibration_dialog = None
         # Set the max height of the widget
         self.setMaximumHeight(800)
 
@@ -6511,6 +6696,11 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         self.model.well_plate.plate_summary_changed_signal.connect(self._update_plate_summary)
         self.model.rack_model.gripper_updated.connect(self.update_start_print_array_button)
         self.controller.array_state_changed.connect(self.update_start_print_array_button)
+        plate_state_signal = getattr(
+            self.controller, "plate_calibration_state_changed", None
+        )
+        if plate_state_signal is not None:
+            plate_state_signal.connect(self._on_plate_calibration_state_changed)
         self.init_ui()
 
     def init_ui(self):
@@ -6589,7 +6779,38 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             )
         }
 
+    def _print_array_terminal_guard(self):
+        getter = getattr(self.controller, "get_print_array_terminal_guard", None)
+        if callable(getter):
+            try:
+                result = dict(getter() or {})
+            except Exception:
+                result = {}
+        else:
+            result = {}
+        return {
+            "blocked": bool(result.get("blocked", False)),
+            "code": str(result.get("code") or "ok"),
+            "plan_state": result.get("plan_state"),
+            "message": str(result.get("message") or ""),
+        }
+
     def update_start_print_array_button(self, *_args):
+        self.start_print_array_button.setToolTip("")
+        terminal_guard = self._print_array_terminal_guard()
+        state_getter = getattr(self.controller, "get_array_run_state", None)
+        array_state = state_getter() if callable(state_getter) else "idle"
+
+        if array_state == "running":
+            self.start_print_array_button.setText("Stop After Well")
+            self._set_array_button_state(self.start_print_array_button, True, 'dark_red')
+            return
+
+        if array_state == "stop_requested":
+            self.start_print_array_button.setText("Stop Pending")
+            self._set_array_button_state(self.start_print_array_button, False, 'dark_red')
+            return
+
         read_only_view_getter = getattr(
             self.model, "is_read_only_experiment_view_active", None
         )
@@ -6605,6 +6826,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             self.start_print_array_button.setText(
                 "Experiment Complete" if completed else "Experiment Read-Only"
             )
+            if completed and bool(terminal_guard.get("blocked")):
+                self.start_print_array_button.setToolTip(terminal_guard["message"])
             self._set_array_button_state(
                 self.start_print_array_button,
                 False,
@@ -6612,22 +6835,31 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             )
             return
 
-        state_getter = getattr(self.controller, "get_array_run_state", None)
-        array_state = state_getter() if callable(state_getter) else "idle"
-
-        if array_state == "running":
-            self.start_print_array_button.setText("Stop After Well")
-            self._set_array_button_state(self.start_print_array_button, True, 'dark_red')
-            return
-
-        if array_state == "stop_requested":
-            self.start_print_array_button.setText("Stop Pending")
-            self._set_array_button_state(self.start_print_array_button, False, 'dark_red')
+        if (
+            bool(terminal_guard.get("blocked"))
+            and terminal_guard.get("code") == "terminal_aborted"
+        ):
+            self.start_print_array_button.setText("Experiment Aborted")
+            self.start_print_array_button.setToolTip(terminal_guard["message"])
+            self._set_array_button_state(
+                self.start_print_array_button, False, 'dark_blue'
+            )
             return
 
         loaded_array_state = self._loaded_array_control_state().get("state")
         if loaded_array_state == "complete":
             self.start_print_array_button.setText("Array Complete")
+            self._set_array_button_state(
+                self.start_print_array_button, False, 'dark_blue'
+            )
+            return
+
+        if (
+            bool(terminal_guard.get("blocked"))
+            and terminal_guard.get("code") == "terminal_completed"
+        ):
+            self.start_print_array_button.setText("Experiment Complete")
+            self.start_print_array_button.setToolTip(terminal_guard["message"])
             self._set_array_button_state(
                 self.start_print_array_button, False, 'dark_blue'
             )
@@ -6678,6 +6910,9 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             return
 
         if array_state == "stop_requested":
+            return
+
+        if bool(self._print_array_terminal_guard().get("blocked")):
             return
 
         loaded_array_state = self._loaded_array_control_state().get("state")
@@ -6889,16 +7124,27 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 label.setAlignment(Qt.AlignCenter)
                 self.grid_layout.addWidget(label, row + 1, col + 1)
                 self.well_labels[row][col] = label
+        if hasattr(self, "reagent_selection"):
+            self.update_well_colors()
 
     def _update_plate_summary(self, name: str, rows: int, cols: int):
         if hasattr(self, "plate_format_value_label"):
             self.plate_format_value_label.setText(f"{name} ({rows}x{cols})")
 
     def _populate_reagent_selection(self):
-        self.reagent_selection.clear()
-        for stock_id in self.model.stock_solutions.get_stock_solution_names():
-            stock_formatted = self.model.stock_solutions.get_formatted_from_stock_id(stock_id)
-            self.reagent_selection.addItem(stock_formatted, userData=stock_id)
+        selected_stock_id = self.reagent_selection.currentData()
+        blocker = QSignalBlocker(self.reagent_selection)
+        try:
+            self.reagent_selection.clear()
+            for stock_id in self.model.stock_solutions.get_stock_solution_names():
+                stock_formatted = self.model.stock_solutions.get_formatted_from_stock_id(stock_id)
+                self.reagent_selection.addItem(stock_formatted, userData=stock_id)
+            selected_index = self.reagent_selection.findData(selected_stock_id)
+            self.reagent_selection.setCurrentIndex(
+                selected_index if selected_index >= 0 else 0
+            )
+        finally:
+            del blocker
 
     def gripper_update_handler(self):
         """Handle when the gripper picks up a new printer head."""
@@ -7107,9 +7353,8 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         """Handle the experiment loaded signal."""
         # Update the options in the reagent selection combobox
         self._populate_reagent_selection()
-        self.reagent_selection.setCurrentIndex(0)
 
-        self.update_well_colors()  # Update with a default reagent on load
+        self.update_well_colors()
         read_only_view_getter = getattr(
             self.model, "is_read_only_experiment_view_active", None
         )
@@ -7143,26 +7388,149 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             )
         if callable(read_only_view_getter) and read_only_view_getter():
             return
-        if not self.model.machine_model.motors_are_enabled() or not self.model.machine_model.motors_are_homed():
-            self.main_window.popup_message("Motors Not Enabled or Homed","Please enable and home the motors before calibrating the well plate.")
-            return
-        if self.model.rack_model.get_gripper_printer_head() != None:
-            print("Gripper is loaded")
-            if not self.model.rack_model.get_gripper_printer_head().is_calibration_chip():
-                self.main_window.popup_message("Calibration Chip Required","Please load the calibration chip into the gripper before calibrating the rack.")
-                return
+        if self._plate_calibration_session_token is not None:
+            self.main_window.popup_message(
+                "Plate Calibration Active",
+                "Wait for the current plate calibration to finish or cancel it.",
+            )
+            return False
+        preflight_getter = getattr(
+            self.controller, "plate_calibration_entry_preflight", None
+        )
+        starter = getattr(self.controller, "begin_plate_calibration_entry", None)
+        if not callable(preflight_getter) or not callable(starter):
+            self.main_window.popup_message(
+                "Plate Calibration Unavailable",
+                "The guarded plate-calibration entry workflow is unavailable.",
+            )
+            return False
+        preflight = preflight_getter()
+        if not preflight.get("allowed"):
+            self.main_window.popup_message(
+                "Plate Calibration Not Started",
+                preflight.get("message", "Plate calibration preflight failed."),
+            )
+            return False
+
+        manual_first = False
+        if not preflight.get("verified"):
+            candidate = preflight.get("historical_candidate")
+            if candidate:
+                choice = self.main_window.popup_choice(
+                    "Plate Calibration Requires Verification",
+                    "The stored plate position is not currently authorized. You may "
+                    "review its existing controlled-calibration evidence without moving, "
+                    "or begin a new calibration from safe height.",
+                    ["Review Existing Calibration", "Calibrate from Safe Height", "Cancel"],
+                    default="Cancel",
+                )
+                if choice == "Review Existing Calibration":
+                    reviewer = getattr(
+                        self.main_window, "review_configuration_target", None
+                    )
+                    if callable(reviewer):
+                        reviewer(preflight["target_key"])
+                    self.main_window.popup_message(
+                        "Calibration Review Complete",
+                        "Press Calibrate Plate again if you want to start calibration. "
+                        "No motion was issued by the review.",
+                    )
+                    return False
+                if choice != "Calibrate from Safe Height":
+                    return False
             else:
-                print("Calibration chip is loaded")
+                choice = self.main_window.popup_choice(
+                    "Unverified Plate Calibration",
+                    "The stored plate height is not authorized. Calibration will raise "
+                    "to safe Z, travel above the stored top-left XY position, and stop. "
+                    "You must manually descend and align the first point.",
+                    ["Calibrate from Safe Height", "Cancel"],
+                    default="Cancel",
+                )
+                if choice != "Calibrate from Safe Height":
+                    return False
+            manual_first = True
+
+        self.calibration_button.setEnabled(False)
+        self.calibration_button.setText("Staging Plate Safely...")
+        result = starter(manual_first=manual_first)
+        if result is False:
+            self._reset_plate_calibration_launch_ui()
+            return False
+        self._plate_calibration_session_token = result["session_token"]
+        return True
+
+    def _reset_plate_calibration_launch_ui(self):
+        self.calibration_button.setText("Calibrate Plate")
+        read_only_getter = getattr(
+            self.model, "is_read_only_experiment_view_active", None
+        )
+        read_only = bool(callable(read_only_getter) and read_only_getter())
+        self.calibration_button.setEnabled(not read_only)
+
+    def _on_plate_calibration_state_changed(self, snapshot):
+        if not isinstance(snapshot, dict):
+            return
+        token = snapshot.get("session_token")
+        if token != self._plate_calibration_session_token:
+            return
+        dialog = self._plate_calibration_dialog
+        if dialog is not None:
+            handler = getattr(dialog, "handle_controller_state", None)
+            if callable(handler):
+                handler(snapshot)
+        state = snapshot.get("state")
+        if state in {"manual_first_point", "automatic_points"} and dialog is None:
+            QtCore.QTimer.singleShot(
+                0,
+                lambda expected_token=token: self._open_staged_plate_calibration_dialog(
+                    expected_token
+                ),
+            )
+        elif state in {"failed", "cancelled"}:
+            self._plate_calibration_session_token = None
+            self._reset_plate_calibration_launch_ui()
+
+    def _open_staged_plate_calibration_dialog(self, session_token):
+        if (
+            session_token != self._plate_calibration_session_token
+            or self._plate_calibration_dialog is not None
+        ):
+            return
+        snapshot_getter = getattr(
+            self.controller, "_plate_calibration_session_snapshot", None
+        )
+        snapshot = snapshot_getter() if callable(snapshot_getter) else {}
+        if snapshot.get("session_token") != session_token or snapshot.get("state") not in {
+            "manual_first_point", "automatic_points"
+        }:
+            return
+        dialog = PlateCalibrationDialog(
+            self.main_window,
+            self.model,
+            self.controller,
+            session_token=session_token,
+            manual_first=bool(snapshot.get("manual_first")),
+        )
+        self._plate_calibration_dialog = dialog
+        accepted = dialog.exec() == QDialog.Accepted
+        if accepted:
+            finisher = getattr(
+                self.controller, "finish_plate_calibration_session", None
+            )
+            if callable(finisher):
+                finisher(session_token, accepted=True)
         else:
-            print("Gripper is empty")
-            response = self.main_window.popup_yes_no("Gripper Empty","Please load the calibration chip into the gripper before calibrating the rack. Proceed anyway?")
-            if self.main_window._is_no_response(response):
-                return
-        self.controller.move_to_location('plate',z_offset=500)
-        plate_calibration_dialog = PlateCalibrationDialog(self.main_window,self.model,self.controller)
-        
-        # Execute the dialog and check if the user completes the calibration
-        if plate_calibration_dialog.exec() == QDialog.Accepted:
+            cancel = getattr(
+                self.controller, "cancel_plate_calibration_entry", None
+            )
+            if callable(cancel):
+                cancel(session_token)
+        self._plate_calibration_dialog = None
+        self._plate_calibration_session_token = None
+        self._reset_plate_calibration_launch_ui()
+
+        if accepted:
             print("Calibration completed successfully.")
             commit = getattr(self.controller, "commit_plate_calibration", None)
             identity_getter = getattr(self.main_window, "request_configuration_identity", None)
@@ -7172,6 +7540,9 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 proposal = prepare()
                 if not proposal or not reviewer(proposal, title="Save Plate Calibration"):
                     self.model.well_plate.discard_temp_calibrations()
+                    self.controller.discard_configuration_capture_evidence(
+                        "plate_calibration"
+                    )
                     return
                 self.model.well_plate.discard_temp_calibrations()
             elif callable(commit) and callable(identity_getter):
@@ -7181,9 +7552,15 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 )
                 if identity is None:
                     self.model.well_plate.discard_temp_calibrations()
+                    self.controller.discard_configuration_capture_evidence(
+                        "plate_calibration"
+                    )
                     return
                 if not commit(operator=identity[0], reason=identity[1]):
                     self.model.well_plate.discard_temp_calibrations()
+                    self.controller.discard_configuration_capture_evidence(
+                        "plate_calibration"
+                    )
                     return
             else:
                 self.model.well_plate.update_calibration_data()
@@ -7191,6 +7568,7 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         else:
             print("Calibration was canceled or failed.")
             self.model.well_plate.discard_temp_calibrations()
+        return accepted
 
     def open_experiment_designer(self):
         # dialog = ExperimentDesignDialog(self.main_window, self.model)
@@ -8644,6 +9022,8 @@ class BaseCalibrationDialog(QDialog):
         self.color_dict = self.main_window.color_dict
         self.model = model
         self.controller = controller
+        self._automatic_motion_pending = False
+        self._workflow_interrupted = False
         self.shortcut_manager = ShortcutManager(self)
         self.setup_shortcuts()
         self.steps = steps
@@ -8720,18 +9100,32 @@ class BaseCalibrationDialog(QDialog):
         # Update the UI to reflect the initial state
         self.update_step_labels()
 
-        self.move_to_initial_position()
-
     def setup_shortcuts(self):
         """Set up keyboard shortcuts using the shortcut manager."""
-        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.controller.set_relative_coordinates(0, -self.model.machine_model.step_size, 0, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.controller.set_relative_coordinates(0, self.model.machine_model.step_size, 0, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.controller.set_relative_coordinates(self.model.machine_model.step_size, 0, 0, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.controller.set_relative_coordinates(-self.model.machine_model.step_size, 0, 0, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.controller.set_relative_coordinates(0, 0, -self.model.machine_model.step_size, manual=True,override=True))
-        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.controller.set_relative_coordinates(0, 0, self.model.machine_model.step_size, manual=True,override=True))
+        self.shortcut_manager.add_shortcut('Left', 'Move left', lambda: self.request_relative_jog(0, -self.model.machine_model.step_size, 0))
+        self.shortcut_manager.add_shortcut('Right', 'Move right', lambda: self.request_relative_jog(0, self.model.machine_model.step_size, 0))
+        self.shortcut_manager.add_shortcut('Up', 'Move forward', lambda: self.request_relative_jog(self.model.machine_model.step_size, 0, 0))
+        self.shortcut_manager.add_shortcut('Down', 'Move backward', lambda: self.request_relative_jog(-self.model.machine_model.step_size, 0, 0))
+        self.shortcut_manager.add_shortcut('k', 'Move up', lambda: self.request_relative_jog(0, 0, -self.model.machine_model.step_size))
+        self.shortcut_manager.add_shortcut('m', 'Move down', lambda: self.request_relative_jog(0, 0, self.model.machine_model.step_size))
         self.shortcut_manager.add_shortcut('Ctrl+Up', 'Increase step size', self.model.machine_model.increase_step_size)
         self.shortcut_manager.add_shortcut('Ctrl+Down', 'Decrease step size', self.model.machine_model.decrease_step_size)
+
+    def request_relative_jog(self, x, y, z):
+        if self._automatic_motion_pending or self._workflow_interrupted:
+            return False
+        return self.controller.set_relative_coordinates(
+            x, y, z, manual=True, override=True
+        )
+
+    def set_automatic_motion_pending(self, pending):
+        self._automatic_motion_pending = bool(pending)
+        enabled = not self._automatic_motion_pending and not self._workflow_interrupted
+        self.next_button.setEnabled(enabled and self.current_step < len(self.steps))
+        self.back_button.setEnabled(enabled and self.current_step > 0)
+        self.submit_button.setEnabled(
+            enabled and self.current_step >= len(self.steps)
+        )
 
     def update_step_labels(self):
         for i, label in enumerate(self.step_labels):
@@ -8847,6 +9241,13 @@ class BaseCalibrationDialog(QDialog):
 
     def closeEvent(self, event):
         """Handle the window close event."""
+        if self._automatic_motion_pending:
+            self.main_window.popup_message(
+                "Calibration Motion In Progress",
+                "Wait for the current calibration move to finish before closing this window.",
+            )
+            event.ignore()
+            return
         reply = QMessageBox.question(
             self,
             "Incomplete Calibration",
@@ -8905,7 +9306,17 @@ class BaseCalibrationDialog(QDialog):
 
 class PlateCalibrationDialog(BaseCalibrationDialog):
     configuration_capture_workflow = "plate_calibration"
-    def __init__(self, main_window, model, controller):
+    def __init__(
+        self,
+        main_window,
+        model,
+        controller,
+        *,
+        session_token,
+        manual_first,
+    ):
+        self.session_token = str(session_token)
+        self.manual_first = bool(manual_first)
         steps = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
         name_dict = {
             "Top-Left": "top_left",
@@ -8919,6 +9330,125 @@ class PlateCalibrationDialog(BaseCalibrationDialog):
             'Z': -500
         }
         super().__init__(main_window, model, controller, "Well Plate Calibration", steps, name_dict,offsets)
+        if self.manual_first:
+            self.instructions_label.setText(
+                "The machine is stopped above Top-Left at safe Z=500. Manually "
+                "descend and align the calibration head, then confirm the position."
+            )
+        else:
+            self.instructions_label.setText(
+                "The machine reached the verified Top-Left position. Align it if "
+                "needed, then confirm the position."
+            )
+
+    def move_to_initial_position(self):
+        """Dialog construction and activation never issue plate motion."""
+
+        return True
+
+    def move_to_offset_position(self):
+        return False
+
+    def request_relative_jog(self, x, y, z):
+        if self._automatic_motion_pending or self._workflow_interrupted:
+            return False
+        jog = getattr(self.controller, "jog_plate_calibration", None)
+        if not callable(jog):
+            return False
+        return jog(self.session_token, x=x, y=y, z=z)
+
+    def handle_controller_state(self, snapshot):
+        if snapshot.get("session_token") != self.session_token:
+            return
+        state = snapshot.get("state")
+        if state in {"staging", "reconciling"}:
+            self.set_automatic_motion_pending(True)
+            self.instructions_label.setText(
+                "Calibration motion is in progress. Wait for position telemetry to settle."
+            )
+            return
+        if state in {"manual_first_point", "automatic_points"}:
+            self.set_automatic_motion_pending(False)
+            if self.current_step < len(self.steps):
+                self.instructions_label.setText(
+                    f"Align the {self.steps[self.current_step]} position and confirm the location."
+                )
+            return
+        if state == "complete":
+            self.current_step = len(self.steps)
+            self._automatic_motion_pending = False
+            self.instructions_label.setText(
+                "Calibration capture is complete and the head is clear of the final corner."
+            )
+            self.next_button.setEnabled(False)
+            self.back_button.setEnabled(False)
+            self.submit_button.setEnabled(True)
+            self.submit_button.setStyleSheet(
+                f"background-color: {self.color_dict['dark_blue']}; color: white;"
+            )
+            self.update_step_labels()
+            self.update_visual_aid()
+            return
+        if state in {"failed", "cancelled"}:
+            self._workflow_interrupted = True
+            self._automatic_motion_pending = False
+            self.next_button.setEnabled(False)
+            self.back_button.setEnabled(False)
+            self.submit_button.setEnabled(False)
+            self.instructions_label.setText(
+                "Calibration was interrupted. Close this window and start again."
+            )
+            QtCore.QTimer.singleShot(0, self.reject)
+
+    def next_step(self):
+        if self._automatic_motion_pending or self._workflow_interrupted:
+            return False
+        if self.current_step >= len(self.steps):
+            return False
+        if self.model.machine_model.is_busy():
+            self.main_window.popup_message(
+                "Machine Busy",
+                "The machine is currently executing a command. Please wait for it to complete.",
+            )
+            return False
+        point_name = self.name_dict[self.steps[self.current_step]]
+        capture = getattr(
+            self.controller, "capture_and_advance_plate_calibration", None
+        )
+        if not callable(capture) or capture(self.session_token, point_name) is False:
+            return False
+        self.current_step += 1
+        self.set_automatic_motion_pending(True)
+        self.update_step_labels()
+        self.update_visual_aid()
+        return True
+
+    def previous_step(self):
+        if (
+            self._automatic_motion_pending
+            or self._workflow_interrupted
+            or self.current_step <= 0
+            or self.current_step >= len(self.steps)
+        ):
+            return False
+        previous_index = self.current_step - 1
+        point_name = self.name_dict[self.steps[previous_index]]
+        mover = getattr(
+            self.controller, "move_plate_calibration_to_captured_point", None
+        )
+        if not callable(mover) or mover(self.session_token, point_name) is False:
+            return False
+        self.current_step = previous_index
+        self.set_automatic_motion_pending(True)
+        self.update_step_labels()
+        self.update_visual_aid()
+        return True
+
+    def submit_calibration(self):
+        if self._automatic_motion_pending or self.current_step != len(self.steps):
+            return False
+        self.accept()
+        return True
 
     def get_initial_calibrations(self):
         return self.model.well_plate.get_all_current_plate_calibrations()
@@ -9609,6 +10139,11 @@ class RackBox(QGroupBox):
 
     def _run_guided_rack_calibration(self, manual_chip_loaded=False, origin_slot_number=None):
         rack_calibration_dialog = RackCalibrationDialog(self.main_window, self.model, self.controller)
+        if rack_calibration_dialog.move_to_initial_position() is False:
+            self.model.rack_model.discard_temp_calibrations()
+            if manual_chip_loaded:
+                self._prompt_manual_rack_calibration_chip_cleanup(origin_slot_number)
+            return False
 
         if rack_calibration_dialog.exec() == QDialog.Accepted:
             print("Rack calibration completed successfully.")
@@ -10049,6 +10584,9 @@ class BoardStatusBox(QGroupBox):
     def init_ui(self):
         """Initialize the user interface."""
         self.layout = QtWidgets.QGridLayout(self)
+        self.layout.setContentsMargins(8, 4, 8, 6)
+        self.layout.setHorizontalSpacing(10)
+        self.layout.setVerticalSpacing(2)
 
         self.labels = {
             'Homed': QLabel('False'),
@@ -10066,14 +10604,32 @@ class BoardStatusBox(QGroupBox):
             self.labels['Mass'] = QLabel('0')
             self.labels['Stable'] = QLabel('False')
 
-        row = 0
-        for label, value in self.labels.items():
+        self.status_name_labels = {}
+        compact_items = [
+            item for item in self.labels.items() if item[0] != 'Flash Fault'
+        ]
+        for index, (label, value) in enumerate(compact_items):
+            row = index // 2
+            pair_column = (index % 2) * 2
             label_label = QLabel(label)
-            label_label.setAlignment(Qt.AlignCenter)
-            value.setAlignment(Qt.AlignCenter)
-            self.layout.addWidget(label_label, row, 0)
-            self.layout.addWidget(value, row, 1)
-            row += 1
+            label_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self.status_name_labels[label] = label_label
+            self.layout.addWidget(label_label, row, pair_column)
+            self.layout.addWidget(value, row, pair_column + 1)
+
+        if 'Flash Fault' in self.labels:
+            row = (len(compact_items) + 1) // 2
+            fault_label = QLabel('Flash Fault')
+            fault_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            fault_value = self.labels['Flash Fault']
+            fault_value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self.status_name_labels['Flash Fault'] = fault_label
+            self.layout.addWidget(fault_label, row, 0)
+            self.layout.addWidget(fault_value, row, 1, 1, 3)
+
+        self.layout.setColumnStretch(1, 1)
+        self.layout.setColumnStretch(3, 1)
         
         self.setLayout(self.layout)
 

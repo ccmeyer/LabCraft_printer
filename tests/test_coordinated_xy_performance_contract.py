@@ -159,6 +159,7 @@ def test_diagnostics_exposes_production_shallow_direct_lut_and_camera_selectors(
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
     assert "selectedDiagnosticId == 2097u" in diagnostics
     assert "selectedDiagnosticId == 2096u" in diagnostics
+    assert "selectedDiagnosticId == 2109u" in diagnostics
     assert "selectedDiagnosticId == 2078u" in diagnostics
     assert "selectedDiagnosticId == 2099u" in diagnostics
     assert '2100u, "coord_xy_terminal_timing"' in diagnostics
@@ -166,6 +167,38 @@ def test_diagnostics_exposes_production_shallow_direct_lut_and_camera_selectors(
         assert f"selectedDiagnosticId == {selector}u" not in diagnostics
     assert "runProductionCoordinatedDiagnostic" in diagnostics
     assert "runDirectXyzLutSuite" in diagnostics
+
+
+def test_pause_resume_qualification_settles_home_and_opens_status_windows():
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+    start = diagnostics.index("auto runMotionPauseResumeQualification")
+    end = diagnostics.index("if (runMotionPauseResumeSuite)", start)
+    suite = diagnostics[start:end]
+
+    for axis in ("z", "xy"):
+        settle = suite.index(f'pause_resume_{axis}_settle_home')
+        reference = suite.index(f'pause_resume_{axis}_reference_home')
+        assert settle < reference
+    assert 'emitSkipped("settle_home")' in suite
+    assert suite.count("(void)Comm::resetStatusMetrics();") == 2
+    assert suite.count("comm->setStatusPaused(false);") == 2
+    assert suite.count("comm->setStatusPaused(true);") == 2
+    assert suite.count("resumeStatusAfterEmission = true;") == 2
+    assert suite.count("resumeStatusAfterEmission = false;") == 2
+
+
+def test_pause_resume_rearms_tmc_drivers_before_fresh_plans():
+    policy = _read("firmware/Core/Inc/MotionResumePolicy.h")
+    stepper = _read("firmware/Core/Src/Stepper.cpp")
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
+    diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
+
+    assert "kDriverDisablePulseMs = 2u" in policy
+    assert "kDriverPoweredSettleMs = 130u" in policy
+    assert "if (!_rearmDriverForResume())" in stepper
+    assert "_rearmCoordinatedDriversForResume(xParticipates, yParticipates)" in gantry
+    assert "resumeDriverRearmCount != 1u" in diagnostics
+    assert "resumeDriverRearmFailures != 0u" in diagnostics
 
 
 def test_production_suite_freezes_geometry_counts_and_strict_evidence():
@@ -191,7 +224,7 @@ def test_production_suite_freezes_geometry_counts_and_strict_evidence():
 
 def test_production_results_use_reduced_metric_contract():
     diagnostics = _read("firmware/Core/Src/Diagnostics.cpp")
-    for result_id in (2087, 2088, 2089, 2090, 2098):
+    for result_id in (2087, 2088, 2089, 2090, 2098, 2106, 2107, 2105):
         assert f"runOne({result_id}u" in diagnostics
     assert '"i2=%lu;s=%lu;mi=%lu;am=%lu;tm=%lu;fm=%lu;pu=%lu;"' in diagnostics
     assert '"ds=%lu;di=%lu;md=%lu;sl=%lu;dc=%lu;ci=%lu;ns=%lu;"' in diagnostics
@@ -206,11 +239,14 @@ def test_production_results_use_reduced_metric_contract():
         assert removed_metric not in production_suite
 
 
-def test_motion_limits_share_fixed_fifteen_ms_confirmation_without_raw_stop():
+def test_xy_motion_limits_use_edge_aware_tim5_confirmation_without_raw_stop():
     policy = _read("firmware/Core/Inc/MotionLimitDebouncePolicy.h")
     header = _read("firmware/Core/Inc/Stepper.h")
     stepper = _read("firmware/Core/Src/Stepper.cpp")
     gantry = _read("firmware/Core/Src/Gantry.cpp")
+    timer = _read("firmware/Core/Src/MotionLimitDebounceTimer.cpp")
+    main = _read("firmware/Core/Src/main.c")
+    interrupts = _read("firmware/Core/Src/stm32f4xx_it.c")
     pressure = _read("firmware/Core/Src/PressureRegulator.cpp")
 
     assert "kDebounceMs = 15u" in policy
@@ -218,8 +254,13 @@ def test_motion_limits_share_fixed_fifteen_ms_confirmation_without_raw_stop():
     assert "Idle = 0u" in policy
     assert "Pending = 1u" in policy
     assert "Confirmed = 2u" in policy
+    assert "kHardwareDebounceUs = kDebounceMs * 1000u" in policy
+    assert "noteHardwareTransition" in policy
+    assert "evaluateHardwareExpiry" in policy
     assert "TickType_t    debounceMs" not in header
-    assert '"LmtDbnc",\n    stepperMsToAtLeast1Tick(MotionLimitDebouncePolicy::kDebounceMs)' in stepper
+    assert '"LmtDbnc"' in stepper  # Z/P/R retain the software-timer path.
+    assert "GPIO_MODE_IT_RISING_FALLING" in stepper
+    assert "MotionLimitDebounceTimer::attach" in stepper
     assert "s1.attachLimitSwitch(GPIOG, GPIO_PIN_6);" in stepper
     assert "s2.attachLimitSwitch(GPIOG, GPIO_PIN_9);" in stepper
     assert "s4.attachLimitSwitch(GPIOG, GPIO_PIN_11);" in stepper
@@ -234,10 +275,113 @@ def test_motion_limits_share_fixed_fifteen_ms_confirmation_without_raw_stop():
     assert "requestCoordinatedLimitAbort" not in raw_exti
     assert "stop()" not in raw_exti
     assert "_observeLimitLevelFromIsr" in raw_exti
+    assert "MotionLimitDebounceTimer::onExtiFromIsr" in raw_exti
     assert "_takeConfirmedLimitFromIsr" in stepper
     assert "_takeConfirmedLimitFromIsr" in gantry
-    assert "_coordinatedLimitAssertedFast())" not in gantry
+    assert "MotionLimitDebouncePolicy::Phase::Pending" not in gantry
+    assert "_limitDebounceIgnoreUntilRelease" in gantry
+    assert "kExpectedTickHz = 1000000u" in timer
+    assert "TIM_IT_CC1" in timer
+    assert "TIM_IT_CC2" in timer
+    assert "TIM_IT_CC3" in timer
+    assert "stickyTransition" in timer
+    assert "closeUnmaskRace" in timer
+    assert "MX_MotionLimitDebounceTimer_Init();" in main
+    assert "void TIM5_IRQHandler(void)" in interrupts
     assert "pdMS_TO_TICKS(15)" in pressure
+
+
+def test_coordinated_terminal_path_uses_one_optimized_debounce_completion():
+    header = _read("firmware/Core/Inc/MotionLimitDebounceTimer.h")
+    timer = _read("firmware/Core/Src/MotionLimitDebounceTimer.cpp")
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
+    stepper = _read("firmware/Core/Src/Stepper.cpp")
+
+    assert "void completeCoordinatedMoveFromIsr(int32_t xStoppedPosition" in header
+    completion = timer[
+        timer.index("void completeCoordinatedMoveFromIsr(") : timer.index(
+            "void cancel(Axis axis",
+            timer.index("void completeCoordinatedMoveFromIsr("),
+        )
+    ]
+    assert '__attribute__((optimize("O2"), hot))' in timer
+    assert "xState.confirmation.consumedPosition = xStoppedPosition" in completion
+    assert "yState.confirmation.consumedPosition = yStoppedPosition" in completion
+    assert "__HAL_TIM_DISABLE_IT(g_timer, TIM_IT_CC1 | TIM_IT_CC2)" in completion
+    assert "__HAL_TIM_CLEAR_FLAG(g_timer, TIM_FLAG_CC1 | TIM_FLAG_CC2)" in completion
+    assert "xState.moveGeneration = 0u" in completion
+    assert "yState.moveGeneration = 0u" in completion
+    assert "xState.debounce.phase == MotionLimitDebouncePolicy::Phase::Idle" in completion
+    assert "yState.debounce.phase == MotionLimitDebouncePolicy::Phase::Idle" in completion
+    assert "return;" in completion
+    assert "xState.debounce.phase = MotionLimitDebouncePolicy::Phase::Idle" in completion
+    assert "yState.debounce.phase = MotionLimitDebouncePolicy::Phase::Idle" in completion
+    assert "EXTI->PR = mask" in completion
+    assert "EXTI->IMR |= mask" in completion
+    for out_of_line_helper in (
+        "axisState(",
+        "disableAxisCompare(",
+        "cancelHardware(",
+        "clearExti(",
+        "unmaskExti(",
+        "ExtiDebounce::lineMask(",
+    ):
+        assert out_of_line_helper not in completion
+
+    isr_finish = gantry[
+        gantry.index("void Gantry::_finishCoordinatedFromIsr(") : gantry.index(
+            "bool Gantry::_handleCoordinatedTimerFromIsr(",
+            gantry.index("void Gantry::_finishCoordinatedFromIsr("),
+        )
+    ]
+    assert isr_finish.count(
+        "MotionLimitDebounceTimer::completeCoordinatedMoveFromIsr("
+    ) == 1
+    assert "_finishCoordinatedHardware(aborted, true)" in isr_finish
+
+    for name in (
+        "_finishAbortedCoordinatedAxisFromLow",
+        "_finishCompletedCoordinatedAxisFromLow",
+    ):
+        start = stepper.index(f"void Stepper::{name}()")
+        end = stepper.index("\n}\n", start) + 2
+        finalizer = stepper[start:end]
+        assert "MotionLimitDebounceTimer::" not in finalizer
+        assert "recordStopPositionFromIsr" not in finalizer
+        assert "MotionLimitDebounceTimer::cancel(" not in finalizer
+
+
+def test_xy_confirmation_clean_path_is_optimized_and_has_no_nested_policy_calls():
+    header = _read("firmware/Core/Inc/Stepper.h")
+    timer = _read("firmware/Core/Src/MotionLimitDebounceTimer.cpp")
+
+    hardware_classifier = header[
+        header.index("bool _usesHardwareLimitDebounce() const") : header.index(
+            "bool _confirmReleasedForNextApproach(",
+            header.index("bool _usesHardwareLimitDebounce() const"),
+        )
+    ]
+    assert "__attribute__((always_inline))" in header[
+        header.rindex("#if defined(__GNUC__)", 0, header.index("bool _usesHardwareLimitDebounce() const")) :
+        header.index("bool _usesHardwareLimitDebounce() const")
+    ]
+    assert "_axis == X_AXIS || _axis == Y_AXIS" in hardware_classifier
+
+    confirmation = timer[
+        timer.index("bool takeConfirmedFromIsr(") : timer.index(
+            "void recordStopPositionFromIsr(",
+            timer.index("bool takeConfirmedFromIsr("),
+        )
+    ]
+    assert '__attribute__((optimize("O2"), hot))' in timer[
+        timer.rindex("#if defined(__GNUC__)", 0, timer.index("bool takeConfirmedFromIsr(")) :
+        timer.index("bool takeConfirmedFromIsr(")
+    ]
+    assert "g_axes[axis == Axis::Y ? 1u : 0u]" in confirmation
+    assert "state.moveGeneration == 0u" in confirmation
+    assert "state.moveGeneration != moveGeneration" in confirmation
+    assert "axisState(" not in confirmation
+    assert "MotionLimitDebouncePolicy::hardwareGenerationMatches(" not in confirmation
 
 
 def test_camera_transition_uses_production_scaling_and_direct_home_counts():
@@ -339,12 +483,24 @@ def test_windows_hil_wrapper_uses_long_shallow_defaults_but_preserves_overrides(
     assert '"--status-only-timeout-ms", $effectiveStatusOnlyTimeoutMs' in script
 
 
+def test_hil_wrappers_forward_confirmation_preauthorization_explicitly():
+    windows = _read("firmware/scripts/run_fw_hil_windows.ps1")
+    pi = _read("firmware/hil/flash_and_test.sh")
+
+    assert "[switch]$PreauthorizeConfirmationPrompts" in windows
+    assert "$PreauthorizeConfirmationPrompts.IsPresent" in windows
+    assert '$flashArgs += "--preauthorize-confirmation-prompts"' in windows
+    assert "PREAUTHORIZE_CONFIRMATION_PROMPTS=0" in pi
+    assert "--preauthorize-confirmation-prompts) PREAUTHORIZE_CONFIRMATION_PROMPTS=1" in pi
+    assert "cmd+=(--preauthorize-confirmation-prompts)" in pi
+
+
 def test_active_coordinated_manifests_share_timing_budgets_and_archive_predecessors():
     production = json.loads(
-        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v5.json")
+        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v7.json")
     )
-    production_v4 = json.loads(
-        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v4.json")
+    production_v6 = json.loads(
+        _read("tools/qualification/manifests/coordinated_xy_production_mres3_v6.json")
     )
     camera = json.loads(
         _read("tools/qualification/manifests/coordinated_xy_camera_transition_v4.json")
@@ -359,8 +515,8 @@ def test_active_coordinated_manifests_share_timing_budgets_and_archive_predecess
         _read("tools/qualification/manifests/coordinated_xy_shallow_edge_v3.json")
     )
     assert production["lifecycle"] == "active"
-    assert production_v4["lifecycle"] == "archived"
-    assert production["expected_test_ids"] == [2087, 2088, 2089, 2090, 2098]
+    assert production_v6["lifecycle"] == "archived"
+    assert production["expected_test_ids"] == [2087, 2088, 2089, 2090, 2098, 2106, 2107, 2105]
     assert production["analysis_rules"]["2087"]["metrics"]["xe"]["equals"] == 106832
     assert production["analysis_rules"]["2087"]["metrics"]["ye"]["equals"] == 180000
     assert production["analysis_rules"]["2087"]["metrics"]["me"]["equals"] == 220000
@@ -374,6 +530,21 @@ def test_active_coordinated_manifests_share_timing_budgets_and_archive_predecess
     assert debounce["xf"]["equals"] == 0
     assert debounce["yf"]["equals"] == 0
     assert debounce["tv"]["equals"] == 1
+    assert debounce["hz"]["equals"] == 1000000
+    assert debounce["du"]["min"] == 15000
+    assert debounce["du"]["max"] == 16000
+    assert production["analysis_rules"]["2106"]["metrics"]["hz"]["equals"] == 40000
+    assert production["analysis_rules"]["2107"]["metrics"]["hz"]["equals"] == 30000
+    assert production["analysis_rules"]["2106"]["metrics"]["rs"]["equals"] == 3000
+    assert production["analysis_rules"]["2107"]["metrics"]["rs"]["equals"] == 3000
+    assert production["analysis_rules"]["2106"]["metrics"]["dr"]["equals"] == 6
+    assert production["analysis_rules"]["2107"]["metrics"]["dr"]["equals"] == 6
+    assert production["analysis_rules"]["2106"]["metrics"]["df"]["equals"] == 0
+    assert production["analysis_rules"]["2107"]["metrics"]["df"]["equals"] == 0
+    crossing = production["analysis_rules"]["2105"]["metrics"]
+    assert crossing["n"]["equals"] == 2
+    assert crossing["xb"]["max"] == 50
+    assert crossing["yb"]["max"] == 50
     assert camera["lifecycle"] == "active"
     assert camera_v3["lifecycle"] == "archived"
     assert camera["analysis_rules"]["2071"]["metrics"]["xe"]["equals"] == 16832

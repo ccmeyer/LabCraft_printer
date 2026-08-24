@@ -157,6 +157,18 @@ def _make_controller(
     def _fake_resume_commands():
         command_events.append(("resume_commands",))
 
+    def _fake_clear_command_queue(handler=None):
+        if callable(handler):
+            handler(
+                {
+                    "ack_received": True,
+                    "ack_timed_out": False,
+                    "status_confirmed": True,
+                    "status_timed_out": False,
+                }
+            )
+        return True
+
     def _fake_move_to_location(*args, **kwargs):
         command_events.append(("move_to_location", args, kwargs))
         return True
@@ -175,7 +187,7 @@ def _make_controller(
 
     c.machine = SimpleNamespace(
         check_if_all_completed=lambda: queue_empty,
-        clear_command_queue=Mock(),
+        clear_command_queue=Mock(side_effect=_fake_clear_command_queue),
         pause_commands=Mock(),
         resume_commands=Mock(side_effect=_fake_resume_commands),
         request_pause_after_seq32=Mock(return_value=True),
@@ -223,6 +235,7 @@ def _make_controller(
         experiment_model=SimpleNamespace(
             create_progress_file=Mock(),
             get_progress_status=Mock(return_value=progress_status),
+            get_execution_plan_snapshot=Mock(return_value=None),
             validate_applied_imaging_calibration_for_print=Mock(
                 return_value={
                     "ok": bool(imaging_guard_ok),
@@ -264,6 +277,188 @@ def _make_controller(
     c.model.machine_model.clear_evap_plate_dock_check_required = _clear_dock_checks
     c.model.machine_model.clear_evap_plate_dock_check_required_after_reset = _clear_reset_dock_check
     return c
+
+
+@pytest.mark.parametrize(
+    ("plan_state", "expected"),
+    [
+        (
+            "completed",
+            {
+                "blocked": True,
+                "code": "terminal_completed",
+                "plan_state": "completed",
+                "message": (
+                    "This experiment is complete and cannot be resumed. "
+                    "Create or load a new experiment before printing again."
+                ),
+            },
+        ),
+        (
+            "aborted",
+            {
+                "blocked": True,
+                "code": "terminal_aborted",
+                "plan_state": "aborted",
+                "message": (
+                    "This experiment was aborted and cannot be resumed. "
+                    "Create or load a new experiment before printing again."
+                ),
+            },
+        ),
+        (
+            "active",
+            {
+                "blocked": False,
+                "code": "ok",
+                "plan_state": "active",
+                "message": "",
+            },
+        ),
+    ],
+)
+def test_print_array_terminal_guard_normalizes_plan_state(plan_state, expected):
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 3, target=7)]),
+        printer_head=_make_printer_head(),
+    )
+    c.model.experiment_model.get_execution_plan_snapshot.return_value = SimpleNamespace(
+        state=SimpleNamespace(value=plan_state)
+    )
+
+    assert Controller.get_print_array_terminal_guard(c) == expected
+
+
+@pytest.mark.parametrize(
+    ("plan_state", "expected_message"),
+    [
+        (
+            "completed",
+            "This experiment is complete and cannot be resumed. "
+            "Create or load a new experiment before printing again.",
+        ),
+        (
+            "aborted",
+            "This experiment was aborted and cannot be resumed. "
+            "Create or load a new experiment before printing again.",
+        ),
+    ],
+)
+def test_terminal_plan_print_request_reports_lifecycle_reason_without_preflight_or_commands(
+    plan_state,
+    expected_message,
+):
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 3, target=7)]),
+        printer_head=_make_printer_head(),
+        initial_state="resume_ready",
+    )
+    experiment_model = c.model.experiment_model
+    experiment_model.get_execution_plan_snapshot.return_value = SimpleNamespace(
+        state=SimpleNamespace(value=plan_state)
+    )
+    experiment_model.validate_authoritative_print_context = Mock()
+
+    Controller.print_array(c)
+
+    assert c.error_occurred_signal.calls == [
+        ("Print Array Unavailable", expected_message)
+    ]
+    experiment_model.validate_authoritative_print_context.assert_not_called()
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+    c.print_droplets.assert_not_called()
+    c.machine.clear_command_queue.assert_not_called()
+    c.machine.resume_commands.assert_not_called()
+
+
+def test_nonterminal_authoritative_head_binding_failure_keeps_existing_message():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    experiment_model = c.model.experiment_model
+    experiment_model.get_execution_plan_snapshot.return_value = SimpleNamespace(
+        state=SimpleNamespace(value="active")
+    )
+    experiment_model.validate_authoritative_print_context = Mock(
+        return_value={
+            "ok": False,
+            "code": "authoritative_context_invalid",
+            "message": "The loaded printer head differs from the saved execution binding.",
+        }
+    )
+
+    Controller.print_array(c)
+
+    assert c.error_occurred_signal.calls == [
+        (
+            "Error",
+            "The loaded printer head or its saved calibration does not match this "
+            "experiment. Printing is unavailable.",
+        )
+    ]
+    experiment_model.validate_authoritative_print_context.assert_called_once_with(
+        c.model.rack_model.get_gripper_printer_head()
+    )
+    c.close_gripper.assert_not_called()
+
+
+def test_hard_abort_terminal_guard_is_visible_before_idle_state_notification():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 3, target=7)]),
+        printer_head=_make_printer_head(),
+        initial_state="stop_requested",
+    )
+    active_plan = SimpleNamespace(state=SimpleNamespace(value="active"))
+    aborted_plan = SimpleNamespace(
+        state=SimpleNamespace(value="aborted"),
+        plan_revision=2,
+    )
+    plan_holder = {"plan": active_plan}
+    experiment_model = c.model.experiment_model
+    experiment_model.get_execution_plan_snapshot = Mock(
+        side_effect=lambda: plan_holder["plan"]
+    )
+
+    def transition_to_aborted(*_args):
+        plan_holder["plan"] = aborted_plan
+        return aborted_plan
+
+    experiment_model.transition_execution_plan_terminal = Mock(
+        side_effect=transition_to_aborted
+    )
+    c._array_context = {}
+    c._build_print_array_snapshot = Mock(return_value={})
+    c._invalidate_paused_array_soft_stop_attempt = Mock()
+    c._record_print_array_audit_event = Mock()
+    observed = []
+
+    def observe_state_change(state):
+        observed.append((state, Controller.get_print_array_terminal_guard(c)))
+        c._array_state = state
+
+    c._set_array_run_state = observe_state_change
+
+    Controller._finish_array_finalize(c, "hard_abort")
+
+    experiment_model.transition_execution_plan_terminal.assert_called_once_with(
+        "aborted", "controller_hard_abort"
+    )
+    assert observed == [
+        (
+            "idle",
+            {
+                "blocked": True,
+                "code": "terminal_aborted",
+                "plan_state": "aborted",
+                "message": (
+                    "This experiment was aborted and cannot be resumed. "
+                    "Create or load a new experiment before printing again."
+                ),
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1088,7 +1283,7 @@ def test_print_array_close_queue_failure_runs_hard_abort_cleanup():
     Controller.print_array(c)
 
     c.enable_print_profile.assert_not_called()
-    c.machine.clear_command_queue.assert_called_once_with()
+    c.machine.clear_command_queue.assert_called_once()
     assert c.get_array_run_state() == "idle"
 
 
@@ -1104,7 +1299,7 @@ def test_print_array_profile_queue_failure_runs_hard_abort_cleanup():
     c.enable_print_profile.assert_called_once_with(
         deferred_gripper_refresh=True
     )
-    c.machine.clear_command_queue.assert_called_once_with()
+    c.machine.clear_command_queue.assert_called_once()
     assert c.get_array_run_state() == "idle"
 
 
@@ -1532,7 +1727,7 @@ def test_late_paused_array_timeout_after_abort_cannot_restart_transport():
 
     assert Controller.request_paused_array_soft_stop(c) is True
     token = c._array_context["soft_stop_attempt_token"]
-    Controller.clear_command_queue(c)
+    Controller.clear_command_queue(c, confirmed=True)
     pause_count = c.machine.pause_commands.call_count
     resume_count = c.machine.resume_commands.call_count
 
@@ -1544,6 +1739,78 @@ def test_late_paused_array_timeout_after_abort_cannot_restart_transport():
 
     assert c.machine.pause_commands.call_count == pause_count
     assert c.machine.resume_commands.call_count == resume_count
+
+
+def test_confirmed_array_abort_waits_for_clear_completion_before_cleanup_commands():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+    c._array_context = _with_lowered_array_accels(
+        {
+            "stock_id": "stock-a",
+            "print_profile_enable_queued": True,
+            "print_profile_disable_queued": False,
+        }
+    )
+    callbacks = []
+    c.machine.clear_command_queue.side_effect = lambda handler=None: (
+        callbacks.append(handler) or True
+    )
+
+    assert Controller.clear_command_queue(c, confirmed=True) is True
+
+    c.disable_print_profile.assert_not_called()
+    c.machine.set_axis_accel.assert_not_called()
+    assert c.get_array_run_state() == "stop_requested"
+
+    callbacks[0](
+        {
+            "ack_received": True,
+            "ack_timed_out": False,
+            "status_confirmed": True,
+            "status_timed_out": False,
+        }
+    )
+
+    c.disable_print_profile.assert_called_once_with()
+    assert c.machine.set_axis_accel.call_args_list == _restore_calls()
+    assert c.get_array_run_state() == "idle"
+
+
+def test_unconfirmed_array_abort_finalizes_without_queuing_cleanup_motion():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+    c._array_context = _with_lowered_array_accels(
+        {
+            "stock_id": "stock-a",
+            "print_profile_enable_queued": True,
+            "print_profile_disable_queued": False,
+        }
+    )
+    callbacks = []
+    c.machine.clear_command_queue.side_effect = lambda handler=None: (
+        callbacks.append(handler) or True
+    )
+
+    assert Controller.clear_command_queue(c, confirmed=True) is True
+    callbacks[0](
+        {
+            "ack_received": False,
+            "ack_timed_out": True,
+            "status_confirmed": False,
+            "status_timed_out": True,
+        }
+    )
+
+    c.disable_print_profile.assert_not_called()
+    c.machine.set_axis_accel.assert_not_called()
+    assert c.get_array_run_state() == "idle"
+    assert Controller.get_queue_clear_state(c)["state"] == "uncertain"
 
 
 def test_paused_array_stale_frozen_barrier_never_retargets_later_well():
@@ -1573,7 +1840,7 @@ def test_paused_array_stale_frozen_barrier_never_retargets_later_well():
 
     assert [call_args.args[0] for call_args in c.machine.request_pause_after_seq32.call_args_list] == [123]
     assert c._array_context["soft_stop_barrier_seq32"] == 123
-    assert c._array_context["soft_stop_phase"] == "clearing"
+    assert c._array_context["soft_stop_phase"] == "parking"
     c.machine.clear_command_queue.assert_called_once()
 
 
@@ -1790,13 +2057,13 @@ def test_request_array_soft_stop_write_failure_aborts_to_idle():
     )
 
     assert Controller.request_array_soft_stop(c) is False
-    c.machine.clear_command_queue.assert_called_once_with()
+    c.machine.clear_command_queue.assert_called_once()
     c.model.machine_model.clear_command_queue.assert_called_once_with()
     assert c.machine.set_axis_accel.call_args_list == _restore_calls()
     assert c.get_array_run_state() == "idle"
     assert c._array_context is None
     assert c.error_occurred_signal.calls[-1][0] == "Soft Stop Failed"
-    assert "queued commands were cleared" in c.error_occurred_signal.calls[-1][1]
+    assert "guarded queue clear was requested" in c.error_occurred_signal.calls[-1][1]
 
 
 def test_request_array_soft_stop_ack_rejection_aborts_to_idle():
@@ -1818,7 +2085,7 @@ def test_request_array_soft_stop_ack_rejection_aborts_to_idle():
     }
 
     assert Controller.request_array_soft_stop(c) is True
-    c.machine.clear_command_queue.assert_called_once_with()
+    c.machine.clear_command_queue.assert_called_once()
     assert c.get_array_run_state() == "idle"
     assert c._array_context is None
     assert "MCU rejected" in c.error_occurred_signal.calls[-1][1]
@@ -1843,7 +2110,7 @@ def test_request_array_soft_stop_not_confirmed_aborts_to_idle():
     }
 
     assert Controller.request_array_soft_stop(c) is True
-    c.machine.clear_command_queue.assert_called_once_with()
+    c.machine.clear_command_queue.assert_called_once()
     assert c.get_array_run_state() == "idle"
     assert c._array_context is None
     assert "not confirmed within the grace window" in c.error_occurred_signal.calls[-1][1]
@@ -2089,6 +2356,79 @@ def test_handle_status_update_soft_stop_clear_and_park_completes_before_resume_r
     assert c.model.machine_model.get_evap_plate_dock_check_reasons() == []
 
 
+def test_terminal_profile_cleanup_waits_for_confirmed_clear_before_parking():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 0, target=5)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+    c._array_context = _with_lowered_array_accels(
+        {
+            "stock_id": "stock-a",
+            "print_profile_enable_queued": True,
+            "print_profile_disable_queued": False,
+        }
+    )
+    c.disable_print_profile.return_value = False
+    callbacks = []
+    c.machine.clear_command_queue.side_effect = lambda handler=None: (
+        callbacks.append(handler) or True
+    )
+
+    assert Controller._enqueue_array_finalize(c, "completed") is True
+
+    c.machine.clear_command_queue.assert_called_once()
+    c.move_to_location.assert_not_called()
+
+    callbacks[0](
+        {
+            "ack_received": True,
+            "ack_timed_out": False,
+            "status_confirmed": True,
+            "status_timed_out": False,
+        }
+    )
+
+    assert c.move_to_location.call_args_list[0] == call("pause")
+    assert c.move_to_location.call_args_list[1].args == ("pause",)
+
+
+def test_terminal_profile_cleanup_does_not_park_after_unconfirmed_clear():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 0, target=5)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+    c._array_context = _with_lowered_array_accels(
+        {
+            "stock_id": "stock-a",
+            "print_profile_enable_queued": True,
+            "print_profile_disable_queued": False,
+        }
+    )
+    c.disable_print_profile.return_value = False
+    callbacks = []
+    c.machine.clear_command_queue.side_effect = lambda handler=None: (
+        callbacks.append(handler) or True
+    )
+
+    assert Controller._enqueue_array_finalize(c, "completed") is True
+    callbacks[0](
+        {
+            "ack_received": False,
+            "ack_timed_out": True,
+            "status_confirmed": False,
+            "status_timed_out": True,
+        }
+    )
+
+    c.move_to_location.assert_not_called()
+    assert c.get_array_run_state() == "idle"
+    assert "array_finalize_clear_unconfirmed" in (
+        c.model.machine_model.get_evap_plate_dock_check_reasons()
+    )
+
+
 def test_confirmed_soft_stop_clear_retires_only_lookahead_execution_intents():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 0), FakeWell("A2", 5)]),
@@ -2213,7 +2553,7 @@ def test_soft_stop_clear_unconfirmed_warns_and_preserves_resume_ready():
 
     Controller.handle_status_update(c, {"Pause_watermark_reached": 1, "Transport_paused": 1})
 
-    c.model.machine_model.clear_command_queue.assert_called_once_with()
+    c.model.machine_model.clear_command_queue.assert_not_called()
     c.update_expected_with_current.assert_not_called()
     c.move_to_location.assert_not_called()
     c.machine.set_axis_accel.assert_not_called()
@@ -2516,7 +2856,7 @@ def test_manual_head_pickup_blocks_after_unconfirmed_soft_stop_clear():
     c.move_to_location.assert_not_called()
     assert c.error_occurred_signal.calls[-1] == (
         "Head Transfer Blocked",
-        "The last soft stop did not confirm that the firmware queue was cleared. Clear the queue or reconnect before loading another printer head.",
+        "The firmware queue clear is pending or uncertain. Confirm Clear Queue or reset the MCU before loading another printer head.",
     )
 
 
@@ -2592,7 +2932,7 @@ def test_soft_stop_wins_over_refill_required():
     assert c._array_context["soft_stop_pending"] is True
 
 
-def test_clear_command_queue_resets_array_runner_state():
+def test_unclassified_clear_preserves_resume_ready_array_state():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),
         printer_head=_make_printer_head(),
@@ -2600,13 +2940,26 @@ def test_clear_command_queue_resets_array_runner_state():
     )
     c._array_context = _with_lowered_array_accels({"stock_id": "stock-a"})
 
-    Controller.clear_command_queue(c)
+    assert Controller.clear_command_queue(c) is False
 
-    c.machine.clear_command_queue.assert_called_once_with()
-    c.model.machine_model.clear_command_queue.assert_called_once_with()
-    c.disable_print_profile.assert_called_once_with()
-    assert c.machine.set_axis_accel.call_args_list == _restore_calls()
-    c.update_expected_with_current.assert_called_once_with()
-    assert c.get_array_run_state() == "idle"
-    assert c._array_context is None
-    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == ["array_hard_abort"]
+    c.machine.clear_command_queue.assert_not_called()
+    c.model.machine_model.clear_command_queue.assert_not_called()
+    c.disable_print_profile.assert_not_called()
+    c.update_expected_with_current.assert_not_called()
+    assert c.get_array_run_state() == "resume_ready"
+    assert c._array_context is not None
+
+
+@pytest.mark.parametrize("queue_clear_state", ["pending", "uncertain"])
+def test_print_array_is_blocked_while_queue_clear_is_not_settled(queue_clear_state):
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    c._queue_clear_state = queue_clear_state
+    c._queue_clear_uncertain = queue_clear_state == "uncertain"
+
+    Controller.print_array(c)
+
+    c.close_gripper.assert_not_called()
+    assert queue_clear_state in c.error_occurred_signal.calls[-1][1]

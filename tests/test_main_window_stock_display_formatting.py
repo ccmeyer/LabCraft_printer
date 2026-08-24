@@ -50,6 +50,9 @@ def test_wellplate_widget_populates_and_selects_display_formatted_stock_names(qa
     assert widget.reagent_selection.itemData(1) == reagent_b_id
 
     widget.reagent_selection.setCurrentIndex(1)
+    WellPlateWidget.on_experiment_loaded(widget)
+    assert widget.reagent_selection.currentData() == reagent_b_id
+
     WellPlateWidget.gripper_update_handler(widget)
 
     assert widget.reagent_selection.currentText() == "ReagentA - 3.47 mM"

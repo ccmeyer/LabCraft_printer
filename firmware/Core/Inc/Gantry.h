@@ -30,6 +30,12 @@ enum class CoordinatedStartStatus : uint8_t {
   UnsupportedMixedAxis = 8u,
 };
 
+enum class MotionResumeStatus : uint8_t {
+  Ready = 0u,
+  Deferred = 1u,
+  Failed = 2u,
+};
+
 struct CoordinatedXySnapshot {
   CoordinatedStartStatus startStatus = CoordinatedStartStatus::Disabled;
   CoordinatedXyExecutor::State state = CoordinatedXyExecutor::State::Idle;
@@ -40,6 +46,12 @@ struct CoordinatedXySnapshot {
   uint32_t emittedXEdges = 0u;
   uint32_t emittedYEdges = 0u;
   uint32_t masterEdges = 0u;
+  uint32_t resumeCount = 0u;
+  uint32_t resumeStartRateHz = 0u;
+  uint32_t resumeStartArr = 0u;
+  uint32_t resumeStartFailures = 0u;
+  uint32_t resumeDriverRearmCount = 0u;
+  uint32_t resumeDriverRearmFailures = 0u;
   uint32_t timer2Interrupts = 0u;
   uint32_t timer7Interrupts = 0u;
   uint32_t plannedEdgeEvents = 0u;
@@ -104,7 +116,7 @@ public:
   static void recordCoordinatedTim2IrqExitFromIsr(uint32_t irqExitCycle);
 
   static void pauseXYZMotors();
-  static void resumeXYZMotors();
+  static MotionResumeStatus resumeXYZMotors();
   static void cancelXYZMotors();
 
   GantryPosition getPosition() const;
@@ -117,7 +129,10 @@ public:
 
 private:
   void _pauseCoordinatedTask();
-  void _resumeCoordinatedTask();
+  MotionResumeStatus _resumeCoordinatedTask();
+  MotionResumeStatus _failCoordinatedResume(CoordinatedStartStatus status);
+  bool _rearmCoordinatedDriversForResume(bool rearmX, bool rearmY);
+  void _accumulateCoordinatedSegment();
   bool _cancelCoordinatedTask();
   void _finishCoordinatedHardware(bool aborted,
                                   bool stepStateKnownLow = false);
@@ -153,6 +168,22 @@ private:
   volatile uint32_t _coordinatedConditionalDecisionMissingCount = 0u;
   volatile uint32_t _coordinatedConditionalNonRearmSlackMinTicks = 0u;
   volatile uint32_t _coordinatedTimerScheduleSaturationFlags = 0u;
+  uint32_t _coordinatedRequestedRateHz = 0u;
+  uint32_t _coordinatedRequestedXEdges = 0u;
+  uint32_t _coordinatedRequestedYEdges = 0u;
+  uint32_t _coordinatedXEdgeOffset = 0u;
+  uint32_t _coordinatedYEdgeOffset = 0u;
+  uint32_t _coordinatedTimer2Offset = 0u;
+  uint32_t _coordinatedPlannedOffset = 0u;
+  uint32_t _coordinatedCleanupOffset = 0u;
+  uint32_t _coordinatedXCleanupOffset = 0u;
+  uint32_t _coordinatedYCleanupOffset = 0u;
+  uint32_t _coordinatedResumeCount = 0u;
+  uint32_t _coordinatedResumeStartRateHz = 0u;
+  uint32_t _coordinatedResumeStartArr = 0u;
+  uint32_t _coordinatedResumeStartFailures = 0u;
+  uint32_t _coordinatedResumeDriverRearmCount = 0u;
+  uint32_t _coordinatedResumeDriverRearmFailures = 0u;
   CoordinatedXyIsrInstrumentation::State _coordinatedTiming{};
 
 };

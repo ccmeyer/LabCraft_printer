@@ -46,3 +46,26 @@ def test_board_status_shows_flash_session_and_fault_when_camera_model_is_present
 
     assert box.labels["Flash Session"].text() == "Armed"
     assert box.labels["Flash Fault"].text() == "Trigger line stayed high for too long"
+
+
+def test_board_status_uses_compact_paired_rows_and_full_width_fault(qapp, test_profile):
+    machine_model = MachineModel()
+    root_model = _RootModel(machine_model)
+    root_model.droplet_camera_model = SimpleNamespace()
+    main_window = SimpleNamespace(color_dict={}, profile=test_profile)
+
+    box = BoardStatusBox(main_window, root_model, SimpleNamespace())
+    layout = box.layout
+
+    def position(widget):
+        return layout.getItemPosition(layout.indexOf(widget))
+
+    assert layout.rowCount() == 4
+    assert position(box.status_name_labels["Homed"]) == (0, 0, 1, 1)
+    assert position(box.status_name_labels["Paused"]) == (0, 2, 1, 1)
+    assert position(box.status_name_labels["Location"]) == (1, 0, 1, 1)
+    assert position(box.status_name_labels["Cycle Count"]) == (1, 2, 1, 1)
+    assert position(box.status_name_labels["Current Micros"]) == (2, 0, 1, 1)
+    assert position(box.status_name_labels["Flash Session"]) == (2, 2, 1, 1)
+    assert position(box.status_name_labels["Flash Fault"]) == (3, 0, 1, 1)
+    assert position(box.labels["Flash Fault"]) == (3, 1, 1, 3)

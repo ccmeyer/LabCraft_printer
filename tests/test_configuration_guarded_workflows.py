@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from Controller import Controller
+from ConfigurationSafetyPolicy import ConfigurationSafetyError
 from MachineDataTransactions import (
     ConfigurationConflictError,
     ConfigurationRecoveryRequired,
@@ -30,6 +31,55 @@ class _Machine:
     def set_absolute_XY(self, x, y, **kwargs):
         self.calls.append((x, y))
         return True
+
+
+def test_v2_guard_confirmation_requires_exact_hash_checkbox_and_version(tmp_path):
+    _base, context = _active_context(tmp_path)
+    try:
+        before = read_governed_documents(context.paths)
+        locations = copy.deepcopy(before["Locations.json"])
+        locations["camera"]["Y"] += 25
+        assessment = context.configuration_safety_guard.assess(
+            before_documents=before,
+            proposed_documents={"Locations.json": locations},
+            workflow="named_location_modify",
+            target_keys=("camera",),
+            hardware_profile="current",
+        )
+        controller = Controller.__new__(Controller)
+
+        rejected = (
+            {},
+            {
+                "proposal_sha256": "0" * 64,
+                "acknowledged": True,
+                "acknowledgement_version": assessment["confirmation_version"],
+            },
+            {
+                "proposal_sha256": assessment["proposal_sha256"],
+                "acknowledged": False,
+                "acknowledgement_version": assessment["confirmation_version"],
+            },
+            {
+                "proposal_sha256": assessment["proposal_sha256"],
+                "acknowledged": True,
+                "acknowledgement_version": assessment["confirmation_version"] + 1,
+            },
+        )
+        for confirmation in rejected:
+            with pytest.raises(ConfigurationSafetyError):
+                controller._validate_guard_confirmation(assessment, confirmation)
+
+        assert controller._validate_guard_confirmation(
+            assessment,
+            {
+                "proposal_sha256": assessment["proposal_sha256"],
+                "acknowledged": True,
+                "acknowledgement_version": assessment["confirmation_version"],
+            },
+        ) == assessment
+    finally:
+        context.close()
 
 
 def test_production_transaction_requires_hash_bound_guard_evidence(tmp_path):
@@ -128,7 +178,7 @@ def test_coordinate_import_and_exact_restore_require_and_preserve_guard_evidence
             confirmation={
                 "proposal_sha256": restore_assessment["proposal_sha256"],
                 "acknowledged": True,
-                "typed_phrase": restore_assessment["required_confirmation_phrase"],
+                "acknowledgement_version": restore_assessment["confirmation_version"],
             },
         )
 
@@ -436,7 +486,7 @@ def test_production_controller_capture_preview_commit_and_trust_epoch_recheck(qa
         confirmation = {
             "proposal_sha256": assessment["proposal_sha256"],
             "acknowledged": True,
-            "typed_phrase": assessment["required_confirmation_phrase"],
+            "acknowledgement_version": assessment["confirmation_version"],
         }
         machine_model.reset_home_status()
         assert controller.commit_guarded_configuration_proposal(
@@ -455,7 +505,7 @@ def test_production_controller_capture_preview_commit_and_trust_epoch_recheck(qa
         assessment = proposal["assessment"]
         confirmation.update(
             proposal_sha256=assessment["proposal_sha256"],
-            typed_phrase=assessment["required_confirmation_phrase"],
+            acknowledgement_version=assessment["confirmation_version"],
         )
         result = controller.commit_guarded_configuration_proposal(
             proposal,

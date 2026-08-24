@@ -8,6 +8,7 @@ from AppVersion import get_app_commit, get_app_version as read_app_version
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import Counter, deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import ast
@@ -34,8 +35,12 @@ from simulation import SIMULATED_PORT
 from CaptureCoordinator import CaptureCoordinator
 from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
 from ApplicationComposition import ExperimentalFeatures, PRODUCTION_RUNTIME_CONTEXT
-from MachineDataVerification import SavedTargetAuthorizationRequest
+from MachineDataVerification import (
+    SavedTargetAuthorizationRequest,
+    canonical_value_sha256,
+)
 from MachineDataTransactions import (
+    CURRENT_VERIFIED_STATES,
     ConfigurationRecoveryRequired,
     ConfigurationTransactionError,
     ConfigurationValidationError,
@@ -45,6 +50,11 @@ from ConfigurationSafetyPolicy import (
     ConfigurationSafetyError,
     parse_guard_assessment,
 )
+from MotionPositionContract import (
+    MotionPositionContractError,
+    canonicalize_position,
+    canonicalize_relative_position,
+)
 
 ARRAY_PAUSE_DEPARTURE_ACCEL = 32000
 ARRAY_PAUSE_DEPARTURE_SETTLE_MS = 200
@@ -53,6 +63,23 @@ ARRAY_PRINT_SERPENTINE = True
 ARRAY_GENTLE_ACCEL_ENABLED = False
 ARRAY_ROW_START_OVERSHOOT_STEPS = 0
 PAUSED_ARRAY_SOFT_STOP_PHASE_TIMEOUT_MS = 4_000
+QUEUE_CLEAR_INTENT_USER_CONFIRMED = "user_confirmed"
+QUEUE_CLEAR_INTENT_SAFE_STOP_BOUNDARY = "safe_stop_boundary"
+QUEUE_CLEAR_INTENT_ARRAY_TERMINAL = "array_terminal"
+QUEUE_CLEAR_INTENT_XY_RECOVERY = "xy_recovery"
+QUEUE_CLEAR_INTENT_CALIBRATION_CLEANUP = "calibration_cleanup"
+QUEUE_CLEAR_INTENTS = frozenset(
+    {
+        QUEUE_CLEAR_INTENT_USER_CONFIRMED,
+        QUEUE_CLEAR_INTENT_SAFE_STOP_BOUNDARY,
+        QUEUE_CLEAR_INTENT_ARRAY_TERMINAL,
+        QUEUE_CLEAR_INTENT_XY_RECOVERY,
+        QUEUE_CLEAR_INTENT_CALIBRATION_CLEANUP,
+    }
+)
+QUEUE_CLEAR_BOUNDARY_PROOFS = frozenset(
+    {"watermark_reached", "frozen_barrier_retired"}
+)
 PLATE_DOCK_SAFE_Z = 500
 PLATE_DOCK_X_OFFSET = -5000
 PLATE_SEATED_LOCATIONS = {"pause", "plate"}
@@ -891,6 +918,7 @@ class Controller(QObject):
     error_occurred_signal = Signal(str,str)
     transport_fault_ui_signal = Signal(object)
     machine_workflow_interrupted_signal = Signal(object)
+    plate_calibration_state_changed = Signal(object)
     xy_motion_recovery_requested = Signal(object)
     xy_motion_recovery_state_changed = Signal(str)
     experimental_balance_connection_changed = Signal(object)
@@ -970,6 +998,7 @@ class Controller(QObject):
         self.configuration_safety_guard = configuration_safety_guard
         self._configuration_capture_evidence = {}
         self._configuration_recovery_required = False
+        self._plate_calibration_session = None
         self.experimental_features = (
             experimental_features or ExperimentalFeatures()
         )
@@ -1012,6 +1041,12 @@ class Controller(QObject):
 
         self.expected_position = self.model.machine_model.get_current_position_dict()
         self.expected_location = self.model.machine_model.get_current_location()
+        self._position_reconciliation = {
+            "state": "settled",
+            "reason": "controller_initialization",
+            "expected_position": copy.deepcopy(self.expected_position),
+        }
+        self._pending_motion_endpoint_evidence = None
 
         self._dfu_thread: DfuUpdateWorker | None = None
         self._qualification_worker = None
@@ -1066,6 +1101,11 @@ class Controller(QObject):
 
         self._array_state = "idle"
         self._array_context = None
+        self._queue_clear_attempt_counter = 0
+        self._queue_clear_attempt = None
+        self._queue_clear_state = "idle"
+        self._queue_clear_uncertain = False
+        self._queue_clear_last_rejection = None
         self._pending_reset_print_settings_restore = None
 
         # Connect the machine's signals to the controller's handlers
@@ -1106,7 +1146,17 @@ class Controller(QObject):
         if imaging_ejection_signal is not None:
             imaging_ejection_signal.connect(self._on_machine_ejection_command_event)
         self.model.machine_model.command_numbers_updated.connect(self.update_command_numbers)
-        self.machine.command_queue.commands_completed.connect(self.update_expected_with_current)
+        self.machine.command_queue.commands_completed.connect(
+            self._begin_position_reconciliation
+        )
+        self.machine_workflow_interrupted_signal.connect(
+            self._on_plate_calibration_workflow_interrupted
+        )
+        machine_paused_signal = getattr(
+            self.model.machine_model, "machine_paused", None
+        )
+        if machine_paused_signal is not None:
+            machine_paused_signal.connect(self._on_plate_calibration_pause_changed)
 
         # self.machine.balance.balance_mass_updated_signal.connect(self.model.calibration_model.update_mass)
         self.machine.all_calibration_droplets_printed.connect(self.start_mass_stabilization_timer)
@@ -1324,6 +1374,7 @@ class Controller(QObject):
                 and self.model.machine_model.pause_watermark_reached
                 and self.model.machine_model.transport_paused
             ):
+                context["soft_stop_clear_boundary_proof"] = "watermark_reached"
                 self._begin_soft_stop_clear_and_park()
             elif soft_stop_phase == "waiting_completion_catchup":
                 self._maybe_complete_array_soft_stop_after_catchup()
@@ -1336,6 +1387,8 @@ class Controller(QObject):
     def update_command_numbers(self):
         """Pass the current command and last completed command to the command queue"""
         self.machine.update_command_numbers(*self.model.machine_model.get_command_numbers())
+        self._advance_position_reconciliation()
+        self._advance_plate_calibration_session()
     
     def update_volumes_in_view(self):
         """Update the volume in the view."""
@@ -2289,12 +2342,17 @@ class Controller(QObject):
             self._restore_print_settings_after_board_reset()
         else:
             print("Controller: Failed to connect to the machine.")
+            self._invalidate_queue_clear_attempt("machine_disconnected")
             self._emit_machine_workflow_interrupted("machine_disconnected")
             self._interrupt_array_after_machine_disconnect()
             self.model.machine_model.disconnect_machine()
 
     def handle_reset_report(self, report: dict):
         report = dict(report or {})
+        self._invalidate_queue_clear_attempt(
+            "board_reset_detected",
+            clear_uncertainty=True,
+        )
         self._emit_machine_workflow_interrupted("board_reset_detected")
         manager = self._stream_capture_manager()
         invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
@@ -2435,6 +2493,7 @@ class Controller(QObject):
         return export_reset_debug_bundle(context, output_dir=destination)
 
     def handle_serial_connection_lost(self, report: dict):
+        self._invalidate_queue_clear_attempt("serial_connection_lost")
         self._emit_machine_workflow_interrupted("serial_connection_lost")
         manager = self._stream_capture_manager()
         invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
@@ -2468,6 +2527,7 @@ class Controller(QObject):
 
     def handle_transport_fault(self, report: dict):
         report = dict(report or {})
+        self._invalidate_queue_clear_attempt("transport_fault")
         self._emit_machine_workflow_interrupted("transport_fault")
         manager = self._stream_capture_manager()
         invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
@@ -4297,26 +4357,112 @@ class Controller(QObject):
         self.model.machine_model.resume_commands()
         return True
 
-    def clear_command_queue(self):
-        """Clear the command queue."""
-        self._invalidate_paused_array_soft_stop_attempt()
-        self._clear_machine_and_model_command_queues(
+    def clear_command_queue(self, *, confirmed=False):
+        """Issue an operator-confirmed destructive queue clear.
+
+        Calling this method without the explicit confirmation marker is
+        intentionally fail-closed. Internal safety and recovery clears use
+        separately classified Controller paths below.
+        """
+        if not bool(confirmed):
+            return self._reject_queue_clear(
+                "unclassified_clear_request",
+                intent=None,
+                notify_user=True,
+            )
+
+        allowed, rejection = self._authorize_queue_clear(
+            QUEUE_CLEAR_INTENT_USER_CONFIRMED
+        )
+        if not allowed:
+            return self._reject_queue_clear(
+                rejection,
+                intent=QUEUE_CLEAR_INTENT_USER_CONFIRMED,
+                notify_user=True,
+            )
+
+        context = getattr(self, "_array_context", None)
+        array_active = bool(
+            isinstance(context, dict)
+            and self.get_array_run_state() in {"running", "stop_requested"}
+        )
+        if array_active:
+            self._invalidate_paused_array_soft_stop_attempt(context)
+            context["soft_stop_pending"] = False
+            context["soft_stop_phase"] = "done"
+            context["finalize_reason"] = "hard_abort"
+            context["array_clear_fallback_attempted"] = True
+            context["array_clear_fallback_requested"] = False
+            self._set_array_run_state("stop_requested")
+
+        completion_handler = None
+        if array_active:
+            completion_handler = lambda result, expected_context=context: (
+                self._finalize_array_hard_abort_after_clear(
+                    expected_context,
+                    result,
+                )
+            )
+
+        sent = self._request_guarded_queue_clear(
+            QUEUE_CLEAR_INTENT_USER_CONFIRMED,
             reason="queue_clear_requested",
             notify_user=True,
+            handler=completion_handler,
         )
-        if self.get_array_run_state() != "idle":
-            context = getattr(self, "_array_context", None)
-            if isinstance(context, dict):
-                context["array_clear_fallback_requested"] = True
-            self._complete_array_finalize("hard_abort")
-        try:
-            self.update_expected_with_current()
-        except Exception:
-            pass
+        if array_active:
+            context["array_clear_fallback_requested"] = bool(sent)
+        return bool(sent)
 
     def get_array_run_state(self):
         """Return the current array runner state."""
         return str(getattr(self, "_array_state", "idle") or "idle")
+
+    def get_print_array_terminal_guard(self):
+        """Return whether the current execution plan permanently blocks printing."""
+        result = {
+            "blocked": False,
+            "code": "ok",
+            "plan_state": None,
+            "message": "",
+        }
+        try:
+            experiment_model = getattr(
+                getattr(self, "model", None), "experiment_model", None
+            )
+            plan_getter = getattr(
+                experiment_model, "get_execution_plan_snapshot", None
+            )
+            plan = plan_getter() if callable(plan_getter) else None
+            state = getattr(plan, "state", None)
+            plan_state = str(getattr(state, "value", state) or "").strip().casefold()
+        except Exception:
+            return result
+
+        result["plan_state"] = plan_state or None
+        if plan_state == "completed":
+            result.update(
+                {
+                    "blocked": True,
+                    "code": "terminal_completed",
+                    "message": (
+                        "This experiment is complete and cannot be resumed. "
+                        "Create or load a new experiment before printing again."
+                    ),
+                }
+            )
+        elif plan_state == "aborted":
+            result.update(
+                {
+                    "blocked": True,
+                    "code": "terminal_aborted",
+                    "message": (
+                        "This experiment was aborted and cannot be resumed. "
+                        "Create or load a new experiment before printing again."
+                    ),
+                }
+            )
+        return result
 
     def get_loaded_array_control_state(self):
         """Return print progress for the reagent in the loaded printer head."""
@@ -4399,9 +4545,11 @@ class Controller(QObject):
 
     def start_new_experiment_session(self, *, base_dir=None):
         array_state = self.get_array_run_state()
+        queue_clear_state = self.get_queue_clear_state()
         array_runner_idle = (
             array_state in {"idle", "resume_ready"}
             and not bool(getattr(self, "_soft_stop_clear_uncertain", False))
+            and queue_clear_state["state"] == "idle"
         )
         experiment_path = self.model.start_new_experiment_session(
             array_runner_idle=array_runner_idle,
@@ -4425,14 +4573,24 @@ class Controller(QObject):
         """Request the operator-confirmed Clear step for an XY motion fault."""
         if self.get_xy_motion_recovery_state() != "clear_required":
             return False
-        try:
-            result = self._clear_machine_and_model_command_queues(
-                reason="xy_motion_recovery_clear",
-                notify_user=False,
+        if self.get_array_run_state() in {"running", "stop_requested"}:
+            self._interrupt_array_after_transport_fault(
+                {"fault_code": "xy_recovery_clear"},
+                reason="gantry_motion_failure",
             )
-        except Exception:
-            return False
-        return result is not False
+        return self._request_guarded_queue_clear(
+            QUEUE_CLEAR_INTENT_XY_RECOVERY,
+            reason="xy_motion_recovery_clear",
+            notify_user=False,
+        )
+
+    def request_calibration_cleanup_queue_clear(self):
+        """Request the calibration lease's classified CLEAR fallback."""
+        return self._request_guarded_queue_clear(
+            QUEUE_CLEAR_INTENT_CALIBRATION_CLEANUP,
+            reason="calibration_profile_cleanup_clear",
+            notify_user=False,
+        )
 
     def _emit_machine_workflow_interrupted(self, reason, *, notify_user=False):
         payload = {
@@ -4442,23 +4600,284 @@ class Controller(QObject):
         self._emit_optional("machine_workflow_interrupted_signal", payload)
         return payload
 
-    def _clear_machine_and_model_command_queues(
+    def _ensure_queue_clear_tracking(self):
+        """Initialize tracking for compatibility with lightweight test doubles."""
+        if not hasattr(self, "_queue_clear_attempt_counter"):
+            self._queue_clear_attempt_counter = 0
+        if not hasattr(self, "_queue_clear_attempt"):
+            self._queue_clear_attempt = None
+        if not hasattr(self, "_queue_clear_state"):
+            self._queue_clear_state = "idle"
+        if not hasattr(self, "_queue_clear_uncertain"):
+            self._queue_clear_uncertain = False
+        if not hasattr(self, "_queue_clear_last_rejection"):
+            self._queue_clear_last_rejection = None
+
+    def get_queue_clear_state(self):
+        """Return a JSON-safe snapshot of the Controller CLEAR transaction."""
+        self._ensure_queue_clear_tracking()
+        attempt = getattr(self, "_queue_clear_attempt", None)
+        return {
+            "state": str(getattr(self, "_queue_clear_state", "idle") or "idle"),
+            "intent": attempt.get("intent") if isinstance(attempt, dict) else None,
+            "attempt_token": (
+                int(attempt.get("token") or 0) if isinstance(attempt, dict) else None
+            ),
+            "last_rejection_reason": getattr(
+                self, "_queue_clear_last_rejection", None
+            ),
+        }
+
+    def _queue_clear_machine_is_connected(self):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        getter = getattr(machine_model, "is_connected", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        if hasattr(machine_model, "machine_connected"):
+            return bool(getattr(machine_model, "machine_connected", False))
+        # Unit-level Controller doubles predate connection modeling. Production
+        # MachineModel always exposes one of the checks above.
+        return True
+
+    def _record_queue_clear_event(self, event_type, summary, *, details=None, level="info"):
+        payload = dict(details or {})
+        payload["queue_clear_state"] = self.get_queue_clear_state()
+        return self._record_print_array_audit_event(
+            event_type,
+            summary,
+            details=payload,
+            level=level,
+        )
+
+    def _reject_queue_clear(self, reason, *, intent, notify_user=False):
+        self._ensure_queue_clear_tracking()
+        reason = str(reason or "queue_clear_blocked")
+        self._queue_clear_last_rejection = reason
+        self._record_queue_clear_event(
+            "print_array_queue_clear_blocked",
+            "Command queue clear was blocked",
+            details={"queue_clear_intent": intent, "rejection_reason": reason},
+            level="warning",
+        )
+        if notify_user:
+            signal = getattr(self, "error_occurred_signal", None)
+            if signal is not None:
+                try:
+                    signal.emit(
+                        "Queue Clear Blocked",
+                        "The command queue was not cleared because the request was not "
+                        f"authorized for the current machine state ({reason}).",
+                    )
+                except Exception:
+                    pass
+        return False
+
+    def _authorize_queue_clear(self, intent):
+        self._ensure_queue_clear_tracking()
+        if intent not in QUEUE_CLEAR_INTENTS:
+            return False, "unknown_clear_intent"
+        if not self._queue_clear_machine_is_connected():
+            return False, "machine_disconnected"
+        if isinstance(self._queue_clear_attempt, dict):
+            return False, "clear_already_pending"
+
+        context = getattr(self, "_array_context", None)
+        array_state = self.get_array_run_state()
+        uncertain = bool(getattr(self, "_queue_clear_uncertain", False))
+
+        if uncertain and intent not in {
+            QUEUE_CLEAR_INTENT_USER_CONFIRMED,
+            QUEUE_CLEAR_INTENT_XY_RECOVERY,
+        }:
+            return False, "previous_clear_uncertain"
+
+        if intent == QUEUE_CLEAR_INTENT_USER_CONFIRMED:
+            return True, None
+        if intent == QUEUE_CLEAR_INTENT_XY_RECOVERY:
+            if self.get_xy_motion_recovery_state() != "clear_required":
+                return False, "xy_recovery_clear_not_required"
+            if array_state in {"running", "stop_requested"}:
+                return False, "active_array_not_interrupted"
+            return True, None
+        if intent == QUEUE_CLEAR_INTENT_CALIBRATION_CLEANUP:
+            if array_state in {"running", "stop_requested"}:
+                return False, "active_array"
+            if bool(getattr(self, "_soft_stop_clear_uncertain", False)):
+                return False, "soft_stop_clear_uncertain"
+            return True, None
+        if not isinstance(context, dict):
+            return False, "array_context_missing"
+        if intent == QUEUE_CLEAR_INTENT_SAFE_STOP_BOUNDARY:
+            proof = context.get("soft_stop_clear_boundary_proof")
+            if (
+                array_state != "stop_requested"
+                or context.get("soft_stop_phase") != "clearing"
+                or context.get("finalize_reason") != "soft_stop"
+                or proof not in QUEUE_CLEAR_BOUNDARY_PROOFS
+                or context.get("soft_stop_clear_boundary_proof_consumed")
+            ):
+                return False, "safe_stop_boundary_not_proven"
+            return True, None
+        if intent == QUEUE_CLEAR_INTENT_ARRAY_TERMINAL:
+            if context.get("finalize_reason") not in {
+                "completed",
+                "refill_required",
+                "soft_stop",
+                "hard_abort",
+            }:
+                return False, "array_not_finalizing"
+            return True, None
+        return False, "unknown_clear_intent"
+
+    def _complete_guarded_queue_clear(self, token, clear_result, handler):
+        self._ensure_queue_clear_tracking()
+        attempt = self._queue_clear_attempt
+        if not isinstance(attempt, dict) or int(attempt.get("token") or 0) != int(token):
+            return False
+
+        result = dict(clear_result or {})
+        intent = attempt.get("intent")
+        self._queue_clear_attempt = None
+        if bool(result.get("status_confirmed")):
+            self._queue_clear_state = "idle"
+            self._queue_clear_uncertain = False
+            self._soft_stop_clear_uncertain = False
+            self._queue_clear_last_rejection = None
+            try:
+                self.model.machine_model.clear_command_queue()
+            except Exception:
+                pass
+            try:
+                self.update_expected_with_current()
+            except Exception:
+                pass
+            event_type = "print_array_queue_clear_confirmed"
+            summary = "Command queue clear was confirmed"
+            level = "info"
+        else:
+            self._queue_clear_state = "uncertain"
+            self._queue_clear_uncertain = True
+            self._queue_clear_last_rejection = "clear_status_unconfirmed"
+            event_type = "print_array_queue_clear_uncertain"
+            summary = "Command queue clear could not be confirmed"
+            level = "warning"
+
+        self._record_queue_clear_event(
+            event_type,
+            summary,
+            details={
+                "queue_clear_intent": intent,
+                "queue_clear_attempt_token": int(token),
+                "clear_result": result,
+            },
+            level=level,
+        )
+        if callable(handler):
+            try:
+                handler(dict(result))
+            except Exception as exc:
+                signal = getattr(self, "error_occurred_signal", None)
+                if signal is not None:
+                    signal.emit("Queue Clear Completion Failed", str(exc))
+        return True
+
+    def _request_guarded_queue_clear(
         self,
+        intent,
         *,
         reason,
         notify_user=False,
         handler=None,
     ):
-        self._emit_machine_workflow_interrupted(
-            reason,
-            notify_user=notify_user,
+        allowed, rejection = self._authorize_queue_clear(intent)
+        if not allowed:
+            return self._reject_queue_clear(
+                rejection,
+                intent=intent,
+                notify_user=notify_user,
+            )
+
+        self._queue_clear_attempt_counter += 1
+        token = int(self._queue_clear_attempt_counter)
+        self._queue_clear_attempt = {
+            "token": token,
+            "intent": str(intent),
+            "reason": str(reason or "queue_clear_requested"),
+        }
+        self._queue_clear_state = "pending"
+        self._queue_clear_last_rejection = None
+
+        if intent == QUEUE_CLEAR_INTENT_SAFE_STOP_BOUNDARY:
+            self._array_context["soft_stop_clear_boundary_proof_consumed"] = True
+
+        completion = lambda payload=None: self._complete_guarded_queue_clear(
+            token,
+            payload,
+            handler,
         )
-        if handler is None:
-            result = self.machine.clear_command_queue()
-        else:
-            result = self.machine.clear_command_queue(handler=handler)
-        self.model.machine_model.clear_command_queue()
-        return result
+        try:
+            sent = self.machine.clear_command_queue(handler=completion)
+        except Exception as exc:
+            if (
+                isinstance(self._queue_clear_attempt, dict)
+                and self._queue_clear_attempt.get("token") == token
+            ):
+                self._queue_clear_attempt = None
+                self._queue_clear_state = "uncertain"
+                self._queue_clear_uncertain = True
+                self._queue_clear_last_rejection = "clear_write_exception"
+            self._record_queue_clear_event(
+                "print_array_queue_clear_uncertain",
+                "Command queue clear write failed",
+                details={
+                    "queue_clear_intent": intent,
+                    "queue_clear_attempt_token": token,
+                    "exception_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+                level="error",
+            )
+            return False
+
+        if sent is False:
+            if (
+                isinstance(self._queue_clear_attempt, dict)
+                and self._queue_clear_attempt.get("token") == token
+            ):
+                self._queue_clear_attempt = None
+                self._queue_clear_state = (
+                    "uncertain" if self._queue_clear_uncertain else "idle"
+                )
+                self._queue_clear_last_rejection = "clear_transport_rejected"
+            return False
+
+        self._emit_machine_workflow_interrupted(reason, notify_user=notify_user)
+        self._record_queue_clear_event(
+            "print_array_queue_clear_requested",
+            "Command queue clear was requested",
+            details={
+                "queue_clear_intent": intent,
+                "queue_clear_attempt_token": token,
+            },
+        )
+        return True
+
+    def _invalidate_queue_clear_attempt(self, reason, *, clear_uncertainty=False):
+        self._ensure_queue_clear_tracking()
+        had_pending = isinstance(self._queue_clear_attempt, dict)
+        self._queue_clear_attempt = None
+        if clear_uncertainty:
+            self._queue_clear_state = "idle"
+            self._queue_clear_uncertain = False
+            self._queue_clear_last_rejection = None
+        elif had_pending:
+            self._queue_clear_state = "uncertain"
+            self._queue_clear_uncertain = True
+            self._queue_clear_last_rejection = str(reason or "clear_interrupted")
+        return had_pending
 
     def _set_array_run_state(self, state):
         state = str(state or "idle")
@@ -4879,6 +5298,11 @@ class Controller(QObject):
             "soft_stop_attempt_token": context.get("soft_stop_attempt_token"),
             "soft_stop_recovery_reason": context.get("soft_stop_recovery_reason"),
             "soft_stop_clear_uncertain": bool(getattr(self, "_soft_stop_clear_uncertain", False)),
+            "soft_stop_clear_boundary_proof": context.get("soft_stop_clear_boundary_proof"),
+            "soft_stop_clear_boundary_proof_consumed": bool(
+                context.get("soft_stop_clear_boundary_proof_consumed", False)
+            ),
+            "queue_clear": self.get_queue_clear_state(),
             "serpentine": bool(getattr(self, "_array_print_serpentine", ARRAY_PRINT_SERPENTINE)),
             "expected_volume_uL": context.get("expected_volume"),
             "droplet_volume_nL": context.get("droplet_volume"),
@@ -5152,6 +5576,7 @@ class Controller(QObject):
             if self._paused_array_frozen_well_finished_array(context):
                 return self._finish_paused_array_final_well(context)
             context["soft_stop_phase"] = "waiting_watermark"
+            context["soft_stop_clear_boundary_proof"] = "watermark_reached"
             self._invalidate_paused_array_soft_stop_attempt(context)
             return self._begin_soft_stop_clear_and_park()
 
@@ -5530,14 +5955,11 @@ class Controller(QObject):
         detail = detail_map.get(str(reason or "unknown"), f"the pause-after request failed ({reason})")
         barrier_text = f" for command {int(barrier_seq32)}" if barrier_seq32 else ""
 
-        try:
-            self.clear_command_queue()
-        except Exception:
-            self._complete_array_finalize("hard_abort")
+        self._complete_array_finalize("hard_abort")
 
         self.error_occurred_signal.emit(
             "Soft Stop Failed",
-            f"Soft stop failed because {detail}{barrier_text}. The print array was aborted and the queued commands were cleared.",
+            f"Soft stop failed because {detail}{barrier_text}. The print array was aborted and a guarded queue clear was requested.",
         )
 
     def _warn_soft_stop_post_watermark(self, message):
@@ -5585,6 +6007,7 @@ class Controller(QObject):
 
         if context.get("soft_stop_origin") == "immediate_pause":
             context["soft_stop_phase"] = "waiting_watermark"
+            context["soft_stop_clear_boundary_proof"] = "frozen_barrier_retired"
             self._invalidate_paused_array_soft_stop_attempt(context)
             return self._begin_soft_stop_clear_and_park()
 
@@ -5593,7 +6016,8 @@ class Controller(QObject):
         return self._enqueue_array_finalize("soft_stop")
 
     def _clear_command_queue_for_soft_stop(self, on_cleared=None):
-        self._clear_machine_and_model_command_queues(
+        return self._request_guarded_queue_clear(
+            QUEUE_CLEAR_INTENT_SAFE_STOP_BOUNDARY,
             reason="array_queue_clear",
             handler=on_cleared,
         )
@@ -5614,8 +6038,12 @@ class Controller(QObject):
         self._soft_stop_clear_uncertain = False
 
         try:
-            self._clear_command_queue_for_soft_stop(self._on_soft_stop_queue_cleared)
+            clear_requested = self._clear_command_queue_for_soft_stop(
+                self._on_soft_stop_queue_cleared
+            )
         except Exception:
+            clear_requested = False
+        if clear_requested is False:
             context["soft_stop_phase"] = "done"
             context["soft_stop_pending"] = False
             self._mark_evap_plate_dock_check_required("soft_stop_clear_unconfirmed")
@@ -5692,11 +6120,6 @@ class Controller(QObject):
                         "remains unavailable.",
                     )
 
-        try:
-            self.update_expected_with_current()
-        except Exception:
-            pass
-
         self._soft_stop_clear_uncertain = False
         if context.pop("soft_stop_pause_during_clearing", False):
             context["soft_stop_phase_before_pause"] = "post_clear_parking"
@@ -5758,106 +6181,242 @@ class Controller(QObject):
             return False
         return True
 
-    def set_relative_X(self, x,manual=False,handler=None,override=False):
-        """Set the relative X coordinate for the machine."""
-        target = {'X': self.expected_position['X'] + x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}
-        if not self._hard_endpoint_allowed(target):
+    def _prepare_motion_endpoint(self, requested_position, *, override):
+        """Return the exact firmware-representable endpoint or reject safely."""
+
+        try:
+            plan = canonicalize_position(
+                self.expected_position,
+                requested_position,
+            )
+        except MotionPositionContractError as exc:
+            self._reject_motion_position_contract(exc)
+            return None
+
+        return self._validate_motion_endpoint_plan(plan, override=override)
+
+    def _prepare_relative_motion_endpoint(self, requested_displacement, *, override):
+        """Return a firmware-representable plan for one relative request."""
+
+        try:
+            plan = canonicalize_relative_position(
+                self.expected_position,
+                requested_displacement,
+            )
+        except MotionPositionContractError as exc:
+            self._reject_motion_position_contract(exc)
+            return None
+        return self._validate_motion_endpoint_plan(plan, override=override)
+
+    def _reject_motion_position_contract(self, error):
+        message = f"Motion target cannot be represented safely: {error}"
+        print(message)
+        signal = getattr(self, "error_occurred_signal", None)
+        if signal is not None:
+            signal.emit("Motion Target Rejected", message)
+
+    def _validate_motion_endpoint_plan(self, plan, *, override):
+        """Apply endpoint and path safety checks to a canonical motion plan."""
+
+        requested = plan["requested_position"]
+        canonical = plan["canonical_position"]
+        if not self._hard_endpoint_allowed(requested):
+            return None
+        if canonical != requested and not self._hard_endpoint_allowed(canonical):
+            return None
+        if not override and self.check_collision(plan["origin_position"], canonical):
+            print('Collision detected')
+            return None
+        return plan
+
+    def _remember_motion_endpoint(
+        self,
+        plan,
+        *,
+        queue_result="accepted",
+        accepted_position=None,
+        failed_axis=None,
+    ):
+        """Retain one queue-batch endpoint for reconciliation/audit evidence."""
+
+        evidence = copy.deepcopy(plan)
+        evidence["queue_result"] = str(queue_result)
+        if accepted_position is not None:
+            accepted = {
+                axis: int(accepted_position[axis])
+                for axis in self._position_axes()
+            }
+            if accepted != evidence["canonical_position"]:
+                evidence["accepted_position"] = accepted
+        if failed_axis is not None:
+            evidence["failed_axis"] = str(failed_axis)
+        self._pending_motion_endpoint_evidence = evidence
+        self._log_motion_endpoint_evidence(evidence)
+        return copy.deepcopy(evidence)
+
+    @staticmethod
+    def _log_motion_endpoint_evidence(evidence):
+        if evidence.get("adjusted_axes"):
+            print(
+                "Motion endpoint canonicalized: "
+                + json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+            )
+
+    def _single_axis_requested_endpoint(self, axis, value):
+        requested = dict(self.expected_position)
+        requested[axis] = value
+        return requested
+
+    @staticmethod
+    def _single_axis_requested_displacement(axis, value):
+        requested = {"X": 0, "Y": 0, "Z": 0}
+        requested[axis] = value
+        return requested
+
+    def _plate_calibration_motion_is_blocked(self):
+        session = self._plate_calibration_active_session()
+        if session is None:
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting relative X: {x}")
-        self.machine.set_relative_X(x,manual=manual,handler=handler)
-        self.expected_position['X'] += x
+        return getattr(self, "_plate_calibration_internal_motion_token", None) != session.get(
+            "session_token"
+        )
+
+    def _reject_conflicting_plate_calibration_motion(self):
+        if not self._plate_calibration_motion_is_blocked():
+            return False
+        self.error_occurred_signal.emit(
+            "Plate Calibration Active",
+            "Other motion is blocked while the guarded plate-calibration session is active.",
+        )
+        return True
+
+    @contextmanager
+    def _plate_calibration_motion_scope(self, session_token):
+        previous = getattr(self, "_plate_calibration_internal_motion_token", None)
+        self._plate_calibration_internal_motion_token = session_token
+        try:
+            yield
+        finally:
+            self._plate_calibration_internal_motion_token = previous
+
+    def set_relative_X(self, x,manual=False,handler=None,override=False):
+        """Set relative X using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
+            return False
+        plan = self._prepare_relative_motion_endpoint(
+            self._single_axis_requested_displacement("X", x),
+            override=override,
+        )
+        if plan is None:
+            return False
+        delta = plan["canonical_position"]["X"] - plan["origin_position"]["X"]
+        if self.machine.set_relative_X(delta,manual=manual,handler=handler) is False:
+            return False
+        self.update_expected_position(x=plan["canonical_position"]["X"])
+        self._remember_motion_endpoint(plan)
         return True
 
     def set_relative_Y(self, y,manual=False,handler=None, override=False):
-        """Set the relative Y coordinate for the machine."""
-        target = {'X': self.expected_position['X'], 'Y': self.expected_position['Y'] + y, 'Z': self.expected_position['Z']}
-        if not self._hard_endpoint_allowed(target):
+        """Set relative Y using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting relative Y: {y}")
-        self.machine.set_relative_Y(y,manual=manual,handler=handler)
-        self.expected_position['Y'] += y
+        plan = self._prepare_relative_motion_endpoint(
+            self._single_axis_requested_displacement("Y", y),
+            override=override,
+        )
+        if plan is None:
+            return False
+        delta = plan["canonical_position"]["Y"] - plan["origin_position"]["Y"]
+        if self.machine.set_relative_Y(delta,manual=manual,handler=handler) is False:
+            return False
+        self.update_expected_position(y=plan["canonical_position"]["Y"])
+        self._remember_motion_endpoint(plan)
         return True
 
     def set_relative_Z(self, z,manual=False,handler=None, override=False):
-        """Set the relative Z coordinate for the machine."""
-        target = {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z'] + z}
-        if not self._hard_endpoint_allowed(target):
+        """Set relative Z using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting relative Z: {z}")
-        self.machine.set_relative_Z(z,manual=manual,handler=handler)
-        self.expected_position['Z'] += z
+        plan = self._prepare_relative_motion_endpoint(
+            self._single_axis_requested_displacement("Z", z),
+            override=override,
+        )
+        if plan is None:
+            return False
+        delta = plan["canonical_position"]["Z"] - plan["origin_position"]["Z"]
+        if self.machine.set_relative_Z(delta,manual=manual,handler=handler) is False:
+            return False
+        self.update_expected_position(z=plan["canonical_position"]["Z"])
+        self._remember_motion_endpoint(plan)
         return True
     
     def set_absolute_XY(self, x, y, manual=False, handler=None, override=False):
-        """Set the absolute X and Y coordinates for the machine."""
-        target = {'X': x, 'Y': y, 'Z': self.expected_position['Z']}
-        if not self._hard_endpoint_allowed(target):
+        """Set absolute X/Y using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting absolute XY: {x}, {y}")
-        if self.machine.set_absolute_XY(x, y, manual=manual, handler=handler) is False:
+        requested = dict(self.expected_position)
+        requested.update({"X": x, "Y": y})
+        plan = self._prepare_motion_endpoint(requested, override=override)
+        if plan is None:
             return False
-        self.update_expected_position(x=x, y=y)
+        canonical = plan["canonical_position"]
+        if self.machine.set_absolute_XY(
+            canonical["X"], canonical["Y"], manual=manual, handler=handler
+        ) is False:
+            return False
+        self.update_expected_position(x=canonical["X"], y=canonical["Y"])
+        self._remember_motion_endpoint(plan)
         return True
 
     def set_absolute_X(self, x,manual=False,handler=None, override=False):
-        """Set the absolute X coordinate for the machine."""
-        target = {'X': x, 'Y': self.expected_position['Y'], 'Z': self.expected_position['Z']}
-        if not self._hard_endpoint_allowed(target):
+        """Set absolute X using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting absolute X: {x}")
-        if self.machine.set_absolute_X(x,manual=manual,handler=handler) is False:
+        plan = self._prepare_motion_endpoint(
+            self._single_axis_requested_endpoint("X", x),
+            override=override,
+        )
+        if plan is None:
             return False
-        self.update_expected_position(x=x)
+        canonical = plan["canonical_position"]["X"]
+        if self.machine.set_absolute_X(canonical,manual=manual,handler=handler) is False:
+            return False
+        self.update_expected_position(x=canonical)
+        self._remember_motion_endpoint(plan)
         return True
 
     def set_absolute_Y(self, y,manual=False,handler=None, override=False):
-        """Set the absolute Y coordinate for the machine."""
-        target = {'X': self.expected_position['X'], 'Y': y, 'Z': self.expected_position['Z']}
-        if not self._hard_endpoint_allowed(target):
+        """Set absolute Y using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting absolute Y: {y}")
-        if self.machine.set_absolute_Y(y,manual=manual,handler=handler) is False:
+        plan = self._prepare_motion_endpoint(
+            self._single_axis_requested_endpoint("Y", y),
+            override=override,
+        )
+        if plan is None:
             return False
-        self.update_expected_position(y=y)
+        canonical = plan["canonical_position"]["Y"]
+        if self.machine.set_absolute_Y(canonical,manual=manual,handler=handler) is False:
+            return False
+        self.update_expected_position(y=canonical)
+        self._remember_motion_endpoint(plan)
         return True
     
     def set_absolute_Z(self, z,manual=False,handler=None, override=False):
-        """Set the absolute Z coordinate for the machine."""
-        target = {'X': self.expected_position['X'], 'Y': self.expected_position['Y'], 'Z': z}
-        if not self._hard_endpoint_allowed(target):
+        """Set absolute Z using the firmware-representable endpoint."""
+        if self._reject_conflicting_plate_calibration_motion():
             return False
-        if not override:
-            if self.check_collision(self.expected_position, target):
-                print('Collision detected')
-                return False
-        #print(f"Setting absolute Z: {z}")
-        if self.machine.set_absolute_Z(z,manual=manual,handler=handler) is False:
+        plan = self._prepare_motion_endpoint(
+            self._single_axis_requested_endpoint("Z", z),
+            override=override,
+        )
+        if plan is None:
             return False
-        self.update_expected_position(z=z)
+        canonical = plan["canonical_position"]["Z"]
+        if self.machine.set_absolute_Z(canonical,manual=manual,handler=handler) is False:
+            return False
+        self.update_expected_position(z=canonical)
+        self._remember_motion_endpoint(plan)
         return True
 
     def _hard_endpoint_allowed(self, target_pos):
@@ -5911,90 +6470,105 @@ class Controller(QObject):
         return False
     
     def set_relative_coordinates(self, x, y, z, manual=False, handler=None,override=False):
-        """Set the relative coordinates for the machine."""
-        new_position = {
-            'X': self.expected_position['X'] + x,
-            'Y': self.expected_position['Y'] + y,
-            'Z': self.expected_position['Z'] + z
-        }
-        if not self._hard_endpoint_allowed(new_position):
+        """Set relative Cartesian coordinates using representable deltas."""
+        if self._reject_conflicting_plate_calibration_motion():
             return False
-        #print(f"Setting relative coordinates: x={x}, y={y}, z={z}")
-        if not override:
-            if self.check_collision(self.expected_position, new_position):
-                print('Collision detected')
-                return False
+        plan = self._prepare_relative_motion_endpoint(
+            {"X": x, "Y": y, "Z": z},
+            override=override,
+        )
+        if plan is None:
+            return False
 
-        # Build list of commands based on the order dictated by z.
-        # Each element is a tuple: (axis, value)
+        origin = plan["origin_position"]
+        canonical = plan["canonical_position"]
+        deltas = {
+            axis: canonical[axis] - origin[axis]
+            for axis in self._position_axes()
+        }
         commands = []
-        if z < 0:
-            if z != 0:
-                commands.append(('Z', z))
-            if y != 0:
-                commands.append(('Y', y))
-            if x != 0:
-                commands.append(('X', x))
+        if deltas["Z"] < 0:
+            order = ("Z", "Y", "X")
         else:
-            if y != 0:
-                commands.append(('Y', y))
-            if x != 0:
-                commands.append(('X', x))
-            if z != 0:
-                commands.append(('Z', z))
+            order = ("Y", "X", "Z")
+        commands = [(axis, deltas[axis]) for axis in order if deltas[axis] != 0]
 
-        # Execute the commands in order, attaching the callback only to the last one.
-        for i, (axis, value) in enumerate(commands):
-            is_last = (i == len(commands) - 1)
-            current_handler = handler if is_last else None
-            if axis == 'X':
-                self.machine.set_relative_X(value, manual=manual, handler=current_handler)
-            elif axis == 'Y':
-                self.machine.set_relative_Y(value, manual=manual, handler=current_handler)
-            elif axis == 'Z':
-                self.machine.set_relative_Z(value, manual=manual, handler=current_handler)
+        if not commands:
+            if handler:
+                handler()
+            self.update_expected_position(**{
+                axis.lower(): canonical[axis] for axis in self._position_axes()
+            })
+            if plan.get("adjusted_axes"):
+                evidence = copy.deepcopy(plan)
+                evidence["queue_result"] = "canonical_noop"
+                self._log_motion_endpoint_evidence(evidence)
+            return True
 
-        # Update the expected position
-        self.expected_position['X'] += x
-        self.expected_position['Y'] += y
-        self.expected_position['Z'] += z
+        current = dict(origin)
+        for index, (axis, value) in enumerate(commands):
+            current_handler = handler if index == len(commands) - 1 else None
+            queue_method = getattr(self.machine, f"set_relative_{axis}")
+            queued = queue_method(value, manual=manual, handler=current_handler)
+            if queued is False:
+                self.update_expected_position(
+                    x=current["X"], y=current["Y"], z=current["Z"]
+                )
+                if current != origin:
+                    self._remember_motion_endpoint(
+                        plan,
+                        queue_result="partial",
+                        accepted_position=current,
+                        failed_axis=axis,
+                    )
+                return False
+            current[axis] = canonical[axis]
+
+        self.update_expected_position(
+            x=canonical["X"], y=canonical["Y"], z=canonical["Z"]
+        )
+        self._remember_motion_endpoint(plan)
         return True
     
     def set_absolute_coordinates(self, x, y, z, manual=False, handler=None, kwargs=None, override=False):
         """Set absolute coordinates; always use XY for any X/Y movement."""
-        new_position = {'X': x, 'Y': y, 'Z': z}
-
-        if not self._hard_endpoint_allowed(new_position):
+        if self._reject_conflicting_plate_calibration_motion():
+            return False
+        requested = {'X': x, 'Y': y, 'Z': z}
+        plan = self._prepare_motion_endpoint(requested, override=override)
+        if plan is None:
             return False
 
-        # 1) collision check
-        if not override and self.check_collision(self.expected_position, new_position):
-            print('Collision detected')
-            return False
-
-        cur = dict(self.expected_position)
-        needs_xy = (x != cur['X']) or (y != cur['Y'])
-        needs_z  = (z != cur['Z'])
+        canonical = plan["canonical_position"]
+        cur = dict(plan["origin_position"])
+        needs_xy = (canonical["X"] != cur['X']) or (canonical["Y"] != cur['Y'])
+        needs_z  = canonical["Z"] != cur['Z']
 
         # 2) plan ordering: if moving "up", do Z first; otherwise XY first, then Z
         moves = []
-        if needs_z and z < cur['Z']:
+        if needs_z and canonical["Z"] < cur['Z']:
             # up first
-            moves.append(('Z', z))
+            moves.append(('Z', canonical["Z"]))
             if needs_xy:
-                moves.append(('XY', (x, y)))
+                moves.append(('XY', (canonical["X"], canonical["Y"])))
         else:
             # XY first (if any), then Z (if any)
             if needs_xy:
-                moves.append(('XY', (x, y)))
+                moves.append(('XY', (canonical["X"], canonical["Y"])))
             if needs_z:
-                moves.append(('Z', z))
+                moves.append(('Z', canonical["Z"]))
 
         # 3) nothing to do
         if not moves:
             if handler:
                 handler()
-            self.update_expected_position(x=x, y=y, z=z)
+            self.update_expected_position(
+                x=canonical["X"], y=canonical["Y"], z=canonical["Z"]
+            )
+            if plan.get("adjusted_axes"):
+                evidence = copy.deepcopy(plan)
+                evidence["queue_result"] = "canonical_noop"
+                self._log_motion_endpoint_evidence(evidence)
             return True
 
         # 4) dispatch (XY is used even if only one axis actually changes)
@@ -6016,6 +6590,13 @@ class Controller(QObject):
                         y=cur['Y'],
                         z=cur['Z'],
                     )
+                    if cur != plan["origin_position"]:
+                        self._remember_motion_endpoint(
+                            plan,
+                            queue_result="partial",
+                            accepted_position=cur,
+                            failed_axis=axis,
+                        )
                     return False
                 cur['X'], cur['Y'] = x_val, y_val
             elif axis == 'Z':
@@ -6031,13 +6612,23 @@ class Controller(QObject):
                         y=cur['Y'],
                         z=cur['Z'],
                     )
+                    if cur != plan["origin_position"]:
+                        self._remember_motion_endpoint(
+                            plan,
+                            queue_result="partial",
+                            accepted_position=cur,
+                            failed_axis=axis,
+                        )
                     return False
                 cur['Z'] = val
             else:
                 raise ValueError(f"Unknown axis {axis}")
 
         # 5) update expected end position
-        self.update_expected_position(x=x, y=y, z=z)
+        self.update_expected_position(
+            x=canonical["X"], y=canonical["Y"], z=canonical["Z"]
+        )
+        self._remember_motion_endpoint(plan)
         return True
 
     def set_relative_print_pressure(self, pressure,manual=False):
@@ -6413,6 +7004,7 @@ class Controller(QObject):
 
     def pause_machine(self):
         """Pause the machine."""
+        self._emit_machine_workflow_interrupted("machine_paused")
         self.machine.pause_machine()
 
     def LED_on(self):
@@ -6428,6 +7020,7 @@ class Controller(QObject):
         recovery_state = self.get_xy_motion_recovery_state()
         if recovery_state not in {"idle", "home_required"}:
             return False
+        self._emit_machine_workflow_interrupted("homing_started")
         print("Homing machine...")
         self.model.machine_model.reset_home_status()
         self.model.machine_model.home_status_signal.emit()
@@ -6506,6 +7099,178 @@ class Controller(QObject):
             )
             return False
 
+    @staticmethod
+    def _position_axes():
+        return ("X", "Y", "Z")
+
+    def _position_reconciliation_now(self):
+        clock = getattr(self, "_monotonic_fn", None)
+        return float(clock() if callable(clock) else time.monotonic())
+
+    def _position_reconciliation_snapshot(self, *, now_monotonic=None):
+        machine_model = self.model.machine_model
+        getter = getattr(machine_model, "get_position_telemetry_snapshot", None)
+        if not callable(getter):
+            return None
+        now = (
+            self._position_reconciliation_now()
+            if now_monotonic is None
+            else float(now_monotonic)
+        )
+        return getter(now_monotonic=now)
+
+    def _position_reconciliation_timeout_ms(self):
+        guard = getattr(self, "configuration_safety_guard", None)
+        policy = getattr(guard, "policy", None)
+        timeout_ms = getattr(policy, "position_telemetry_max_age_ms", 2500)
+        try:
+            return max(1, int(timeout_ms))
+        except (TypeError, ValueError):
+            return 2500
+
+    def _settle_position_reconciliation(self, *, reason, now_monotonic=None):
+        now = (
+            self._position_reconciliation_now()
+            if now_monotonic is None
+            else float(now_monotonic)
+        )
+        machine_model = self.model.machine_model
+        position_getter = getattr(
+            machine_model,
+            "get_current_position_dict_capital",
+            machine_model.get_current_position_dict,
+        )
+        position = position_getter()
+        self._position_reconciliation = {
+            "state": "settled",
+            "reason": str(reason),
+            "completed_monotonic": now,
+            "expected_position": copy.deepcopy(self.expected_position),
+            "reported_position": {
+                axis: int(position[axis]) for axis in self._position_axes()
+            },
+        }
+        return copy.deepcopy(self._position_reconciliation)
+
+    def _begin_position_reconciliation(self):
+        """Wait for a complete post-drain position cycle before capture."""
+
+        motion_endpoint = copy.deepcopy(
+            getattr(self, "_pending_motion_endpoint_evidence", None)
+        )
+        self._pending_motion_endpoint_evidence = None
+        if getattr(self, "configuration_safety_guard", None) is None:
+            self.update_expected_with_current()
+            return
+
+        now = self._position_reconciliation_now()
+        timeout_ms = self._position_reconciliation_timeout_ms()
+        telemetry = self._position_reconciliation_snapshot(now_monotonic=now) or {}
+        axes = telemetry.get("axes", {}) if isinstance(telemetry, dict) else {}
+        position = self.model.machine_model.get_current_position_dict_capital()
+        self._position_reconciliation = {
+            "state": "pending",
+            "reason": "command_queue_drained",
+            "started_monotonic": now,
+            "deadline_monotonic": now + (timeout_ms / 1000.0),
+            "telemetry_max_age_ms": timeout_ms,
+            "trust_epoch": telemetry.get("trust_epoch"),
+            "baseline_generations": {
+                axis: int((axes.get(axis) or {}).get("generation", 0))
+                for axis in self._position_axes()
+            },
+            "observed_generations": {
+                axis: int((axes.get(axis) or {}).get("generation", 0))
+                for axis in self._position_axes()
+            },
+            "expected_position": copy.deepcopy(self.expected_position),
+            "reported_position_at_drain": {
+                axis: int(position[axis]) for axis in self._position_axes()
+            },
+        }
+        if motion_endpoint is not None:
+            self._position_reconciliation["motion_endpoint"] = motion_endpoint
+        session = getattr(self, "_plate_calibration_session", None)
+        if (
+            isinstance(session, dict)
+            and session.get("state") == "reconciling"
+            and session.get("awaiting_queue_drain")
+        ):
+            session["awaiting_queue_drain"] = False
+            session["reconciliation_started_monotonic"] = now
+            self._advance_plate_calibration_session(now_monotonic=now)
+
+    def _advance_position_reconciliation(self, *, now_monotonic=None):
+        record = getattr(self, "_position_reconciliation", None)
+        if not isinstance(record, dict):
+            return {"state": "settled", "reason": "compatibility_default"}
+        if record.get("state") not in {"pending", "timed_out"}:
+            return copy.deepcopy(record)
+
+        now = (
+            self._position_reconciliation_now()
+            if now_monotonic is None
+            else float(now_monotonic)
+        )
+        telemetry = self._position_reconciliation_snapshot(now_monotonic=now)
+        if not isinstance(telemetry, dict):
+            if now >= float(record.get("deadline_monotonic", now)):
+                record["state"] = "timed_out"
+                record["reason"] = "position_telemetry_unavailable"
+            return copy.deepcopy(record)
+
+        observed_epoch = telemetry.get("trust_epoch")
+        if observed_epoch != record.get("trust_epoch"):
+            record["state"] = "trust_changed"
+            record["reason"] = "motion_trust_epoch_changed"
+            record["observed_trust_epoch"] = observed_epoch
+            record["completed_monotonic"] = now
+            return copy.deepcopy(record)
+
+        try:
+            queue_empty = bool(self.check_if_all_completed())
+        except Exception:
+            queue_empty = False
+        if not queue_empty or bool(self.model.machine_model.is_busy()):
+            if now >= float(record.get("deadline_monotonic", now)):
+                record["state"] = "timed_out"
+                record["reason"] = "motion_not_settled_before_deadline"
+            return copy.deepcopy(record)
+
+        axes = telemetry.get("axes", {})
+        baseline = record.get("baseline_generations", {})
+        observed = {
+            axis: int((axes.get(axis) or {}).get("generation", 0))
+            for axis in self._position_axes()
+        }
+        record["observed_generations"] = observed
+        if not all(
+            observed[axis] > int(baseline.get(axis, 0))
+            for axis in self._position_axes()
+        ):
+            if now >= float(record.get("deadline_monotonic", now)):
+                record["state"] = "timed_out"
+                record["reason"] = "post_drain_position_cycle_incomplete"
+            return copy.deepcopy(record)
+
+        position = self.model.machine_model.get_current_position_dict_capital()
+        reported = {
+            axis: int(position[axis]) for axis in self._position_axes()
+        }
+        expected = {
+            axis: record.get("expected_position", {}).get(axis)
+            for axis in self._position_axes()
+        }
+        record["reported_position"] = reported
+        record["completed_monotonic"] = now
+        if reported == expected:
+            record["state"] = "settled"
+            record["reason"] = "fresh_post_drain_position_matches_expected"
+        else:
+            record["state"] = "mismatch"
+            record["reason"] = "fresh_post_drain_position_mismatch"
+        return copy.deepcopy(record)
+
     def _configuration_capture_readiness(self):
         """Return one JSON-safe, fail-closed current-position evidence snapshot."""
 
@@ -6514,6 +7279,9 @@ class Controller(QObject):
             return {"ready": True, "reason_codes": [], "compatibility_mode": True}
         machine_model = self.model.machine_model
         now = float(self._monotonic_fn())
+        reconciliation = self._advance_position_reconciliation(
+            now_monotonic=now
+        )
         telemetry_getter = getattr(machine_model, "get_position_telemetry_snapshot", None)
         telemetry = telemetry_getter(now_monotonic=now) if callable(telemetry_getter) else None
         reasons = []
@@ -6563,7 +7331,18 @@ class Controller(QObject):
         expected = dict(self.expected_position)
         if any(type(position.get(axis)) is not int for axis in ("X", "Y", "Z")):
             reasons.append("position_invalid")
-        if any(expected.get(axis) != position.get(axis) for axis in ("X", "Y", "Z")):
+        reconciliation_state = str(reconciliation.get("state") or "settled")
+        if reconciliation_state == "pending":
+            reasons.append("position_reconciliation_pending")
+        elif reconciliation_state == "timed_out":
+            reasons.append("position_reconciliation_timeout")
+        elif reconciliation_state == "trust_changed":
+            reasons.append("position_reconciliation_trust_changed")
+        elif reconciliation_state == "mismatch":
+            reasons.append("expected_position_mismatch")
+        elif any(
+            expected.get(axis) != position.get(axis) for axis in ("X", "Y", "Z")
+        ):
             reasons.append("expected_position_mismatch")
         machine_uuid = getattr(getattr(self, "machine_data_paths", None), "machine_uuid", None)
         if not machine_uuid:
@@ -6575,10 +7354,654 @@ class Controller(QObject):
             "trust_epoch": trust_epoch,
             "captured_position": {axis: int(position[axis]) for axis in ("X", "Y", "Z")},
             "expected_position": copy.deepcopy(expected),
+            "position_reconciliation": copy.deepcopy(reconciliation),
             "telemetry": copy.deepcopy(axes),
             "captured_monotonic": now,
             "telemetry_max_age_ms": guard.policy.position_telemetry_max_age_ms,
         }
+
+    @staticmethod
+    def _plate_calibration_points():
+        return ("top_left", "top_right", "bottom_right", "bottom_left")
+
+    @staticmethod
+    def _plate_calibration_terminal_states():
+        return {"failed", "cancelled"}
+
+    def _plate_calibration_session_snapshot(self):
+        session = getattr(self, "_plate_calibration_session", None)
+        if not isinstance(session, dict):
+            return {
+                "session_token": None,
+                "state": "idle",
+                "target_key": None,
+                "target_state": None,
+                "manual_first": False,
+                "expected_endpoint": None,
+                "failure_reason": None,
+            }
+        public_keys = (
+            "session_token",
+            "state",
+            "phase",
+            "machine_uuid",
+            "plate_name",
+            "target_key",
+            "target_state",
+            "manual_first",
+            "expected_endpoint",
+            "expected_point",
+            "next_point_index",
+            "failure_reason",
+        )
+        return {
+            key: copy.deepcopy(session.get(key))
+            for key in public_keys
+        }
+
+    def _emit_plate_calibration_state(self):
+        snapshot = self._plate_calibration_session_snapshot()
+        self._emit_optional("plate_calibration_state_changed", snapshot)
+        return snapshot
+
+    def _set_plate_calibration_state(self, state, **updates):
+        session = getattr(self, "_plate_calibration_session", None)
+        if not isinstance(session, dict):
+            return self._plate_calibration_session_snapshot()
+        session.update(copy.deepcopy(updates))
+        session["state"] = str(state)
+        return self._emit_plate_calibration_state()
+
+    def _plate_calibration_active_session(self, session_token=None):
+        session = getattr(self, "_plate_calibration_session", None)
+        if not isinstance(session, dict):
+            return None
+        if session.get("state") in self._plate_calibration_terminal_states():
+            return None
+        if session_token is not None and session.get("session_token") != session_token:
+            return None
+        return session
+
+    def _fail_plate_calibration_session(self, reason, *, notify=True):
+        session = getattr(self, "_plate_calibration_session", None)
+        if not isinstance(session, dict):
+            return False
+        if session.get("state") in self._plate_calibration_terminal_states():
+            return False
+        reason = str(reason or "plate_calibration_failed")
+        try:
+            self.model.well_plate.discard_temp_calibrations()
+        except Exception:
+            pass
+        self.discard_configuration_capture_evidence("plate_calibration")
+        self._set_plate_calibration_state(
+            "failed",
+            failure_reason=reason,
+            expected_endpoint=None,
+            awaiting_queue_drain=False,
+        )
+        if notify:
+            self.error_occurred_signal.emit(
+                "Plate Calibration Stopped",
+                "Plate calibration stopped safely. No calibration was saved. "
+                f"Start it again after resolving: {reason}.",
+            )
+        return False
+
+    def _on_plate_calibration_workflow_interrupted(self, payload):
+        session = self._plate_calibration_active_session()
+        if session is None:
+            return
+        reason = payload.get("reason") if isinstance(payload, dict) else payload
+        self._fail_plate_calibration_session(
+            f"workflow_interrupted:{reason or 'unknown'}",
+            notify=False,
+        )
+
+    def _on_plate_calibration_pause_changed(self):
+        if not bool(getattr(self.model.machine_model, "paused", False)):
+            return
+        self._fail_plate_calibration_session("machine_paused", notify=False)
+
+    def _plate_calibration_fail_preflight(self, reason_code, message):
+        return {
+            "allowed": False,
+            "reason_code": str(reason_code),
+            "message": str(message),
+            "state": "idle",
+        }
+
+    def plate_calibration_entry_preflight(self):
+        """Inspect the governed plate and machine state without issuing motion."""
+
+        if self._plate_calibration_active_session() is not None:
+            return self._plate_calibration_fail_preflight(
+                "plate_calibration_already_active",
+                "A plate calibration is already active.",
+            )
+
+        machine_model = self.model.machine_model
+        if not machine_model.is_connected():
+            return self._plate_calibration_fail_preflight(
+                "not_connected", "Connect to the machine before calibrating the plate."
+            )
+        if not machine_model.motors_are_enabled() or not machine_model.motors_are_homed():
+            return self._plate_calibration_fail_preflight(
+                "motors_not_ready", "Enable and home the motors before calibrating the plate."
+            )
+        if bool(getattr(machine_model, "paused", False)) or bool(
+            getattr(machine_model, "transport_paused", False)
+        ):
+            return self._plate_calibration_fail_preflight(
+                "motion_paused", "Resume or recover the motion system before calibrating the plate."
+            )
+        if not self.check_if_all_completed() or bool(machine_model.is_busy()):
+            return self._plate_calibration_fail_preflight(
+                "command_queue_not_idle", "Wait for the command queue to become idle."
+            )
+        origin = str(getattr(self, "expected_location", None) or "").strip().casefold()
+        supported_origin = origin in {
+            "home",
+            "loading",
+            "camera",
+            "plate",
+            "pause",
+        } or origin.startswith("slot-")
+        if not supported_origin:
+            return self._plate_calibration_fail_preflight(
+                "unsupported_plate_entry_origin",
+                "Move through a known Home, rack-slot, Camera, or plate route before "
+                "starting plate calibration.",
+            )
+
+        readiness = self._configuration_capture_readiness()
+        if not readiness.get("ready"):
+            reasons = ", ".join(readiness.get("reason_codes") or ["machine_not_ready"])
+            return self._plate_calibration_fail_preflight(
+                "machine_not_ready", f"Machine position is not ready for calibration: {reasons}."
+            )
+
+        rack_model = getattr(self.model, "rack_model", None)
+        head_getter = getattr(rack_model, "get_gripper_printer_head", None)
+        head = head_getter() if callable(head_getter) else getattr(
+            rack_model, "gripper_printer_head", None
+        )
+        is_calibration_chip = getattr(head, "is_calibration_chip", None)
+        if head is None or not callable(is_calibration_chip) or not is_calibration_chip():
+            return self._plate_calibration_fail_preflight(
+                "calibration_head_required",
+                "Load the calibration printer head before calibrating the plate.",
+            )
+
+        service = getattr(self, "configuration_transactions", None)
+        guard = getattr(self, "configuration_safety_guard", None)
+        paths = getattr(self, "machine_data_paths", None)
+        if service is None or guard is None or not getattr(paths, "machine_uuid", None):
+            return self._plate_calibration_fail_preflight(
+                "configuration_safety_unavailable",
+                "The governed machine-data safety service is unavailable.",
+            )
+
+        plate = getattr(self.model, "well_plate", None)
+        try:
+            plate_name = str(plate.get_current_plate_name()).strip()
+            calibrations = copy.deepcopy(
+                plate.get_all_current_plate_calibrations()
+            )
+            required = set(self._plate_calibration_points())
+            if set(calibrations) != required:
+                raise ValueError("the active plate must contain exactly four corners")
+            normalized = {}
+            for point_name in self._plate_calibration_points():
+                point = calibrations[point_name]
+                normalized[point_name] = {
+                    axis: int(point[axis]) for axis in self._position_axes()
+                }
+            guard.validate_active_documents(read_governed_documents(service.paths))
+            state = service.refresh(allow_pending=False)
+        except Exception as exc:
+            return self._plate_calibration_fail_preflight(
+                "plate_configuration_invalid",
+                f"The active plate configuration is not safe to use: {exc}",
+            )
+
+        target_key = f"plate:{plate_name.casefold()}"
+        authorization = dict(state.authorization.get(target_key) or {})
+        if not authorization:
+            return self._plate_calibration_fail_preflight(
+                "plate_authorization_missing",
+                f"Authorization state is missing for {target_key}.",
+            )
+        value_sha256 = canonical_value_sha256(normalized)
+        if authorization.get("value_sha256") != value_sha256:
+            return self._plate_calibration_fail_preflight(
+                "plate_authorization_value_mismatch",
+                "The plate coordinates differ from their authorization record.",
+            )
+
+        target_state = str(authorization.get("state") or "")
+        promotion_candidates = self.controlled_calibration_promotion_candidates()
+        if promotion_candidates is False:
+            return self._plate_calibration_fail_preflight(
+                "calibration_history_invalid",
+                "Existing calibration history could not be verified.",
+            )
+        candidate = copy.deepcopy((promotion_candidates or {}).get(target_key))
+        return {
+            "allowed": True,
+            "reason_code": "ready",
+            "message": "Plate calibration entry is ready.",
+            "state": "idle",
+            "machine_uuid": paths.machine_uuid,
+            "trust_epoch": readiness.get("trust_epoch"),
+            "plate_name": plate_name,
+            "target_key": target_key,
+            "target_state": target_state,
+            "verified": target_state in CURRENT_VERIFIED_STATES,
+            "historical_candidate": candidate,
+            "initial_calibrations": normalized,
+            "initial_value_sha256": value_sha256,
+        }
+
+    def _plate_calibration_session_invariants(self, session):
+        paths = getattr(self, "machine_data_paths", None)
+        if getattr(paths, "machine_uuid", None) != session.get("machine_uuid"):
+            return False, "authorized_machine_changed"
+        telemetry = self._position_reconciliation_snapshot()
+        if not isinstance(telemetry, dict):
+            return False, "position_telemetry_unavailable"
+        if telemetry.get("trust_epoch") != session.get("trust_epoch"):
+            return False, "motion_trust_epoch_changed"
+        plate = getattr(self.model, "well_plate", None)
+        try:
+            if str(plate.get_current_plate_name()).strip() != session.get("plate_name"):
+                return False, "active_plate_changed"
+            calibrations = {
+                point_name: {
+                    axis: int(plate.get_all_current_plate_calibrations()[point_name][axis])
+                    for axis in self._position_axes()
+                }
+                for point_name in self._plate_calibration_points()
+            }
+        except Exception:
+            return False, "active_plate_configuration_invalid"
+        if canonical_value_sha256(calibrations) != session.get("initial_value_sha256"):
+            return False, "active_plate_coordinates_changed"
+        return True, ""
+
+    def begin_plate_calibration_entry(self, *, manual_first):
+        """Queue a safe-height plate entry and return its transient session token."""
+
+        preflight = self.plate_calibration_entry_preflight()
+        if not preflight.get("allowed"):
+            self.error_occurred_signal.emit(
+                "Plate Calibration Not Started", preflight.get("message", "Preflight failed.")
+            )
+            return False
+        manual_first = bool(manual_first)
+        if preflight["verified"] and manual_first:
+            self.error_occurred_signal.emit(
+                "Plate Calibration Not Started",
+                "A verified plate must use its verified automatic first-corner approach.",
+            )
+            return False
+        if not preflight["verified"] and not manual_first:
+            self.error_occurred_signal.emit(
+                "Plate Calibration Not Started",
+                "An unverified plate may only be calibrated from safe height.",
+            )
+            return False
+
+        token = str(uuid.uuid4())
+        top_left = copy.deepcopy(preflight["initial_calibrations"]["top_left"])
+        endpoint = {
+            "X": top_left["X"],
+            "Y": top_left["Y"],
+            "Z": PLATE_DOCK_SAFE_Z if manual_first else top_left["Z"],
+        }
+        self._plate_calibration_session = {
+            "session_token": token,
+            "state": "staging",
+            "phase": "entry",
+            "machine_uuid": preflight["machine_uuid"],
+            "trust_epoch": preflight["trust_epoch"],
+            "plate_name": preflight["plate_name"],
+            "target_key": preflight["target_key"],
+            "target_state": preflight["target_state"],
+            "manual_first": manual_first,
+            "initial_calibrations": copy.deepcopy(preflight["initial_calibrations"]),
+            "initial_value_sha256": preflight["initial_value_sha256"],
+            "captured_points": {},
+            "next_point_index": 0,
+            "expected_point": "top_left",
+            "expected_endpoint": endpoint,
+            "failure_reason": None,
+            "awaiting_queue_drain": False,
+            "reconciliation_started_monotonic": None,
+        }
+        self._emit_plate_calibration_state()
+
+        approach_x = top_left["X"] + PLATE_DOCK_X_OFFSET
+        with self._plate_calibration_motion_scope(token):
+            if self.set_absolute_Z(PLATE_DOCK_SAFE_Z, override=False) is False:
+                return self._fail_plate_calibration_session("safe_z_rejected")
+            if self.set_absolute_coordinates(
+                approach_x, top_left["Y"], PLATE_DOCK_SAFE_Z, override=False
+            ) is False:
+                return self._fail_plate_calibration_session("plate_dogleg_rejected")
+
+            if manual_first:
+                queued = self.set_absolute_coordinates(
+                    top_left["X"],
+                    top_left["Y"],
+                    PLATE_DOCK_SAFE_Z,
+                    override=False,
+                    handler=lambda token=token: self._plate_calibration_motion_completed(token),
+                )
+            else:
+                if self.set_absolute_coordinates(
+                    top_left["X"], top_left["Y"], PLATE_DOCK_SAFE_Z, override=False
+                ) is False:
+                    return self._fail_plate_calibration_session("plate_seated_safe_rejected")
+                queued = self.set_absolute_Z(
+                    top_left["Z"],
+                    override=True,
+                    handler=lambda token=token: self._plate_calibration_motion_completed(token),
+                )
+        if queued is False:
+            return self._fail_plate_calibration_session("plate_entry_endpoint_rejected")
+        self._plate_calibration_session["expected_endpoint"] = copy.deepcopy(
+            self.expected_position
+        )
+        return self._plate_calibration_session_snapshot()
+
+    def _plate_calibration_motion_completed(self, session_token):
+        session = self._plate_calibration_active_session(session_token)
+        if session is None or session.get("state") != "staging":
+            return False
+        self._set_plate_calibration_state(
+            "reconciling",
+            awaiting_queue_drain=True,
+            reconciliation_started_monotonic=None,
+        )
+        timeout_ms = self._position_reconciliation_timeout_ms()
+        QtCore.QTimer.singleShot(
+            timeout_ms + 25,
+            lambda token=session_token: self._plate_calibration_timeout_check(token),
+        )
+        return True
+
+    def _plate_calibration_timeout_check(self, session_token):
+        session = self._plate_calibration_active_session(session_token)
+        if session is None or session.get("state") != "reconciling":
+            return
+        self._advance_plate_calibration_session()
+
+    def _advance_plate_calibration_session(self, *, now_monotonic=None):
+        session = self._plate_calibration_active_session()
+        if session is None or session.get("state") != "reconciling":
+            return self._plate_calibration_session_snapshot()
+        if session.get("awaiting_queue_drain"):
+            return self._plate_calibration_session_snapshot()
+
+        valid, reason = self._plate_calibration_session_invariants(session)
+        if not valid:
+            self._fail_plate_calibration_session(reason)
+            return self._plate_calibration_session_snapshot()
+        reconciliation = self._advance_position_reconciliation(
+            now_monotonic=now_monotonic
+        )
+        state = reconciliation.get("state")
+        if state == "pending":
+            return self._plate_calibration_session_snapshot()
+        if state == "timed_out":
+            self._fail_plate_calibration_session("position_reconciliation_timeout")
+            return self._plate_calibration_session_snapshot()
+        if state == "trust_changed":
+            self._fail_plate_calibration_session("position_reconciliation_trust_changed")
+            return self._plate_calibration_session_snapshot()
+        if state != "settled":
+            self._fail_plate_calibration_session("expected_position_mismatch")
+            return self._plate_calibration_session_snapshot()
+        if reconciliation.get("expected_position") != session.get("expected_endpoint"):
+            self._fail_plate_calibration_session("stale_motion_completion")
+            return self._plate_calibration_session_snapshot()
+
+        readiness = self._configuration_capture_readiness()
+        if not readiness.get("ready"):
+            reasons = readiness.get("reason_codes") or ["position_not_ready"]
+            if "position_reconciliation_pending" in reasons:
+                return self._plate_calibration_session_snapshot()
+            self._fail_plate_calibration_session(";".join(reasons))
+            return self._plate_calibration_session_snapshot()
+        if readiness.get("captured_position") != session.get("expected_endpoint"):
+            self._fail_plate_calibration_session("expected_position_mismatch")
+            return self._plate_calibration_session_snapshot()
+
+        phase = session.get("phase")
+        if phase == "entry":
+            self.expected_location = "plate"
+            self.update_location_handler(name="plate")
+            ready_state = "manual_first_point" if session.get("manual_first") else "automatic_points"
+        elif phase in {"point", "jog"}:
+            ready_state = str(session.get("resume_state") or "automatic_points")
+        elif phase == "final_lift":
+            ready_state = "complete"
+        else:
+            self._fail_plate_calibration_session("invalid_calibration_phase")
+            return self._plate_calibration_session_snapshot()
+        return self._set_plate_calibration_state(
+            ready_state,
+            awaiting_queue_drain=False,
+            reconciliation_started_monotonic=None,
+        )
+
+    def _require_plate_calibration_ready_session(self, session_token):
+        session = self._plate_calibration_active_session(session_token)
+        if session is None:
+            return None
+        if session.get("state") not in {"manual_first_point", "automatic_points"}:
+            return None
+        valid, reason = self._plate_calibration_session_invariants(session)
+        if not valid:
+            self._fail_plate_calibration_session(reason)
+            return None
+        if not self.check_if_all_completed() or bool(self.model.machine_model.is_busy()):
+            return None
+        return session
+
+    def jog_plate_calibration(self, session_token, x=0, y=0, z=0):
+        """Queue one session-bound manual jog and require telemetry reconciliation."""
+
+        session = self._require_plate_calibration_ready_session(session_token)
+        deltas = {"X": int(x), "Y": int(y), "Z": int(z)}
+        if session is None or sum(value != 0 for value in deltas.values()) != 1:
+            return False
+        resume_state = session["state"]
+        self._set_plate_calibration_state(
+            "staging", phase="jog", resume_state=resume_state
+        )
+        with self._plate_calibration_motion_scope(session_token):
+            queued = self.set_relative_coordinates(
+                deltas["X"],
+                deltas["Y"],
+                deltas["Z"],
+                manual=True,
+                override=True,
+                handler=lambda token=session_token: self._plate_calibration_motion_completed(token),
+            )
+        if queued is False:
+            return self._fail_plate_calibration_session("manual_jog_rejected")
+        session["expected_endpoint"] = copy.deepcopy(self.expected_position)
+        return True
+
+    def _predicted_plate_calibration_point(self, session, point_name):
+        initial = session["initial_calibrations"]
+        captures = session["captured_points"]
+        if point_name not in initial or not captures:
+            return None
+        totals = {axis: 0 for axis in self._position_axes()}
+        for captured_name, captured in captures.items():
+            for axis in self._position_axes():
+                totals[axis] += int(captured[axis]) - int(initial[captured_name][axis])
+        count = len(captures)
+        return {
+            axis: int(initial[point_name][axis]) + int(totals[axis] / count)
+            for axis in self._position_axes()
+        }
+
+    def capture_and_advance_plate_calibration(self, session_token, point_name):
+        """Capture the current corner and safely approach the next one."""
+
+        session = self._require_plate_calibration_ready_session(session_token)
+        point_name = str(point_name or "")
+        points = self._plate_calibration_points()
+        if session is None or session.get("expected_point") != point_name:
+            return False
+        point_index = int(session.get("next_point_index", 0))
+        if point_index >= len(points) or points[point_index] != point_name:
+            return False
+
+        captured = self.capture_configuration_point(
+            point_name, workflow="plate_calibration"
+        )
+        if captured is False:
+            return False
+        captured = {
+            axis: int(captured[axis]) for axis in self._position_axes()
+        }
+        session["captured_points"][point_name] = copy.deepcopy(captured)
+        self.model.well_plate.set_calibration_position(point_name, captured)
+
+        next_index = point_index + 1
+        if next_index < len(points):
+            next_name = points[next_index]
+            target = self._predicted_plate_calibration_point(session, next_name)
+            if target is None:
+                return self._fail_plate_calibration_session("next_corner_unavailable")
+            traverse_z = min(int(captured["Z"]) - 500, int(target["Z"]) - 500)
+            endpoint = copy.deepcopy(target)
+            self._set_plate_calibration_state(
+                "staging",
+                phase="point",
+                resume_state="automatic_points",
+                expected_point=next_name,
+                next_point_index=next_index,
+                expected_endpoint=endpoint,
+            )
+            with self._plate_calibration_motion_scope(session_token):
+                if self.set_absolute_Z(traverse_z, override=True) is False:
+                    return self._fail_plate_calibration_session("corner_lift_rejected")
+                if self.set_absolute_XY(target["X"], target["Y"], override=True) is False:
+                    return self._fail_plate_calibration_session("corner_xy_rejected")
+                if self.set_absolute_Z(
+                    target["Z"],
+                    override=True,
+                    handler=lambda token=session_token: self._plate_calibration_motion_completed(token),
+                ) is False:
+                    return self._fail_plate_calibration_session("corner_descent_rejected")
+            session["expected_endpoint"] = copy.deepcopy(self.expected_position)
+            return True
+
+        lift_z = int(captured["Z"]) - 500
+        self._set_plate_calibration_state(
+            "staging",
+            phase="final_lift",
+            next_point_index=len(points),
+            expected_point=None,
+            expected_endpoint={
+                "X": captured["X"], "Y": captured["Y"], "Z": lift_z
+            },
+        )
+        with self._plate_calibration_motion_scope(session_token):
+            if self.set_absolute_Z(
+                lift_z,
+                override=True,
+                handler=lambda token=session_token: self._plate_calibration_motion_completed(token),
+            ) is False:
+                return self._fail_plate_calibration_session("final_lift_rejected")
+        session["expected_endpoint"] = copy.deepcopy(self.expected_position)
+        return True
+
+    def move_plate_calibration_to_captured_point(self, session_token, point_name):
+        """Safely revisit an already captured corner within the active session."""
+
+        session = self._require_plate_calibration_ready_session(session_token)
+        point_name = str(point_name or "")
+        target = copy.deepcopy((session or {}).get("captured_points", {}).get(point_name))
+        if session is None or target is None:
+            return False
+        current = self.model.machine_model.get_current_position_dict_capital()
+        traverse_z = min(int(current["Z"]) - 500, int(target["Z"]) - 500)
+        point_index = self._plate_calibration_points().index(point_name)
+        for obsolete_name in self._plate_calibration_points()[point_index:]:
+            session["captured_points"].pop(obsolete_name, None)
+            try:
+                self.model.well_plate.temp_calibration_data.pop(
+                    obsolete_name, None
+                )
+            except Exception:
+                pass
+            self._configuration_capture_evidence.pop(
+                ("plate_calibration", obsolete_name), None
+            )
+        self._set_plate_calibration_state(
+            "staging",
+            phase="point",
+            resume_state="automatic_points" if point_index else (
+                "manual_first_point" if session.get("manual_first") else "automatic_points"
+            ),
+            expected_point=point_name,
+            next_point_index=point_index,
+            expected_endpoint=copy.deepcopy(target),
+        )
+        with self._plate_calibration_motion_scope(session_token):
+            if self.set_absolute_Z(traverse_z, override=True) is False:
+                return self._fail_plate_calibration_session("corner_lift_rejected")
+            if self.set_absolute_XY(target["X"], target["Y"], override=True) is False:
+                return self._fail_plate_calibration_session("corner_xy_rejected")
+            if self.set_absolute_Z(
+                target["Z"],
+                override=True,
+                handler=lambda token=session_token: self._plate_calibration_motion_completed(token),
+            ) is False:
+                return self._fail_plate_calibration_session("corner_descent_rejected")
+        session["expected_endpoint"] = copy.deepcopy(self.expected_position)
+        return True
+
+    def finish_plate_calibration_session(self, session_token, *, accepted):
+        session = getattr(self, "_plate_calibration_session", None)
+        if not isinstance(session, dict) or session.get("session_token") != session_token:
+            return False
+        if accepted and session.get("state") != "complete":
+            return False
+        if not accepted:
+            try:
+                self.model.well_plate.discard_temp_calibrations()
+            except Exception:
+                pass
+            self.discard_configuration_capture_evidence("plate_calibration")
+            if session.get("state") != "failed":
+                self._set_plate_calibration_state(
+                    "cancelled", failure_reason="operator_cancelled"
+                )
+        snapshot = self._plate_calibration_session_snapshot()
+        self._plate_calibration_session = None
+        self._emit_optional(
+            "plate_calibration_state_changed",
+            {**snapshot, "state": snapshot["state"]},
+        )
+        return True
+
+    def cancel_plate_calibration_entry(self, session_token):
+        """Cancel an idle calibration dialog without interrupting active motion."""
+
+        session = self._plate_calibration_active_session(session_token)
+        if session is None or session.get("state") in {"staging", "reconciling"}:
+            return False
+        return self.finish_plate_calibration_session(
+            session_token, accepted=False
+        )
 
     def capture_configuration_point(self, target_key, *, workflow):
         """Capture one calibration point only from trusted, fresh machine state."""
@@ -6587,7 +8010,10 @@ class Controller(QObject):
         workflow = str(workflow or "").strip()
         evidence = self._configuration_capture_readiness()
         if not evidence.get("ready"):
-            message = "Position capture is not safe: " + ", ".join(evidence["reason_codes"])
+            reason_codes = evidence["reason_codes"]
+            message = "Position capture is not safe: " + ", ".join(reason_codes)
+            if "position_reconciliation_pending" in reason_codes:
+                message += ". Final position telemetry is still settling; wait briefly and retry."
             self.error_occurred_signal.emit("Position Not Captured", message)
             self.record_configuration_attempt(
                 event_type="rejected",
@@ -6598,6 +8024,8 @@ class Controller(QObject):
             )
             return False
         point = copy.deepcopy(evidence.get("captured_position") or self.model.machine_model.get_current_position_dict_capital())
+        evidence["workflow"] = workflow
+        evidence["target_key"] = target_key
         self._configuration_capture_evidence[(workflow, target_key)] = copy.deepcopy(evidence)
         return point
 
@@ -6787,8 +8215,12 @@ class Controller(QObject):
             raise ConfigurationSafetyError("Confirmation is missing or belongs to another proposal.")
         if confirmation.get("acknowledged") is not True:
             raise ConfigurationSafetyError("The displayed coordinate deltas were not acknowledged.")
-        if parsed["result"] == "strong_confirmation" and confirmation.get("typed_phrase") != parsed["required_confirmation_phrase"]:
-            raise ConfigurationSafetyError("The strong confirmation phrase does not match exactly.")
+        if parsed.get("schema_version") == 2 and confirmation.get(
+            "acknowledgement_version"
+        ) != parsed.get("confirmation_version"):
+            raise ConfigurationSafetyError(
+                "The acknowledgement belongs to a different confirmation policy."
+            )
         return parsed
 
     def commit_guarded_configuration_proposal(self, proposal, *, operator, reason, confirmation):
@@ -7028,6 +8460,49 @@ class Controller(QObject):
             self.error_occurred_signal.emit("Configuration Verification Failed", str(exc))
             return False
 
+    def controlled_calibration_promotion_candidates(self):
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return {}
+        try:
+            guard = getattr(self, "configuration_safety_guard", None)
+            if guard is not None:
+                guard.validate_active_documents(read_governed_documents(service.paths))
+            return service.controlled_calibration_promotion_candidates()
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit(
+                "Calibration Evidence Verification Failed", str(exc)
+            )
+            return False
+
+    def promote_controlled_calibration(
+        self, target_key, source_event_id, *, operator, reason
+    ):
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return False
+        try:
+            guard = getattr(self, "configuration_safety_guard", None)
+            if guard is not None:
+                guard.validate_active_documents(read_governed_documents(service.paths))
+            result = service.promote_controlled_calibration(
+                target_key,
+                source_event_id,
+                operator=operator,
+                reason=reason,
+            )
+            self.saved_target_authorizer = service.saved_target_authorizer
+            return result
+        except ConfigurationTransactionError as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit(
+                "Calibration Evidence Verification Failed", str(exc)
+            )
+            return False
+
     def import_configuration_files(self, selected_files, *, operator, reason):
         """Import an explicit governed-file mapping and refresh runtime state."""
 
@@ -7106,10 +8581,13 @@ class Controller(QObject):
     def update_expected_with_current(self):
         """Update the expected position with the current position."""
         self.expected_position = self.model.machine_model.get_current_position_dict()
+        self._pending_motion_endpoint_evidence = None
         try:
             self.expected_location = self.model.machine_model.get_current_location()
         except Exception:
             self.expected_location = None
+
+        self._settle_position_reconciliation(reason="explicit_current_resync")
 
         # resync rack expected state when queue drains
         try:
@@ -7654,10 +9132,14 @@ class Controller(QObject):
             )
             return False
 
-        if getattr(self, "_soft_stop_clear_uncertain", False):
+        queue_clear_state = self.get_queue_clear_state()["state"]
+        if (
+            getattr(self, "_soft_stop_clear_uncertain", False)
+            or queue_clear_state in {"pending", "uncertain"}
+        ):
             self.error_occurred_signal.emit(
                 'Head Transfer Blocked',
-                'The last soft stop did not confirm that the firmware queue was cleared. Clear the queue or reconnect before loading another printer head.',
+                'The firmware queue clear is pending or uncertain. Confirm Clear Queue or reset the MCU before loading another printer head.',
             )
             return False
 
@@ -7968,6 +9450,8 @@ class Controller(QObject):
             "soft_stop_phase_before_pause": None,
             "soft_stop_resume_sent": False,
             "soft_stop_pause_during_clearing": False,
+            "soft_stop_clear_boundary_proof": None,
+            "soft_stop_clear_boundary_proof_consumed": False,
             "pause_departure_pending": True,
             "pause_departure_accel": int(
                 getattr(self, "_array_pause_departure_accel", ARRAY_PAUSE_DEPARTURE_ACCEL)
@@ -8541,17 +10025,51 @@ class Controller(QObject):
             self._complete_array_finalize(reason)
             return False
 
-        self._queue_array_profile_disable_once(clear_on_failure=True)
-
         def _finish_after_park():
             self._complete_array_finalize(reason)
 
-        if self._queue_pause_park_sequence(on_complete=_finish_after_park) is False:
+        def _queue_finalize_park():
+            if self._queue_pause_park_sequence(on_complete=_finish_after_park) is not False:
+                return True
             dock_reason = "soft_stop_park_failed" if reason == "soft_stop" else "array_park_failed"
             self._mark_evap_plate_dock_check_required(dock_reason)
             self._complete_array_finalize(reason)
             return False
-        return True
+
+        profile_disabled = self._queue_array_profile_disable_once(
+            clear_on_failure=False
+        )
+        if profile_disabled is not False:
+            return _queue_finalize_park()
+
+        if not isinstance(context, dict):
+            self._complete_array_finalize(reason)
+            return False
+        context["array_clear_fallback_attempted"] = True
+
+        def _after_terminal_clear(clear_result):
+            if context is not getattr(self, "_array_context", None):
+                return
+            if context.get("finalize_reason") != reason:
+                return
+            if bool(dict(clear_result or {}).get("status_confirmed")):
+                _queue_finalize_park()
+                return
+            self._mark_evap_plate_dock_check_required(
+                "array_finalize_clear_unconfirmed"
+            )
+            self._complete_array_finalize(reason)
+
+        sent = self._request_array_terminal_queue_clear(
+            handler=_after_terminal_clear
+        )
+        context["array_clear_fallback_requested"] = bool(sent)
+        if sent is False:
+            self._mark_evap_plate_dock_check_required(
+                "array_finalize_clear_not_sent"
+            )
+            self._complete_array_finalize(reason)
+        return bool(sent)
 
     def _queue_array_profile_disable_once(self, *, clear_on_failure=False):
         """Queue one profile teardown for the active array, with CLEAR fallback."""
@@ -8573,30 +10091,86 @@ class Controller(QObject):
         if queued is not False:
             return True
 
-        if clear_on_failure and not context.get("array_clear_fallback_requested"):
-            context["array_clear_fallback_requested"] = True
-            try:
-                self._clear_machine_and_model_command_queues(
-                    reason="array_queue_clear",
-                )
-            except Exception:
-                pass
+        if clear_on_failure and not context.get("array_clear_fallback_attempted"):
+            context["array_clear_fallback_attempted"] = True
+            context["array_clear_fallback_requested"] = bool(
+                self._request_array_terminal_queue_clear()
+            )
         return False
+
+    def _request_array_terminal_queue_clear(self, handler=None):
+        """Clear abandoned look-ahead after array dispatch is terminal."""
+        sent = self._request_guarded_queue_clear(
+            QUEUE_CLEAR_INTENT_ARRAY_TERMINAL,
+            reason="array_queue_clear",
+            handler=handler,
+        )
+        if sent:
+            return True
+
+        self._ensure_queue_clear_tracking()
+        self._queue_clear_state = "uncertain"
+        self._queue_clear_uncertain = True
+        self._queue_clear_last_rejection = "array_terminal_clear_not_sent"
+        try:
+            self.pause_commands()
+        except Exception:
+            pass
+        signal = getattr(self, "error_occurred_signal", None)
+        if signal is not None:
+            signal.emit(
+                "Array Abort Queue Clear Failed",
+                "The print array was stopped, but its queued commands could not be "
+                "cleared. The Controller requested Pause and will block further array "
+                "work until Clear Queue is confirmed or the MCU is reset.",
+            )
+        return False
+
+    def _finalize_array_hard_abort_after_clear(self, context, clear_result):
+        """Finish hard-abort bookkeeping only after the CLEAR transaction ends."""
+        if not isinstance(context, dict) or context is not getattr(
+            self, "_array_context", None
+        ):
+            return False
+        result = dict(clear_result or {})
+        context["array_hard_abort_clear_completed"] = True
+        if not bool(result.get("status_confirmed")):
+            # Do not queue profile teardown or acceleration restoration into a
+            # transport whose CLEAR result is unknown.
+            context["print_profile_disable_queued"] = True
+            context["skip_array_accel_restore"] = True
+            self._mark_evap_plate_dock_check_required(
+                "array_hard_abort_clear_unconfirmed"
+            )
+        self._complete_array_finalize("hard_abort")
+        return True
 
     def _complete_array_finalize(self, reason):
         reason = str(reason or "completed")
-        self._queue_array_profile_disable_once(clear_on_failure=reason == "hard_abort")
+        context = getattr(self, "_array_context", None)
+        if isinstance(context, dict) and context.get("finalize_reason") is None:
+            context["finalize_reason"] = reason
         if reason == "hard_abort":
-            context = getattr(self, "_array_context", None)
-            if isinstance(context, dict) and not context.get("array_clear_fallback_requested"):
-                context["array_clear_fallback_requested"] = True
-                try:
-                    self._clear_machine_and_model_command_queues(
-                        reason="array_queue_clear",
+            if isinstance(context, dict) and not context.get(
+                "array_hard_abort_clear_completed"
+            ):
+                if context.get("array_clear_fallback_requested"):
+                    return
+                if context.get("array_clear_fallback_attempted"):
+                    return
+                context["array_clear_fallback_attempted"] = True
+                sent = self._request_array_terminal_queue_clear(
+                    handler=lambda result, expected_context=context: (
+                        self._finalize_array_hard_abort_after_clear(
+                            expected_context,
+                            result,
+                        )
                     )
-                except Exception:
-                    pass
+                )
+                context["array_clear_fallback_requested"] = bool(sent)
+                return
             self._mark_evap_plate_dock_check_required("array_hard_abort")
+        self._queue_array_profile_disable_once(clear_on_failure=False)
         context = getattr(self, "_array_context", None)
         if isinstance(context, dict) and context.get("array_finalize_after_accel_restore"):
             return
@@ -9100,6 +10674,12 @@ class Controller(QObject):
         required number of droplets for the currently loaded printer head.
         '''
         experiment_model = getattr(self.model, "experiment_model", None)
+        terminal_guard = self.get_print_array_terminal_guard()
+        if bool(terminal_guard.get("blocked")):
+            message = str(terminal_guard.get("message") or "Printing is unavailable.")
+            self.error_occurred_signal.emit("Print Array Unavailable", message)
+            print(f"Cannot print: {message}")
+            return
         read_only_view_getter = getattr(
             self.model, "is_read_only_experiment_view_active", None
         )
@@ -9167,6 +10747,16 @@ class Controller(QObject):
         starting_state = self.get_array_run_state()
         if starting_state in {"running", "stop_requested"}:
             print('Cannot print: Array runner is already active')
+            return
+
+        queue_clear_state = self.get_queue_clear_state()["state"]
+        if queue_clear_state in {"pending", "uncertain"}:
+            message = (
+                "Printing is unavailable while the previous command queue clear "
+                f"is {queue_clear_state}. Confirm Clear Queue or reset the MCU first."
+            )
+            self.error_occurred_signal.emit('Error', message)
+            print(f'Cannot print: {message}')
             return
 
         if not self.check_if_all_completed():

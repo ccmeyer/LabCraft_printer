@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtWidgets import QLabel
 
 from ConfigurationSafetyPolicy import ConfigurationChangeGuard, load_configuration_change_policy, parse_safety_bounds
-from View import ConfigurationChangePreviewDialog
+from View import ConfigurationChangePreviewDialog, ControlledCalibrationPromotionDialog
 
 
 def _assessment():
@@ -26,23 +26,26 @@ def _assessment():
     )
 
 
-def test_preview_requires_exact_phrase_and_returns_proposal_bound_confirmation(qapp, monkeypatch):
+def test_preview_requires_checkbox_and_returns_proposal_bound_confirmation(qapp, monkeypatch):
     assessment = _assessment()
     dialog = ConfigurationChangePreviewDialog(assessment)
     warnings = []
     monkeypatch.setattr("View.QMessageBox.warning", lambda *args: warnings.append(args))
     dialog.operator_edit.setText("Alice")
     dialog.reason_edit.setText("Camera recalibration")
-    dialog.acknowledge.setChecked(True)
-    dialog.phrase_edit.setText("wrong")
-
     dialog._finish()
     assert dialog.outcome == "cancelled"
     assert warnings
 
-    dialog.phrase_edit.setText(assessment["required_confirmation_phrase"])
+    dialog.acknowledge.setChecked(True)
     dialog._finish()
     assert dialog.outcome == "accepted"
+    result = dialog.result_payload()
+    assert result["confirmation"] == {
+        "proposal_sha256": assessment["proposal_sha256"],
+        "acknowledged": True,
+        "acknowledgement_version": assessment["confirmation_version"],
+    }
 
 
 def test_restore_preview_identifies_verified_backup_and_removed_target(qapp):
@@ -72,3 +75,41 @@ def test_restore_preview_identifies_verified_backup_and_removed_target(qapp):
     assert dialog.action_button.text() == "Restore Exact Backup and Revoke Changed Targets"
     labels = "\n".join(label.text() for label in dialog.findChildren(QLabel))
     assert "Verified backup transaction 00000000-0000-0000-0000-000000000123" in labels
+
+
+def test_controlled_calibration_promotion_uses_review_checkbox_without_json(qapp, monkeypatch):
+    candidate = {
+        "target_key": "plate:plate-a",
+        "workflow": "plate_calibration",
+        "source_event_path": "history/configuration_events/0001-source.json",
+        "source_created_at_utc": "2026-08-23T00:00:00Z",
+        "integrity": "verified",
+        "proposal_sha256": "a" * 64,
+        "captures": [
+            {
+                "target_key": "top_left",
+                "captured_position": {"X": 1, "Y": 2, "Z": 3},
+                "expected_position": {"X": 1, "Y": 2, "Z": 3},
+                "ready": True,
+                "reason_codes": [],
+            }
+        ],
+        "deltas": [],
+    }
+    dialog = ControlledCalibrationPromotionDialog(candidate)
+    warnings = []
+    monkeypatch.setattr("View.QMessageBox.warning", lambda *args: warnings.append(args))
+    dialog.operator_edit.setText("Alice")
+    dialog.reason_edit.setText("Review existing plate calibration")
+
+    dialog._accept_if_complete()
+    assert warnings
+    assert dialog.result() == 0
+
+    dialog.acknowledge.setChecked(True)
+    dialog._accept_if_complete()
+    assert dialog.result() == 1
+    assert dialog.review_result() == {
+        "operator": "Alice",
+        "reason": "Review existing plate calibration",
+    }

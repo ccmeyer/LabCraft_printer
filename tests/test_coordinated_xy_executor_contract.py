@@ -122,8 +122,8 @@ def test_task_control_clears_stale_tim2_irq_before_a_fresh_edge_interval():
     finish = gantry[gantry.index("void Gantry::_finishCoordinatedHardware"):]
     finish = finish[: finish.index("void Gantry::_finishCoordinatedFromIsr")]
     pause = gantry[gantry.index("void Gantry::_pauseCoordinatedTask"):]
-    pause = pause[: pause.index("void Gantry::_resumeCoordinatedTask")]
-    resume = gantry[gantry.index("void Gantry::_resumeCoordinatedTask"):]
+    pause = pause[: pause.index("MotionResumeStatus Gantry::_resumeCoordinatedTask")]
+    resume = gantry[gantry.index("MotionResumeStatus Gantry::_resumeCoordinatedTask"):]
     resume = resume[: resume.index("bool Gantry::_cancelCoordinatedTask")]
     cancel = gantry[gantry.index("bool Gantry::_cancelCoordinatedTask"):]
     cancel = cancel[: cancel.index("void Gantry::pauseXYZMotors")]
@@ -156,7 +156,9 @@ def test_host_executor_tests_cover_counts_pause_cancel_limits_and_faults():
     for name in (
         "EachMasterEventEmitsOneActiveEdgeMask",
         "IndependentPhasesReturnToEveryInitialState",
-        "PauseStopsAtBoundaryAndPreservesCachedTrace",
+        "PauseHighEmitsOneAccountedCleanupFall",
+        "PauseLowStopsImmediatelyWithoutCleanup",
+        "CancelOverridesPendingPauseCleanup",
         "CancelHighEmitsOneAccountedCleanupFall",
         "CleanupFallsOnlyAxesThatAreHigh",
         "LimitOverridesCancelBeforeCleanup",
@@ -166,3 +168,23 @@ def test_host_executor_tests_cover_counts_pause_cancel_limits_and_faults():
     ):
         assert name in tests
     assert "CompleteStep" not in tests
+
+
+def test_resume_builds_a_fresh_remaining_move_plan_at_the_bounded_start_rate():
+    gantry = _read("firmware/Core/Src/Gantry.cpp")
+    stepper = _read("firmware/Core/Src/Stepper.cpp")
+    policy = _read("firmware/Core/Inc/MotionResumePolicy.h")
+
+    coordinated = gantry[gantry.index("MotionResumeStatus Gantry::_resumeCoordinatedTask"):]
+    coordinated = coordinated[: coordinated.index("bool Gantry::_cancelCoordinatedTask")]
+    direct = stepper[stepper.index("Stepper::DirectMoveStartStatus Stepper::resumeMove"):]
+    direct = direct[: direct.index("bool Stepper::stepIsLow")]
+
+    assert "kResumeStartRateHz = 3000u" in policy
+    assert "remainingMove(currentX, targetX)" in coordinated
+    assert "remainingMove(currentY, targetY)" in coordinated
+    assert "request.initialMasterRateHz = MotionResumePolicy::selectStartRateHz" in coordinated
+    assert "CoordinatedXyPlanner::prepare(request, plan)" in coordinated
+    assert "CoordinatedXyExecutor::resume" not in coordinated
+    assert "remainingMove(_pos, paused.targetPosition)" in direct
+    assert "_moveWithInitialRate" in direct

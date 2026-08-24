@@ -37,8 +37,10 @@ def _guard():
 def test_tracked_policy_loads_with_stable_release_hash_and_all_strong_fallback():
     policy = load_configuration_change_policy()
 
-    assert policy.policy_id == "labcraft-rc2-configuration-guard-v1"
-    assert policy.raw_sha256 == "7f724af4b2e88ab3d46d774f38bb6be8cdd6b82240027e04785bc80b9cfa4274"
+    assert policy.policy_id == "labcraft-configuration-guard-v2"
+    assert policy.raw_sha256 == "2abdf88bb54ede0a326034f9f44a0a8b5af51a9f55c1b97f9a091edd93cca3ba"
+    assert policy.schema_version == 2
+    assert policy.confirmation_mode == "explicit_checkbox"
     assert policy.position_telemetry_max_age_ms == 2500
     assert dict(policy.warning_thresholds_steps) == {}
     assert policy.classify_location("Camera") == "camera"
@@ -57,6 +59,36 @@ def test_policy_rejects_duplicate_names_and_boolean_thresholds():
     payload["warning_thresholds_steps"] = {"generic": {"X": True}}
     with pytest.raises(ConfigurationSafetyError, match="nonnegative integers"):
         parse_configuration_change_policy(payload, raw_sha256="0" * 64)
+
+
+def test_v1_policy_and_assessment_remain_readable_without_changing_the_file():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "FreeRTOS-interface"
+        / "Policies"
+        / "configuration_change_policy_v1.json"
+    )
+    policy = load_configuration_change_policy(path)
+    docs = _documents()
+    proposed = copy.deepcopy(docs["Locations.json"])
+    proposed["camera"]["Y"] += 1
+    assessment = ConfigurationChangeGuard(
+        policy, parse_safety_bounds(docs["Obstacles.json"])
+    ).assess(
+        before_documents=docs,
+        proposed_documents={"Locations.json": proposed},
+        workflow="named_location_modify",
+        target_keys=("camera",),
+        hardware_profile="current",
+    )
+
+    assert policy.schema_version == 1
+    assert policy.confirmation_mode == "typed_phrase"
+    assert assessment["schema_version"] == 1
+    assert assessment["required_confirmation_phrase"].endswith(
+        assessment["proposal_sha256"][:12]
+    )
+    assert parse_guard_assessment(assessment) == assessment
 
 
 def test_bounds_parser_is_strict_and_endpoint_check_is_global_only():
@@ -121,7 +153,10 @@ def test_camera_assessment_contains_exact_delta_policy_and_proposal_binding():
     assert assessment["result"] == "strong_confirmation"
     assert assessment["target_class"] == "camera"
     assert assessment["changes"][0]["signed_delta"] == {"X": 0, "Y": 1234, "Z": 0}
-    assert assessment["required_confirmation_phrase"].endswith(assessment["proposal_sha256"][:12])
+    assert assessment["confirmation_mode"] == "explicit_checkbox"
+    assert assessment["confirmation_version"] == 1
+    assert "camera" in assessment["required_acknowledgement"]
+    assert "1234 steps" in assessment["required_acknowledgement"]
     assert parse_guard_assessment(assessment) == assessment
 
 

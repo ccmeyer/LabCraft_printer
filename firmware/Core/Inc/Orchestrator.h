@@ -341,7 +341,7 @@ public:
 
   void clearQueue();
   void pauseCurrent();
-  void resumeCurrent();
+  MotionResumeStatus resumeCurrent();
   void cancelCurrent();
   void pausePressureRegulators();
   void resumePressureRegulators();

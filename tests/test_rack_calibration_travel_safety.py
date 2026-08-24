@@ -250,14 +250,11 @@ def test_rack_side_to_side_blocks_when_home_z_is_unavailable():
     ]
 
 
-def test_plate_calibration_initial_move_remains_unchanged():
+def test_plate_calibration_dialog_initial_move_is_side_effect_free():
     dialog = make_plate_dialog()
 
     result = View.PlateCalibrationDialog.move_to_initial_position(dialog)
 
-    assert result is None
-    assert coord_calls(dialog) == [
-        (100, 200, -200, {"override": True}),
-        (100, 200, 300, {"override": True}),
-    ]
+    assert result is True
+    assert coord_calls(dialog) == []
     assert dialog.main_window.messages == []

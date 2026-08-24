@@ -22,6 +22,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-selftest-path", default=None)
     parser.add_argument("--fixture", default=None)
     parser.add_argument("--operator-prompts", action="store_true")
+    parser.add_argument(
+        "--preauthorize-confirmation-prompts",
+        action="store_true",
+        help=(
+            "Use prior attended authorization for known confirmation-only gates. "
+            "Requires --operator-prompts; physical-action prompts remain interactive."
+        ),
+    )
     parser.add_argument("--progress-jsonl", action="store_true")
     parser.add_argument(
         "--raw-report",
@@ -45,6 +53,7 @@ def main(argv: Sequence[str] | None = None, *, invoker: SelfTestInvoker | None =
         raw_report_path=args.raw_report,
         fixture_id=args.fixture,
         operator_prompts=args.operator_prompts,
+        preauthorize_confirmation_prompts=args.preauthorize_confirmation_prompts,
         progress_jsonl=args.progress_jsonl,
         invoker=invoker if invoker is not None else default_selftest_invoker,
     )

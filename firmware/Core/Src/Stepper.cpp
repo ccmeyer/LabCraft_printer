@@ -7,6 +7,8 @@
 
 #include "Stepper.h"
 #include "ExtiDebounce.h"
+#include "MotionLimitDebounceTimer.h"
+#include "MotionResumePolicy.h"
 #include "MotionUnitScale.h"
 #include "StepperProfileMath.h"
 #include "Orchestrator.h"          // for getDoneEvents()
@@ -185,11 +187,23 @@ Stepper::DirectMoveSnapshot Stepper::getLastDirectMoveSnapshot() const
 
 MotionLimitDebouncePolicy::Snapshot Stepper::getLimitDebounceSnapshot() const
 {
+  if (_usesHardwareLimitDebounce()) {
+    const auto axis = _axis == X_AXIS
+        ? MotionLimitDebounceTimer::Axis::X
+        : MotionLimitDebounceTimer::Axis::Y;
+    return MotionLimitDebounceTimer::snapshot(axis).debounce;
+  }
   taskENTER_CRITICAL();
   const MotionLimitDebouncePolicy::Snapshot snapshot =
       MotionLimitDebouncePolicy::makeSnapshot(_limitDebounceState);
   taskEXIT_CRITICAL();
   return snapshot;
+}
+
+bool Stepper::limitDebounceTimebaseValid() const
+{
+  return _limitDebounceTimebaseValid &&
+      (!_usesHardwareLimitDebounce() || MotionLimitDebounceTimer::healthy());
 }
 
 void Stepper::begin(
@@ -273,7 +287,16 @@ Stepper::DirectMoveStartStatus Stepper::moveTo(bool sign,
 Stepper::DirectMoveStartStatus Stepper::move(bool direction,
                                              uint32_t steps,
                                              uint32_t freqHz,
-                                             uint32_t /*accelSteps ignored*/) {
+                                             uint32_t accelSteps) {
+  return _moveWithInitialRate(direction, steps, freqHz, accelSteps, 0u);
+}
+
+Stepper::DirectMoveStartStatus Stepper::_moveWithInitialRate(
+    bool direction,
+    uint32_t steps,
+    uint32_t freqHz,
+    uint32_t /*accelSteps ignored*/,
+    uint32_t initialRateHz) {
   if (!_htim) {
     taskENTER_CRITICAL();
     _directMoveSnapshot = DirectMoveSnapshot{};
@@ -327,6 +350,7 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
     }
     _directMoveSnapshot.endPosition = _pos;
     _directMoveSnapshot.emittedEdges = resuming ? resumedFrom.emittedEdges : 0u;
+    if (resuming) ++_directMoveSnapshot.resumeStartFailures;
     _directMoveSnapshot.direction = direction;
     _directMoveSnapshot.movingTowardLimit = direction == _homeTowardLimitDir;
     _directMoveSnapshot.limitAssertedAtStart = _isLimitAsserted();
@@ -425,6 +449,7 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
     _directMoveSnapshot.terminalReason = DirectMoveTerminalReason::StartRejected;
     _directMoveSnapshot.endPosition = _pos;
     _targetPos = _pos;
+    if (resuming) ++_directMoveSnapshot.resumeStartFailures;
     taskEXIT_CRITICAL();
     xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
     return DirectMoveStartStatus::LimitBlocked;
@@ -435,6 +460,9 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
   StepperProfileMath::MovePlanInput planInput{};
   planInput.steps = nativeSteps;
   planInput.requestedHz = MotionUnitScale::toNativeRate(freqHz);
+  planInput.initialHz = initialRateHz == 0u
+      ? 0u
+      : MotionUnitScale::toNativeRate(initialRateHz);
   planInput.maxSpeedHz = MotionUnitScale::toNativeRate(_max_speed_hz);
   planInput.accelStepsPerSec2 =
       MotionUnitScale::toNativeAcceleration(_accel_sps2);
@@ -458,6 +486,11 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
 
   _targetARR = plan.targetArr;
   _startARR = plan.startArr;
+  if (resuming) {
+    taskENTER_CRITICAL();
+    _directMoveSnapshot.resumeStartArr = plan.startArr;
+    taskEXIT_CRITICAL();
+  }
 
   const bool useNormalizedCosineProfile =
       (_axis == X_AXIS || _axis == Y_AXIS || _axis == Z_AXIS) &&
@@ -479,6 +512,7 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
     _directMoveSnapshot.terminalReason = DirectMoveTerminalReason::ProfileFault;
     _directMoveSnapshot.endPosition = _pos;
     _directMoveSnapshot.emittedEdges = _directMoveEmittedOffset;
+    if (resuming) ++_directMoveSnapshot.resumeStartFailures;
     _targetPos = _pos;
     taskEXIT_CRITICAL();
     xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
@@ -521,6 +555,7 @@ Stepper::DirectMoveStartStatus Stepper::move(bool direction,
     _directMoveSnapshot.terminalReason = DirectMoveTerminalReason::StartRejected;
     _directMoveSnapshot.endPosition = _pos;
     _directMoveSnapshot.emittedEdges = _directMoveEmittedOffset;
+    if (resuming) ++_directMoveSnapshot.resumeStartFailures;
     _targetPos = _pos;
     taskEXIT_CRITICAL();
     xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
@@ -1058,18 +1093,20 @@ Stepper::LimitStableSample Stepper::_sampleLimitLevelStable(
     const HomeInterruptionPolicy::CancellationToken* cancelToken)
 {
   LimitStableSample sample{};
-  sample.timebaseValid = _limitDebounceTimebaseValid;
+  const bool hardwareDebounce = _usesHardwareLimitDebounce();
+  sample.timebaseValid = limitDebounceTimebaseValid();
   if (_isLimitAsserted() != assertedLevel) {
-    if (assertedLevel &&
+    if (!hardwareDebounce && assertedLevel &&
         _limitDebounceState.phase == MotionLimitDebouncePolicy::Phase::Pending) {
       _observeLimitLevelFromTask(false, stepperCycleNow());
     }
     return sample;
   }
-  if (!_limitDebounceTimebaseValid || _limitDebounceCycles == 0u) {
+  if (!sample.timebaseValid || _limitDebounceCycles == 0u) {
     // Missing timing evidence fails safe for an assertion. It cannot prove a
     // released interval, so an approach remains inhibited in that case.
-    if (assertedLevel && !_limitDebounceIgnoreUntilRelease) {
+    if (!hardwareDebounce && assertedLevel &&
+        !_limitDebounceIgnoreUntilRelease) {
       _observeLimitLevelFromTask(true, 0u);
     }
     sample.stable = assertedLevel;
@@ -1083,7 +1120,8 @@ Stepper::LimitStableSample Stepper::_sampleLimitLevelStable(
     }
     const bool currentAsserted = _isLimitAsserted();
     const uint32_t nowCycle = stepperCycleNow();
-    if (assertedLevel && !_limitDebounceIgnoreUntilRelease) {
+    if (!hardwareDebounce && assertedLevel &&
+        !_limitDebounceIgnoreUntilRelease) {
       _observeLimitLevelFromTask(currentAsserted, nowCycle);
       const MotionLimitDebouncePolicy::Snapshot snapshot =
           getLimitDebounceSnapshot();
@@ -1151,6 +1189,12 @@ void Stepper::stop() {
 
   _togglesRemaining = _togglesDone = 0;
   _inSoftStop = false;
+  if (_usesHardwareLimitDebounce()) {
+    MotionLimitDebounceTimer::cancel(
+        _axis == X_AXIS
+            ? MotionLimitDebounceTimer::Axis::X
+            : MotionLimitDebounceTimer::Axis::Y);
+  }
 }
 
 void Stepper::_prepareForNewMove()
@@ -1158,7 +1202,13 @@ void Stepper::_prepareForNewMove()
   _moveGeneration = StepperLimitPolicy::nextMoveGeneration(_moveGeneration);
   _debounceArmedGeneration = 0u;
 
-  if (_debounceTimer != nullptr) {
+  if (_usesHardwareLimitDebounce()) {
+    MotionLimitDebounceTimer::cancel(
+        _axis == X_AXIS
+            ? MotionLimitDebounceTimer::Axis::X
+            : MotionLimitDebounceTimer::Axis::Y,
+        true);
+  } else if (_debounceTimer != nullptr) {
     xTimerStop(_debounceTimer, 0u);
   }
   taskENTER_CRITICAL();
@@ -1436,8 +1486,17 @@ void Stepper::_finishCoordinatedAxis(bool aborted)
   if (aborted) {
     _targetPos = _pos;
   }
+  MotionLimitDebounceTimer::recordStopPositionFromIsr(
+      _axis == X_AXIS
+          ? MotionLimitDebounceTimer::Axis::X
+          : MotionLimitDebounceTimer::Axis::Y,
+      _pos);
   _inSoftStop = false;
   _coordinatedReserved = false;
+  MotionLimitDebounceTimer::cancel(
+      _axis == X_AXIS
+          ? MotionLimitDebounceTimer::Axis::X
+          : MotionLimitDebounceTimer::Axis::Y);
 }
 
 LC_COORDINATED_GPIO_OPTIMIZED
@@ -1496,6 +1555,30 @@ void Stepper::disableMotor() {
   }
 }
 
+bool Stepper::_rearmDriverForResume() {
+  if (!stepIsLow()) {
+    _stepPort->BSRR = static_cast<uint32_t>(_stepPin) << 16u;
+    if (_dualDriver) {
+      _stepPort2->BSRR = static_cast<uint32_t>(_stepPin2) << 16u;
+    }
+    disableMotor();
+    return false;
+  }
+
+  disableMotor();
+  vTaskDelay(pdMS_TO_TICKS(MotionResumePolicy::kDriverDisablePulseMs));
+  const bool disabled = enableOutputsDeassertedForDiagnostics();
+
+  enableMotor();
+  vTaskDelay(pdMS_TO_TICKS(MotionResumePolicy::kDriverPoweredSettleMs));
+  const bool ready = disabled &&
+      enableOutputsAssertedForDiagnostics() && stepIsLow();
+  if (!ready) {
+    disableMotor();
+  }
+  return ready;
+}
+
 void Stepper::pauseMove() {
   if (!_htim || _coordinatedReserved || _togglesRemaining == 0u) return;
   HAL_TIM_Base_Stop_IT(_htim);
@@ -1511,6 +1594,7 @@ void Stepper::pauseMove() {
       _pos += (_direction ? logicalStep : -logicalStep);
       ++_togglesDone;
       --_togglesRemaining;
+      ++_directMoveSnapshot.pauseCleanupEdges;
       _stepPort->BSRR = static_cast<uint32_t>(_stepPin) << 16u;
       if (_dualDriver) {
         _stepPort2->BSRR = static_cast<uint32_t>(_stepPin2) << 16u;
@@ -1542,35 +1626,70 @@ Stepper::DirectMoveStartStatus Stepper::resumeMove() {
 	if (paused.state != DirectMoveState::Paused) {
 	  return DirectMoveStartStatus::Busy;
 	}
-	const int64_t remainingDelta =
-	    static_cast<int64_t>(paused.targetPosition) - static_cast<int64_t>(_pos);
-	const uint64_t remainingMagnitude = remainingDelta < 0
-	    ? static_cast<uint64_t>(-(remainingDelta + 1)) + 1u
-	    : static_cast<uint64_t>(remainingDelta);
-	if (remainingMagnitude == 0u || remainingMagnitude > UINT32_MAX) {
+	const MotionResumePolicy::RemainingMove remaining =
+	    MotionResumePolicy::remainingMove(_pos, paused.targetPosition);
+	if (!remaining.valid) {
 	  taskENTER_CRITICAL();
 	  _directMoveSnapshot.startStatus = DirectMoveStartStatus::InvalidRequest;
 	  _directMoveSnapshot.state = DirectMoveState::Faulted;
 	  _directMoveSnapshot.terminalReason = DirectMoveTerminalReason::StartRejected;
 	  _directMoveSnapshot.endPosition = _pos;
+	  ++_directMoveSnapshot.resumeStartFailures;
 	  taskEXIT_CRITICAL();
 	  return DirectMoveStartStatus::InvalidRequest;
+	}
+	if (remaining.immediate) {
+	  taskENTER_CRITICAL();
+	  _togglesRemaining = _togglesDone = 0u;
+	  _directMoveSnapshot.state = DirectMoveState::Completed;
+	  _directMoveSnapshot.terminalReason = DirectMoveTerminalReason::Completed;
+	  _directMoveSnapshot.endPosition = _pos;
+	  taskEXIT_CRITICAL();
+	  xEventGroupSetBits(Orchestrator::getDoneEvents(), _doneBit);
+	  return DirectMoveStartStatus::Immediate;
 	}
 
 	const uint32_t resumeHz = _lastFreqHz;
 	const uint32_t resumeAccel = _lastAccel;
+	const uint32_t resumeStartHz =
+	    MotionResumePolicy::selectStartRateHz(resumeHz);
+	if (!_rearmDriverForResume()) {
+	  DirectStepperProfile::abort(_directProfileState);
+	  taskENTER_CRITICAL();
+	  _directMoveSnapshot = paused;
+	  _directMoveSnapshot.startStatus = DirectMoveStartStatus::Unavailable;
+	  _directMoveSnapshot.state = DirectMoveState::Faulted;
+	  _directMoveSnapshot.terminalReason =
+	      DirectMoveTerminalReason::StartRejected;
+	  _directMoveSnapshot.endPosition = _pos;
+	  ++_directMoveSnapshot.resumeCount;
+	  _directMoveSnapshot.resumeStartRateHz = resumeStartHz;
+	  ++_directMoveSnapshot.resumeStartFailures;
+	  ++_directMoveSnapshot.resumeDriverRearmFailures;
+	  taskEXIT_CRITICAL();
+	  return DirectMoveStartStatus::Unavailable;
+	}
 	DirectStepperProfile::abort(_directProfileState);
 	taskENTER_CRITICAL();
 	_directMoveResumeSnapshot = paused;
+	++_directMoveResumeSnapshot.resumeCount;
+	_directMoveResumeSnapshot.resumeStartRateHz = resumeStartHz;
+	++_directMoveResumeSnapshot.resumeDriverRearmCount;
 	_directMoveResumePending = true;
 	_togglesRemaining = _togglesDone = 0u;
 	_accelToggles = _decelToggles = 0u;
 	taskEXIT_CRITICAL();
 
-	return move(remainingDelta > 0,
-	            static_cast<uint32_t>(remainingMagnitude),
-	            resumeHz,
-	            resumeAccel);
+	return _moveWithInitialRate(remaining.positive,
+	                            remaining.magnitude,
+	                            resumeHz,
+	                            resumeAccel,
+	                            resumeStartHz);
+}
+
+bool Stepper::stepIsLow() const {
+  bool high = false;
+  return _readCoordinatedStepHigh(high) && !high;
 }
 
 void Stepper::cancelMove() {
@@ -1592,6 +1711,12 @@ void Stepper::cancelMove() {
   _inSoftStop = false;
   DirectStepperProfile::abort(_directProfileState);
   taskEXIT_CRITICAL();
+  if (_usesHardwareLimitDebounce()) {
+    MotionLimitDebounceTimer::cancel(
+        _axis == X_AXIS
+            ? MotionLimitDebounceTimer::Axis::X
+            : MotionLimitDebounceTimer::Axis::Y);
+  }
 }
 
 void Stepper::_stepTick() {
@@ -1602,7 +1727,11 @@ void Stepper::_stepTick() {
 
   if (_togglesRemaining != 0u) {
     const bool asserted = _isLimitAsserted();
-    if (asserted ||
+    if (_usesHardwareLimitDebounce()) {
+      if (_limitDebounceIgnoreUntilRelease) {
+        _observeLimitLevelFromIsr(asserted, stepperCycleNow());
+      }
+    } else if (asserted ||
         _limitDebounceState.phase == MotionLimitDebouncePolicy::Phase::Pending ||
         _limitDebounceIgnoreUntilRelease) {
       #if (LC_STEPPER_ISR_INSTRUMENTATION_ENABLE != 0)
@@ -1640,6 +1769,12 @@ void Stepper::_stepTick() {
     _directMoveSnapshot.emittedEdges =
         _directMoveEmittedOffset + _totalToggles;
     _directMoveSnapshot.limitSeen = _limitSeenThisMove;
+    if (_usesHardwareLimitDebounce()) {
+      MotionLimitDebounceTimer::cancel(
+          _axis == X_AXIS
+              ? MotionLimitDebounceTimer::Axis::X
+              : MotionLimitDebounceTimer::Axis::Y);
+    }
 
     // signal orchestrator
     BaseType_t woken = pdFALSE;
@@ -1831,7 +1966,9 @@ void Stepper::attachLimitSwitch(GPIO_TypeDef* port,
   // 1) Configure GPIO as EXTI with correct edge + pull
   GPIO_InitTypeDef gi{};
   gi.Pin   = pin;
-  gi.Mode  = activeHigh ? GPIO_MODE_IT_RISING : GPIO_MODE_IT_FALLING;
+  gi.Mode  = _usesHardwareLimitDebounce()
+      ? GPIO_MODE_IT_RISING_FALLING
+      : (activeHigh ? GPIO_MODE_IT_RISING : GPIO_MODE_IT_FALLING);
   gi.Pull  = _limitPull;
   gi.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(port, &gi);
@@ -1858,16 +1995,27 @@ void Stepper::attachLimitSwitch(GPIO_TypeDef* port,
   HAL_NVIC_SetPriority(_extiIRQn, 5, 0);
   __HAL_GPIO_EXTI_CLEAR_FLAG(pin);
 
-  // 4) Create one-shot debounce timer
-  _debounceTimer = xTimerCreate(
-    "LmtDbnc",
-    stepperMsToAtLeast1Tick(MotionLimitDebouncePolicy::kDebounceMs),
-    pdFALSE,
-    this,
-    Stepper::_debounceTimerCb
-  );
-  if (_debounceTimer == nullptr) {
-    Logger::instance()->log("[Stepper %d] debounce timer create failed\r\n", (int)_axis);
+  // 4) X/Y use independent TIM5 compare channels. Z/P/R retain the existing
+  // one-shot FreeRTOS timer path.
+  if (_usesHardwareLimitDebounce()) {
+    (void)MotionLimitDebounceTimer::attach(
+        _axis == X_AXIS
+            ? MotionLimitDebounceTimer::Axis::X
+            : MotionLimitDebounceTimer::Axis::Y,
+        port,
+        pin,
+        activeHigh);
+  } else {
+    _debounceTimer = xTimerCreate(
+      "LmtDbnc",
+      stepperMsToAtLeast1Tick(MotionLimitDebouncePolicy::kDebounceMs),
+      pdFALSE,
+      this,
+      Stepper::_debounceTimerCb
+    );
+    if (_debounceTimer == nullptr) {
+      Logger::instance()->log("[Stepper %d] debounce timer create failed\r\n", (int)_axis);
+    }
   }
   HAL_NVIC_EnableIRQ(_extiIRQn);
 }
@@ -1899,6 +2047,12 @@ void Stepper::_observeLimitLevelFromIsr(bool asserted, uint32_t nowCycle)
     _limitReleasePending = false;
     _limitReleaseStartCycle = 0u;
     MotionLimitDebouncePolicy::resetTransient(_limitDebounceState);
+    return;
+  }
+
+  // Moving X/Y assertions are owned exclusively by EXTI + TIM5. Motion-timer
+  // sampling remains release-only so it cannot create or advance a candidate.
+  if (_usesHardwareLimitDebounce()) {
     return;
   }
 
@@ -1934,8 +2088,25 @@ __attribute__((optimize("O2"), hot))
 #endif
 bool Stepper::_takeConfirmedLimitFromIsr()
 {
-  if (_limitHandledThisMove ||
-      _limitDebounceState.phase != MotionLimitDebouncePolicy::Phase::Confirmed) {
+  if (_limitHandledThisMove) {
+    return false;
+  }
+  if (_usesHardwareLimitDebounce()) {
+    const bool confirmed = MotionLimitDebounceTimer::takeConfirmedFromIsr(
+        _axis == X_AXIS
+            ? MotionLimitDebounceTimer::Axis::X
+            : MotionLimitDebounceTimer::Axis::Y,
+        _moveGeneration,
+        _pos);
+    if (!confirmed) {
+      return false;
+    }
+    _limitSeenThisMove = true;
+    if (_limitHitCount != std::numeric_limits<uint32_t>::max()) {
+      ++_limitHitCount;
+    }
+  } else if (_limitDebounceState.phase !=
+             MotionLimitDebouncePolicy::Phase::Confirmed) {
     return false;
   }
   _limitHandledThisMove = true;
@@ -1964,6 +2135,13 @@ bool Stepper::_stopForConfirmedLimitFromIsr()
       _directMoveEmittedOffset + _togglesDone +
       ((_togglesDone & 1u) != 0u ? 1u : 0u);
   _directMoveSnapshot.limitSeen = true;
+  if (_usesHardwareLimitDebounce()) {
+    MotionLimitDebounceTimer::recordStopPositionFromIsr(
+        _axis == X_AXIS
+            ? MotionLimitDebounceTimer::Axis::X
+            : MotionLimitDebounceTimer::Axis::Y,
+        _pos);
+  }
   stop();
   _stepPort->BSRR = static_cast<uint32_t>(_stepPin) << 16u;
   if (_dualDriver) {
@@ -1980,6 +2158,25 @@ void Stepper::_onRawLimitInterruptFromIsr()
 {
   if (!stepper_rtos_running()) {
     __HAL_GPIO_EXTI_CLEAR_FLAG(_limPin);
+    return;
+  }
+
+  if (_usesHardwareLimitDebounce()) {
+    const bool asserted = _isLimitAsserted();
+    if (_limitDebounceIgnoreUntilRelease) {
+      _observeLimitLevelFromIsr(asserted, stepperCycleNow());
+      return;
+    }
+    const bool moving = _togglesRemaining != 0u ||
+        (_coordinatedReserved && _targetPos != _pos);
+    MotionLimitDebounceTimer::onExtiFromIsr(
+        _axis == X_AXIS
+            ? MotionLimitDebounceTimer::Axis::X
+            : MotionLimitDebounceTimer::Axis::Y,
+        _moveGeneration,
+        _pos,
+        moving && _direction == _homeTowardLimitDir &&
+            !_limitHandledThisMove);
     return;
   }
 

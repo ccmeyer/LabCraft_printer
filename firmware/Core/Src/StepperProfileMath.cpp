@@ -42,14 +42,29 @@ MovePlan planMove(const MovePlanInput& input) {
   if (cruiseHz > input.maxSpeedHz) cruiseHz = input.maxSpeedHz;
   if (cruiseHz < 1u) cruiseHz = 1u;
 
+  uint32_t initialHz = input.initialHz;
+  const bool explicitInitialRate = initialHz != 0u;
+  if (explicitInitialRate) {
+    if (initialHz > cruiseHz) initialHz = cruiseHz;
+    if (initialHz < 1u) initialHz = 1u;
+  }
+
   const float accel = (input.accelStepsPerSec2 > 1.f) ? input.accelStepsPerSec2 : 1.f;
-  uint32_t accelSteps = static_cast<uint32_t>(std::ceil((double)cruiseHz * (double)cruiseHz / (2.0 * (double)accel)));
+  const double cruiseSquared = static_cast<double>(cruiseHz) * cruiseHz;
+  const double initialSquared = explicitInitialRate
+      ? static_cast<double>(initialHz) * initialHz
+      : 0.0;
+  uint32_t accelSteps = static_cast<uint32_t>(std::ceil(
+      (cruiseSquared - initialSquared) / (2.0 * static_cast<double>(accel))));
   if (accelSteps < 1u) accelSteps = 1u;
 
   if ((2u * accelSteps) > input.steps) {
-    double vPeakD = std::sqrt((double)input.steps * (double)accel);
+    const double vPeakD = std::sqrt(
+        static_cast<double>(input.steps) * static_cast<double>(accel) +
+        initialSquared);
     uint32_t vPeak = static_cast<uint32_t>(std::floor(vPeakD));
     if (vPeak < 1u) vPeak = 1u;
+    if (vPeak > cruiseHz) vPeak = cruiseHz;
     cruiseHz = vPeak;
     accelSteps = input.steps / 2u;
     if (accelSteps < 1u) accelSteps = 1u;
@@ -65,12 +80,22 @@ MovePlan planMove(const MovePlanInput& input) {
   if (targetArr < minArr) targetArr = minArr;
   if (targetArr > input.timerMaxArr) targetArr = input.timerMaxArr;
 
-  uint64_t start64 = static_cast<uint64_t>(targetArr) * 5u;
-  if (start64 > static_cast<uint64_t>(input.timerMaxArr)) start64 = input.timerMaxArr;
-  uint32_t startArr = static_cast<uint32_t>(start64);
+  uint32_t startArr = 0u;
+  if (explicitInitialRate) {
+    if (initialHz > cruiseHz) initialHz = cruiseHz;
+    startArr = arrForFreq(input.timerClockHz, initialHz);
+    if (startArr > input.timerMaxArr) startArr = input.timerMaxArr;
+  } else {
+    uint64_t start64 = static_cast<uint64_t>(targetArr) * 5u;
+    if (start64 > static_cast<uint64_t>(input.timerMaxArr)) {
+      start64 = input.timerMaxArr;
+    }
+    startArr = static_cast<uint32_t>(start64);
+  }
   if (startArr < minArr) startArr = minArr;
 
   plan.cruiseHz = cruiseHz;
+  plan.initialHz = explicitInitialRate ? initialHz : 0u;
   plan.accelSteps = accelSteps;
   plan.accelToggles = accelSteps * 2u;
   plan.decelToggles = plan.accelToggles;

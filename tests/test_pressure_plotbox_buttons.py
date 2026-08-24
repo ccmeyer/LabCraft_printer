@@ -191,6 +191,7 @@ def _make_controller(events, *, queue_clear=True, imaging_preflight=None, refuel
         ),
         disable_print_profile=Mock(side_effect=lambda: events.append("disable_print_profile")),
         clear_command_queue=Mock(),
+        request_calibration_cleanup_queue_clear=Mock(return_value=True),
         get_xy_motion_recovery_state=Mock(return_value="idle"),
         get_print_array_imaging_calibration_preflight=Mock(return_value=imaging_preflight),
         get_print_array_refuel_check_preflight=Mock(return_value=refuel_preflight),
@@ -1139,13 +1140,42 @@ def test_calibration_profile_disable_failure_uses_queue_clear_fallback(monkeypat
 
     box._launch_droplet_imager_dialog()
 
-    controller.clear_command_queue.assert_called_once_with()
+    controller.request_calibration_cleanup_queue_clear.assert_called_once_with()
+    controller.clear_command_queue.assert_not_called()
     assert popups == [
         (
             "Calibration Profile Cleanup Failed",
-            "Could not queue the calibration pressure-profile disable command. Verify the machine is idle before continuing.",
+            "Could not queue the calibration pressure-profile disable command. A guarded queue-clear fallback was requested. Verify the machine is idle before continuing.",
         )
     ]
+
+
+def test_calibration_profile_disable_failure_preserves_active_experiment_when_clear_blocked(
+    monkeypatch,
+    qapp,
+):
+    events = []
+    popups = []
+    main_window = _make_main_window(CURRENT_PROFILE, popups)
+    model = _make_model(_FakeMachineModel(), events, printer_head=object())
+    controller = _make_controller(events)
+    controller.disable_print_profile = Mock(return_value=False)
+    controller.request_calibration_cleanup_queue_clear = Mock(return_value=False)
+    box = PressurePlotBox(main_window, model, controller)
+    _patch_droplet_launch(
+        monkeypatch,
+        events,
+        main_window=main_window,
+        model=model,
+        controller=controller,
+    )
+
+    box._launch_droplet_imager_dialog()
+
+    controller.request_calibration_cleanup_queue_clear.assert_called_once_with()
+    controller.clear_command_queue.assert_not_called()
+    assert popups[0][0] == "Calibration Profile Cleanup Blocked"
+    assert "experiment was preserved" in popups[0][1]
 
 
 def test_nozzle_dataset_capture_uses_calibration_profile_lease(monkeypatch, qapp):

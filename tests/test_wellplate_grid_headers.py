@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+from PySide6.QtWidgets import QComboBox
+
 from View import WellPlateWidget
 
 
@@ -40,3 +42,24 @@ def test_update_grid_places_row_and_column_headers(qapp):
     # 2 row headers at col 0, row 1..2
     row_headers = [(w.text(), r, c) for (w, r, c) in widget.grid_layout._items if c == 0 and r >= 1]
     assert set(row_headers) >= {("A", 1, 0), ("B", 2, 0)}
+
+
+def test_update_grid_repaints_after_replacing_well_labels(qapp):
+    widget = WellPlateWidget.__new__(WellPlateWidget)
+    widget.grid_layout = _GridLayoutSpy()
+    widget.clear_grid = lambda: None
+    widget.reagent_selection = QComboBox()
+    widget.model = SimpleNamespace(
+        well_plate=SimpleNamespace(
+            get_plate_dimensions=lambda: (2, 3),
+            iter_rows=lambda: iter(["A", "B"]),
+        )
+    )
+    repaints = []
+    widget.update_well_colors = lambda: repaints.append(
+        (len(widget.well_labels), len(widget.well_labels[0]))
+    )
+
+    WellPlateWidget.update_grid(widget)
+
+    assert repaints == [(2, 3)]

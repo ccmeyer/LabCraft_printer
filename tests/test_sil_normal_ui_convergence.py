@@ -12,6 +12,7 @@ from tests.calibration_test_utils import SignalStub, ensure_calibration_import_s
 ensure_calibration_import_stubs()
 
 from ApplicationComposition import SIMULATION_RUNTIME_CONTEXT
+from MotionPositionContract import canonicalize_position
 from CalibrationClasses.Model import CalibrationManager
 from CalibrationClasses.View import (
     CalibrationModePreflightDialog,
@@ -76,6 +77,13 @@ def _connect_home_and_move_to_custom_camera(session, qapp, custom_position):
         ),
         "simulator homing",
     )
+    origin_position = (
+        session.components.model.machine_model.get_current_position_dict()
+    )
+    accepted_position = canonicalize_position(
+        origin_position,
+        custom_position,
+    )["canonical_position"]
 
     completed = {"value": False}
     assert session.components.controller.move_to_location(
@@ -89,7 +97,11 @@ def _connect_home_and_move_to_custom_camera(session, qapp, custom_position):
         lambda: completed["value"] and session.components.machine.check_if_all_completed(),
         "custom camera positioning",
     )
-    assert session.components.model.machine_model.get_current_position_dict() == custom_position
+    assert (
+        session.components.model.machine_model.get_current_position_dict()
+        == accepted_position
+    )
+    return accepted_position
 
 
 def _launch_motion_capable_imager(monkeypatch, session, qapp):
@@ -752,7 +764,11 @@ def test_imager_head_cleaning_camera_free_sil_round_trip(
         model = session.components.model
         controller = session.components.controller
         camera_position = model.location_model.get_location_dict("camera")
-        _connect_home_and_move_to_custom_camera(session, qapp, camera_position)
+        camera_position = _connect_home_and_move_to_custom_camera(
+            session,
+            qapp,
+            camera_position,
+        )
 
         camera_calls = []
 
@@ -857,7 +873,11 @@ def test_imager_head_cleaning_sil_round_trip_resume_and_exit(
             lambda *args, **kwargs: QtWidgets.QMessageBox.Yes,
         )
 
-        _connect_home_and_move_to_custom_camera(session, qapp, custom_position)
+        custom_position = _connect_home_and_move_to_custom_camera(
+            session,
+            qapp,
+            custom_position,
+        )
         dialog = _launch_motion_capable_imager(monkeypatch, session, qapp)
         manager = model.calibration_manager
         camera_model = model.droplet_camera_model
@@ -1032,7 +1052,11 @@ def test_imager_head_cleaning_sil_recovers_from_interrupted_move(
             lambda *args, **kwargs: QtWidgets.QMessageBox.Yes,
         )
 
-        _connect_home_and_move_to_custom_camera(session, qapp, custom_position)
+        custom_position = _connect_home_and_move_to_custom_camera(
+            session,
+            qapp,
+            custom_position,
+        )
         dialog = _launch_motion_capable_imager(monkeypatch, session, qapp)
         motion_start = len(lifecycle)
         next_command = int(machine.command_queue.command_number) + 1

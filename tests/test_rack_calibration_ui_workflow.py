@@ -146,6 +146,9 @@ def install_fake_rack_dialog(monkeypatch, events, result):
             self.controller = controller
             events.append(("dialog_init",))
 
+        def move_to_initial_position(self):
+            return True
+
         def exec(self):
             events.append(("dialog_exec",))
             return result
@@ -210,6 +213,35 @@ def test_cancelled_guided_rack_dialog_discards_temp_calibrations(monkeypatch):
     assert result is True
     assert events == [("dialog_init",), ("dialog_exec",)]
     assert rack_model.update_calls == 0
+    assert rack_model.discard_calls == 1
+
+
+def test_rejected_initial_rack_route_aborts_before_showing_dialog(monkeypatch):
+    chip = FakePrinterHead()
+    widget, events, rack_model, _main_window = make_widget(
+        gripper_printer_head=chip
+    )
+
+    class RejectingRackCalibrationDialog:
+        def __init__(self, *_args, **_kwargs):
+            events.append(("dialog_init",))
+
+        def move_to_initial_position(self):
+            events.append(("initial_route_rejected",))
+            return False
+
+        def exec(self):
+            events.append(("unexpected_dialog_exec",))
+            return QtWidgets.QDialog.Accepted
+
+    monkeypatch.setattr(
+        View, "RackCalibrationDialog", RejectingRackCalibrationDialog
+    )
+
+    result = View.RackBox.open_rack_calibration_dialog(widget)
+
+    assert result is False
+    assert events == [("dialog_init",), ("initial_route_rejected",)]
     assert rack_model.discard_calls == 1
 
 

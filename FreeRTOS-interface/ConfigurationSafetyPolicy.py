@@ -21,9 +21,11 @@ from MachineDataArchive import canonical_json_bytes
 
 
 POLICY_SCHEMA_NAME = "labcraft.configuration_change_policy"
-POLICY_SCHEMA_VERSION = 1
+LEGACY_POLICY_SCHEMA_VERSION = 1
+POLICY_SCHEMA_VERSION = 2
 ASSESSMENT_SCHEMA_NAME = "labcraft.configuration_guard_assessment"
-ASSESSMENT_SCHEMA_VERSION = 1
+LEGACY_ASSESSMENT_SCHEMA_VERSION = 1
+ASSESSMENT_SCHEMA_VERSION = 2
 RESTORE_PRECONDITION_SCHEMA_NAME = "labcraft.configuration_restore_precondition"
 RESTORE_PRECONDITION_SCHEMA_VERSION = 1
 AXES = ("X", "Y", "Z")
@@ -177,6 +179,7 @@ def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
 
 @dataclass(frozen=True)
 class ConfigurationChangePolicy:
+    schema_version: int
     policy_id: str
     raw_sha256: str
     supported_hardware_profiles: tuple[str, ...]
@@ -191,8 +194,9 @@ class ConfigurationChangePolicy:
     rack_orientation_direction: str
     plate_initial_orientation: str
     maximum_transform_condition_number: float | None
-    confirmation_phrase_version: int
-    confirmation_template: str
+    confirmation_version: int
+    confirmation_mode: str
+    confirmation_template: str | None
     rationale: str
     approval_reference: str
 
@@ -215,6 +219,8 @@ class ConfigurationChangePolicy:
         return any(folded.startswith(prefix.casefold()) for prefix in self.reserved_location_prefixes)
 
     def required_phrase(self, target: str, proposal_hash: str) -> str:
+        if self.confirmation_mode != "typed_phrase" or self.confirmation_template is None:
+            raise ConfigurationSafetyError("The active policy does not use typed confirmation phrases.")
         return self.confirmation_template.format(
             target=str(target), proposal_short_hash=str(proposal_hash)[:12]
         )
@@ -255,7 +261,8 @@ def parse_configuration_change_policy(
     _expect_exact_keys(payload, _POLICY_KEYS, "configuration-change policy")
     if payload.get("schema_name") != POLICY_SCHEMA_NAME:
         raise ConfigurationSafetyError("Unknown configuration-change policy schema.")
-    if payload.get("schema_version") != POLICY_SCHEMA_VERSION:
+    schema_version = payload.get("schema_version")
+    if schema_version not in {LEGACY_POLICY_SCHEMA_VERSION, POLICY_SCHEMA_VERSION}:
         raise ConfigurationSafetyError("Unknown configuration-change policy version.")
     if not isinstance(raw_sha256, str) or len(raw_sha256) != 64 or any(
         char not in "0123456789abcdef" for char in raw_sha256
@@ -313,7 +320,14 @@ def parse_configuration_change_policy(
         raise ConfigurationSafetyError("Policy rack, plate, and confirmation entries must be objects.")
     _expect_exact_keys(rack, {"slot_count", "orientation_axis", "orientation_direction"}, "rack policy")
     _expect_exact_keys(plate, {"initial_orientation", "maximum_transform_condition_number"}, "plate policy")
-    _expect_exact_keys(confirmation, {"phrase_version", "template"}, "confirmation policy")
+    if schema_version == LEGACY_POLICY_SCHEMA_VERSION:
+        _expect_exact_keys(confirmation, {"phrase_version", "template"}, "confirmation policy")
+    else:
+        _expect_exact_keys(
+            confirmation,
+            {"acknowledgement_version", "mode"},
+            "confirmation policy",
+        )
     slot_count = _strict_int(rack.get("slot_count"), "rack slot_count")
     if slot_count <= 0:
         raise ConfigurationSafetyError("Rack slot_count must be positive.")
@@ -337,12 +351,34 @@ def parse_configuration_change_policy(
         condition = float(condition)
         if not math.isfinite(condition) or condition <= 1:
             raise ConfigurationSafetyError("Plate condition limit must be finite and greater than one.")
-    phrase_version = _strict_int(confirmation.get("phrase_version"), "phrase_version")
-    template = _nonempty_text(confirmation.get("template"), "confirmation template")
-    if "{target}" not in template or "{proposal_short_hash}" not in template:
-        raise ConfigurationSafetyError("Confirmation template must bind target and proposal hash.")
+    if schema_version == LEGACY_POLICY_SCHEMA_VERSION:
+        confirmation_version = _strict_int(
+            confirmation.get("phrase_version"), "phrase_version"
+        )
+        confirmation_mode = "typed_phrase"
+        template = _nonempty_text(
+            confirmation.get("template"), "confirmation template"
+        )
+        if "{target}" not in template or "{proposal_short_hash}" not in template:
+            raise ConfigurationSafetyError(
+                "Confirmation template must bind target and proposal hash."
+            )
+    else:
+        confirmation_version = _strict_int(
+            confirmation.get("acknowledgement_version"),
+            "acknowledgement_version",
+        )
+        confirmation_mode = _nonempty_text(
+            confirmation.get("mode"), "confirmation mode"
+        )
+        if confirmation_mode != "explicit_checkbox":
+            raise ConfigurationSafetyError(
+                "Configuration policy v2 requires explicit_checkbox confirmation."
+            )
+        template = None
 
     return ConfigurationChangePolicy(
+        schema_version=schema_version,
         policy_id=_nonempty_text(payload.get("policy_id"), "policy_id"),
         raw_sha256=raw_sha256,
         supported_hardware_profiles=profiles,
@@ -357,7 +393,8 @@ def parse_configuration_change_policy(
         rack_orientation_direction=orientation_direction,
         plate_initial_orientation=plate_orientation,
         maximum_transform_condition_number=condition,
-        confirmation_phrase_version=phrase_version,
+        confirmation_version=confirmation_version,
+        confirmation_mode=confirmation_mode,
         confirmation_template=template,
         rationale=_nonempty_text(payload.get("rationale"), "policy rationale"),
         approval_reference=_nonempty_text(
@@ -368,7 +405,7 @@ def parse_configuration_change_policy(
 
 def load_configuration_change_policy(path: str | Path | None = None) -> ConfigurationChangePolicy:
     policy_path = Path(path) if path is not None else (
-        Path(__file__).resolve().parent / "Policies" / "configuration_change_policy_v1.json"
+        Path(__file__).resolve().parent / "Policies" / "configuration_change_policy_v2.json"
     )
     try:
         raw = policy_path.read_bytes()
@@ -935,6 +972,44 @@ class ConfigurationChangeGuard:
         ):
             result = "routine_confirmation"
         target_label = ", ".join(target_keys)
+        authorization_consequence = (
+            "verified_by_controlled_calibration"
+            if workflow in {"rack_calibration", "plate_calibration"}
+            else "revoked_pending_verification"
+        )
+        largest_delta = max(
+            (
+                value
+                for change in changes
+                for value in (change.get("absolute_delta") or {}).values()
+                if type(value) is int
+            ),
+            default=None,
+        )
+        has_removal = any(change.get("proposed") is None for change in changes)
+        if result == "reject":
+            acknowledgement = None
+        elif result == "routine_confirmation":
+            acknowledgement = "I reviewed every displayed coordinate and delta."
+        else:
+            change_summary = (
+                "including removed values"
+                if has_removal
+                else (
+                    f"including the largest delta of {largest_delta} steps"
+                    if largest_delta is not None
+                    else "including the complete proposed value"
+                )
+            )
+            consequence = (
+                "This completed calibration will be saved as verified."
+                if authorization_consequence == "verified_by_controlled_calibration"
+                else "Changed targets will remain motion-blocked until separately verified."
+            )
+            acknowledgement = (
+                f"I reviewed every displayed coordinate and delta for {target_label}, "
+                f"{change_summary}. {consequence}"
+            )
         assessment = {
             "schema_name": ASSESSMENT_SCHEMA_NAME,
             "schema_version": ASSESSMENT_SCHEMA_VERSION,
@@ -956,17 +1031,28 @@ class ConfigurationChangeGuard:
             "threshold_results": thresholds,
             "result": result,
             "rejection_code": rejection_code,
-            "confirmation_phrase_version": self.policy.confirmation_phrase_version,
-            "required_confirmation_phrase": (
-                self.policy.required_phrase(target_label, proposal_hash)
-                if result == "strong_confirmation" else None
-            ),
-            "authorization_consequence": "revoked_pending_verification",
+            "authorization_consequence": authorization_consequence,
         }
+        if self.policy.schema_version == LEGACY_POLICY_SCHEMA_VERSION:
+            assessment.update(
+                schema_version=LEGACY_ASSESSMENT_SCHEMA_VERSION,
+                confirmation_phrase_version=self.policy.confirmation_version,
+                required_confirmation_phrase=(
+                    self.policy.required_phrase(target_label, proposal_hash)
+                    if result == "strong_confirmation" else None
+                ),
+            )
+            assessment["authorization_consequence"] = "revoked_pending_verification"
+        else:
+            assessment.update(
+                confirmation_mode=self.policy.confirmation_mode,
+                confirmation_version=self.policy.confirmation_version,
+                required_acknowledgement=acknowledgement,
+            )
         return parse_guard_assessment(assessment)
 
 
-_ASSESSMENT_KEYS = {
+_ASSESSMENT_KEYS_V1 = {
     "schema_name", "schema_version", "policy_id", "policy_sha256",
     "proposal_sha256", "workflow", "target_keys", "target_class",
     "hardware_profile", "governed_file_sha256", "changes", "preconditions",
@@ -975,12 +1061,27 @@ _ASSESSMENT_KEYS = {
     "authorization_consequence",
 }
 
+_ASSESSMENT_KEYS_V2 = {
+    "schema_name", "schema_version", "policy_id", "policy_sha256",
+    "proposal_sha256", "workflow", "target_keys", "target_class",
+    "hardware_profile", "governed_file_sha256", "changes", "preconditions",
+    "hard_checks", "threshold_results", "result", "rejection_code",
+    "confirmation_mode", "confirmation_version", "required_acknowledgement",
+    "authorization_consequence",
+}
+
 
 def parse_guard_assessment(payload: object) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise ConfigurationSafetyError("Guard assessment must be an object.")
-    _expect_exact_keys(payload, _ASSESSMENT_KEYS, "guard assessment")
-    if payload.get("schema_name") != ASSESSMENT_SCHEMA_NAME or payload.get("schema_version") != ASSESSMENT_SCHEMA_VERSION:
+    schema_version = payload.get("schema_version")
+    if schema_version == LEGACY_ASSESSMENT_SCHEMA_VERSION:
+        _expect_exact_keys(payload, _ASSESSMENT_KEYS_V1, "guard assessment")
+    elif schema_version == ASSESSMENT_SCHEMA_VERSION:
+        _expect_exact_keys(payload, _ASSESSMENT_KEYS_V2, "guard assessment")
+    else:
+        raise ConfigurationSafetyError("Unknown guard assessment schema.")
+    if payload.get("schema_name") != ASSESSMENT_SCHEMA_NAME:
         raise ConfigurationSafetyError("Unknown guard assessment schema.")
     for key in ("policy_id", "workflow", "target_class", "hardware_profile", "authorization_consequence"):
         _nonempty_text(payload.get(key), f"assessment {key}")
@@ -1001,19 +1102,38 @@ def parse_guard_assessment(payload: object) -> dict[str, object]:
             raise ConfigurationSafetyError(f"Assessment {key} must be a list.")
     if payload.get("result") not in CONFIRMATION_RESULTS:
         raise ConfigurationSafetyError("Assessment result is unknown.")
-    if type(payload.get("confirmation_phrase_version")) is not int:
-        raise ConfigurationSafetyError("Assessment confirmation phrase version is invalid.")
-    phrase = payload.get("required_confirmation_phrase")
-    if payload["result"] == "strong_confirmation":
-        _nonempty_text(phrase, "required confirmation phrase")
-    elif phrase is not None:
-        raise ConfigurationSafetyError("Only strong confirmation may require a phrase.")
+    if schema_version == LEGACY_ASSESSMENT_SCHEMA_VERSION:
+        if type(payload.get("confirmation_phrase_version")) is not int:
+            raise ConfigurationSafetyError("Assessment confirmation phrase version is invalid.")
+        phrase = payload.get("required_confirmation_phrase")
+        if payload["result"] == "strong_confirmation":
+            _nonempty_text(phrase, "required confirmation phrase")
+        elif phrase is not None:
+            raise ConfigurationSafetyError("Only strong confirmation may require a phrase.")
+    else:
+        if payload.get("confirmation_mode") != "explicit_checkbox":
+            raise ConfigurationSafetyError("Assessment confirmation mode is invalid.")
+        if type(payload.get("confirmation_version")) is not int:
+            raise ConfigurationSafetyError("Assessment confirmation version is invalid.")
+        acknowledgement = payload.get("required_acknowledgement")
+        if payload["result"] == "reject":
+            if acknowledgement is not None:
+                raise ConfigurationSafetyError(
+                    "Rejected assessments cannot require acknowledgement."
+                )
+        else:
+            _nonempty_text(acknowledgement, "required acknowledgement")
     rejection = payload.get("rejection_code")
     if payload["result"] == "reject":
         _nonempty_text(rejection, "rejection code")
     elif rejection is not None:
         raise ConfigurationSafetyError("Only a rejected assessment may carry a rejection code.")
-    if payload.get("authorization_consequence") != "revoked_pending_verification":
+    allowed_consequences = {"revoked_pending_verification"}
+    if schema_version == ASSESSMENT_SCHEMA_VERSION and payload.get("workflow") in {
+        "rack_calibration", "plate_calibration"
+    }:
+        allowed_consequences.add("verified_by_controlled_calibration")
+    if payload.get("authorization_consequence") not in allowed_consequences:
         raise ConfigurationSafetyError("Assessment authorization consequence is invalid.")
     return copy.deepcopy(payload)
 

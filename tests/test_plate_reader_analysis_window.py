@@ -720,7 +720,7 @@ def test_right_panel_exposes_plate_reader_analysis_button(qapp):
 
     button = host.findChild(QtWidgets.QPushButton, "plateReaderAnalysisButton")
     assert button is not None
-    assert button.text() == "Analyze Plate Reader..."
+    assert button.text() == "Analyze Plate Reader Data"
 
     host.close()
 

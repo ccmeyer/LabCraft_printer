@@ -23,7 +23,8 @@ def test_discover_suite_entries_lists_current_manifests():
         "motion_timing_v1",
         "profile_lut_benchmark_v1",
         "coordinated_xy_camera_transition_v4",
-        "coordinated_xy_production_mres3_v5",
+        "coordinated_xy_production_mres3_v7",
+        "motion_pause_resume_v1",
         "coordinated_xy_shallow_edge_v4",
         "direct_xyz_lut_v1",
         "motion_envelope_v1",
@@ -151,16 +152,17 @@ def test_production_mres3_suite_requires_fixed_conditional_contract():
         entry.manifest_id: entry
         for entry in discover_suite_entries(MANIFEST_ROOT)
     }
-    manifest = entries["coordinated_xy_production_mres3_v5"].manifest
+    manifest = entries["coordinated_xy_production_mres3_v7"].manifest
 
     assert manifest.lifecycle == "active"
     assert manifest.profile == "FULL"
     assert manifest.selftest_args == ("--coordinated-xy-production-mres3-suite",)
     assert required_fixture_ids(manifest) == (
         "coordinated_xy_production_mres3_envelope_clear",
+        "coordinated_xy_production_mres3_limit_crossings_ready",
     )
     assert [row.test_id for row in build_test_plan_rows(manifest)] == [
-        2087, 2088, 2089, 2090, 2098
+        2087, 2088, 2089, 2090, 2098, 2106, 2107, 2105
     ]
     motion = manifest.analysis_rules["2087"]["metrics"]
     assert motion["n"]["equals"] == 10
@@ -183,6 +185,41 @@ def test_production_mres3_suite_requires_fixed_conditional_contract():
     assert debounce["tv"]["equals"] == 1
     assert debounce["xf"]["equals"] == 0
     assert debounce["yf"]["equals"] == 0
+    assert debounce["hz"]["equals"] == 1000000
+    assert debounce["du"]["min"] == 15000
+    assert debounce["du"]["max"] == 16000
+    assert debounce["hc"]["equals"] == 1
+    assert debounce["af"]["equals"] == 0
+    crossing = manifest.analysis_rules["2105"]["metrics"]
+    assert crossing["n"]["equals"] == 2
+    assert crossing["xa"]["equals"] == 1
+    assert crossing["ya"]["equals"] == 1
+    assert crossing["xb"]["max"] == 50
+    assert crossing["yb"]["max"] == 50
+    assert crossing["xr"]["equals"] == 1
+    assert crossing["yr"]["equals"] == 1
+
+
+def test_pause_resume_suite_uses_application_maxima_and_fresh_start_gate():
+    entries = {entry.manifest_id: entry for entry in discover_suite_entries(MANIFEST_ROOT)}
+    manifest = entries["motion_pause_resume_v1"].manifest
+
+    assert manifest.profile == "FULL"
+    assert manifest.selftest_args == ("--motion-pause-resume-suite",)
+    assert required_fixture_ids(manifest) == ("motion_pause_resume_envelope_clear",)
+    assert "unmeasured settling homes" in manifest.fixtures[0]["operator_note"]
+    assert "measured reference homes" in manifest.fixtures[0]["operator_note"]
+    assert [row.test_id for row in build_test_plan_rows(manifest)] == [2106, 2107]
+    xy = manifest.analysis_rules["2106"]["metrics"]
+    z = manifest.analysis_rules["2107"]["metrics"]
+    assert xy["hz"]["equals"] == 40000
+    assert z["hz"]["equals"] == 30000
+    assert xy["rs"]["equals"] == z["rs"]["equals"] == 3000
+    assert xy["hold"]["equals"] == z["hold"]["equals"] == 2000
+    assert xy["rc"]["equals"] == z["rc"]["equals"] == 6
+    assert xy["dr"]["equals"] == z["dr"]["equals"] == 6
+    assert xy["df"]["equals"] == z["df"]["equals"] == 0
+    assert xy["xd"]["max"] == xy["yd"]["max"] == z["zd"]["max"] == 25
 
 
 def test_shallow_edge_suite_freezes_incident_vector_evidence():
@@ -261,6 +298,8 @@ def test_direct_xyz_lut_suite_requires_profile_coverage_and_isolation():
     assert manifest.analysis_rules["2091"]["metrics"]["np"]["equals"] == 7000
     assert manifest.analysis_rules["2091"]["metrics"]["dc"]["equals"] == 5715
     assert manifest.analysis_rules["2093"]["metrics"]["en"]["equals"] == 0
+    assert manifest.analysis_rules["2093"]["metrics"]["hz"]["equals"] == 30000
+    assert manifest.analysis_rules["2093"]["metrics"]["dc"]["equals"] == 3215
     assert manifest.analysis_rules["2094"]["metrics"]["ai"]["equals"] == 1000
     assert manifest.analysis_rules["2095"]["metrics"]["pre"]["equals"] == 1
     assert manifest.analysis_rules["2095"]["metrics"]["post"]["equals"] == 1

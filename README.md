@@ -52,6 +52,31 @@ To get started with the LabCraft Printer project, follow these steps:
     pip install -r requirements.txt
     ```
 
+## Print-Array Pause and Queue-Clear Safety
+
+The full-height `Pause` button in the Connection group pauses command transport
+immediately and opens explicit actions. During an active print array, prefer
+`Finish Current Well and Stop`;
+it resumes only through the frozen current-well boundary, clears confirmed
+look-ahead work, parks, and leaves the experiment resumable. `Keep Paused` is
+the safe default.
+
+`Abort Array and Clear Queue` requires a second confirmation. It permanently
+aborts the active experiment and the interrupted well may be uncertain. Every
+application queue clear is classified and guarded by the Controller. An
+automatic calibration cleanup cannot clear an active or uncertain experiment.
+After a confirmed abort, the print-array control changes to disabled
+`Experiment Aborted`; the terminal experiment cannot be resumed even when its
+loaded reagent still has partial progress. Create or load a new experiment
+before printing again. A completed terminal experiment is likewise
+non-resumable and remains represented by a disabled completion control.
+
+While a queue clear is pending or could not be confirmed, new print arrays and
+printer-head transfers remain blocked. Keep the machine clear and use the
+supported confirmed Clear Queue retry or motion-recovery workflow. If recovery
+requires an MCU reset, follow the normal reset, inspection, dock-check, and
+homing procedure before further motion.
+
 ## Run Python Tests
 
 On this Windows checkout, use the repo virtual environment directly:
@@ -3588,6 +3613,39 @@ Run the campaign on the Pi serial port:
 python tools/run_qualification_campaign.py --campaign machine_full_qualification_v1 --operator-prompts --port /dev/ttyAMA0
 ```
 
+After the attending operator has given fresh authorization for the exact
+campaign, known confirmation-only gates can be consumed without pausing for
+another terminal response:
+
+```bash
+python tools/run_qualification_campaign.py --campaign machine_full_qualification_v1 --operator-prompts --preauthorize-confirmation-prompts --port /dev/ttyAMA0
+python tools/run_qualification.py --manifest coordinated_xy_production_mres3_v7 --operator-prompts --preauthorize-confirmation-prompts --fixture coordinated_xy_production_mres3_envelope_clear --port /dev/ttyAMA0
+```
+
+`--preauthorize-confirmation-prompts` is opt-in and requires
+`--operator-prompts`. It auto-resumes only the runner's explicit allowlist of
+confirmation-only stages, including the coordinated XY envelope and bounded
+crossing readiness gates. Every automatic response is retained in the raw and
+normalized reports with `mode=preauthorized`. Prompts that require a physical
+action remain interactive; these include evaporation-plate placement, manual
+X/Y switch press/release, and gripper load/support/removal. An unrecognized
+future operator gate is never automatically resumed and therefore fails closed
+if the host has not been updated to classify it.
+The option is not unattended authority and does not replace the fresh attended
+confirmation, FULL-profile authorization, fixture checks, emergency-stop
+access, or final firmware restoration required by the development workflow.
+
+The raw self-test and legacy HIL pass-throughs use the same explicit option:
+
+```bash
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --preauthorize-confirmation-prompts --out hil_reports/selftest.json
+powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_hil_windows.ps1 -PiHost 192.168.0.29 -Profile FULL -PreauthorizeConfirmationPrompts
+```
+
+Interactive prompt time is excluded from the self-test hard deadline, and the
+progress/activity watchdog timestamps are rebased when an operator responds so
+a valid long pause cannot cause an immediate stale-progress failure.
+
 Run the dedicated refuel-vacuum pressure-sensor qualification suite:
 
 ```bash
@@ -3644,22 +3702,31 @@ one edge of cross-track error. At 40 kHz with the 90 MHz timer clock, ARR
 remains 2249; callback load and nominal move duration do not increase.
 
 X and Y retain independent STEP phases initialized from the output GPIOs.
-Pause stops between active edges and preserves the cached trace. Cancel,
-confirmed limits, and post-edge scheduling faults stop immediately when both
-pins are low. If a pin is high, the next valid timer interval emits and
-accounts exactly one cleanup falling edge on only that axis, rebases the
-target to the actual position, and terminates with both pins low. Successful
-moves require zero cleanup edges and zero spacing violations.
+Pause stops immediately when both STEP pins are low. If either pin is high,
+the next valid timer interval emits and accounts the required cleanup falling
+edge before entering the paused state, so no STEP output is held high during a
+pause. Resume discards the old profile cursor and plans only the remaining
+distance to the retained endpoint, starting at no more than 3 kHz and
+accelerating under the original move's cruise and acceleration limits. Direct
+X/Y/Z resume uses the same remaining-endpoint rule. Ordinary unpaused starts
+retain their existing profile. Cancel, confirmed limits, and post-edge
+scheduling faults continue to use the bounded STEP-low terminal path.
 
-All X/Y/Z/P/R motion limit inputs use the same continuous 15 ms confirmation
-policy. A raw EXTI edge starts and temporarily masks a candidate; it cannot
-stop motion. The active axis timer (or coordinated TIM2) samples the level and
-stops only after 15 ms of uninterrupted assertion, at a STEP-low boundary. A
-release rejects the candidate and the next assertion must serve a full new
-window. DWT supplies wrap-safe timing; if that timebase is unavailable, an
-asserted input confirms immediately as the fail-safe behavior. Z retains its
-active-high/no-pull electrical configuration. The pressure-regulator PG13/PG14
-inner switches keep their existing independent 15 ms deferred notification.
+X and Y use an edge-aware, hardware-timed 15 ms confirmation path. Both edges
+on PG6/PG9 feed EXTI; the first asserted edge masks only that line and arms its
+independent TIM5 compare channel on the continuously running 1 MHz counter.
+Any intervening edge is retained in hardware/software evidence and rejects the
+old window. An input that ends high must then serve a complete new 15 ms
+window; an input that ends low is safely unmasked. TIM5 publishes only a
+confirmed axis, and the next direct-axis or coordinated motion interrupt uses
+the existing STEP-low abort path. Motion-timer level samples cannot create or
+advance an X/Y assertion candidate. If TIM5 initialization or arming is not
+valid, an asserted candidate confirms immediately as the fail-safe behavior.
+TIM5 channel 3 is reserved for the non-actuating 15,000-16,000 us diagnostic
+timing check. Z/P/R retain their existing EXTI/software-timer and direct-step
+sampling path, including Z's active-high/no-pull electrical configuration.
+The pressure-regulator PG13/PG14 inner switches retain their independent 15 ms
+deferred notification.
 
 The production timing contract uses a 2,600-core-cycle active-handler
 regression budget and a 3,500-cycle post-motion terminal-handler budget. The
@@ -3676,8 +3743,11 @@ diagnostic evidence rather than independent acceptance limits.
 The supported coordinated-motion selectors are now:
 
 ```bash
-python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-production-mres3-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_production_mres3_v5.json
-python3 tools/run_qualification.py --manifest coordinated_xy_production_mres3_v5 --operator-prompts --fixture coordinated_xy_production_mres3_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_production_mres3_v5.json
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-production-mres3-suite --timeout-ms 300000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_production_mres3_v7.json
+python3 tools/run_qualification.py --manifest coordinated_xy_production_mres3_v7 --operator-prompts --fixture coordinated_xy_production_mres3_envelope_clear --fixture coordinated_xy_production_mres3_limit_crossings_ready --machine-id LC-001 --raw-report hil_reports/coordinated_xy_production_mres3_v7.json
+
+python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --motion-pause-resume-suite --timeout-ms 180000 --status-only-timeout-ms 120000 --out hil_reports/motion_pause_resume_v1.json
+python3 tools/run_qualification.py --manifest motion_pause_resume_v1 --operator-prompts --fixture motion_pause_resume_envelope_clear --machine-id LC-001 --raw-report hil_reports/motion_pause_resume_v1.json
 
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-shallow-edge-suite --timeout-ms 240000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_shallow_edge_v4.json
 python3 tools/run_qualification.py --manifest coordinated_xy_shallow_edge_v4 --operator-prompts --fixture coordinated_xy_shallow_edge_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_shallow_edge_v4.json
@@ -3688,6 +3758,25 @@ python3 tools/run_qualification.py --manifest direct_xyz_lut_v1 --operator-promp
 python3 tools/run_selftest.py --port /dev/ttyAMA0 --profile FULL --coordinated-xy-camera-transition-suite --timeout-ms 180000 --status-only-timeout-ms 120000 --out hil_reports/coordinated_xy_camera_transition_v4.json
 python3 tools/run_qualification.py --manifest coordinated_xy_camera_transition_v4 --operator-prompts --fixture coordinated_xy_camera_transition_envelope_clear --machine-id LC-001 --raw-report hil_reports/coordinated_xy_camera_transition_v4.json
 ```
+
+Production selector `2097` now emits results
+`[2087,2088,2089,2090,2098,2106,2107,2105]`. Result `2098` proves TIM5 is running at
+1 MHz, channel 3 services a 15 ms deadline within 15,000-16,000 us, the timing
+infrastructure has no failures, and ten clean production moves produce no X/Y
+confirmations. Results `2106` and `2107` run six two-second pause/resume cases
+each at the application maxima (40 kHz coordinated XY and 30 kHz direct Z),
+require STEP-low stable holds, exact 3 kHz fresh-plan starts, endpoints, enabled
+outputs, exactly one bounded TMC ENN rearm plus a 130 ms powered settle per
+resume, and at most 25 logical units of post-run home drift. Each axis first
+performs an unmeasured settling home so the measured
+reference and post-run homes share the same calibrated coordinate frame.
+Status telemetry is enabled only across the XY and Z motion windows so the
+focused run also provides a real cadence gate. Operator-gated result `2105`
+then performs one bounded physical
+crossing per axis at 3 kHz. Each axis starts at the normal 100-step home
+backoff, receives only a 200-step command toward the optical trigger, must
+report the correct terminal axis with both STEP outputs low and no more than
+50 post-edge steps, and must release/home successfully before the next axis.
 
 The completed Z speed-ladder experiment selected the existing 30 kHz logical
 rate and 140,000 logical steps/s^2 acceleration for production. Its firmware
@@ -4091,7 +4180,7 @@ python3 tools/run_qualification.py --manifest direct_xyz_lut_v1 \
 ```
 
 The selector homes Z and XY, runs a 14,000-logical-unit cruise-capable move on
-X, Y, and Z plus a 2,000-unit triangular X move at the 40 kHz logical rate,
+X and Y at 40 kHz and Z at 30 kHz, plus a 2,000-unit triangular X move at 40 kHz,
 then homes again. Results `2091`-`2094` require exact MRES=3 native pulse and
 LUT cursor coverage; `2095` requires both home sets to remain on the legacy
 path, no P/R displacement, and the production MRES=3/DEDGE/filter settings.

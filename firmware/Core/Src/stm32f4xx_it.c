@@ -50,6 +50,7 @@
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN PFP */
+void MotionLimitDebounceTimer_IRQHandler(void);
 #if defined(__GNUC__) && (LC_CRASHLOG_FAULT_HOOKS_ENABLE != 0)
 void HardFault_Handler(void) __attribute__((naked, noreturn));
 void MemManage_Handler(void) __attribute__((naked, noreturn));
@@ -61,6 +62,11 @@ void UsageFault_Handler(void) __attribute__((naked, noreturn));
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+void TIM5_IRQHandler(void)
+{
+  MotionLimitDebounceTimer_IRQHandler();
+}
 
 /* USER CODE END 0 */
 

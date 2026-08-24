@@ -29,6 +29,7 @@
 #include <stdio.h>
 
 extern void MX_LED_Init(void);
+extern void MX_MotionLimitDebounceTimer_Init(void);
 
 extern void MX_COMM_Init(UART_HandleTypeDef* huart);
 extern void MX_PS_Init(I2C_HandleTypeDef* hi2c,
@@ -381,6 +382,7 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM12_Init();
   /* USER CODE BEGIN 2 */
+  MX_MotionLimitDebounceTimer_Init();
   Watchdog_EarlyInit();
   if (Watchdog_ShouldRunRecoveryReset() != 0u) {
     NVIC_SystemReset();

@@ -6,6 +6,7 @@
  */
 #include "BoardConfig.h"
 #include "Orchestrator.h"
+#include "MotionLimitDebounceTimer.h"
 #include "Diagnostics.h"
 #include "OrchestratorCompletionPolicy.h"
 #include "OrchestratorDecode.h"
@@ -432,11 +433,14 @@ void Orchestrator::pauseCurrent() {
   }
 }
 
-void Orchestrator::resumeCurrent() {
+MotionResumeStatus Orchestrator::resumeCurrent() {
   Logger::instance()->log("resumeCurrent\r\n");
-  Gantry::instance()->resumeXYZMotors();
+  const MotionResumeStatus motionStatus =
+      Gantry::instance()->resumeXYZMotors();
+  if (motionStatus != MotionResumeStatus::Ready) return motionStatus;
   Printer::instance()->resumeDispense();
   resumePressureRegulators();
+  return MotionResumeStatus::Ready;
 }
 void Orchestrator::cancelCurrent() {
 //  Logger::instance()->log("cancelCurrent\r\n");
@@ -978,6 +982,30 @@ void Orchestrator::latchGantryMotionFailure(
   _directMotionContextValid = false;
   _pauseAfterSeq32 = 0u;
   _pauseWatermarkReached = false;
+  if (context.reason == XY_MOTION_FAULT_X_LIMIT ||
+      context.reason == XY_MOTION_FAULT_Y_LIMIT) {
+    const bool xAxis = context.reason == XY_MOTION_FAULT_X_LIMIT;
+    const MotionLimitDebounceTimer::ConfirmationSnapshot limit =
+        MotionLimitDebounceTimer::lastConfirmation(
+            xAxis ? MotionLimitDebounceTimer::Axis::X
+                  : MotionLimitDebounceTimer::Axis::Y);
+    if (limit.valid) {
+      Logger::instance()->log(
+          "[LimitDebounce] src=exti_tim5 axis=%c gen=%lu cand=%lu dl=%lu svc=%lu late_us=%lu trans=%lu restart=%lu raw=%u arm_fail=%lu edge_pos=%ld consume_pos=%ld\r\n",
+          xAxis ? 'X' : 'Y',
+          (unsigned long)limit.moveGeneration,
+          (unsigned long)limit.candidateTimerCount,
+          (unsigned long)limit.deadlineTimerCount,
+          (unsigned long)limit.serviceTimerCount,
+          (unsigned long)limit.irqLatenessUs,
+          (unsigned long)limit.transitionCount,
+          (unsigned long)limit.restartCount,
+          (unsigned)limit.rawExpiryAsserted,
+          (unsigned long)limit.armFailureCount,
+          (long)limit.candidatePosition,
+          (long)limit.consumedPosition);
+    }
+  }
   Logger::instance()->log("[Gantry] motion failure latched reason=%s\r\n",
                           XyMotionFaultContext_ReasonName(context.reason));
 }
@@ -1399,8 +1427,13 @@ void Orchestrator::_run() {
 			continue;
 		}
 		_pressurePauseDeferred = false;
-		resumeCurrent();
+		const MotionResumeStatus resumeStatus = resumeCurrent();
+		if (resumeStatus == MotionResumeStatus::Deferred) {
+		  _paused = true;
+		  continue;
+		}
 		_resumeRequested = false;
+		_paused = resumeStatus != MotionResumeStatus::Ready;
 		bool resumedCommandCompleted = !_hasInFlightCommand;
 		if (_hasInFlightCommand) {
 		  switch (_lastPausedCmd.cmd) {
@@ -1413,10 +1446,12 @@ void Orchestrator::_run() {
 			  resumedCommandCompleted = validateResumedDirectAxis(_lastPausedCmd);
 			  break;
 			case CMD_ABS_XY:
-			  resumedCommandCompleted =
-			      waitForBits(BIT_STEPPER1_DONE | BIT_STEPPER2_DONE) &&
-			      validateResumedAbsoluteXy(_lastPausedCmd.p1s(),
-			                                _lastPausedCmd.p2s());
+			  resumedCommandCompleted = resumeStatus == MotionResumeStatus::Failed
+			      ? validateResumedAbsoluteXy(_lastPausedCmd.p1s(),
+			                                  _lastPausedCmd.p2s())
+			      : (waitForBits(BIT_STEPPER1_DONE | BIT_STEPPER2_DONE) &&
+			         validateResumedAbsoluteXy(_lastPausedCmd.p1s(),
+			                                   _lastPausedCmd.p2s()));
 			  break;
 			case CMD_DISPENSE:
 			case CMD_DISPENSE_PRINT:

@@ -806,7 +806,26 @@ def _operator_prompt_message(stage: str) -> str:
         return (
             "Confirm both limit switches are released, the gantry is square, and the complete "
             "XY/Z motion envelope is clear. Remove all hands before the logical-unit MRES=3 "
-            "homes, ten-move row (40 kHz active edges), and bounded post-row X/Y homes begin."
+            "homes, ten-move row (40 kHz active edges), six two-second XY pauses at 40 kHz, "
+            "six Z pauses at 30 kHz with bounded motor-enable rearms, and bounded post-row "
+            "homes begin."
+        )
+    if stage == "coordinated_xy_production_mres3_limit_crossings_ready":
+        return (
+            "Confirm the prior production row and homes completed normally, both optical X/Y "
+            "limits are released, their hard-stop margins are available, the emergency stop is "
+            "reachable, and all hands are clear. The firmware will command one bounded 200-step "
+            "X crossing at 3 kHz, home/release X, then repeat for Y. Abort immediately for contact, "
+            "excessive travel, a missing limit stop, or communication loss."
+        )
+    if stage == "motion_pause_resume_envelope_clear":
+        return (
+            "Confirm both optical X/Y limits are released, the XY/Z motion envelope is clear, "
+            "non-dispensing test heads are installed, the emergency stop is reachable, and all "
+            "hands are clear. The firmware will home XY/Z, pause six XY moves at 40 kHz and six "
+            "Z moves at 30 kHz for two seconds each, perform one bounded motor-enable rearm plus "
+            "a 130 ms powered settle, resume each from 3 kHz, and then re-home to check for lost "
+            "physical position."
         )
     if stage == "coordinated_xy_shallow_edge_envelope_clear":
         return (
@@ -818,23 +837,44 @@ def _operator_prompt_message(stage: str) -> str:
         return (
             "Confirm both limit switches are released and the direct X/Y/Z motion envelope is clear. "
             "The firmware will home Z and XY, run one 14,000-unit move on each axis plus one "
-            "2,000-unit triangular X move at the production 40 kHz logical rate, then home again."
+            "2,000-unit triangular X move at 40 kHz XY / 30 kHz Z logical rates, then home again."
         )
     return "Confirm the operator-gated self-test step is ready to continue."
 
 
-def _is_operator_prompt_stage(stage: str) -> bool:
-    return stage in {
+PREAUTHORIZABLE_OPERATOR_PROMPT_STAGES = frozenset(
+    {
+        "coordinated_xy_camera_transition_envelope_clear",
+        "coordinated_xy_production_mres3_envelope_clear",
+        "coordinated_xy_production_mres3_limit_crossings_ready",
+        "motion_pause_resume_envelope_clear",
+        "coordinated_xy_shallow_edge_envelope_clear",
+        "direct_xyz_lut_envelope_clear",
+    }
+)
+
+ACTION_REQUIRED_OPERATOR_PROMPT_STAGES = frozenset(
+    {
         "evap_plate_confirm",
         "coord_x_limit_press",
         "coord_x_limit_release",
         "coord_y_limit_press",
         "coord_y_limit_release",
-        "coordinated_xy_camera_transition_envelope_clear",
-        "coordinated_xy_production_mres3_envelope_clear",
-        "coordinated_xy_shallow_edge_envelope_clear",
-        "direct_xyz_lut_envelope_clear",
     }
+)
+
+
+def _is_operator_prompt_stage(stage: str) -> bool:
+    return stage in (
+        PREAUTHORIZABLE_OPERATOR_PROMPT_STAGES
+        | ACTION_REQUIRED_OPERATOR_PROMPT_STAGES
+    )
+
+
+def _should_preauthorize_operator_prompt(args, stage: str) -> bool:
+    return bool(getattr(args, "preauthorize_confirmation_prompts", False)) and (
+        stage in PREAUTHORIZABLE_OPERATOR_PROMPT_STAGES
+    )
 
 
 def _read_operator_prompt_response(args, message: str) -> bool:
@@ -1243,6 +1283,7 @@ def run(args: argparse.Namespace) -> int:
     started_at = now_iso()
     results = []
     host_checks = []
+    operator_interactions = []
     trace_chunks: dict[tuple[int, int, int], dict] = {}
     summary = {"total": 0, "passed": 0, "failed": 0}
     aborted = False
@@ -1266,6 +1307,10 @@ def run(args: argparse.Namespace) -> int:
                 "summary": summary,
                 "results": results,
                 "host_checks": host_checks,
+                "preauthorize_confirmation_prompts": bool(
+                    getattr(args, "preauthorize_confirmation_prompts", False)
+                ),
+                "operator_interactions": operator_interactions,
                 "startup_reset_report": startup_reset_report,
                 "reset_report": reset_report_details,
             }
@@ -1397,6 +1442,9 @@ def run(args: argparse.Namespace) -> int:
         direct_xyz_lut_suite = bool(
             getattr(args, "direct_xyz_lut_suite", False)
         )
+        motion_pause_resume_suite = bool(
+            getattr(args, "motion_pause_resume_suite", False)
+        )
         coordinated_xy_camera_transition_suite = bool(
             getattr(args, "coordinated_xy_camera_transition_suite", False)
         )
@@ -1406,6 +1454,7 @@ def run(args: argparse.Namespace) -> int:
         coordinated_xy_performance_diagnostic = bool(
             coordinated_xy_production_mres3_suite
             or direct_xyz_lut_suite
+            or motion_pause_resume_suite
             or coordinated_xy_camera_transition_suite
             or coordinated_xy_shallow_edge_suite
         )
@@ -1417,7 +1466,7 @@ def run(args: argparse.Namespace) -> int:
         refuel_vacuum_suite = bool(getattr(args, "refuel_vacuum_suite", False))
         valve_characterization_suite = bool(getattr(args, "valve_characterization_suite", False))
         valve_gap_sweep_suite = bool(getattr(args, "valve_gap_sweep_suite", False))
-        selector = 1039 if selftest_scheduler_no_yield_suite else 1038 if selftest_scheduler_cooperative_suite else 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2096 if direct_xyz_lut_suite else 2099 if coordinated_xy_shallow_edge_suite else 2097 if coordinated_xy_production_mres3_suite else 2078 if coordinated_xy_camera_transition_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
+        selector = 1039 if selftest_scheduler_no_yield_suite else 1038 if selftest_scheduler_cooperative_suite else 2599 if gripper_seal_stress_suite else 2498 if valve_gap_sweep_suite else 2499 if valve_characterization_suite else 2298 if refuel_vacuum_suite else 2299 if pressure_regulator_suite else 2109 if motion_pause_resume_suite else 2096 if direct_xyz_lut_suite else 2099 if coordinated_xy_shallow_edge_suite else 2097 if coordinated_xy_production_mres3_suite else 2078 if coordinated_xy_camera_transition_suite else 2039 if profile_lut_benchmark else 2029 if motion_timing_suite else 2019 if motion_envelope_suite else 2009 if xy_motion_suite else 2500 if gripper_seal_suite else (
             pressure_sweep_suite if pressure_sweep_suite is not None else (
                 CUSTOM_PRESSURE_TRACE_TEST_ID if custom_trace_config is not None else pressure_trace_test
             )
@@ -1656,22 +1705,49 @@ def run(args: argparse.Namespace) -> int:
                                     "message": prompt_message,
                                 },
                             )
+                            response_mode = (
+                                "preauthorized"
+                                if _should_preauthorize_operator_prompt(args, stage)
+                                else "interactive"
+                            )
                             prompt_started = time.monotonic()
-                            accepted = _read_operator_prompt_response(args, prompt_message)
+                            accepted = (
+                                True
+                                if response_mode == "preauthorized"
+                                else _read_operator_prompt_response(args, prompt_message)
+                            )
                             prompt_finished = time.monotonic()
                             paused_s = max(0.0, prompt_finished - prompt_started)
                             hard_deadline += paused_s
                             idle_deadline = prompt_finished + (progress_timeout_ms / 1000.0)
                             activity_deadline = prompt_finished + (activity_timeout_ms / 1000.0)
+                            # All timestamps derived from the pre-prompt loop value are
+                            # stale after input() returns. Rebase them so an attended
+                            # pause cannot immediately trip the progress watchdog or
+                            # produce misleading frame-age evidence.
+                            now = prompt_finished
+                            last_valid_frame_monotonic = prompt_finished
+                            last_rx_byte_monotonic = prompt_finished
+                            last_selftest_frame_monotonic = prompt_finished
                             operator_cmd = CMD_RESUME if accepted else CMD_SELFTEST_ABORT
                             ser.write(build_control(operator_cmd, operator_control_seq8 & 0xFF, selftest_seq32))
                             operator_control_seq8 = (operator_control_seq8 + 1) & 0xFF
+                            operator_interactions.append(
+                                {
+                                    "stage": stage,
+                                    "message": prompt_message,
+                                    "mode": response_mode,
+                                    "accepted": bool(accepted),
+                                    "responded_at": now_iso(),
+                                }
+                            )
                             _emit_selftest_event(
                                 args,
                                 {
                                     "event": "selftest_operator_prompt_response",
                                     "stage": stage,
                                     "accepted": bool(accepted),
+                                    "mode": response_mode,
                                 },
                             )
                         continue
@@ -2001,6 +2077,10 @@ def run(args: argparse.Namespace) -> int:
             "summary": summary,
             "results": results,
             "host_checks": host_checks,
+            "preauthorize_confirmation_prompts": bool(
+                getattr(args, "preauthorize_confirmation_prompts", False)
+            ),
+            "operator_interactions": operator_interactions,
             "startup_reset_report": startup_reset_report,
             "reset_report": reset_report_details,
         }
@@ -2058,6 +2138,15 @@ def main() -> int:
         ),
     )
     p.add_argument("--progress-jsonl", action="store_true", help="Emit structured SELFTEST_EVENT JSONL progress lines.")
+    p.add_argument(
+        "--preauthorize-confirmation-prompts",
+        action="store_true",
+        help=(
+            "Auto-resume known confirmation-only operator gates after an attended "
+            "campaign has been authorized. Prompts that require a physical action "
+            "remain interactive."
+        ),
+    )
     p.add_argument("--hello-timeout-ms", type=int, default=8000)
     p.add_argument("--hello-retry-ms", type=int, default=250)
     p.add_argument("--fast-fail-on-missing-hello", action="store_true")
@@ -2093,6 +2182,7 @@ def main() -> int:
     selector_group.add_argument("--coordinated-xy-production-mres3-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-shallow-edge-suite", action="store_true")
     selector_group.add_argument("--direct-xyz-lut-suite", action="store_true")
+    selector_group.add_argument("--motion-pause-resume-suite", action="store_true")
     selector_group.add_argument("--coordinated-xy-camera-transition-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-suite", action="store_true")
     selector_group.add_argument("--gripper-seal-stress-suite", action="store_true")

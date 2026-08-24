@@ -32,11 +32,22 @@ def _controller(events=None):
     return controller
 
 
-def test_clear_queue_interrupts_pending_workflows_before_machine_clear():
+def test_confirmed_clear_interrupts_workflows_after_transport_accepts_request():
     events = []
     controller = _controller(events)
     controller.machine = SimpleNamespace(
-        clear_command_queue=lambda: events.append(("machine_clear", None))
+        clear_command_queue=lambda handler=None: (
+            events.append(("machine_clear", None)),
+            handler(
+                {
+                    "ack_received": True,
+                    "ack_timed_out": False,
+                    "status_confirmed": True,
+                    "status_timed_out": False,
+                }
+            ),
+            True,
+        )[-1]
     )
     controller.model = SimpleNamespace(
         machine_model=SimpleNamespace(
@@ -44,16 +55,16 @@ def test_clear_queue_interrupts_pending_workflows_before_machine_clear():
         )
     )
 
-    Controller.clear_command_queue(controller)
+    assert Controller.clear_command_queue(controller, confirmed=True) is True
 
     assert events == [
+        ("machine_clear", None),
+        ("model_clear", None),
+        ("expected_updated", None),
         (
             "interrupted",
             {"reason": "queue_clear_requested", "notify_user": True},
         ),
-        ("machine_clear", None),
-        ("model_clear", None),
-        ("expected_updated", None),
     ]
 
 
