@@ -1649,31 +1649,38 @@ class MainWindow(QMainWindow):
         self.resize(width, height)
 
     def _add_right_panel_action_buttons(self, right_layout):
-        """Add compact right-panel actions above the experiment guide."""
-        action_row = QtWidgets.QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
+        """Add right-panel actions in a readable two-by-two grid."""
+        action_grid = QtWidgets.QGridLayout()
+        action_grid.setObjectName("rightPanelActionGrid")
+        action_grid.setContentsMargins(0, 0, 0, 0)
+        action_grid.setHorizontalSpacing(6)
+        action_grid.setVerticalSpacing(4)
+        action_grid.setColumnStretch(0, 1)
+        action_grid.setColumnStretch(1, 1)
 
         self.audit_timeline_button = QtWidgets.QPushButton("Audit Timeline")
         self.audit_timeline_button.clicked.connect(self.show_experiment_audit)
-        action_row.addWidget(self.audit_timeline_button, 1)
+        action_grid.addWidget(self.audit_timeline_button, 0, 0)
 
         self.configuration_history_button = QtWidgets.QPushButton("Configuration History")
         self.configuration_history_button.clicked.connect(self.show_configuration_history)
-        action_row.addWidget(self.configuration_history_button, 1)
+        action_grid.addWidget(self.configuration_history_button, 0, 1)
 
-        self.plate_reader_analysis_button = QtWidgets.QPushButton("Analyze Plate Reader...")
+        self.plate_reader_analysis_button = QtWidgets.QPushButton(
+            "Analyze Plate Reader Data"
+        )
         self.plate_reader_analysis_button.setObjectName("plateReaderAnalysisButton")
         self.plate_reader_analysis_button.setToolTip("Associate plate-reader data with the concentration key and run analysis")
         self.plate_reader_analysis_button.clicked.connect(self.show_plate_reader_analysis)
-        action_row.addWidget(self.plate_reader_analysis_button, 1)
+        action_grid.addWidget(self.plate_reader_analysis_button, 1, 0)
 
         self.keyboard_shortcuts_button = QtWidgets.QPushButton("Shortcuts")
         self.keyboard_shortcuts_button.setToolTip("Show keyboard shortcuts")
         self.keyboard_shortcuts_button.clicked.connect(self.show_keyboard_shortcuts)
-        action_row.addWidget(self.keyboard_shortcuts_button)
+        action_grid.addWidget(self.keyboard_shortcuts_button, 1, 1)
 
-        right_layout.addLayout(action_row)
-        return action_row
+        right_layout.addLayout(action_grid)
+        return action_grid
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -3088,13 +3095,19 @@ class ConnectionWidget(QGroupBox):
         layout.addWidget(QLabel("Device"), 0, 0)
         layout.addWidget(QLabel("Port"),   0, 1)
         layout.addWidget(QLabel("Connect"),0, 2)
-        layout.addWidget(QLabel("Safety"), 0, 3)
 
-        self.pause_machine_button = QPushButton("Pause Machine Now")
+        self.pause_machine_button = QPushButton("Pause")
         self.pause_machine_button.setObjectName("pauseMachineButton")
         self.pause_machine_button.setFocusPolicy(QtCore.Qt.NoFocus)
         self.pause_machine_button.clicked.connect(self.main_window.pause_machine)
-        layout.addWidget(self.pause_machine_button, 1, 3)
+        connection_row_count = 3 if self.legacy_mode else 2
+        layout.addWidget(
+            self.pause_machine_button,
+            0,
+            3,
+            connection_row_count,
+            1,
+        )
 
         if not self.legacy_mode:
             # ----- CURRENT MODE (unchanged behavior) -----
@@ -3302,7 +3315,7 @@ class ConnectionWidget(QGroupBox):
                 "mid_gray",
                 self.color_dict.get("dark_gray", "#6e6e6e"),
             )
-            self.pause_machine_button.setText("Pause Machine Now")
+            self.pause_machine_button.setText("Pause")
             self.pause_machine_button.setEnabled(False)
             self.pause_machine_button.setStyleSheet(
                 f"background-color: {color}; color: white;"
@@ -3314,13 +3327,13 @@ class ConnectionWidget(QGroupBox):
 
         if bool(getattr(machine_model, "paused", False)):
             color = self.color_dict.get("orange", "#f4743b")
-            self.pause_machine_button.setText("Paused — Actions…")
+            self.pause_machine_button.setText("Paused\nActions…")
             self.pause_machine_button.setToolTip(
                 "Machine commands are paused. Reopen the resume, keep paused, or clear choices."
             )
         else:
             color = self.color_dict.get("dark_red", "#8a0303")
-            self.pause_machine_button.setText("Pause Machine Now")
+            self.pause_machine_button.setText("Pause")
             self.pause_machine_button.setToolTip(
                 "Immediately pause machine commands and open explicit pause actions."
             )
@@ -10568,6 +10581,9 @@ class BoardStatusBox(QGroupBox):
     def init_ui(self):
         """Initialize the user interface."""
         self.layout = QtWidgets.QGridLayout(self)
+        self.layout.setContentsMargins(8, 4, 8, 6)
+        self.layout.setHorizontalSpacing(10)
+        self.layout.setVerticalSpacing(2)
 
         self.labels = {
             'Homed': QLabel('False'),
@@ -10585,14 +10601,32 @@ class BoardStatusBox(QGroupBox):
             self.labels['Mass'] = QLabel('0')
             self.labels['Stable'] = QLabel('False')
 
-        row = 0
-        for label, value in self.labels.items():
+        self.status_name_labels = {}
+        compact_items = [
+            item for item in self.labels.items() if item[0] != 'Flash Fault'
+        ]
+        for index, (label, value) in enumerate(compact_items):
+            row = index // 2
+            pair_column = (index % 2) * 2
             label_label = QLabel(label)
-            label_label.setAlignment(Qt.AlignCenter)
-            value.setAlignment(Qt.AlignCenter)
-            self.layout.addWidget(label_label, row, 0)
-            self.layout.addWidget(value, row, 1)
-            row += 1
+            label_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self.status_name_labels[label] = label_label
+            self.layout.addWidget(label_label, row, pair_column)
+            self.layout.addWidget(value, row, pair_column + 1)
+
+        if 'Flash Fault' in self.labels:
+            row = (len(compact_items) + 1) // 2
+            fault_label = QLabel('Flash Fault')
+            fault_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            fault_value = self.labels['Flash Fault']
+            fault_value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            self.status_name_labels['Flash Fault'] = fault_label
+            self.layout.addWidget(fault_label, row, 0)
+            self.layout.addWidget(fault_value, row, 1, 1, 3)
+
+        self.layout.setColumnStretch(1, 1)
+        self.layout.setColumnStretch(3, 1)
         
         self.setLayout(self.layout)
 

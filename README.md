@@ -54,8 +54,9 @@ To get started with the LabCraft Printer project, follow these steps:
 
 ## Print-Array Pause and Queue-Clear Safety
 
-`Pause Machine Now` pauses command transport immediately and opens explicit
-actions. During an active print array, prefer `Finish Current Well and Stop`;
+The full-height `Pause` button in the Connection group pauses command transport
+immediately and opens explicit actions. During an active print array, prefer
+`Finish Current Well and Stop`;
 it resumes only through the frozen current-well boundary, clears confirmed
 look-ahead work, parks, and leaves the experiment resumable. `Keep Paused` is
 the safe default.

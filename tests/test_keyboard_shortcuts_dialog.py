@@ -125,14 +125,37 @@ def test_right_panel_action_row_wires_shortcuts_button(qapp):
     container = QtWidgets.QWidget()
     layout = QtWidgets.QVBoxLayout(container)
 
-    MainWindow._add_right_panel_action_buttons(main_window, layout)
+    action_grid = MainWindow._add_right_panel_action_buttons(main_window, layout)
 
     assert main_window.audit_timeline_button.text() == "Audit Timeline"
     assert main_window.keyboard_shortcuts_button.text() == "Shortcuts"
     assert main_window.keyboard_shortcuts_button.toolTip() == "Show keyboard shortcuts"
+    assert isinstance(action_grid, QtWidgets.QGridLayout)
+    assert action_grid.itemAtPosition(0, 0).widget() is main_window.audit_timeline_button
+    assert (
+        action_grid.itemAtPosition(0, 1).widget()
+        is main_window.configuration_history_button
+    )
+    assert (
+        action_grid.itemAtPosition(1, 0).widget()
+        is main_window.plate_reader_analysis_button
+    )
+    assert action_grid.itemAtPosition(1, 1).widget() is main_window.keyboard_shortcuts_button
+
+    container.resize(450, 160)
+    container.show()
+    qapp.processEvents()
+    for button in (
+        main_window.audit_timeline_button,
+        main_window.configuration_history_button,
+        main_window.plate_reader_analysis_button,
+        main_window.keyboard_shortcuts_button,
+    ):
+        assert button.width() >= button.sizeHint().width()
 
     main_window.keyboard_shortcuts_button.click()
     main_window.audit_timeline_button.click()
 
     assert main_window.show_keyboard_shortcuts.call_count == 1
     assert main_window.show_experiment_audit.call_count == 1
+    container.close()

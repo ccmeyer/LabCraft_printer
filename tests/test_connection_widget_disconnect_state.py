@@ -64,7 +64,7 @@ def test_connection_widget_shows_disconnect_pending_until_complete(qapp):
 
     assert widget.machine_connect_button.text() == "Disconnect"
     assert widget.machine_connect_button.isEnabled()
-    assert widget.pause_machine_button.text() == "Pause Machine Now"
+    assert widget.pause_machine_button.text() == "Pause"
     assert widget.pause_machine_button.isEnabled()
 
     widget.request_machine_connect_change()
@@ -112,7 +112,7 @@ def test_connection_pause_button_tracks_pause_state_and_dispatches(qapp):
     widget, main_window, machine_model = _make_connection_widget(qapp)
 
     assert widget.pause_machine_button.objectName() == "pauseMachineButton"
-    assert widget.pause_machine_button.text() == "Pause Machine Now"
+    assert widget.pause_machine_button.text() == "Pause"
     assert widget.pause_machine_button.isEnabled()
     assert main_window.color_dict["dark_red"] in widget.pause_machine_button.styleSheet()
 
@@ -122,7 +122,7 @@ def test_connection_pause_button_tracks_pause_state_and_dispatches(qapp):
     machine_model.paused = True
     machine_model.machine_paused.emit()
 
-    assert widget.pause_machine_button.text() == "Paused — Actions…"
+    assert widget.pause_machine_button.text() == "Paused\nActions…"
     assert widget.pause_machine_button.isEnabled()
     assert main_window.color_dict["orange"] in widget.pause_machine_button.styleSheet()
 
@@ -133,8 +133,23 @@ def test_legacy_connection_group_includes_enabled_safety_control(qapp):
         profile="legacy",
     )
 
-    assert widget.pause_machine_button.text() == "Pause Machine Now"
+    assert widget.pause_machine_button.text() == "Pause"
     assert widget.pause_machine_button.isEnabled()
+
+
+def test_pause_button_spans_every_connection_row_without_safety_header(qapp):
+    for profile, expected_row_span in (("current", 2), ("legacy", 3)):
+        widget, _main_window, _machine_model = _make_connection_widget(
+            qapp,
+            profile=profile,
+        )
+        layout = widget.layout()
+        button_index = layout.indexOf(widget.pause_machine_button)
+
+        assert layout.getItemPosition(button_index) == (0, 3, expected_row_span, 1)
+        assert "Safety" not in {
+            label.text() for label in widget.findChildren(View.QLabel)
+        }
 
 
 def test_simulation_pause_control_waits_for_binding(qapp):
