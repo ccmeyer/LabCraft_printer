@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.3.0-rc.7 - 2026-08-24
+
+### Fixed
+
+- Made coordinated XY completion endpoint-safe across firmware and host layers. Firmware now distinguishes queue depletion from physical endpoint completion, while the application waits for coherent terminal X/Y/Z telemetry before advancing a dependent workflow.
+- Preserved the exact commanded endpoint through pause/resume and queue drain instead of allowing stale partial telemetry to replace it. Genuine coherent mismatches, trust changes, and timeouts remain fail-closed.
+- Replaced stale post-home reconciliation with a fresh all-axis Home telemetry barrier bound to the new motion-trust epoch. Plate-calibration preflight now reports a missing calibration head deterministically and queues no motion.
+- Moved rack calibration travel into a token-bound Controller session. Initial entry, inter-anchor moves, Back navigation, and the final retract all reach the qualified `Z=500` plane before rack-directed XY travel and suppress dependent commands after any rejection or interruption.
+- Added a pre-motion plate-installed acknowledgement and kept plate entry safe-height-first. Cancelling the acknowledgement leaves motion, temporary captures, governed configuration, and authorization unchanged.
+- Corrected plate-relative Pause maintenance: a successful plate calibration now preserves Pause X/Y and atomically derives Pause Z from the calibrated top-left corner.
+
+### Changed
+
+- A guarded **Save New Location** or **Modify Location** operation now immediately verifies the captured value when fresh machine identity, trust epoch, telemetry, and exact expected/reported-position evidence all agree.
+- Ordinary pending locations can be reviewed through read-only coordinates and one explicit acknowledgement checkbox; users no longer transcribe exact JSON. Plate and rack targets continue to direct users to their physical calibration workflows.
+- The Pi development firmware and hardware wrappers now default their released recovery binding to `v1.3.0-rc.7`; explicit release arguments remain supported.
+
+### Safety and compatibility
+
+- This release changes the bundled firmware. Deploy and verify the exact 367,968-byte rc.7 artifact with SHA-256 `1FEC7C6C8D3C0022844695CDF51A860539BCFBDA291BB18C12A99062C7A32577`. Application update success alone is not proof of installed firmware.
+- Device command framing and payload layouts are unchanged. SAFE remains non-actuating, and FULL or physical motion qualification remains attended-only.
+- Machine-data schema version 1 and the external preservation contract are unchanged. Existing authorized values and immutable history remain intact; only governed values explicitly changed by a transaction receive new events or authorization evidence.
+- Release rollback remains support-guided stable `v1.2.0` with its paired firmware and compatibility export; do not manually edit machine data or firmware-state evidence.
+
+### Validation
+
+- Firmware gate: 485/485 host tests passed and the STM32CubeIDE Debug target built successfully from the merged source.
+- Focused Windows and Pi tests passed for endpoint reconciliation, guarded configuration, plate/rack calibration, updater metadata, and development workflow behavior.
+- Complete Python suite, release metadata validation, strict JSON parsing, and static diff checks passed on the final untagged candidate.
+- Attended isolated-development qualification on LC-001 verified safe plate and rack entry, successful saves, immediate controlled verification, cancellation without partial writes, and no unexpected activity; exact rc.6 firmware restoration and protected postflight passed afterward.
+
+### Rollback
+
+- The reviewed application rollback target remains stable `v1.2.0`. Because that release predates the external machine-data preservation contract, use only the support-guided compatibility export in `docs/machine_data_update_and_rollback_runbook.md`.
+- Restore and verify the firmware artifact paired with the rollback release; application rollback does not automatically establish installed-firmware provenance.
+
 ## v1.3.0-rc.6 - 2026-08-24
 
 ### Fixed

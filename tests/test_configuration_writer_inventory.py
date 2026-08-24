@@ -23,7 +23,7 @@ EXPECTED_CALL_SITES = {
     ("Model.py", "RackModel.update_calibration_data", "store_calibrations"),
     ("Model.py", "WellPlate.update_calibration_data", "save_calibrations_to_file"),
     ("Model.py", "WellPlate.update_calibration_data", "store_calibrations"),
-    ("View.py", "RackBox._run_guided_rack_calibration", "update_calibration_data"),
+    ("View.py", "RackBox._open_staged_rack_calibration_dialog", "update_calibration_data"),
     ("View.py", "WellPlateWidget._open_staged_plate_calibration_dialog", "update_calibration_data"),
 }
 

@@ -15,7 +15,7 @@ param(
   [string]$SharedPython = "/home/labcraft/LabCraft_printer/env/bin/python",
   [string]$WorkflowConfig = "/home/labcraft/.config/LabCraft/development_workflow.json",
   [string]$FirmwareStatePath = "/home/labcraft/.local/share/LabCraft/LabCraft Printer/development-workflow/firmware-state.json",
-  [string]$ReleasedTag = "v1.3.0-rc.5",
+  [string]$ReleasedTag = "v1.3.0-rc.7",
   [string]$RemoteSessionRoot = "/home/labcraft/.local/share/LabCraft/LabCraft Printer/development-workflow/hardware-sessions",
   [string]$OutputRoot = "verification_reports/development-workflow/hardware",
   [string]$Operator = $env:USERNAME,

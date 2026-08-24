@@ -1117,7 +1117,7 @@ $confirmation = 'I CONFIRM MOTOR POWER IS INHIBITED, THE MOTION ENVELOPE IS CLEA
      -Action Activate-Development `
      -PiHost 192.168.0.33 `
      -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
-     -ReleasedTag v1.3.0-rc.5 `
+     -ReleasedTag v1.3.0-rc.7 `
      -Operator Conary-Codex `
      -AttendedConfirmation $confirmation `
      -Execute
@@ -1152,14 +1152,14 @@ $confirmation = 'I CONFIRM MOTOR POWER IS INHIBITED, THE MOTION ENVELOPE IS CLEA
    updater/rollback/DFU protection. Do not press Connect or start a hardware
    workflow. Close the main window normally and require the wrapper to report a
    normal exit and matching protected postflight.
-5. Immediately restore and SAFE-verify exact rc.5 firmware:
+5. Immediately restore and SAFE-verify exact rc.7 firmware:
 
    ```powershell
    powershell -ExecutionPolicy Bypass -File tools\run_pi_development_firmware.ps1 `
      -Action Restore-Released `
      -PiHost 192.168.0.33 `
      -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
-     -ReleasedTag v1.3.0-rc.5 `
+     -ReleasedTag v1.3.0-rc.7 `
      -Operator Conary-Codex
    ```
 
