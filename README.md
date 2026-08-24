@@ -61,6 +61,15 @@ it resumes only through the frozen current-well boundary, clears confirmed
 look-ahead work, parks, and leaves the experiment resumable. `Keep Paused` is
 the safe default.
 
+When Resume finds an interrupted coordinated XY command already terminal at
+its exact retained endpoint, firmware retires that command without waiting for
+one-shot completion bits that may have been consumed during Pause. During an
+immediate-pause safe stop, the Controller also watches only the narrower case
+where fresh post-Resume X/Y telemetry proves the active XY command is at its
+endpoint but its retirement frontier remains stalled for four seconds. That
+guard reasserts Pause and requires Retry Safe Stop or confirmed abort; it never
+clears the queue, parks, homes, or times ordinary motion and dispensing.
+
 `Abort Array and Clear Queue` requires a second confirmation. It permanently
 aborts the active experiment and the interrupted well may be uncertain. Every
 application queue clear is classified and guarded by the Controller. An

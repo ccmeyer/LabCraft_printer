@@ -188,3 +188,19 @@ def test_resume_builds_a_fresh_remaining_move_plan_at_the_bounded_start_rate():
     assert "CoordinatedXyExecutor::resume" not in coordinated
     assert "remainingMove(_pos, paused.targetPosition)" in direct
     assert "_moveWithInitialRate" in direct
+
+
+def test_orchestrator_reclassifies_resumed_xy_before_waiting_for_done_bits():
+    orchestrator = _read("firmware/Core/Src/Orchestrator.cpp")
+    resume = orchestrator[orchestrator.index("if (_resumeRequested)") :]
+    absolute_xy = resume[resume.index("case CMD_ABS_XY:") :]
+    absolute_xy = absolute_xy[: absolute_xy.index("case CMD_DISPENSE:")]
+
+    inspect = absolute_xy.index("inspectResumedAbsoluteXy")
+    complete = absolute_xy.index("AbsXyResumeDisposition::CompleteWithoutWait")
+    wait = absolute_xy.index("waitForBits(BIT_STEPPER1_DONE | BIT_STEPPER2_DONE)")
+    validate = absolute_xy.index("validateResumedAbsoluteXy", wait)
+
+    assert inspect < complete < wait < validate
+    assert "resumedCommandCompleted = true" in absolute_xy
+    assert "resumedWaitCompleted &&" in absolute_xy

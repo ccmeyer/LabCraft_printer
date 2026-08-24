@@ -43,6 +43,24 @@ AbsXyDisposition evaluateAbsXyCompletion(const AbsXyCompletionInput& input) {
     return AbsXyDisposition::Completed;
 }
 
+AbsXyResumeDisposition evaluateAbsXyResume(
+    const AbsXyResumeInput& input) {
+    if (!input.targetCanonical || !input.startAccepted ||
+        !input.targetsMatch) {
+        return AbsXyResumeDisposition::MotionFailure;
+    }
+    if (input.terminalCompleted && !input.executorActive) {
+        return input.endpointMatches
+            ? AbsXyResumeDisposition::CompleteWithoutWait
+            : AbsXyResumeDisposition::MotionFailure;
+    }
+    if (input.executorActive && !input.terminalCompleted &&
+        !input.endpointMatches) {
+        return AbsXyResumeDisposition::WaitForDoneBits;
+    }
+    return AbsXyResumeDisposition::MotionFailure;
+}
+
 DirectMoveDisposition evaluateDirectMoveCompletion(
     const DirectMoveCompletionInput& input) {
     if (!input.startAccepted || input.terminalFailure) {

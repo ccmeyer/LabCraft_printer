@@ -63,6 +63,7 @@ ARRAY_PRINT_SERPENTINE = True
 ARRAY_GENTLE_ACCEL_ENABLED = False
 ARRAY_ROW_START_OVERSHOOT_STEPS = 0
 PAUSED_ARRAY_SOFT_STOP_PHASE_TIMEOUT_MS = 4_000
+PAUSED_ARRAY_SOFT_STOP_ENDPOINT_RETIRE_TIMEOUT_MS = 4_000
 QUEUE_CLEAR_INTENT_USER_CONFIRMED = "user_confirmed"
 QUEUE_CLEAR_INTENT_SAFE_STOP_BOUNDARY = "safe_stop_boundary"
 QUEUE_CLEAR_INTENT_ARRAY_TERMINAL = "array_terminal"
@@ -5297,6 +5298,30 @@ class Controller(QObject):
             "soft_stop_frozen_barrier_seq32": context.get("soft_stop_frozen_barrier_seq32"),
             "soft_stop_attempt_token": context.get("soft_stop_attempt_token"),
             "soft_stop_recovery_reason": context.get("soft_stop_recovery_reason"),
+            "soft_stop_resume_position_generations": context.get(
+                "soft_stop_resume_position_generations"
+            ),
+            "soft_stop_resume_motion_trust_epoch": context.get(
+                "soft_stop_resume_motion_trust_epoch"
+            ),
+            "soft_stop_endpoint_watch_token": context.get(
+                "soft_stop_endpoint_watch_token"
+            ),
+            "soft_stop_endpoint_watch_seq32": context.get(
+                "soft_stop_endpoint_watch_seq32"
+            ),
+            "soft_stop_endpoint_watch_started_monotonic": context.get(
+                "soft_stop_endpoint_watch_started_monotonic"
+            ),
+            "soft_stop_endpoint_watch_target": context.get(
+                "soft_stop_endpoint_watch_target"
+            ),
+            "soft_stop_endpoint_watch_reported_position": context.get(
+                "soft_stop_endpoint_watch_reported_position"
+            ),
+            "soft_stop_endpoint_watch_last_retired": context.get(
+                "soft_stop_endpoint_watch_last_retired"
+            ),
             "soft_stop_clear_uncertain": bool(getattr(self, "_soft_stop_clear_uncertain", False)),
             "soft_stop_clear_boundary_proof": context.get("soft_stop_clear_boundary_proof"),
             "soft_stop_clear_boundary_proof_consumed": bool(
@@ -5507,12 +5532,35 @@ class Controller(QObject):
         context["soft_stop_attempt_token"] = token
         return token
 
-    def _invalidate_paused_array_soft_stop_attempt(self, context=None):
+    def _invalidate_paused_array_soft_stop_attempt(
+        self,
+        context=None,
+        *,
+        preserve_resume_baseline=False,
+    ):
         if context is None:
             context = getattr(self, "_array_context", None)
         if not isinstance(context, dict):
             return None
+        self._invalidate_paused_array_endpoint_watch(context)
+        if not preserve_resume_baseline:
+            context["soft_stop_resume_position_generations"] = None
+            context["soft_stop_resume_motion_trust_epoch"] = None
         return self._new_paused_array_soft_stop_attempt(context)
+
+    def _invalidate_paused_array_endpoint_watch(self, context=None):
+        if context is None:
+            context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return None
+        token = int(context.get("soft_stop_endpoint_watch_token") or 0) + 1
+        context["soft_stop_endpoint_watch_token"] = token
+        context["soft_stop_endpoint_watch_seq32"] = None
+        context["soft_stop_endpoint_watch_started_monotonic"] = None
+        context["soft_stop_endpoint_watch_target"] = None
+        context["soft_stop_endpoint_watch_reported_position"] = None
+        context["soft_stop_endpoint_watch_last_retired"] = None
+        return token
 
     def _schedule_paused_array_soft_stop_timeout(self, phase, token):
         QtCore.QTimer.singleShot(
@@ -5612,18 +5660,214 @@ class Controller(QObject):
         if phase == "resuming_to_watermark":
             if not transport_paused:
                 context["soft_stop_phase"] = "waiting_watermark"
-                self._invalidate_paused_array_soft_stop_attempt(context)
+                self._invalidate_paused_array_soft_stop_attempt(
+                    context,
+                    preserve_resume_baseline=True,
+                )
                 self._record_print_array_audit_event(
                     "print_array_safe_stop_resumed",
                     "Print array resumed toward the frozen safe-stop watermark",
                     details={"frozen_barrier_seq32": frozen_barrier},
                 )
+                self._evaluate_paused_array_endpoint_retirement_watch(context)
                 return True
             return False
 
         if phase == "waiting_watermark":
+            if transport_paused:
+                return self._enter_paused_array_soft_stop_recovery(
+                    "transport_paused_before_watermark",
+                    transport_pause_confirmed=True,
+                )
+            self._evaluate_paused_array_endpoint_retirement_watch(context)
             return False
         return False
+
+    def _capture_paused_array_resume_position_baseline(self, context):
+        context["soft_stop_resume_position_generations"] = None
+        context["soft_stop_resume_motion_trust_epoch"] = None
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        snapshot_getter = getattr(machine_model, "get_position_telemetry_snapshot", None)
+        if not callable(snapshot_getter):
+            return False
+        try:
+            snapshot = snapshot_getter()
+            axes = snapshot.get("axes") if isinstance(snapshot, dict) else None
+            if not isinstance(axes, dict):
+                return False
+            generations = {
+                axis: int((axes.get(axis) or {}).get("generation"))
+                for axis in ("X", "Y")
+            }
+            trust_epoch = int(snapshot.get("trust_epoch"))
+        except (AttributeError, TypeError, ValueError):
+            return False
+        context["soft_stop_resume_position_generations"] = generations
+        context["soft_stop_resume_motion_trust_epoch"] = trust_epoch
+        return True
+
+    def _paused_array_endpoint_retirement_evidence(
+        self,
+        context,
+        *,
+        expected_seq32=None,
+    ):
+        if (
+            not isinstance(context, dict)
+            or self.get_array_run_state() != "stop_requested"
+            or context.get("soft_stop_origin") != "immediate_pause"
+            or context.get("soft_stop_phase") != "waiting_watermark"
+            or not context.get("soft_stop_pending")
+        ):
+            return None
+
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        if (
+            machine_model is None
+            or bool(getattr(machine_model, "transport_paused", False))
+            or bool(getattr(machine_model, "pause_watermark_reached", False))
+        ):
+            return None
+        try:
+            current_seq32 = int(getattr(machine_model, "current_command_num", 0) or 0)
+            last_retired = int(
+                getattr(machine_model, "last_retired_command_num", 0) or 0
+            )
+        except (TypeError, ValueError):
+            return None
+        if current_seq32 <= last_retired or current_seq32 <= 0:
+            return None
+        if expected_seq32 is not None and current_seq32 != int(expected_seq32):
+            return None
+
+        command_getter = getattr(self.machine, "get_active_command_snapshot", None)
+        if not callable(command_getter):
+            return None
+        try:
+            command = command_getter(current_seq32)
+        except Exception:
+            return None
+        if not isinstance(command, dict):
+            return None
+        try:
+            command_seq32 = int(command.get("command_number") or 0)
+            target_x = int(command.get("param1"))
+            target_y = int(command.get("param2"))
+        except (TypeError, ValueError):
+            return None
+        if (
+            command_seq32 != current_seq32
+            or str(command.get("command_type") or "").upper() != "ABSOLUTE_XY"
+        ):
+            return None
+
+        baseline = context.get("soft_stop_resume_position_generations")
+        baseline_epoch = context.get("soft_stop_resume_motion_trust_epoch")
+        snapshot_getter = getattr(machine_model, "get_position_telemetry_snapshot", None)
+        if not isinstance(baseline, dict) or not callable(snapshot_getter):
+            return None
+        try:
+            snapshot = snapshot_getter()
+            if int(snapshot.get("trust_epoch")) != int(baseline_epoch):
+                return None
+            axes = snapshot.get("axes")
+            x_axis = axes.get("X")
+            y_axis = axes.get("Y")
+            x_generation = int(x_axis.get("generation"))
+            y_generation = int(y_axis.get("generation"))
+            reported_x = int(x_axis.get("value"))
+            reported_y = int(y_axis.get("value"))
+            if (
+                x_generation <= int(baseline.get("X"))
+                or y_generation <= int(baseline.get("Y"))
+            ):
+                return None
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if reported_x != target_x or reported_y != target_y:
+            return None
+
+        return {
+            "watched_seq32": current_seq32,
+            "target": {"X": target_x, "Y": target_y},
+            "reported_position": {"X": reported_x, "Y": reported_y},
+            "last_retired_frontier": last_retired,
+            "telemetry_generations": {
+                "X": x_generation,
+                "Y": y_generation,
+            },
+            "resume_generation_baseline": {
+                "X": int(baseline.get("X")),
+                "Y": int(baseline.get("Y")),
+            },
+        }
+
+    def _evaluate_paused_array_endpoint_retirement_watch(self, context):
+        evidence = self._paused_array_endpoint_retirement_evidence(context)
+        if evidence is None:
+            if context.get("soft_stop_endpoint_watch_seq32") is not None:
+                self._invalidate_paused_array_endpoint_watch(context)
+            return False
+
+        watched_seq32 = int(evidence["watched_seq32"])
+        if (
+            context.get("soft_stop_endpoint_watch_seq32") == watched_seq32
+            and context.get("soft_stop_endpoint_watch_started_monotonic") is not None
+        ):
+            return True
+
+        token = self._invalidate_paused_array_endpoint_watch(context)
+        started = time.monotonic()
+        context["soft_stop_endpoint_watch_seq32"] = watched_seq32
+        context["soft_stop_endpoint_watch_started_monotonic"] = started
+        context["soft_stop_endpoint_watch_target"] = dict(evidence["target"])
+        context["soft_stop_endpoint_watch_reported_position"] = dict(
+            evidence["reported_position"]
+        )
+        context["soft_stop_endpoint_watch_last_retired"] = evidence[
+            "last_retired_frontier"
+        ]
+        QtCore.QTimer.singleShot(
+            PAUSED_ARRAY_SOFT_STOP_ENDPOINT_RETIRE_TIMEOUT_MS,
+            lambda expected_token=int(token), expected_seq32=watched_seq32: self._handle_paused_array_endpoint_retirement_timeout(
+                expected_token,
+                expected_seq32,
+            ),
+        )
+        return True
+
+    def _handle_paused_array_endpoint_retirement_timeout(self, token, seq32):
+        context = getattr(self, "_array_context", None)
+        if not isinstance(context, dict):
+            return False
+        if (
+            int(context.get("soft_stop_endpoint_watch_token") or 0) != int(token)
+            or context.get("soft_stop_endpoint_watch_seq32") != int(seq32)
+        ):
+            return False
+        evidence = self._paused_array_endpoint_retirement_evidence(
+            context,
+            expected_seq32=seq32,
+        )
+        if evidence is None:
+            self._invalidate_paused_array_endpoint_watch(context)
+            return False
+        started = context.get("soft_stop_endpoint_watch_started_monotonic")
+        try:
+            elapsed_ms = max(0.0, (time.monotonic() - float(started)) * 1000.0)
+        except (TypeError, ValueError):
+            elapsed_ms = None
+        evidence["elapsed_time_ms"] = elapsed_ms
+        evidence["recovery_reason"] = "resumed_xy_endpoint_not_retired"
+        self._record_print_array_audit_event(
+            "print_array_safe_stop_xy_endpoint_retirement_timeout",
+            "Resumed XY command reached its endpoint without retiring",
+            details=evidence,
+            level="warning",
+        )
+        return self._enter_paused_array_soft_stop_recovery(
+            "resumed_xy_endpoint_not_retired"
+        )
 
     def _paused_array_frozen_well_finished_array(self, context):
         if context.get("queued_wells"):
@@ -5756,6 +6000,7 @@ class Controller(QObject):
             "resuming_to_watermark",
             token,
         )
+        self._capture_paused_array_resume_position_baseline(context)
         if self.resume_commands() is False:
             if self._paused_array_soft_stop_callback_is_current(
                 "resuming_to_watermark",
@@ -5785,7 +6030,12 @@ class Controller(QObject):
         )
         return False
 
-    def _enter_paused_array_soft_stop_recovery(self, reason):
+    def _enter_paused_array_soft_stop_recovery(
+        self,
+        reason,
+        *,
+        transport_pause_confirmed=False,
+    ):
         context = getattr(self, "_array_context", None)
         if not isinstance(context, dict):
             return False
@@ -5797,12 +6047,14 @@ class Controller(QObject):
         context["soft_stop_recovery_reason"] = str(reason or "uncertain_state")
         context["soft_stop_resume_sent"] = False
 
-        try:
-            sent = self.machine.pause_commands()
-        except Exception:
-            sent = False
-        if sent is not False:
-            self.model.machine_model.pause_commands()
+        sent = True
+        if not transport_pause_confirmed:
+            try:
+                sent = self.machine.pause_commands()
+            except Exception:
+                sent = False
+            if sent is not False:
+                self.model.machine_model.pause_commands()
         self._record_print_array_audit_event(
             "print_array_safe_stop_recovery_required",
             "Print array safe stop requires operator recovery",
@@ -5812,12 +6064,18 @@ class Controller(QObject):
             },
             level="warning",
         )
-        self.error_occurred_signal.emit(
-            "Safe Stop Needs Attention",
-            "The safe-stop watermark or resume state could not be confirmed. The machine "
-            "has been told to pause again. Retry the safe stop or abort the array; full-array "
-            "resume is unavailable because a watermark may still be armed.",
-        )
+        if context.get("soft_stop_recovery_reason") == "resumed_xy_endpoint_not_retired":
+            message = (
+                "The resumed XY move reached its target but did not retire. The machine has "
+                "been told to pause again. Retry the safe stop or abort the array."
+            )
+        else:
+            message = (
+                "The safe-stop watermark or resume state could not be confirmed. The machine "
+                "has been told to pause again. Retry the safe stop or abort the array; full-array "
+                "resume is unavailable because a watermark may still be armed."
+            )
+        self.error_occurred_signal.emit("Safe Stop Needs Attention", message)
         return False
 
     @staticmethod
@@ -9449,6 +9707,14 @@ class Controller(QObject):
             "soft_stop_recovery_reason": None,
             "soft_stop_phase_before_pause": None,
             "soft_stop_resume_sent": False,
+            "soft_stop_resume_position_generations": None,
+            "soft_stop_resume_motion_trust_epoch": None,
+            "soft_stop_endpoint_watch_token": 0,
+            "soft_stop_endpoint_watch_seq32": None,
+            "soft_stop_endpoint_watch_started_monotonic": None,
+            "soft_stop_endpoint_watch_target": None,
+            "soft_stop_endpoint_watch_reported_position": None,
+            "soft_stop_endpoint_watch_last_retired": None,
             "soft_stop_pause_during_clearing": False,
             "soft_stop_clear_boundary_proof": None,
             "soft_stop_clear_boundary_proof_consumed": False,

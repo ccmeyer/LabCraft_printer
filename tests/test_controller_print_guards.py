@@ -188,6 +188,7 @@ def _make_controller(
     c.machine = SimpleNamespace(
         check_if_all_completed=lambda: queue_empty,
         clear_command_queue=Mock(side_effect=_fake_clear_command_queue),
+        get_active_command_snapshot=Mock(return_value=None),
         pause_commands=Mock(),
         resume_commands=Mock(side_effect=_fake_resume_commands),
         request_pause_after_seq32=Mock(return_value=True),
@@ -206,6 +207,15 @@ def _make_controller(
         refuel_guard_record = {"status": "passed"}
     if progress_status is None:
         progress_status = {"has_printed_progress": True}
+    position_telemetry = {
+        "trust_epoch": 0,
+        "axes": {
+            "X": {"value": 0, "generation": 0},
+            "Y": {"value": 0, "generation": 0},
+            "Z": {"value": 0, "generation": 0},
+        },
+    }
+    c.position_telemetry = position_telemetry
     c.model = SimpleNamespace(
         well_plate=well_plate,
         update_state=Mock(side_effect=lambda status: None),
@@ -228,7 +238,9 @@ def _make_controller(
             paused=False,
             pause_after_seq32=0,
             pause_watermark_reached=False,
+            current_command_num=0,
             last_retired_command_num=0,
+            get_position_telemetry_snapshot=lambda: position_telemetry,
             pause_commands=Mock(),
             resume_commands=Mock(),
         ),
@@ -1666,6 +1678,214 @@ def test_repeated_paused_array_safe_stop_request_does_not_duplicate_arm_or_resum
 
     assert c._array_context["soft_stop_phase"] == "waiting_watermark"
     c.machine.resume_commands.assert_called_once_with()
+
+
+def _configure_resumed_xy_endpoint_watch(
+    c,
+    *,
+    command_type="ABSOLUTE_XY",
+    target=(-4, -722),
+    reported=None,
+    fresh=True,
+    seq32=306,
+    last_retired=305,
+):
+    reported = target if reported is None else reported
+    c._array_state = "stop_requested"
+    c._array_context.update(
+        {
+            "soft_stop_origin": "immediate_pause",
+            "soft_stop_pending": True,
+            "soft_stop_phase": "waiting_watermark",
+            "soft_stop_frozen_barrier_seq32": 123,
+            "soft_stop_resume_position_generations": {"X": 10, "Y": 20},
+            "soft_stop_resume_motion_trust_epoch": 4,
+            "soft_stop_endpoint_watch_token": 0,
+            "soft_stop_endpoint_watch_seq32": None,
+        }
+    )
+    c.model.machine_model.transport_paused = False
+    c.model.machine_model.pause_watermark_reached = False
+    c.model.machine_model.current_command_num = seq32
+    c.model.machine_model.last_retired_command_num = last_retired
+    c.position_telemetry["trust_epoch"] = 4
+    c.position_telemetry["axes"]["X"].update(
+        value=reported[0], generation=11 if fresh else 10
+    )
+    c.position_telemetry["axes"]["Y"].update(
+        value=reported[1], generation=21 if fresh else 20
+    )
+    c.machine.get_active_command_snapshot.return_value = {
+        "command_number": seq32,
+        "command_type": command_type,
+        "param1": target[0],
+        "param2": target[1],
+        "param3": 30000,
+        "status": "Executing",
+    }
+    c.model.record_experiment_audit_event = Mock(return_value=True)
+    return c
+
+
+def test_paused_array_resume_captures_xy_telemetry_baseline_before_transport_write():
+    c = _paused_array_conversion_controller()
+    c._array_context.update(
+        {
+            "soft_stop_origin": "immediate_pause",
+            "soft_stop_pending": True,
+            "soft_stop_phase": "arming_watermark_from_pause",
+            "soft_stop_resume_sent": False,
+            "soft_stop_frozen_barrier_seq32": 123,
+        }
+    )
+    c.position_telemetry["trust_epoch"] = 7
+    c.position_telemetry["axes"]["X"]["generation"] = 30
+    c.position_telemetry["axes"]["Y"]["generation"] = 40
+
+    def _resume_and_publish_new_position():
+        c.position_telemetry["axes"]["X"]["generation"] = 31
+        c.position_telemetry["axes"]["Y"]["generation"] = 41
+        return True
+
+    c.machine.resume_commands.side_effect = _resume_and_publish_new_position
+
+    assert Controller._resume_paused_array_to_frozen_watermark(c, c._array_context)
+    assert c._array_context["soft_stop_resume_position_generations"] == {
+        "X": 30,
+        "Y": 40,
+    }
+    assert c._array_context["soft_stop_resume_motion_trust_epoch"] == 7
+
+
+def test_endpoint_retirement_watch_requires_fresh_post_resume_xy_telemetry(monkeypatch):
+    c = _configure_resumed_xy_endpoint_watch(
+        _paused_array_conversion_controller(),
+        fresh=False,
+    )
+    callbacks = []
+    monkeypatch.setattr(
+        "Controller.QtCore.QTimer.singleShot",
+        lambda _delay, callback: callbacks.append(callback),
+    )
+
+    assert Controller._evaluate_paused_array_endpoint_retirement_watch(
+        c, c._array_context
+    ) is False
+    assert callbacks == []
+
+
+@pytest.mark.parametrize(
+    ("command_type", "reported"),
+    [("DISPENSE_PRINT", (-4, -722)), ("ABSOLUTE_XY", (-3, -722))],
+)
+def test_endpoint_retirement_watch_ignores_non_xy_and_motion_away_from_endpoint(
+    monkeypatch,
+    command_type,
+    reported,
+):
+    c = _configure_resumed_xy_endpoint_watch(
+        _paused_array_conversion_controller(),
+        command_type=command_type,
+        reported=reported,
+    )
+    callbacks = []
+    monkeypatch.setattr(
+        "Controller.QtCore.QTimer.singleShot",
+        lambda _delay, callback: callbacks.append(callback),
+    )
+
+    assert Controller._evaluate_paused_array_endpoint_retirement_watch(
+        c, c._array_context
+    ) is False
+    assert callbacks == []
+
+
+def test_endpoint_retirement_watch_arms_once_and_cancels_on_retirement(monkeypatch):
+    c = _configure_resumed_xy_endpoint_watch(_paused_array_conversion_controller())
+    callbacks = []
+    monkeypatch.setattr(
+        "Controller.QtCore.QTimer.singleShot",
+        lambda _delay, callback: callbacks.append(callback),
+    )
+
+    assert Controller._evaluate_paused_array_endpoint_retirement_watch(
+        c, c._array_context
+    ) is True
+    assert Controller._evaluate_paused_array_endpoint_retirement_watch(
+        c, c._array_context
+    ) is True
+    assert len(callbacks) == 1
+
+    c.model.machine_model.last_retired_command_num = 306
+    assert Controller._evaluate_paused_array_endpoint_retirement_watch(
+        c, c._array_context
+    ) is False
+    callbacks[0]()
+
+    c.machine.pause_commands.assert_not_called()
+    assert c._array_context["soft_stop_phase"] == "waiting_watermark"
+
+
+def test_endpoint_retirement_timeout_repauses_once_without_clear_or_park(monkeypatch):
+    c = _configure_resumed_xy_endpoint_watch(_paused_array_conversion_controller())
+    callbacks = []
+    monkeypatch.setattr(
+        "Controller.QtCore.QTimer.singleShot",
+        lambda _delay, callback: callbacks.append(callback),
+    )
+
+    assert Controller._evaluate_paused_array_endpoint_retirement_watch(
+        c, c._array_context
+    ) is True
+    callbacks[0]()
+
+    assert c._array_context["soft_stop_phase"] == "paused_safe_stop_recovery"
+    assert c._array_context["soft_stop_recovery_reason"] == (
+        "resumed_xy_endpoint_not_retired"
+    )
+    c.machine.pause_commands.assert_called_once_with()
+    c.machine.clear_command_queue.assert_not_called()
+    c.move_to_location.assert_not_called()
+    action_state = Controller.get_array_pause_action_state(c)
+    assert action_state["safe_stop_action"] == "retry"
+    assert action_state["can_resume_entire_array"] is False
+    assert c.error_occurred_signal.calls[-1] == (
+        "Safe Stop Needs Attention",
+        "The resumed XY move reached its target but did not retire. The machine has "
+        "been told to pause again. Retry the safe stop or abort the array.",
+    )
+    event_types = [call.args[0] for call in c.model.record_experiment_audit_event.call_args_list]
+    assert "print_array_safe_stop_xy_endpoint_retirement_timeout" in event_types
+    timeout_call = next(
+        call
+        for call in c.model.record_experiment_audit_event.call_args_list
+        if call.args[0] == "print_array_safe_stop_xy_endpoint_retirement_timeout"
+    )
+    assert timeout_call.kwargs["details"]["watched_seq32"] == 306
+    assert timeout_call.kwargs["details"]["target"] == {"X": -4, "Y": -722}
+    assert timeout_call.kwargs["details"]["reported_position"] == {
+        "X": -4,
+        "Y": -722,
+    }
+    assert timeout_call.kwargs["details"]["last_retired_frontier"] == 305
+    assert timeout_call.kwargs["details"]["elapsed_time_ms"] >= 0
+    assert timeout_call.kwargs["details"]["recovery_reason"] == (
+        "resumed_xy_endpoint_not_retired"
+    )
+
+
+def test_unexpected_authoritative_pause_before_watermark_enters_recovery_without_repause():
+    c = _configure_resumed_xy_endpoint_watch(_paused_array_conversion_controller())
+    c.model.machine_model.transport_paused = True
+
+    assert Controller._advance_paused_array_soft_stop_from_status(c) is False
+
+    assert c._array_context["soft_stop_phase"] == "paused_safe_stop_recovery"
+    assert c._array_context["soft_stop_recovery_reason"] == (
+        "transport_paused_before_watermark"
+    )
+    c.machine.pause_commands.assert_not_called()
+    c.machine.clear_command_queue.assert_not_called()
 
 
 def test_paused_array_safe_stop_definite_arm_failure_stays_paused_and_allows_resume():

@@ -150,6 +150,69 @@ TEST(OrchestratorCompletionPolicyTests, AbsXyLimitOrPlannerFailureWinsOverContro
         static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyCompletion(input)));
 }
 
+TEST(OrchestratorCompletionPolicyTests, ResumedAbsXyAtTerminalEndpointCompletesWithoutWait) {
+    const OrchestratorCompletionPolicy::AbsXyResumeInput input{
+        true, true, false, true, true, true};
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyResumeDisposition::CompleteWithoutWait),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyResume(input)));
+}
+
+TEST(OrchestratorCompletionPolicyTests, ResumedAbsXyActiveMoveWaitsForDoneBits) {
+    const OrchestratorCompletionPolicy::AbsXyResumeInput input{
+        true, true, true, false, false, true};
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyResumeDisposition::WaitForDoneBits),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyResume(input)));
+}
+
+TEST(OrchestratorCompletionPolicyTests, ResumedAbsXyTerminalEndpointMismatchFails) {
+    const OrchestratorCompletionPolicy::AbsXyResumeInput input{
+        true, true, false, true, false, true};
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyResumeDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyResume(input)));
+}
+
+TEST(OrchestratorCompletionPolicyTests, ResumedAbsXyInconsistentActiveEndpointFails) {
+    OrchestratorCompletionPolicy::AbsXyResumeInput input{
+        true, true, true, false, true, true};
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyResumeDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyResume(input)));
+
+    input.terminalCompleted = true;
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyResumeDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyResume(input)));
+}
+
+TEST(OrchestratorCompletionPolicyTests, ResumedAbsXyInvalidOrInactiveStateFails) {
+    OrchestratorCompletionPolicy::AbsXyResumeInput input{
+        true, true, false, false, false, true};
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyResumeDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyResume(input)));
+
+    input.executorActive = true;
+    input.targetCanonical = false;
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyResumeDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyResume(input)));
+
+    input.targetCanonical = true;
+    input.startAccepted = false;
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyResumeDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyResume(input)));
+
+    input.startAccepted = true;
+    input.targetsMatch = false;
+    LONGS_EQUAL(
+        static_cast<long>(OrchestratorCompletionPolicy::AbsXyResumeDisposition::MotionFailure),
+        static_cast<long>(OrchestratorCompletionPolicy::evaluateAbsXyResume(input)));
+}
+
 TEST(OrchestratorCompletionPolicyTests, DirectMoveCompletionRequiresEveryGate) {
     OrchestratorCompletionPolicy::DirectMoveCompletionInput input{
         true, true, false, true, false, true, true};

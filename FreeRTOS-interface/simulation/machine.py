@@ -369,6 +369,36 @@ class SimulatedMachine(QtCore.QObject):
             "simulated_duration_ms": command.simulated_duration_ms,
         }
 
+    def get_active_command_snapshot(self, command_number):
+        """Return retained nonterminal command metadata without simulated I/O."""
+        try:
+            requested = int(command_number)
+        except (TypeError, ValueError):
+            return None
+        command = next(
+            (
+                item
+                for item in self.command_queue.queue
+                if item.command_number == requested
+            ),
+            None,
+        )
+        if command is None or command.status not in {
+            "Added",
+            "Sent",
+            "Accepted",
+            "Executing",
+        }:
+            return None
+        return {
+            "command_number": command.command_number,
+            "command_type": command.command_type,
+            "param1": command.param1,
+            "param2": command.param2,
+            "param3": command.param3,
+            "status": command.status,
+        }
+
     def connect_board(self, port=SIMULATED_PORT):
         if str(port or "").strip().upper() != SIMULATED_PORT:
             return self._emit_error(

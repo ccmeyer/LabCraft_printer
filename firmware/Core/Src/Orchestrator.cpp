@@ -791,9 +791,14 @@ Orchestrator::AbsoluteXyExecutionResult Orchestrator::executeAbsoluteXy(
   return result;
 }
 
-bool Orchestrator::validateResumedAbsoluteXy(int32_t targetX,
-                                             int32_t targetY) {
-  const GantryPosition position = Gantry::instance()->getPosition();
+OrchestratorCompletionPolicy::AbsXyResumeDisposition
+Orchestrator::inspectResumedAbsoluteXy(
+    int32_t targetX,
+    int32_t targetY,
+    AbsoluteXyExecutionResult& result,
+    GantryPosition& position,
+    CoordinatedXySnapshot& snapshot) {
+  position = Gantry::instance()->getPosition();
   int32_t actualTargetX = position.x;
   int32_t actualTargetY = position.y;
   const bool targetsCanonical =
@@ -803,25 +808,52 @@ bool Orchestrator::validateResumedAbsoluteXy(int32_t targetX,
           position.y, targetY, actualTargetY);
   Stepper* stepperX = Stepper::stepperX();
   Stepper* stepperY = Stepper::stepperY();
-  bool completed = targetsCanonical &&
-      position.x == actualTargetX && position.y == actualTargetY &&
-      stepperX != nullptr && stepperY != nullptr &&
-      stepperX->getTargetPosition() == actualTargetX &&
-      stepperY->getTargetPosition() == actualTargetY;
-  const CoordinatedXySnapshot snapshot = Gantry::instance()->coordinatedSnapshot();
-  AbsoluteXyExecutionResult result{};
+  snapshot = Gantry::instance()->coordinatedSnapshot();
+  result = AbsoluteXyExecutionResult{};
   result.startStatus = snapshot.startStatus;
   result.terminalReason = snapshot.terminalReason;
-  result.waitCompleted = true;
   result.endpointMatches = targetsCanonical &&
       position.x == actualTargetX && position.y == actualTargetY;
   result.targetsMatch = stepperX != nullptr && stepperY != nullptr &&
       stepperX->getTargetPosition() == actualTargetX &&
       stepperY->getTargetPosition() == actualTargetY;
-  completed = completed &&
+  const bool startAccepted =
+      snapshot.startStatus == CoordinatedStartStatus::Started ||
+      snapshot.startStatus == CoordinatedStartStatus::Immediate;
+  const bool terminalCompleted =
       snapshot.state == CoordinatedXyExecutor::State::Completed &&
       snapshot.terminalReason == CoordinatedXyExecutor::TerminalReason::Completed;
+  return OrchestratorCompletionPolicy::evaluateAbsXyResume({
+      targetsCanonical,
+      startAccepted,
+      snapshot.state == CoordinatedXyExecutor::State::Armed ||
+          snapshot.state == CoordinatedXyExecutor::State::Running ||
+          snapshot.state == CoordinatedXyExecutor::State::Paused,
+      terminalCompleted,
+      result.endpointMatches,
+      result.targetsMatch,
+  });
+}
+
+bool Orchestrator::validateResumedAbsoluteXy(int32_t targetX,
+                                             int32_t targetY,
+                                             bool waitCompleted) {
+  AbsoluteXyExecutionResult result{};
+  GantryPosition position{};
+  CoordinatedXySnapshot snapshot{};
+  const auto disposition = inspectResumedAbsoluteXy(
+      targetX, targetY, result, position, snapshot);
+  const bool completed = disposition ==
+      OrchestratorCompletionPolicy::AbsXyResumeDisposition::CompleteWithoutWait;
+  result.waitCompleted = waitCompleted;
   if (!completed) {
+    int32_t actualTargetX = position.x;
+    int32_t actualTargetY = position.y;
+    const bool targetsCanonical =
+        MotionUnitScale::canonicalizeAbsoluteTarget(
+            position.x, targetX, actualTargetX) &&
+        MotionUnitScale::canonicalizeAbsoluteTarget(
+            position.y, targetY, actualTargetY);
     const bool startAccepted =
         snapshot.startStatus == CoordinatedStartStatus::Started ||
         snapshot.startStatus == CoordinatedStartStatus::Immediate;
@@ -1446,12 +1478,32 @@ void Orchestrator::_run() {
 			  resumedCommandCompleted = validateResumedDirectAxis(_lastPausedCmd);
 			  break;
 			case CMD_ABS_XY:
-			  resumedCommandCompleted = resumeStatus == MotionResumeStatus::Failed
-			      ? validateResumedAbsoluteXy(_lastPausedCmd.p1s(),
-			                                  _lastPausedCmd.p2s())
-			      : (waitForBits(BIT_STEPPER1_DONE | BIT_STEPPER2_DONE) &&
-			         validateResumedAbsoluteXy(_lastPausedCmd.p1s(),
-			                                   _lastPausedCmd.p2s()));
+			  {
+			    AbsoluteXyExecutionResult resumeResult{};
+			    GantryPosition resumePosition{};
+			    CoordinatedXySnapshot resumeSnapshot{};
+			    const auto disposition = inspectResumedAbsoluteXy(
+			        _lastPausedCmd.p1s(),
+			        _lastPausedCmd.p2s(),
+			        resumeResult,
+			        resumePosition,
+			        resumeSnapshot);
+			    if (disposition == OrchestratorCompletionPolicy::
+			            AbsXyResumeDisposition::CompleteWithoutWait) {
+			      resumedCommandCompleted = true;
+			    } else if (disposition == OrchestratorCompletionPolicy::
+			                   AbsXyResumeDisposition::MotionFailure ||
+			               resumeStatus == MotionResumeStatus::Failed) {
+			      resumedCommandCompleted = validateResumedAbsoluteXy(
+			          _lastPausedCmd.p1s(), _lastPausedCmd.p2s(), false);
+			    } else {
+			      const bool resumedWaitCompleted =
+			          waitForBits(BIT_STEPPER1_DONE | BIT_STEPPER2_DONE);
+			      resumedCommandCompleted = resumedWaitCompleted &&
+			          validateResumedAbsoluteXy(
+			              _lastPausedCmd.p1s(), _lastPausedCmd.p2s(), true);
+			    }
+			  }
 			  break;
 			case CMD_DISPENSE:
 			case CMD_DISPENSE_PRINT:

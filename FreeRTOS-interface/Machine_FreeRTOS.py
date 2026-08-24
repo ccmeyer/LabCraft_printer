@@ -6467,6 +6467,23 @@ class Machine(QObject):
                 return command
         return None
 
+    def get_active_command_snapshot(self, command_number):
+        """Return retained nonterminal command metadata without machine I/O."""
+        command = self._find_command_by_number(command_number)
+        if command is None:
+            return None
+        status = str(getattr(command, "status", "") or "")
+        if status not in {"Added", "Sent", "Accepted", "Executing"}:
+            return None
+        return {
+            "command_number": int(getattr(command, "command_number", 0) or 0),
+            "command_type": str(getattr(command, "command_type", "") or "").upper(),
+            "param1": int(getattr(command, "param1", 0) or 0),
+            "param2": int(getattr(command, "param2", 0) or 0),
+            "param3": int(getattr(command, "param3", 0) or 0),
+            "status": status,
+        }
+
     def _align_command_counter_after_clear(self, last_retired_command):
         last_retired = self._coerce_optional_int(last_retired_command)
         if last_retired is None:

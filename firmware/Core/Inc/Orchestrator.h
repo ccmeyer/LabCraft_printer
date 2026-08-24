@@ -464,7 +464,15 @@ private:
                                               EventBits_t doneBit,
                                               bool latchFailure = true);
   bool validateResumedDirectAxis(const Command& cmd);
-  bool validateResumedAbsoluteXy(int32_t targetX, int32_t targetY);
+  OrchestratorCompletionPolicy::AbsXyResumeDisposition inspectResumedAbsoluteXy(
+      int32_t targetX,
+      int32_t targetY,
+      AbsoluteXyExecutionResult& result,
+      GantryPosition& position,
+      CoordinatedXySnapshot& snapshot);
+  bool validateResumedAbsoluteXy(int32_t targetX,
+                                 int32_t targetY,
+                                 bool waitCompleted);
   void latchCoordinatedXyMotionFailure(
       XyMotionFaultReason reason,
       const AbsoluteXyExecutionResult& result,
