@@ -4633,6 +4633,37 @@ Operators can update the Python application from the Firmware tab.
 
 Maintainers preparing release tags, release metadata, update bundles, or stable/RC promotions should follow `docs/release_process.md`.
 
+### Isolated exact-tag upgrade rehearsal
+
+Before rolling a machine-data release out to legacy cohorts, use the
+[exact-tag Pi upgrade rehearsal](docs/machine_data_rc7_upgrade_rehearsal_plan.md).
+It creates a standalone clone and unique external cancellation/activation roots
+for one preserved `VERSION` plus `local/` wrapper. It does not move the
+production or development worktree, reuse either established machine-data
+store, launch the normal application, or touch firmware.
+
+Prepare one run per source cohort:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\run_pi_upgrade_rehearsal.ps1 `
+  -Action Prepare `
+  -PiHost 192.168.0.33 `
+  -SshIdentityFile verification_reports\pi_sil_codex_network_ed25519 `
+  -SourceRelease v1.2.0-rc.6 `
+  -TargetRelease v1.3.0-rc.7 `
+  -SourceWrapper "/absolute/pi/path/to/preserved-wrapper" `
+  -ExpectedMachineId "EXPECTED-MACHINE-ID" `
+  -Operator "Operator Name"
+```
+
+Record the returned run ID and progress explicitly through `Status`, `Update`,
+`Cancel`, `Activate`, and `Verify`. After two distinct source cohorts are
+verified, `Summarize` seals their shared exact target. There is no cleanup
+action: a fresh run ID supplies a fresh destination, while failed and passing
+evidence remains available for review. Real coordinates stay in private Pi
+evidence; ignored Windows reports contain only hashes, counts, tags, commits,
+and results.
+
 Expected flow:
 
 - Click `Check for Updates`.

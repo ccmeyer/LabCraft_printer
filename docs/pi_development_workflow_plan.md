@@ -1192,6 +1192,16 @@ Run the complete failure/success matrix on Windows and LC-001, seal evidence,
 and document daily no-hardware development, firmware HIL, attended hardware
 testing, failure recovery, and released-firmware restoration.
 
+## Related exact-tag upgrade rehearsal
+
+Legacy-to-current migration rehearsal is a separate bootstrap-only lane, not a
+development-worktree launch. Use `tools/run_pi_upgrade_rehearsal.ps1` and the
+[exact-tag rehearsal runbook](machine_data_rc7_upgrade_rehearsal_plan.md). It
+uses standalone disposable clones and fresh external roots while treating both
+established worktrees, both established stores, the shared environment, and
+firmware state as immutable controls. Never roll either established worktree
+back to a legacy tag for this purpose.
+
 ## Decision log
 
 | Date | Decision | Rationale |
@@ -1223,6 +1233,7 @@ testing, failure recovery, and released-firmware restoration.
 | Date | Change |
 | --- | --- |
 | 2026-08-21 | Created the live eight-slice workflow, concrete Slice 1 plan, Slices 2-4 implementation contract, and continuous Goal prompt. |
+| 2026-08-24 | Added the separately routed exact-tag updater/bootstrap rehearsal; it never repurposes the protected or development worktree and retains every run root. |
 | 2026-08-21 | Began Slice 1 implementation on `feature/pi-development-workflow`. |
 | 2026-08-21 | Completed Slice 1 implementation and automated validation; clean/pushed Pi invariance qualification remains. |
 | 2026-08-21 | Published `e58129b3` and marked Slice 1 verified after clean/pushed Preflight and exact Pi-state invariance passed. |
