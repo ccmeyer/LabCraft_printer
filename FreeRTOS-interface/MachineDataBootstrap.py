@@ -762,6 +762,7 @@ class MachineDataBootstrap:
             "migration_published",
             "verification_written",
             "activation_receipt_written",
+            "deployment_enrolled",
             "pointer_written",
         )
         if state not in order:
@@ -937,6 +938,26 @@ class MachineDataBootstrap:
                 activation_id=activation_id,
                 migration_id=published.receipt.migration_id,
                 activation_receipt_sha256=activation_sha,
+            )
+            try:
+                validate_or_enroll_deployment(
+                    paths,
+                    active,
+                    configuration_lock,
+                    app_version=self.app_version,
+                    app_commit=self.app_commit,
+                    release_contract=self.release_contract,
+                    allow_genesis_enrollment=True,
+                    io=self.io,
+                    clock=self.clock,
+                )
+            except MachineDataUpdateError as exc:
+                raise BootstrapError("recovery_required", str(exc)) from exc
+            self._write_journal(
+                workspace,
+                "deployment_enrolled",
+                identity,
+                published.receipt.migration_id,
             )
             self.io.atomic_write_json(
                 self.base.active_machine_path,

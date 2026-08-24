@@ -47,6 +47,7 @@ from MachineDataLock import (
     acquire_update_lock,
 )
 from MachineDataTransactions import inspect_configuration_state, read_governed_documents
+from MachineDataMigration import MigrationState, load_migration_receipt
 from MachineDataVerification import (
     build_target_snapshot,
     load_activation_receipt,
@@ -68,7 +69,10 @@ LATEST_RESULT_SCHEMA_NAME = "labcraft.machine_data_update_latest_result"
 LATEST_RESULT_SCHEMA_VERSION = 1
 GENESIS_ENROLLMENT_VERSION = "v1.3.0-rc.2"
 GENESIS_ENROLLMENT_VERSIONS = frozenset(
-    {GENESIS_ENROLLMENT_VERSION, "v1.3.0-rc.3"}
+    {GENESIS_ENROLLMENT_VERSION, "v1.3.0-rc.3", "v1.3.0-rc.8"}
+)
+GENESIS_MIGRATION_SOURCE_VERSIONS = frozenset(
+    {"v1.2.0", "v1.2.0-rc.6", "v1.3.0-rc.1"}
 )
 
 TRANSITION_NONE = "none"
@@ -828,23 +832,46 @@ def _validate_genesis_enrollment_evidence(
     if app_version not in GENESIS_ENROLLMENT_VERSIONS:
         raise MachineDataUpdateError(
             "deployment_anchor_missing",
-            "Only a reviewed rc.2/rc.3 first-start deployment may create a genesis anchor.",
+            "Only a reviewed rc.2, rc.3, or rc.8 first-start deployment may create a genesis anchor.",
             recovery_required=True,
         )
     try:
+        migration = load_migration_receipt(paths.migration_receipt_path)
         activation = load_activation_receipt(paths.activation_receipt_path)
         verification = load_machine_verification(paths.verification_path)
+        migration_sha = sha256_file(paths.migration_receipt_path)[0]
         activation_sha = sha256_file(paths.activation_receipt_path)[0]
+        verification_sha = sha256_file(paths.verification_path)[0]
     except Exception as exc:
         raise MachineDataUpdateError(
             "deployment_anchor_missing",
             f"Genesis enrollment evidence could not be validated: {exc}",
             recovery_required=True,
         ) from exc
+    if migration.source_version not in GENESIS_MIGRATION_SOURCE_VERSIONS:
+        raise MachineDataUpdateError(
+            "deployment_anchor_missing",
+            "Genesis enrollment source release is not an approved legacy migration cohort.",
+            recovery_required=True,
+        )
     if (
-        active.activation_receipt_sha256 != activation_sha
+        migration.state is not MigrationState.COPIED_UNVERIFIED
+        or migration.machine_id != active.machine_id
+        or migration.machine_uuid != active.machine_uuid
+        or migration.migration_id != active.migration_id
+        or activation.machine_id != active.machine_id
+        or activation.machine_uuid != active.machine_uuid
+        or active.activation_receipt_sha256 != activation_sha
         or active.activation_id != activation.activation_id
         or active.migration_id != activation.migration_id
+        or activation.migration_receipt_sha256 != migration_sha
+        or activation.verification_sha256 != verification_sha
+        or activation.backup_archive_sha256 != migration.backup_archive_sha256
+        or verification.machine_id != active.machine_id
+        or verification.machine_uuid != active.machine_uuid
+        or verification.migration_id != active.migration_id
+        or verification.migration_receipt_sha256 != migration_sha
+        or verification.activation_ready is not True
         or activation.app_version != app_version
         or not commit_identities_match(activation.app_commit, app_commit)
         or verification.app_version != app_version
@@ -936,13 +963,11 @@ def inspect_deployment_gate(
             "Deployment history exists but its anchor is missing.",
             recovery_required=True,
         )
-    _validate_genesis_enrollment_evidence(
-        paths,
-        active,
-        app_version=app_version,
-        app_commit=app_commit,
+    raise MachineDataUpdateError(
+        "deployment_anchor_missing",
+        "A missing deployment anchor cannot be enrolled during ordinary startup.",
+        recovery_required=True,
     )
-    return None
 
 
 def validate_or_enroll_deployment(
@@ -953,6 +978,7 @@ def validate_or_enroll_deployment(
     app_version: str,
     app_commit: str,
     release_contract: Mapping[str, object] | None,
+    allow_genesis_enrollment: bool = False,
     io: DurableFileOps | None = None,
     clock: Callable[[], str] = utc_now,
 ) -> Mapping[str, object] | None:
@@ -960,6 +986,12 @@ def validate_or_enroll_deployment(
 
     if release_contract is None:
         return None
+    if type(allow_genesis_enrollment) is not bool:
+        raise MachineDataUpdateError(
+            "deployment_anchor_invalid",
+            "Genesis enrollment authority must be an explicit boolean.",
+            recovery_required=True,
+        )
     release_contract = parse_release_machine_data_contract(dict(release_contract), required=True)
     assert release_contract is not None
     configuration_lock.assert_owns(paths)
@@ -988,6 +1020,12 @@ def validate_or_enroll_deployment(
         raise MachineDataUpdateError(
             "deployment_anchor_missing",
             "Deployment history exists but its anchor is missing.",
+            recovery_required=True,
+        )
+    if not allow_genesis_enrollment:
+        raise MachineDataUpdateError(
+            "deployment_anchor_missing",
+            "Genesis enrollment is permitted only during the current reviewed activation transaction.",
             recovery_required=True,
         )
     _validate_genesis_enrollment_evidence(
@@ -1471,6 +1509,7 @@ __all__ = [
     "LATEST_RESULT_SCHEMA_NAME",
     "GENESIS_ENROLLMENT_VERSION",
     "GENESIS_ENROLLMENT_VERSIONS",
+    "GENESIS_MIGRATION_SOURCE_VERSIONS",
     "MachineDataUpdateError",
     "PreparedUpdate",
     "ProtectedMember",

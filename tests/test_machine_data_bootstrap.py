@@ -4,6 +4,7 @@ import pytest
 
 import MachineDataBootstrap
 import MachineDataMigration
+from MachineDataArchive import DurableFileOps
 from tests.machine_data_migration_helpers import (
     FIXED_TIME,
     MACHINE_ID,
@@ -20,16 +21,38 @@ from tests.machine_data_migration_helpers import (
 ACTIVATION_ID = "00000000-0000-0000-0000-000000000003"
 
 
-def _bootstrap(base, *, uuid_values=()):
+def _bootstrap(
+    base,
+    *,
+    uuid_values=(),
+    app_version="v1.3.0-rc.2",
+    app_commit="test-commit",
+    release_contract=None,
+    io=None,
+):
     values = iter(uuid_values)
+    kwargs = {}
+    if release_contract is not None:
+        kwargs["release_contract"] = release_contract
+    if io is not None:
+        kwargs["io"] = io
     return MachineDataBootstrap.MachineDataBootstrap(
         base,
-        app_version="v1.3.0-rc.2",
-        app_commit="test-commit",
+        app_version=app_version,
+        app_commit=app_commit,
         migration_policy=migration_policy(),
         clock=lambda: FIXED_TIME,
         uuid_factory=lambda: next(values),
+        **kwargs,
     )
+
+
+RC8_CONTRACT = {
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "data_schema_version": 1,
+    "transition": "none",
+    "transition_id": None,
+}
 
 
 def test_development_bootstrap_explicitly_disables_release_deployment_gate(tmp_path):
@@ -98,6 +121,131 @@ def test_first_start_migrates_activates_and_reuses_from_second_checkout(
         assert reused.active_machine == context.active_machine
     finally:
         reused.close()
+
+
+def test_rc8_genesis_is_durable_before_active_pointer_publication(tmp_path):
+    checkpoints = []
+    io = DurableFileOps(fault_hook=lambda name, _path: checkpoints.append(name))
+    wrapper, _local = write_wrapper(
+        tmp_path / "source", cohort="v1.3.0-rc.1", custom_camera=True
+    )
+    candidate = inspect_wrapper(wrapper)
+    base, _unused_paths = machine_data_paths(tmp_path)
+    bootstrap = _bootstrap(
+        base,
+        uuid_values=(MIGRATION_ID,),
+        app_version="v1.3.0-rc.8",
+        app_commit="8" * 40,
+        release_contract=RC8_CONTRACT,
+        io=io,
+    )
+
+    context = bootstrap.bootstrap_from_candidate(
+        MachineDataBootstrap.BootstrapSubmission(
+            selection=MachineDataMigration.CandidateSelection(
+                MachineDataMigration.CandidateSourceKind.OPERATOR_SELECTED_WRAPPER,
+                wrapper,
+            ),
+            machine_id=MACHINE_ID,
+            machine_uuid=MACHINE_UUID,
+            activation_id=ACTIVATION_ID,
+            operator="Test Operator",
+            source_reason="Preserved pre-update local",
+            camera_confirmation=candidate.safety_snapshot["locations"]["camera"],
+        )
+    )
+    try:
+        assert checkpoints.index("after_deployment_genesis_replace") < checkpoints.index(
+            "before_active_machine_write"
+        )
+    finally:
+        context.close()
+
+
+def test_rc8_genesis_failure_leaves_no_active_pointer(tmp_path):
+    def fail_genesis(name, _path):
+        if name == "before_deployment_genesis_write":
+            raise RuntimeError("injected genesis failure")
+
+    wrapper, _local = write_wrapper(
+        tmp_path / "source", cohort="v1.3.0-rc.1", custom_camera=True
+    )
+    candidate = inspect_wrapper(wrapper)
+    base, paths = machine_data_paths(tmp_path)
+    bootstrap = _bootstrap(
+        base,
+        uuid_values=(MIGRATION_ID,),
+        app_version="v1.3.0-rc.8",
+        app_commit="8" * 40,
+        release_contract=RC8_CONTRACT,
+        io=DurableFileOps(fault_hook=fail_genesis),
+    )
+
+    with pytest.raises(RuntimeError, match="injected genesis failure"):
+        bootstrap.bootstrap_from_candidate(
+            MachineDataBootstrap.BootstrapSubmission(
+                selection=MachineDataMigration.CandidateSelection(
+                    MachineDataMigration.CandidateSourceKind.OPERATOR_SELECTED_WRAPPER,
+                    wrapper,
+                ),
+                machine_id=MACHINE_ID,
+                machine_uuid=MACHINE_UUID,
+                activation_id=ACTIVATION_ID,
+                operator="Test Operator",
+                source_reason="Preserved pre-update local",
+                camera_confirmation=candidate.safety_snapshot["locations"]["camera"],
+            )
+        )
+
+    assert not base.active_machine_path.exists()
+    assert not paths.deployment_anchor_path.exists()
+    journal = json.loads(
+        (
+            base.activation_work_root
+            / MACHINE_UUID
+            / ACTIVATION_ID
+            / "journal.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert journal["state"] == "activation_receipt_written"
+
+
+def test_rc8_rejects_unapproved_source_release_before_active_pointer(tmp_path):
+    wrapper, _local = write_wrapper(
+        tmp_path / "source", cohort="v1.3.0-rc.1", custom_camera=True
+    )
+    (wrapper / "VERSION").write_text("v1.3.0-rc.7\n", encoding="utf-8")
+    candidate = inspect_wrapper(wrapper)
+    base, paths = machine_data_paths(tmp_path)
+    bootstrap = _bootstrap(
+        base,
+        uuid_values=(MIGRATION_ID,),
+        app_version="v1.3.0-rc.8",
+        app_commit="8" * 40,
+        release_contract=RC8_CONTRACT,
+    )
+
+    with pytest.raises(
+        MachineDataBootstrap.BootstrapError,
+        match="approved legacy migration cohort",
+    ):
+        bootstrap.bootstrap_from_candidate(
+            MachineDataBootstrap.BootstrapSubmission(
+                selection=MachineDataMigration.CandidateSelection(
+                    MachineDataMigration.CandidateSourceKind.OPERATOR_SELECTED_WRAPPER,
+                    wrapper,
+                ),
+                machine_id=MACHINE_ID,
+                machine_uuid=MACHINE_UUID,
+                activation_id=ACTIVATION_ID,
+                operator="Test Operator",
+                source_reason="Unsupported source",
+                camera_confirmation=candidate.safety_snapshot["locations"]["camera"],
+            )
+        )
+
+    assert not base.active_machine_path.exists()
+    assert not paths.deployment_anchor_path.exists()
 
 
 def test_completed_m2_workspace_absence_can_resume_activation(tmp_path):
