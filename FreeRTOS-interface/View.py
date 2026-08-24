@@ -2735,7 +2735,7 @@ class MainWindow(QMainWindow):
             )
             self._pause_action_dialog = confirmation_dialog
             if confirmation_dialog.exec_confirmed():
-                self.controller.clear_command_queue()
+                self.controller.clear_command_queue(confirmed=True)
         finally:
             self._pause_action_dialog = None
             self._pause_action_flow_active = False
@@ -5484,13 +5484,30 @@ class PressurePlotBox(QtWidgets.QGroupBox):
             return True
 
         try:
-            self.controller.clear_command_queue()
+            request_clear = getattr(
+                self.controller,
+                "request_calibration_cleanup_queue_clear",
+                None,
+            )
+            clear_requested = bool(callable(request_clear) and request_clear())
         except Exception as exc:
+            clear_requested = False
             cleanup_error = f"{cleanup_error} Queue-clear fallback also failed: {exc}"
-        self.popup_message_signal.emit(
-            "Calibration Profile Cleanup Failed",
-            f"{cleanup_error} Verify the machine is idle before continuing.",
-        )
+
+        if clear_requested:
+            self.popup_message_signal.emit(
+                "Calibration Profile Cleanup Failed",
+                f"{cleanup_error} A guarded queue-clear fallback was requested. "
+                "Verify the machine is idle before continuing.",
+            )
+        else:
+            self.popup_message_signal.emit(
+                "Calibration Profile Cleanup Blocked",
+                f"{cleanup_error} The queue was not cleared because an experiment "
+                "or queue-clear recovery may still be active. The experiment was "
+                "preserved; keep the machine paused and use the confirmed abort "
+                "workflow if clearing is required.",
+            )
         return False
 
     def calibration_session_is_idle(self):

@@ -63,6 +63,23 @@ ARRAY_PRINT_SERPENTINE = True
 ARRAY_GENTLE_ACCEL_ENABLED = False
 ARRAY_ROW_START_OVERSHOOT_STEPS = 0
 PAUSED_ARRAY_SOFT_STOP_PHASE_TIMEOUT_MS = 4_000
+QUEUE_CLEAR_INTENT_USER_CONFIRMED = "user_confirmed"
+QUEUE_CLEAR_INTENT_SAFE_STOP_BOUNDARY = "safe_stop_boundary"
+QUEUE_CLEAR_INTENT_ARRAY_TERMINAL = "array_terminal"
+QUEUE_CLEAR_INTENT_XY_RECOVERY = "xy_recovery"
+QUEUE_CLEAR_INTENT_CALIBRATION_CLEANUP = "calibration_cleanup"
+QUEUE_CLEAR_INTENTS = frozenset(
+    {
+        QUEUE_CLEAR_INTENT_USER_CONFIRMED,
+        QUEUE_CLEAR_INTENT_SAFE_STOP_BOUNDARY,
+        QUEUE_CLEAR_INTENT_ARRAY_TERMINAL,
+        QUEUE_CLEAR_INTENT_XY_RECOVERY,
+        QUEUE_CLEAR_INTENT_CALIBRATION_CLEANUP,
+    }
+)
+QUEUE_CLEAR_BOUNDARY_PROOFS = frozenset(
+    {"watermark_reached", "frozen_barrier_retired"}
+)
 PLATE_DOCK_SAFE_Z = 500
 PLATE_DOCK_X_OFFSET = -5000
 PLATE_SEATED_LOCATIONS = {"pause", "plate"}
@@ -1084,6 +1101,11 @@ class Controller(QObject):
 
         self._array_state = "idle"
         self._array_context = None
+        self._queue_clear_attempt_counter = 0
+        self._queue_clear_attempt = None
+        self._queue_clear_state = "idle"
+        self._queue_clear_uncertain = False
+        self._queue_clear_last_rejection = None
         self._pending_reset_print_settings_restore = None
 
         # Connect the machine's signals to the controller's handlers
@@ -1352,6 +1374,7 @@ class Controller(QObject):
                 and self.model.machine_model.pause_watermark_reached
                 and self.model.machine_model.transport_paused
             ):
+                context["soft_stop_clear_boundary_proof"] = "watermark_reached"
                 self._begin_soft_stop_clear_and_park()
             elif soft_stop_phase == "waiting_completion_catchup":
                 self._maybe_complete_array_soft_stop_after_catchup()
@@ -2319,12 +2342,17 @@ class Controller(QObject):
             self._restore_print_settings_after_board_reset()
         else:
             print("Controller: Failed to connect to the machine.")
+            self._invalidate_queue_clear_attempt("machine_disconnected")
             self._emit_machine_workflow_interrupted("machine_disconnected")
             self._interrupt_array_after_machine_disconnect()
             self.model.machine_model.disconnect_machine()
 
     def handle_reset_report(self, report: dict):
         report = dict(report or {})
+        self._invalidate_queue_clear_attempt(
+            "board_reset_detected",
+            clear_uncertainty=True,
+        )
         self._emit_machine_workflow_interrupted("board_reset_detected")
         manager = self._stream_capture_manager()
         invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
@@ -2465,6 +2493,7 @@ class Controller(QObject):
         return export_reset_debug_bundle(context, output_dir=destination)
 
     def handle_serial_connection_lost(self, report: dict):
+        self._invalidate_queue_clear_attempt("serial_connection_lost")
         self._emit_machine_workflow_interrupted("serial_connection_lost")
         manager = self._stream_capture_manager()
         invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
@@ -2498,6 +2527,7 @@ class Controller(QObject):
 
     def handle_transport_fault(self, report: dict):
         report = dict(report or {})
+        self._invalidate_queue_clear_attempt("transport_fault")
         self._emit_machine_workflow_interrupted("transport_fault")
         manager = self._stream_capture_manager()
         invalidate = getattr(manager, "invalidate_stream_gravimetric_baseline", None)
@@ -4327,22 +4357,62 @@ class Controller(QObject):
         self.model.machine_model.resume_commands()
         return True
 
-    def clear_command_queue(self):
-        """Clear the command queue."""
-        self._invalidate_paused_array_soft_stop_attempt()
-        self._clear_machine_and_model_command_queues(
+    def clear_command_queue(self, *, confirmed=False):
+        """Issue an operator-confirmed destructive queue clear.
+
+        Calling this method without the explicit confirmation marker is
+        intentionally fail-closed. Internal safety and recovery clears use
+        separately classified Controller paths below.
+        """
+        if not bool(confirmed):
+            return self._reject_queue_clear(
+                "unclassified_clear_request",
+                intent=None,
+                notify_user=True,
+            )
+
+        allowed, rejection = self._authorize_queue_clear(
+            QUEUE_CLEAR_INTENT_USER_CONFIRMED
+        )
+        if not allowed:
+            return self._reject_queue_clear(
+                rejection,
+                intent=QUEUE_CLEAR_INTENT_USER_CONFIRMED,
+                notify_user=True,
+            )
+
+        context = getattr(self, "_array_context", None)
+        array_active = bool(
+            isinstance(context, dict)
+            and self.get_array_run_state() in {"running", "stop_requested"}
+        )
+        if array_active:
+            self._invalidate_paused_array_soft_stop_attempt(context)
+            context["soft_stop_pending"] = False
+            context["soft_stop_phase"] = "done"
+            context["finalize_reason"] = "hard_abort"
+            context["array_clear_fallback_attempted"] = True
+            context["array_clear_fallback_requested"] = False
+            self._set_array_run_state("stop_requested")
+
+        completion_handler = None
+        if array_active:
+            completion_handler = lambda result, expected_context=context: (
+                self._finalize_array_hard_abort_after_clear(
+                    expected_context,
+                    result,
+                )
+            )
+
+        sent = self._request_guarded_queue_clear(
+            QUEUE_CLEAR_INTENT_USER_CONFIRMED,
             reason="queue_clear_requested",
             notify_user=True,
+            handler=completion_handler,
         )
-        if self.get_array_run_state() != "idle":
-            context = getattr(self, "_array_context", None)
-            if isinstance(context, dict):
-                context["array_clear_fallback_requested"] = True
-            self._complete_array_finalize("hard_abort")
-        try:
-            self.update_expected_with_current()
-        except Exception:
-            pass
+        if array_active:
+            context["array_clear_fallback_requested"] = bool(sent)
+        return bool(sent)
 
     def get_array_run_state(self):
         """Return the current array runner state."""
@@ -4429,9 +4499,11 @@ class Controller(QObject):
 
     def start_new_experiment_session(self, *, base_dir=None):
         array_state = self.get_array_run_state()
+        queue_clear_state = self.get_queue_clear_state()
         array_runner_idle = (
             array_state in {"idle", "resume_ready"}
             and not bool(getattr(self, "_soft_stop_clear_uncertain", False))
+            and queue_clear_state["state"] == "idle"
         )
         experiment_path = self.model.start_new_experiment_session(
             array_runner_idle=array_runner_idle,
@@ -4455,14 +4527,24 @@ class Controller(QObject):
         """Request the operator-confirmed Clear step for an XY motion fault."""
         if self.get_xy_motion_recovery_state() != "clear_required":
             return False
-        try:
-            result = self._clear_machine_and_model_command_queues(
-                reason="xy_motion_recovery_clear",
-                notify_user=False,
+        if self.get_array_run_state() in {"running", "stop_requested"}:
+            self._interrupt_array_after_transport_fault(
+                {"fault_code": "xy_recovery_clear"},
+                reason="gantry_motion_failure",
             )
-        except Exception:
-            return False
-        return result is not False
+        return self._request_guarded_queue_clear(
+            QUEUE_CLEAR_INTENT_XY_RECOVERY,
+            reason="xy_motion_recovery_clear",
+            notify_user=False,
+        )
+
+    def request_calibration_cleanup_queue_clear(self):
+        """Request the calibration lease's classified CLEAR fallback."""
+        return self._request_guarded_queue_clear(
+            QUEUE_CLEAR_INTENT_CALIBRATION_CLEANUP,
+            reason="calibration_profile_cleanup_clear",
+            notify_user=False,
+        )
 
     def _emit_machine_workflow_interrupted(self, reason, *, notify_user=False):
         payload = {
@@ -4472,23 +4554,284 @@ class Controller(QObject):
         self._emit_optional("machine_workflow_interrupted_signal", payload)
         return payload
 
-    def _clear_machine_and_model_command_queues(
+    def _ensure_queue_clear_tracking(self):
+        """Initialize tracking for compatibility with lightweight test doubles."""
+        if not hasattr(self, "_queue_clear_attempt_counter"):
+            self._queue_clear_attempt_counter = 0
+        if not hasattr(self, "_queue_clear_attempt"):
+            self._queue_clear_attempt = None
+        if not hasattr(self, "_queue_clear_state"):
+            self._queue_clear_state = "idle"
+        if not hasattr(self, "_queue_clear_uncertain"):
+            self._queue_clear_uncertain = False
+        if not hasattr(self, "_queue_clear_last_rejection"):
+            self._queue_clear_last_rejection = None
+
+    def get_queue_clear_state(self):
+        """Return a JSON-safe snapshot of the Controller CLEAR transaction."""
+        self._ensure_queue_clear_tracking()
+        attempt = getattr(self, "_queue_clear_attempt", None)
+        return {
+            "state": str(getattr(self, "_queue_clear_state", "idle") or "idle"),
+            "intent": attempt.get("intent") if isinstance(attempt, dict) else None,
+            "attempt_token": (
+                int(attempt.get("token") or 0) if isinstance(attempt, dict) else None
+            ),
+            "last_rejection_reason": getattr(
+                self, "_queue_clear_last_rejection", None
+            ),
+        }
+
+    def _queue_clear_machine_is_connected(self):
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        getter = getattr(machine_model, "is_connected", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return False
+        if hasattr(machine_model, "machine_connected"):
+            return bool(getattr(machine_model, "machine_connected", False))
+        # Unit-level Controller doubles predate connection modeling. Production
+        # MachineModel always exposes one of the checks above.
+        return True
+
+    def _record_queue_clear_event(self, event_type, summary, *, details=None, level="info"):
+        payload = dict(details or {})
+        payload["queue_clear_state"] = self.get_queue_clear_state()
+        return self._record_print_array_audit_event(
+            event_type,
+            summary,
+            details=payload,
+            level=level,
+        )
+
+    def _reject_queue_clear(self, reason, *, intent, notify_user=False):
+        self._ensure_queue_clear_tracking()
+        reason = str(reason or "queue_clear_blocked")
+        self._queue_clear_last_rejection = reason
+        self._record_queue_clear_event(
+            "print_array_queue_clear_blocked",
+            "Command queue clear was blocked",
+            details={"queue_clear_intent": intent, "rejection_reason": reason},
+            level="warning",
+        )
+        if notify_user:
+            signal = getattr(self, "error_occurred_signal", None)
+            if signal is not None:
+                try:
+                    signal.emit(
+                        "Queue Clear Blocked",
+                        "The command queue was not cleared because the request was not "
+                        f"authorized for the current machine state ({reason}).",
+                    )
+                except Exception:
+                    pass
+        return False
+
+    def _authorize_queue_clear(self, intent):
+        self._ensure_queue_clear_tracking()
+        if intent not in QUEUE_CLEAR_INTENTS:
+            return False, "unknown_clear_intent"
+        if not self._queue_clear_machine_is_connected():
+            return False, "machine_disconnected"
+        if isinstance(self._queue_clear_attempt, dict):
+            return False, "clear_already_pending"
+
+        context = getattr(self, "_array_context", None)
+        array_state = self.get_array_run_state()
+        uncertain = bool(getattr(self, "_queue_clear_uncertain", False))
+
+        if uncertain and intent not in {
+            QUEUE_CLEAR_INTENT_USER_CONFIRMED,
+            QUEUE_CLEAR_INTENT_XY_RECOVERY,
+        }:
+            return False, "previous_clear_uncertain"
+
+        if intent == QUEUE_CLEAR_INTENT_USER_CONFIRMED:
+            return True, None
+        if intent == QUEUE_CLEAR_INTENT_XY_RECOVERY:
+            if self.get_xy_motion_recovery_state() != "clear_required":
+                return False, "xy_recovery_clear_not_required"
+            if array_state in {"running", "stop_requested"}:
+                return False, "active_array_not_interrupted"
+            return True, None
+        if intent == QUEUE_CLEAR_INTENT_CALIBRATION_CLEANUP:
+            if array_state in {"running", "stop_requested"}:
+                return False, "active_array"
+            if bool(getattr(self, "_soft_stop_clear_uncertain", False)):
+                return False, "soft_stop_clear_uncertain"
+            return True, None
+        if not isinstance(context, dict):
+            return False, "array_context_missing"
+        if intent == QUEUE_CLEAR_INTENT_SAFE_STOP_BOUNDARY:
+            proof = context.get("soft_stop_clear_boundary_proof")
+            if (
+                array_state != "stop_requested"
+                or context.get("soft_stop_phase") != "clearing"
+                or context.get("finalize_reason") != "soft_stop"
+                or proof not in QUEUE_CLEAR_BOUNDARY_PROOFS
+                or context.get("soft_stop_clear_boundary_proof_consumed")
+            ):
+                return False, "safe_stop_boundary_not_proven"
+            return True, None
+        if intent == QUEUE_CLEAR_INTENT_ARRAY_TERMINAL:
+            if context.get("finalize_reason") not in {
+                "completed",
+                "refill_required",
+                "soft_stop",
+                "hard_abort",
+            }:
+                return False, "array_not_finalizing"
+            return True, None
+        return False, "unknown_clear_intent"
+
+    def _complete_guarded_queue_clear(self, token, clear_result, handler):
+        self._ensure_queue_clear_tracking()
+        attempt = self._queue_clear_attempt
+        if not isinstance(attempt, dict) or int(attempt.get("token") or 0) != int(token):
+            return False
+
+        result = dict(clear_result or {})
+        intent = attempt.get("intent")
+        self._queue_clear_attempt = None
+        if bool(result.get("status_confirmed")):
+            self._queue_clear_state = "idle"
+            self._queue_clear_uncertain = False
+            self._soft_stop_clear_uncertain = False
+            self._queue_clear_last_rejection = None
+            try:
+                self.model.machine_model.clear_command_queue()
+            except Exception:
+                pass
+            try:
+                self.update_expected_with_current()
+            except Exception:
+                pass
+            event_type = "print_array_queue_clear_confirmed"
+            summary = "Command queue clear was confirmed"
+            level = "info"
+        else:
+            self._queue_clear_state = "uncertain"
+            self._queue_clear_uncertain = True
+            self._queue_clear_last_rejection = "clear_status_unconfirmed"
+            event_type = "print_array_queue_clear_uncertain"
+            summary = "Command queue clear could not be confirmed"
+            level = "warning"
+
+        self._record_queue_clear_event(
+            event_type,
+            summary,
+            details={
+                "queue_clear_intent": intent,
+                "queue_clear_attempt_token": int(token),
+                "clear_result": result,
+            },
+            level=level,
+        )
+        if callable(handler):
+            try:
+                handler(dict(result))
+            except Exception as exc:
+                signal = getattr(self, "error_occurred_signal", None)
+                if signal is not None:
+                    signal.emit("Queue Clear Completion Failed", str(exc))
+        return True
+
+    def _request_guarded_queue_clear(
         self,
+        intent,
         *,
         reason,
         notify_user=False,
         handler=None,
     ):
-        self._emit_machine_workflow_interrupted(
-            reason,
-            notify_user=notify_user,
+        allowed, rejection = self._authorize_queue_clear(intent)
+        if not allowed:
+            return self._reject_queue_clear(
+                rejection,
+                intent=intent,
+                notify_user=notify_user,
+            )
+
+        self._queue_clear_attempt_counter += 1
+        token = int(self._queue_clear_attempt_counter)
+        self._queue_clear_attempt = {
+            "token": token,
+            "intent": str(intent),
+            "reason": str(reason or "queue_clear_requested"),
+        }
+        self._queue_clear_state = "pending"
+        self._queue_clear_last_rejection = None
+
+        if intent == QUEUE_CLEAR_INTENT_SAFE_STOP_BOUNDARY:
+            self._array_context["soft_stop_clear_boundary_proof_consumed"] = True
+
+        completion = lambda payload=None: self._complete_guarded_queue_clear(
+            token,
+            payload,
+            handler,
         )
-        if handler is None:
-            result = self.machine.clear_command_queue()
-        else:
-            result = self.machine.clear_command_queue(handler=handler)
-        self.model.machine_model.clear_command_queue()
-        return result
+        try:
+            sent = self.machine.clear_command_queue(handler=completion)
+        except Exception as exc:
+            if (
+                isinstance(self._queue_clear_attempt, dict)
+                and self._queue_clear_attempt.get("token") == token
+            ):
+                self._queue_clear_attempt = None
+                self._queue_clear_state = "uncertain"
+                self._queue_clear_uncertain = True
+                self._queue_clear_last_rejection = "clear_write_exception"
+            self._record_queue_clear_event(
+                "print_array_queue_clear_uncertain",
+                "Command queue clear write failed",
+                details={
+                    "queue_clear_intent": intent,
+                    "queue_clear_attempt_token": token,
+                    "exception_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+                level="error",
+            )
+            return False
+
+        if sent is False:
+            if (
+                isinstance(self._queue_clear_attempt, dict)
+                and self._queue_clear_attempt.get("token") == token
+            ):
+                self._queue_clear_attempt = None
+                self._queue_clear_state = (
+                    "uncertain" if self._queue_clear_uncertain else "idle"
+                )
+                self._queue_clear_last_rejection = "clear_transport_rejected"
+            return False
+
+        self._emit_machine_workflow_interrupted(reason, notify_user=notify_user)
+        self._record_queue_clear_event(
+            "print_array_queue_clear_requested",
+            "Command queue clear was requested",
+            details={
+                "queue_clear_intent": intent,
+                "queue_clear_attempt_token": token,
+            },
+        )
+        return True
+
+    def _invalidate_queue_clear_attempt(self, reason, *, clear_uncertainty=False):
+        self._ensure_queue_clear_tracking()
+        had_pending = isinstance(self._queue_clear_attempt, dict)
+        self._queue_clear_attempt = None
+        if clear_uncertainty:
+            self._queue_clear_state = "idle"
+            self._queue_clear_uncertain = False
+            self._queue_clear_last_rejection = None
+        elif had_pending:
+            self._queue_clear_state = "uncertain"
+            self._queue_clear_uncertain = True
+            self._queue_clear_last_rejection = str(reason or "clear_interrupted")
+        return had_pending
 
     def _set_array_run_state(self, state):
         state = str(state or "idle")
@@ -4909,6 +5252,11 @@ class Controller(QObject):
             "soft_stop_attempt_token": context.get("soft_stop_attempt_token"),
             "soft_stop_recovery_reason": context.get("soft_stop_recovery_reason"),
             "soft_stop_clear_uncertain": bool(getattr(self, "_soft_stop_clear_uncertain", False)),
+            "soft_stop_clear_boundary_proof": context.get("soft_stop_clear_boundary_proof"),
+            "soft_stop_clear_boundary_proof_consumed": bool(
+                context.get("soft_stop_clear_boundary_proof_consumed", False)
+            ),
+            "queue_clear": self.get_queue_clear_state(),
             "serpentine": bool(getattr(self, "_array_print_serpentine", ARRAY_PRINT_SERPENTINE)),
             "expected_volume_uL": context.get("expected_volume"),
             "droplet_volume_nL": context.get("droplet_volume"),
@@ -5182,6 +5530,7 @@ class Controller(QObject):
             if self._paused_array_frozen_well_finished_array(context):
                 return self._finish_paused_array_final_well(context)
             context["soft_stop_phase"] = "waiting_watermark"
+            context["soft_stop_clear_boundary_proof"] = "watermark_reached"
             self._invalidate_paused_array_soft_stop_attempt(context)
             return self._begin_soft_stop_clear_and_park()
 
@@ -5560,14 +5909,11 @@ class Controller(QObject):
         detail = detail_map.get(str(reason or "unknown"), f"the pause-after request failed ({reason})")
         barrier_text = f" for command {int(barrier_seq32)}" if barrier_seq32 else ""
 
-        try:
-            self.clear_command_queue()
-        except Exception:
-            self._complete_array_finalize("hard_abort")
+        self._complete_array_finalize("hard_abort")
 
         self.error_occurred_signal.emit(
             "Soft Stop Failed",
-            f"Soft stop failed because {detail}{barrier_text}. The print array was aborted and the queued commands were cleared.",
+            f"Soft stop failed because {detail}{barrier_text}. The print array was aborted and a guarded queue clear was requested.",
         )
 
     def _warn_soft_stop_post_watermark(self, message):
@@ -5615,6 +5961,7 @@ class Controller(QObject):
 
         if context.get("soft_stop_origin") == "immediate_pause":
             context["soft_stop_phase"] = "waiting_watermark"
+            context["soft_stop_clear_boundary_proof"] = "frozen_barrier_retired"
             self._invalidate_paused_array_soft_stop_attempt(context)
             return self._begin_soft_stop_clear_and_park()
 
@@ -5623,7 +5970,8 @@ class Controller(QObject):
         return self._enqueue_array_finalize("soft_stop")
 
     def _clear_command_queue_for_soft_stop(self, on_cleared=None):
-        self._clear_machine_and_model_command_queues(
+        return self._request_guarded_queue_clear(
+            QUEUE_CLEAR_INTENT_SAFE_STOP_BOUNDARY,
             reason="array_queue_clear",
             handler=on_cleared,
         )
@@ -5644,8 +5992,12 @@ class Controller(QObject):
         self._soft_stop_clear_uncertain = False
 
         try:
-            self._clear_command_queue_for_soft_stop(self._on_soft_stop_queue_cleared)
+            clear_requested = self._clear_command_queue_for_soft_stop(
+                self._on_soft_stop_queue_cleared
+            )
         except Exception:
+            clear_requested = False
+        if clear_requested is False:
             context["soft_stop_phase"] = "done"
             context["soft_stop_pending"] = False
             self._mark_evap_plate_dock_check_required("soft_stop_clear_unconfirmed")
@@ -5721,11 +6073,6 @@ class Controller(QObject):
                         "work could not be reconciled with saved progress. Continuing "
                         "remains unavailable.",
                     )
-
-        try:
-            self.update_expected_with_current()
-        except Exception:
-            pass
 
         self._soft_stop_clear_uncertain = False
         if context.pop("soft_stop_pause_during_clearing", False):
@@ -8739,10 +9086,14 @@ class Controller(QObject):
             )
             return False
 
-        if getattr(self, "_soft_stop_clear_uncertain", False):
+        queue_clear_state = self.get_queue_clear_state()["state"]
+        if (
+            getattr(self, "_soft_stop_clear_uncertain", False)
+            or queue_clear_state in {"pending", "uncertain"}
+        ):
             self.error_occurred_signal.emit(
                 'Head Transfer Blocked',
-                'The last soft stop did not confirm that the firmware queue was cleared. Clear the queue or reconnect before loading another printer head.',
+                'The firmware queue clear is pending or uncertain. Confirm Clear Queue or reset the MCU before loading another printer head.',
             )
             return False
 
@@ -9053,6 +9404,8 @@ class Controller(QObject):
             "soft_stop_phase_before_pause": None,
             "soft_stop_resume_sent": False,
             "soft_stop_pause_during_clearing": False,
+            "soft_stop_clear_boundary_proof": None,
+            "soft_stop_clear_boundary_proof_consumed": False,
             "pause_departure_pending": True,
             "pause_departure_accel": int(
                 getattr(self, "_array_pause_departure_accel", ARRAY_PAUSE_DEPARTURE_ACCEL)
@@ -9626,17 +9979,51 @@ class Controller(QObject):
             self._complete_array_finalize(reason)
             return False
 
-        self._queue_array_profile_disable_once(clear_on_failure=True)
-
         def _finish_after_park():
             self._complete_array_finalize(reason)
 
-        if self._queue_pause_park_sequence(on_complete=_finish_after_park) is False:
+        def _queue_finalize_park():
+            if self._queue_pause_park_sequence(on_complete=_finish_after_park) is not False:
+                return True
             dock_reason = "soft_stop_park_failed" if reason == "soft_stop" else "array_park_failed"
             self._mark_evap_plate_dock_check_required(dock_reason)
             self._complete_array_finalize(reason)
             return False
-        return True
+
+        profile_disabled = self._queue_array_profile_disable_once(
+            clear_on_failure=False
+        )
+        if profile_disabled is not False:
+            return _queue_finalize_park()
+
+        if not isinstance(context, dict):
+            self._complete_array_finalize(reason)
+            return False
+        context["array_clear_fallback_attempted"] = True
+
+        def _after_terminal_clear(clear_result):
+            if context is not getattr(self, "_array_context", None):
+                return
+            if context.get("finalize_reason") != reason:
+                return
+            if bool(dict(clear_result or {}).get("status_confirmed")):
+                _queue_finalize_park()
+                return
+            self._mark_evap_plate_dock_check_required(
+                "array_finalize_clear_unconfirmed"
+            )
+            self._complete_array_finalize(reason)
+
+        sent = self._request_array_terminal_queue_clear(
+            handler=_after_terminal_clear
+        )
+        context["array_clear_fallback_requested"] = bool(sent)
+        if sent is False:
+            self._mark_evap_plate_dock_check_required(
+                "array_finalize_clear_not_sent"
+            )
+            self._complete_array_finalize(reason)
+        return bool(sent)
 
     def _queue_array_profile_disable_once(self, *, clear_on_failure=False):
         """Queue one profile teardown for the active array, with CLEAR fallback."""
@@ -9658,30 +10045,86 @@ class Controller(QObject):
         if queued is not False:
             return True
 
-        if clear_on_failure and not context.get("array_clear_fallback_requested"):
-            context["array_clear_fallback_requested"] = True
-            try:
-                self._clear_machine_and_model_command_queues(
-                    reason="array_queue_clear",
-                )
-            except Exception:
-                pass
+        if clear_on_failure and not context.get("array_clear_fallback_attempted"):
+            context["array_clear_fallback_attempted"] = True
+            context["array_clear_fallback_requested"] = bool(
+                self._request_array_terminal_queue_clear()
+            )
         return False
+
+    def _request_array_terminal_queue_clear(self, handler=None):
+        """Clear abandoned look-ahead after array dispatch is terminal."""
+        sent = self._request_guarded_queue_clear(
+            QUEUE_CLEAR_INTENT_ARRAY_TERMINAL,
+            reason="array_queue_clear",
+            handler=handler,
+        )
+        if sent:
+            return True
+
+        self._ensure_queue_clear_tracking()
+        self._queue_clear_state = "uncertain"
+        self._queue_clear_uncertain = True
+        self._queue_clear_last_rejection = "array_terminal_clear_not_sent"
+        try:
+            self.pause_commands()
+        except Exception:
+            pass
+        signal = getattr(self, "error_occurred_signal", None)
+        if signal is not None:
+            signal.emit(
+                "Array Abort Queue Clear Failed",
+                "The print array was stopped, but its queued commands could not be "
+                "cleared. The Controller requested Pause and will block further array "
+                "work until Clear Queue is confirmed or the MCU is reset.",
+            )
+        return False
+
+    def _finalize_array_hard_abort_after_clear(self, context, clear_result):
+        """Finish hard-abort bookkeeping only after the CLEAR transaction ends."""
+        if not isinstance(context, dict) or context is not getattr(
+            self, "_array_context", None
+        ):
+            return False
+        result = dict(clear_result or {})
+        context["array_hard_abort_clear_completed"] = True
+        if not bool(result.get("status_confirmed")):
+            # Do not queue profile teardown or acceleration restoration into a
+            # transport whose CLEAR result is unknown.
+            context["print_profile_disable_queued"] = True
+            context["skip_array_accel_restore"] = True
+            self._mark_evap_plate_dock_check_required(
+                "array_hard_abort_clear_unconfirmed"
+            )
+        self._complete_array_finalize("hard_abort")
+        return True
 
     def _complete_array_finalize(self, reason):
         reason = str(reason or "completed")
-        self._queue_array_profile_disable_once(clear_on_failure=reason == "hard_abort")
+        context = getattr(self, "_array_context", None)
+        if isinstance(context, dict) and context.get("finalize_reason") is None:
+            context["finalize_reason"] = reason
         if reason == "hard_abort":
-            context = getattr(self, "_array_context", None)
-            if isinstance(context, dict) and not context.get("array_clear_fallback_requested"):
-                context["array_clear_fallback_requested"] = True
-                try:
-                    self._clear_machine_and_model_command_queues(
-                        reason="array_queue_clear",
+            if isinstance(context, dict) and not context.get(
+                "array_hard_abort_clear_completed"
+            ):
+                if context.get("array_clear_fallback_requested"):
+                    return
+                if context.get("array_clear_fallback_attempted"):
+                    return
+                context["array_clear_fallback_attempted"] = True
+                sent = self._request_array_terminal_queue_clear(
+                    handler=lambda result, expected_context=context: (
+                        self._finalize_array_hard_abort_after_clear(
+                            expected_context,
+                            result,
+                        )
                     )
-                except Exception:
-                    pass
+                )
+                context["array_clear_fallback_requested"] = bool(sent)
+                return
             self._mark_evap_plate_dock_check_required("array_hard_abort")
+        self._queue_array_profile_disable_once(clear_on_failure=False)
         context = getattr(self, "_array_context", None)
         if isinstance(context, dict) and context.get("array_finalize_after_accel_restore"):
             return
@@ -10252,6 +10695,16 @@ class Controller(QObject):
         starting_state = self.get_array_run_state()
         if starting_state in {"running", "stop_requested"}:
             print('Cannot print: Array runner is already active')
+            return
+
+        queue_clear_state = self.get_queue_clear_state()["state"]
+        if queue_clear_state in {"pending", "uncertain"}:
+            message = (
+                "Printing is unavailable while the previous command queue clear "
+                f"is {queue_clear_state}. Confirm Clear Queue or reset the MCU first."
+            )
+            self.error_occurred_signal.emit('Error', message)
+            print(f'Cannot print: {message}')
             return
 
         if not self.check_if_all_completed():

@@ -57,7 +57,9 @@ def _make_main_window(*, array_state="idle", connected=True, paused=False):
     controller = SimpleNamespace(
         pause_commands=Mock(side_effect=lambda: setattr(machine_model, "paused", True)),
         resume_commands=Mock(side_effect=lambda: setattr(machine_model, "paused", False)),
-        clear_command_queue=Mock(side_effect=lambda: setattr(machine_model, "paused", False)),
+        clear_command_queue=Mock(
+            side_effect=lambda **_kwargs: setattr(machine_model, "paused", False)
+        ),
         get_array_run_state=Mock(return_value=array_state),
         get_array_pause_action_state=Mock(
             return_value={
@@ -132,7 +134,7 @@ def test_confirmed_clear_aborts_exactly_once(monkeypatch):
 
     MainWindow.pause_machine(main_window)
 
-    main_window.controller.clear_command_queue.assert_called_once_with()
+    main_window.controller.clear_command_queue.assert_called_once_with(confirmed=True)
     main_window.controller.resume_commands.assert_not_called()
 
 

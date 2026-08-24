@@ -380,7 +380,19 @@ def test_xy_recovery_state_signal_is_transition_only(qapp, test_profile, tmp_pat
 def test_controller_xy_recovery_actions_are_state_guarded():
     controller = Controller.__new__(Controller)
     state = {"value": "clear_required"}
-    machine_clear = Mock(return_value=True)
+    machine_clear = Mock(
+        side_effect=lambda handler=None: (
+            handler(
+                {
+                    "ack_received": True,
+                    "ack_timed_out": False,
+                    "status_confirmed": True,
+                    "status_timed_out": False,
+                }
+            )
+            or True
+        )
+    )
     model_clear = Mock()
     reset_home = Mock()
     home_status = Mock()
@@ -399,7 +411,7 @@ def test_controller_xy_recovery_actions_are_state_guarded():
     controller._emit_machine_workflow_interrupted = Mock()
 
     assert Controller.clear_xy_motion_recovery(controller) is True
-    machine_clear.assert_called_once_with()
+    machine_clear.assert_called_once()
     model_clear.assert_called_once_with()
 
     assert Controller.home_machine(controller) is False

@@ -157,6 +157,18 @@ def _make_controller(
     def _fake_resume_commands():
         command_events.append(("resume_commands",))
 
+    def _fake_clear_command_queue(handler=None):
+        if callable(handler):
+            handler(
+                {
+                    "ack_received": True,
+                    "ack_timed_out": False,
+                    "status_confirmed": True,
+                    "status_timed_out": False,
+                }
+            )
+        return True
+
     def _fake_move_to_location(*args, **kwargs):
         command_events.append(("move_to_location", args, kwargs))
         return True
@@ -175,7 +187,7 @@ def _make_controller(
 
     c.machine = SimpleNamespace(
         check_if_all_completed=lambda: queue_empty,
-        clear_command_queue=Mock(),
+        clear_command_queue=Mock(side_effect=_fake_clear_command_queue),
         pause_commands=Mock(),
         resume_commands=Mock(side_effect=_fake_resume_commands),
         request_pause_after_seq32=Mock(return_value=True),
@@ -1088,7 +1100,7 @@ def test_print_array_close_queue_failure_runs_hard_abort_cleanup():
     Controller.print_array(c)
 
     c.enable_print_profile.assert_not_called()
-    c.machine.clear_command_queue.assert_called_once_with()
+    c.machine.clear_command_queue.assert_called_once()
     assert c.get_array_run_state() == "idle"
 
 
@@ -1104,7 +1116,7 @@ def test_print_array_profile_queue_failure_runs_hard_abort_cleanup():
     c.enable_print_profile.assert_called_once_with(
         deferred_gripper_refresh=True
     )
-    c.machine.clear_command_queue.assert_called_once_with()
+    c.machine.clear_command_queue.assert_called_once()
     assert c.get_array_run_state() == "idle"
 
 
@@ -1532,7 +1544,7 @@ def test_late_paused_array_timeout_after_abort_cannot_restart_transport():
 
     assert Controller.request_paused_array_soft_stop(c) is True
     token = c._array_context["soft_stop_attempt_token"]
-    Controller.clear_command_queue(c)
+    Controller.clear_command_queue(c, confirmed=True)
     pause_count = c.machine.pause_commands.call_count
     resume_count = c.machine.resume_commands.call_count
 
@@ -1544,6 +1556,78 @@ def test_late_paused_array_timeout_after_abort_cannot_restart_transport():
 
     assert c.machine.pause_commands.call_count == pause_count
     assert c.machine.resume_commands.call_count == resume_count
+
+
+def test_confirmed_array_abort_waits_for_clear_completion_before_cleanup_commands():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+    c._array_context = _with_lowered_array_accels(
+        {
+            "stock_id": "stock-a",
+            "print_profile_enable_queued": True,
+            "print_profile_disable_queued": False,
+        }
+    )
+    callbacks = []
+    c.machine.clear_command_queue.side_effect = lambda handler=None: (
+        callbacks.append(handler) or True
+    )
+
+    assert Controller.clear_command_queue(c, confirmed=True) is True
+
+    c.disable_print_profile.assert_not_called()
+    c.machine.set_axis_accel.assert_not_called()
+    assert c.get_array_run_state() == "stop_requested"
+
+    callbacks[0](
+        {
+            "ack_received": True,
+            "ack_timed_out": False,
+            "status_confirmed": True,
+            "status_timed_out": False,
+        }
+    )
+
+    c.disable_print_profile.assert_called_once_with()
+    assert c.machine.set_axis_accel.call_args_list == _restore_calls()
+    assert c.get_array_run_state() == "idle"
+
+
+def test_unconfirmed_array_abort_finalizes_without_queuing_cleanup_motion():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+    c._array_context = _with_lowered_array_accels(
+        {
+            "stock_id": "stock-a",
+            "print_profile_enable_queued": True,
+            "print_profile_disable_queued": False,
+        }
+    )
+    callbacks = []
+    c.machine.clear_command_queue.side_effect = lambda handler=None: (
+        callbacks.append(handler) or True
+    )
+
+    assert Controller.clear_command_queue(c, confirmed=True) is True
+    callbacks[0](
+        {
+            "ack_received": False,
+            "ack_timed_out": True,
+            "status_confirmed": False,
+            "status_timed_out": True,
+        }
+    )
+
+    c.disable_print_profile.assert_not_called()
+    c.machine.set_axis_accel.assert_not_called()
+    assert c.get_array_run_state() == "idle"
+    assert Controller.get_queue_clear_state(c)["state"] == "uncertain"
 
 
 def test_paused_array_stale_frozen_barrier_never_retargets_later_well():
@@ -1573,7 +1657,7 @@ def test_paused_array_stale_frozen_barrier_never_retargets_later_well():
 
     assert [call_args.args[0] for call_args in c.machine.request_pause_after_seq32.call_args_list] == [123]
     assert c._array_context["soft_stop_barrier_seq32"] == 123
-    assert c._array_context["soft_stop_phase"] == "clearing"
+    assert c._array_context["soft_stop_phase"] == "parking"
     c.machine.clear_command_queue.assert_called_once()
 
 
@@ -1790,13 +1874,13 @@ def test_request_array_soft_stop_write_failure_aborts_to_idle():
     )
 
     assert Controller.request_array_soft_stop(c) is False
-    c.machine.clear_command_queue.assert_called_once_with()
+    c.machine.clear_command_queue.assert_called_once()
     c.model.machine_model.clear_command_queue.assert_called_once_with()
     assert c.machine.set_axis_accel.call_args_list == _restore_calls()
     assert c.get_array_run_state() == "idle"
     assert c._array_context is None
     assert c.error_occurred_signal.calls[-1][0] == "Soft Stop Failed"
-    assert "queued commands were cleared" in c.error_occurred_signal.calls[-1][1]
+    assert "guarded queue clear was requested" in c.error_occurred_signal.calls[-1][1]
 
 
 def test_request_array_soft_stop_ack_rejection_aborts_to_idle():
@@ -1818,7 +1902,7 @@ def test_request_array_soft_stop_ack_rejection_aborts_to_idle():
     }
 
     assert Controller.request_array_soft_stop(c) is True
-    c.machine.clear_command_queue.assert_called_once_with()
+    c.machine.clear_command_queue.assert_called_once()
     assert c.get_array_run_state() == "idle"
     assert c._array_context is None
     assert "MCU rejected" in c.error_occurred_signal.calls[-1][1]
@@ -1843,7 +1927,7 @@ def test_request_array_soft_stop_not_confirmed_aborts_to_idle():
     }
 
     assert Controller.request_array_soft_stop(c) is True
-    c.machine.clear_command_queue.assert_called_once_with()
+    c.machine.clear_command_queue.assert_called_once()
     assert c.get_array_run_state() == "idle"
     assert c._array_context is None
     assert "not confirmed within the grace window" in c.error_occurred_signal.calls[-1][1]
@@ -2089,6 +2173,79 @@ def test_handle_status_update_soft_stop_clear_and_park_completes_before_resume_r
     assert c.model.machine_model.get_evap_plate_dock_check_reasons() == []
 
 
+def test_terminal_profile_cleanup_waits_for_confirmed_clear_before_parking():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 0, target=5)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+    c._array_context = _with_lowered_array_accels(
+        {
+            "stock_id": "stock-a",
+            "print_profile_enable_queued": True,
+            "print_profile_disable_queued": False,
+        }
+    )
+    c.disable_print_profile.return_value = False
+    callbacks = []
+    c.machine.clear_command_queue.side_effect = lambda handler=None: (
+        callbacks.append(handler) or True
+    )
+
+    assert Controller._enqueue_array_finalize(c, "completed") is True
+
+    c.machine.clear_command_queue.assert_called_once()
+    c.move_to_location.assert_not_called()
+
+    callbacks[0](
+        {
+            "ack_received": True,
+            "ack_timed_out": False,
+            "status_confirmed": True,
+            "status_timed_out": False,
+        }
+    )
+
+    assert c.move_to_location.call_args_list[0] == call("pause")
+    assert c.move_to_location.call_args_list[1].args == ("pause",)
+
+
+def test_terminal_profile_cleanup_does_not_park_after_unconfirmed_clear():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 0, target=5)]),
+        printer_head=_make_printer_head(),
+        initial_state="running",
+    )
+    c._array_context = _with_lowered_array_accels(
+        {
+            "stock_id": "stock-a",
+            "print_profile_enable_queued": True,
+            "print_profile_disable_queued": False,
+        }
+    )
+    c.disable_print_profile.return_value = False
+    callbacks = []
+    c.machine.clear_command_queue.side_effect = lambda handler=None: (
+        callbacks.append(handler) or True
+    )
+
+    assert Controller._enqueue_array_finalize(c, "completed") is True
+    callbacks[0](
+        {
+            "ack_received": False,
+            "ack_timed_out": True,
+            "status_confirmed": False,
+            "status_timed_out": True,
+        }
+    )
+
+    c.move_to_location.assert_not_called()
+    assert c.get_array_run_state() == "idle"
+    assert "array_finalize_clear_unconfirmed" in (
+        c.model.machine_model.get_evap_plate_dock_check_reasons()
+    )
+
+
 def test_confirmed_soft_stop_clear_retires_only_lookahead_execution_intents():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 0), FakeWell("A2", 5)]),
@@ -2213,7 +2370,7 @@ def test_soft_stop_clear_unconfirmed_warns_and_preserves_resume_ready():
 
     Controller.handle_status_update(c, {"Pause_watermark_reached": 1, "Transport_paused": 1})
 
-    c.model.machine_model.clear_command_queue.assert_called_once_with()
+    c.model.machine_model.clear_command_queue.assert_not_called()
     c.update_expected_with_current.assert_not_called()
     c.move_to_location.assert_not_called()
     c.machine.set_axis_accel.assert_not_called()
@@ -2516,7 +2673,7 @@ def test_manual_head_pickup_blocks_after_unconfirmed_soft_stop_clear():
     c.move_to_location.assert_not_called()
     assert c.error_occurred_signal.calls[-1] == (
         "Head Transfer Blocked",
-        "The last soft stop did not confirm that the firmware queue was cleared. Clear the queue or reconnect before loading another printer head.",
+        "The firmware queue clear is pending or uncertain. Confirm Clear Queue or reset the MCU before loading another printer head.",
     )
 
 
@@ -2592,7 +2749,7 @@ def test_soft_stop_wins_over_refill_required():
     assert c._array_context["soft_stop_pending"] is True
 
 
-def test_clear_command_queue_resets_array_runner_state():
+def test_unclassified_clear_preserves_resume_ready_array_state():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),
         printer_head=_make_printer_head(),
@@ -2600,13 +2757,26 @@ def test_clear_command_queue_resets_array_runner_state():
     )
     c._array_context = _with_lowered_array_accels({"stock_id": "stock-a"})
 
-    Controller.clear_command_queue(c)
+    assert Controller.clear_command_queue(c) is False
 
-    c.machine.clear_command_queue.assert_called_once_with()
-    c.model.machine_model.clear_command_queue.assert_called_once_with()
-    c.disable_print_profile.assert_called_once_with()
-    assert c.machine.set_axis_accel.call_args_list == _restore_calls()
-    c.update_expected_with_current.assert_called_once_with()
-    assert c.get_array_run_state() == "idle"
-    assert c._array_context is None
-    assert c.model.machine_model.get_evap_plate_dock_check_reasons() == ["array_hard_abort"]
+    c.machine.clear_command_queue.assert_not_called()
+    c.model.machine_model.clear_command_queue.assert_not_called()
+    c.disable_print_profile.assert_not_called()
+    c.update_expected_with_current.assert_not_called()
+    assert c.get_array_run_state() == "resume_ready"
+    assert c._array_context is not None
+
+
+@pytest.mark.parametrize("queue_clear_state", ["pending", "uncertain"])
+def test_print_array_is_blocked_while_queue_clear_is_not_settled(queue_clear_state):
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 5)]),
+        printer_head=_make_printer_head(),
+    )
+    c._queue_clear_state = queue_clear_state
+    c._queue_clear_uncertain = queue_clear_state == "uncertain"
+
+    Controller.print_array(c)
+
+    c.close_gripper.assert_not_called()
+    assert queue_clear_state in c.error_occurred_signal.calls[-1][1]

@@ -52,6 +52,25 @@ To get started with the LabCraft Printer project, follow these steps:
     pip install -r requirements.txt
     ```
 
+## Print-Array Pause and Queue-Clear Safety
+
+`Pause Machine Now` pauses command transport immediately and opens explicit
+actions. During an active print array, prefer `Finish Current Well and Stop`;
+it resumes only through the frozen current-well boundary, clears confirmed
+look-ahead work, parks, and leaves the experiment resumable. `Keep Paused` is
+the safe default.
+
+`Abort Array and Clear Queue` requires a second confirmation. It permanently
+aborts the active experiment and the interrupted well may be uncertain. Every
+application queue clear is classified and guarded by the Controller. An
+automatic calibration cleanup cannot clear an active or uncertain experiment.
+
+While a queue clear is pending or could not be confirmed, new print arrays and
+printer-head transfers remain blocked. Keep the machine clear and use the
+supported confirmed Clear Queue retry or motion-recovery workflow. If recovery
+requires an MCU reset, follow the normal reset, inspection, dock-check, and
+homing procedure before further motion.
+
 ## Run Python Tests
 
 On this Windows checkout, use the repo virtual environment directly:
