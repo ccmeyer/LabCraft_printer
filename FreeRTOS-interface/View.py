@@ -3099,6 +3099,9 @@ class ConnectionWidget(QGroupBox):
         self.pause_machine_button = QPushButton("Pause")
         self.pause_machine_button.setObjectName("pauseMachineButton")
         self.pause_machine_button.setFocusPolicy(QtCore.Qt.NoFocus)
+        pause_button_size_policy = self.pause_machine_button.sizePolicy()
+        pause_button_size_policy.setVerticalPolicy(QSizePolicy.Expanding)
+        self.pause_machine_button.setSizePolicy(pause_button_size_policy)
         self.pause_machine_button.clicked.connect(self.main_window.pause_machine)
         connection_row_count = 3 if self.legacy_mode else 2
         layout.addWidget(

@@ -147,6 +147,18 @@ def test_pause_button_spans_every_connection_row_without_safety_header(qapp):
         button_index = layout.indexOf(widget.pause_machine_button)
 
         assert layout.getItemPosition(button_index) == (0, 3, expected_row_span, 1)
+        assert (
+            widget.pause_machine_button.sizePolicy().verticalPolicy()
+            == View.QSizePolicy.Expanding
+        )
+        widget.adjustSize()
+        widget.show()
+        qapp.processEvents()
+        assert (
+            widget.pause_machine_button.height()
+            > widget.machine_connect_button.height()
+        )
+        widget.close()
         assert "Safety" not in {
             label.text() for label in widget.findChildren(View.QLabel)
         }
