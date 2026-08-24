@@ -7,11 +7,19 @@ two preserved legacy cohorts to one exact release. It never rolls back either
 established Pi worktree and never removes or repoints an existing machine-data
 store.
 
-Implementation validation on 2026-08-24 passed 224 focused Windows tests
+Implementation validation on 2026-08-24 passed 228 focused Windows tests
 covering the supervisor, bootstrap-only runner, migration/bootstrap services,
-update preservation, and legacy updater. Pi dry-run, focused Pi tests, and both
-real-data cohort rehearsals remain pending until the exact harness revision is
-committed, pushed, and supplied with the two private source-wrapper paths.
+update preservation, and legacy updater. The initial harness passed Pi dry-run,
+exact development sync/validation, and 222 Pi tests with two Windows-only
+skips. The corrected harness must be republished and requalified before a fresh
+rc.1 run; the real rc.6 source-wrapper path is still pending.
+
+The first rc.1 `Prepare` attempt, run
+`6b974bd5-74fe-4c54-a557-8a62a86ca5a4`, failed before preparation because the
+supervisor expected a persisted `production_ready` firmware field. Firmware
+state v1 derives that value from `role == released`. The failed root remains
+quarantined; the corrected harness validates the real schema and derives the
+readiness result without altering firmware state.
 
 For the rc.7 campaign the required source and target bindings are:
 

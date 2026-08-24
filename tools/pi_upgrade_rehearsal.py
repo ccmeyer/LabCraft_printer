@@ -676,6 +676,28 @@ def remote_json_file_evidence(path: Path) -> dict[str, Any]:
     }
 
 
+def remote_firmware_readiness(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    payload = evidence.get("payload")
+    if (
+        not evidence.get("exists")
+        or not isinstance(payload, dict)
+        or payload.get("schema_name") != "labcraft.firmware_state"
+        or payload.get("schema_version") != 1
+        or payload.get("role") not in {
+            "released", "development", "unknown", "recovery-required"
+        }
+        or type(payload.get("state_revision")) is not int
+        or payload["state_revision"] < 1
+    ):
+        raise RehearsalError("Durable firmware state is missing or malformed.")
+    role = payload["role"]
+    return {
+        "role": role,
+        "production_ready": role == "released",
+        "state_revision": payload["state_revision"],
+    }
+
+
 def remote_collect_invariants(request: Mapping[str, Any]) -> dict[str, Any]:
     production = Path(request["production_repo"]).resolve(strict=False)
     development = Path(request["development_repo"]).resolve(strict=False)
@@ -696,10 +718,8 @@ def remote_collect_invariants(request: Mapping[str, Any]) -> dict[str, Any]:
     firmware_evidence = remote_json_file_evidence(firmware)
     if not workflow_evidence["exists"] or not isinstance(workflow_evidence.get("payload"), dict):
         raise RehearsalError("Development workflow binding is missing or malformed.")
-    if not firmware_evidence["exists"] or not isinstance(firmware_evidence.get("payload"), dict):
-        raise RehearsalError("Durable firmware state is missing or malformed.")
-    firmware_payload = firmware_evidence["payload"]
-    if firmware_payload.get("role") != "released" or firmware_payload.get("production_ready") is not True:
+    firmware_summary = remote_firmware_readiness(firmware_evidence)
+    if not firmware_summary["production_ready"]:
         raise RehearsalError("Firmware state is not released and production-ready.")
     config = workflow_evidence["payload"]
     development_data = Path(str(config.get("development_machine_data_root") or ""))
@@ -721,8 +741,9 @@ def remote_collect_invariants(request: Mapping[str, Any]) -> dict[str, Any]:
         "development_machine_data": remote_tree_evidence(development_data),
         "workflow_config_sha256": workflow_evidence["sha256"],
         "firmware_state_sha256": firmware_evidence["sha256"],
-        "firmware_role": firmware_payload.get("role"),
-        "firmware_production_ready": firmware_payload.get("production_ready"),
+        "firmware_role": firmware_summary["role"],
+        "firmware_production_ready": firmware_summary["production_ready"],
+        "firmware_state_revision": firmware_summary["state_revision"],
         "shared_python": str(shared_python.resolve()),
         "shared_python_version": version,
         "pip_check": pip_check.stdout.strip(),

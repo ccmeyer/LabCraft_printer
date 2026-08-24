@@ -124,6 +124,41 @@ def test_public_and_windows_release_bindings_must_match():
         rehearsal.remote_require_public_release_pair(source, target, source, mismatched)
 
 
+def test_firmware_readiness_is_derived_from_valid_released_role():
+    summary = rehearsal.remote_firmware_readiness(
+        {
+            "exists": True,
+            "payload": {
+                "schema_name": "labcraft.firmware_state",
+                "schema_version": 1,
+                "role": "released",
+                "state_revision": 178,
+            },
+        }
+    )
+    assert summary == {
+        "role": "released",
+        "production_ready": True,
+        "state_revision": 178,
+    }
+
+
+@pytest.mark.parametrize("role", ["development", "unknown", "recovery-required"])
+def test_nonreleased_firmware_role_is_not_production_ready(role):
+    summary = rehearsal.remote_firmware_readiness(
+        {
+            "exists": True,
+            "payload": {
+                "schema_name": "labcraft.firmware_state",
+                "schema_version": 1,
+                "role": role,
+                "state_revision": 1,
+            },
+        }
+    )
+    assert summary["production_ready"] is False
+
+
 @pytest.mark.parametrize("value", ["main", "v1.3.0-rc.latest", "../v1.3.0", ""])
 def test_release_tags_must_be_exact(value):
     with pytest.raises(rehearsal.RehearsalError):
