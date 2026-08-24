@@ -26,6 +26,14 @@ class RecordingAuthorizer:
         )
 
 
+class _Signal:
+    def __init__(self):
+        self.events = []
+
+    def emit(self, payload):
+        self.events.append(payload)
+
+
 def _move_controller(target, *, allowed, name="camera", rack=None, plate=None):
     commands = []
     errors = []
@@ -74,6 +82,34 @@ def test_unverified_camera_is_denied_before_safe_route_or_final_command():
     assert commands == []
     assert errors == [("Move Blocked", "Saved target is not verified.")]
     assert authorizer.requests[0].target_key == "location:camera"
+
+
+def test_unverified_move_can_emit_an_actionable_location_verification_route():
+    controller, _commands, _errors, authorizer, name = _move_controller(
+        {"X": 11000, "Y": 22000, "Z": 33000},
+        allowed=False,
+    )
+    assert Controller.move_to_location(controller, name) is False
+    request = authorizer.requests[0]
+    decision = authorizer.authorize(request)
+    signal = _Signal()
+    host = SimpleNamespace(
+        configuration_verification_required=signal,
+        _configuration_verification_route=Controller._configuration_verification_route,
+    )
+
+    assert Controller._emit_configuration_verification_required(
+        host, decision, request
+    ) is True
+    assert signal.events == [
+        {
+            "target_key": "location:camera",
+            "target_kind": "location",
+            "reason_code": "target_unverified",
+            "message": "Saved target is not verified.",
+            "verification_route": "location_verification",
+        }
+    ]
 
 
 def test_manual_override_and_ignore_safe_height_do_not_bypass_authorization():

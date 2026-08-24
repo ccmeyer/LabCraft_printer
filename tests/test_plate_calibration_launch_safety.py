@@ -221,6 +221,38 @@ def test_duplicate_entry_is_rejected_before_machine_or_configuration_access():
     assert result["reason_code"] == "plate_calibration_already_active"
 
 
+def test_missing_calibration_head_precedes_stale_position_reconciliation():
+    controller = Controller.__new__(Controller)
+    controller._plate_calibration_session = None
+    controller._rack_calibration_session = None
+    controller.expected_location = "Home"
+    controller.model = SimpleNamespace(
+        machine_model=SimpleNamespace(
+            is_connected=lambda: True,
+            motors_are_enabled=lambda: True,
+            motors_are_homed=lambda: True,
+            paused=False,
+            transport_paused=False,
+            is_busy=lambda: False,
+        ),
+        rack_model=SimpleNamespace(get_gripper_printer_head=lambda: None),
+    )
+    controller.check_if_all_completed = lambda: True
+    readiness_calls = []
+    controller._configuration_capture_readiness = lambda: readiness_calls.append(
+        True
+    ) or {
+        "ready": False,
+        "reason_codes": ["expected_position_mismatch"],
+    }
+
+    result = controller.plate_calibration_entry_preflight()
+
+    assert result["allowed"] is False
+    assert result["reason_code"] == "calibration_head_required"
+    assert readiness_calls == []
+
+
 def test_revoked_plate_preflight_exposes_historical_review_without_authorizing_motion(
     monkeypatch,
 ):

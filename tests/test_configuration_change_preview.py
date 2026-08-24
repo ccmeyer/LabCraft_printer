@@ -2,10 +2,15 @@ import copy
 import json
 from pathlib import Path
 
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel, QPlainTextEdit
 
 from ConfigurationSafetyPolicy import ConfigurationChangeGuard, load_configuration_change_policy, parse_safety_bounds
-from View import ConfigurationChangePreviewDialog, ControlledCalibrationPromotionDialog
+from View import (
+    ConfigurationChangePreviewDialog,
+    ControlledCalibrationPromotionDialog,
+    LocationVerificationDialog,
+    MainWindow,
+)
 
 
 def _assessment():
@@ -113,3 +118,65 @@ def test_controlled_calibration_promotion_uses_review_checkbox_without_json(qapp
         "operator": "Alice",
         "reason": "Review existing plate calibration",
     }
+
+
+def test_location_verification_displays_values_and_requires_one_checkbox(
+    qapp, monkeypatch
+):
+    snapshot = {
+        "target_key": "location:pause",
+        "value": {"X": 21060, "Y": 11415, "Z": 120050},
+        "operator_default": "Conary-Codex",
+        "acknowledgement_version": 1,
+        "machine_id": "LC-001",
+    }
+    dialog = LocationVerificationDialog(snapshot)
+    warnings = []
+    monkeypatch.setattr("View.QMessageBox.warning", lambda *args: warnings.append(args))
+
+    assert dialog.operator_edit.text() == "Conary-Codex"
+    assert "120050" in "\n".join(
+        child.toPlainText() for child in dialog.findChildren(QPlainTextEdit)
+    )
+    dialog._accept_if_complete()
+    assert warnings
+    assert dialog.result() == 0
+
+    dialog.acknowledge.setChecked(True)
+    dialog._accept_if_complete()
+    assert dialog.result() == 1
+    assert dialog.review_result() == {
+        "operator": "Conary-Codex",
+        "acknowledged": True,
+        "acknowledgement_version": 1,
+    }
+
+
+def test_blocked_generic_move_offers_the_verification_window(qapp, monkeypatch):
+    calls = []
+    window = MainWindow.__new__(MainWindow)
+    window.popup_choice = lambda title, message, options, **kwargs: (
+        calls.append((title, message, options)),
+        "Verify Location...",
+    )[1]
+    window.review_configuration_target = lambda target: calls.append(
+        ("verify", target)
+    )
+    monkeypatch.setattr(
+        "View.QtCore.QTimer.singleShot", lambda _delay, callback: callback()
+    )
+
+    MainWindow.show_configuration_verification_required(
+        window,
+        {
+            "target_key": "location:pause",
+            "target_kind": "location",
+            "reason_code": "target_revoked",
+            "message": "The saved Pause target requires verification.",
+            "verification_route": "location_verification",
+        },
+    )
+
+    assert calls[-1] == ("verify", "location:pause")
+    assert calls[0][2] == ["Verify Location...", "Cancel"]
+    assert "No motion was queued" in calls[0][1]

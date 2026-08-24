@@ -50,7 +50,9 @@ from ConfigurationSafetyPolicy import (
 from ControlledCalibration import (
     ControlledCalibrationError,
     ControlledCalibrationEvidence,
+    ControlledPositionCaptureEvidence,
     validate_controlled_calibration_evidence,
+    validate_controlled_position_capture_evidence,
 )
 
 
@@ -1174,6 +1176,67 @@ def _apply_controlled_calibration_authorization(
     return updated, changes
 
 
+def _apply_controlled_position_capture_authorization(
+    authorization: Mapping[str, Mapping[str, object]],
+    documents: Mapping[str, object],
+    after_hashes: Mapping[str, str],
+    evidence: ControlledPositionCaptureEvidence,
+    *,
+    operator: str,
+    verified_at_utc: str,
+    evidence_reference: str,
+) -> tuple[dict[str, dict[str, object]], list[dict[str, object]]]:
+    """Authorize one exact named location proven by live capture evidence."""
+
+    snapshot = build_target_snapshot_from_documents(
+        documents["Locations.json"],
+        documents["Plates.json"],
+        documents["Settings.json"],
+    )
+    updated = {
+        key: copy.deepcopy(dict(value)) for key, value in authorization.items()
+    }
+    changes: list[dict[str, object]] = []
+    for key in evidence.authorization_target_keys:
+        target = snapshot.get(key)
+        entry = updated.get(key)
+        if target is None or entry is None:
+            raise ConfigurationValidationError(
+                f"Controlled position-capture target is unavailable: {key}"
+            )
+        kind, source_file, value = target
+        source_name = Path(source_file).name
+        before_state = entry["state"]
+        entry.update(
+            target_key=key,
+            kind=kind,
+            value_sha256=canonical_value_sha256(value),
+            source_file=source_file,
+            source_file_sha256=after_hashes[source_name],
+            state="operator_verified",
+            verified_at_utc=verified_at_utc,
+            verified_by=operator,
+            verification_method="controlled_position_capture",
+            evidence_reference=evidence_reference,
+            service_record_reference=None,
+        )
+        changes.append(
+            {
+                "target_key": key,
+                "before_state": before_state,
+                "after_state": "operator_verified",
+                "value_sha256": entry["value_sha256"],
+                "controlled_position_capture": {
+                    "workflow": evidence.workflow,
+                    "target_name": evidence.target_name,
+                    "trust_epoch": evidence.trust_epoch,
+                    "evidence_reference": evidence_reference,
+                },
+            }
+        )
+    return updated, changes
+
+
 def _head_payload(
     *,
     identity: MachineIdentity,
@@ -1632,6 +1695,7 @@ class ConfigurationTransactionService:
                 )
             ]
             controlled_evidence = None
+            position_capture_evidence = None
             controlled_calibration_submission = (
                 event_type == "change"
                 and workflow in {"rack_calibration", "plate_calibration"}
@@ -1651,10 +1715,37 @@ class ConfigurationTransactionService:
                         parsed_guard,
                         complete,
                         machine_uuid=self.identity.machine_uuid,
+                        require_pause_derivation=workflow == "plate_calibration",
                     )
                 except ControlledCalibrationError as exc:
                     raise ConfigurationValidationError(
                         f"Controlled calibration evidence is invalid: {exc}"
+                    ) from exc
+            controlled_position_capture_submission = (
+                event_type == "change"
+                and workflow in {"named_location_add", "named_location_modify"}
+                and parsed_guard is not None
+                and parsed_guard.get("schema_version") == 2
+            )
+            if controlled_position_capture_submission:
+                if (
+                    parsed_guard.get("authorization_consequence")
+                    != "verified_by_controlled_position_capture"
+                ):
+                    raise ConfigurationValidationError(
+                        "Controlled position capture cannot fall back to unverified persistence."
+                    )
+                try:
+                    position_capture_evidence = (
+                        validate_controlled_position_capture_evidence(
+                            parsed_guard,
+                            complete,
+                            machine_uuid=self.identity.machine_uuid,
+                        )
+                    )
+                except ControlledCalibrationError as exc:
+                    raise ConfigurationValidationError(
+                        f"Controlled position-capture evidence is invalid: {exc}"
                     ) from exc
 
             transaction_id = str(self.uuid_factory())
@@ -1666,21 +1757,36 @@ class ConfigurationTransactionService:
             event_relative = _event_relative(sequence, event_id)
 
             if not affected:
-                if controlled_evidence is None:
+                if controlled_evidence is None and position_capture_evidence is None:
                     raise ConfigurationValidationError(
                         "The proposed configuration is unchanged."
                     )
-                authorization, verification_changes = (
-                    _apply_controlled_calibration_authorization(
-                        current_state.authorization,
-                        complete,
-                        before_hashes,
-                        controlled_evidence,
-                        operator=actor["operator"],
-                        verified_at_utc=now,
-                        evidence_reference=event_relative,
+                if controlled_evidence is not None:
+                    authorization, verification_changes = (
+                        _apply_controlled_calibration_authorization(
+                            current_state.authorization,
+                            complete,
+                            before_hashes,
+                            controlled_evidence,
+                            operator=actor["operator"],
+                            verified_at_utc=now,
+                            evidence_reference=event_relative,
+                        )
                     )
-                )
+                    message = "Unchanged calibration reverified and audited."
+                else:
+                    authorization, verification_changes = (
+                        _apply_controlled_position_capture_authorization(
+                            current_state.authorization,
+                            complete,
+                            before_hashes,
+                            position_capture_evidence,
+                            operator=actor["operator"],
+                            verified_at_utc=now,
+                            evidence_reference=event_relative,
+                        )
+                    )
+                    message = "Unchanged named location reverified and audited."
                 return self._record_nonmutating_locked(
                     state=current_state,
                     event_type="verification",
@@ -1695,7 +1801,7 @@ class ConfigurationTransactionService:
                     event_id=event_id,
                     now=now,
                     event_relative=event_relative,
-                    message="Unchanged calibration reverified and audited.",
+                    message=message,
                 )
             after_hashes = dict(before_hashes)
             for filename in affected:
@@ -1725,6 +1831,24 @@ class ConfigurationTransactionService:
                     sorted(
                         set(changed_targets)
                         | set(controlled_evidence.authorization_target_keys)
+                    )
+                )
+            elif position_capture_evidence is not None:
+                authorization, verification_changes = (
+                    _apply_controlled_position_capture_authorization(
+                        authorization,
+                        complete,
+                        after_hashes,
+                        position_capture_evidence,
+                        operator=actor["operator"],
+                        verified_at_utc=now,
+                        evidence_reference=event_relative,
+                    )
+                )
+                changed_targets = tuple(
+                    sorted(
+                        set(changed_targets)
+                        | set(position_capture_evidence.authorization_target_keys)
                     )
                 )
 

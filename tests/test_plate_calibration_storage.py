@@ -68,7 +68,7 @@ def test_open_calibration_dialog_uses_guarded_entry_without_generic_plate_move(t
     widget = WellPlateWidget.__new__(WellPlateWidget)
     widget.main_window = SimpleNamespace(
         popup_message=lambda *args, **kwargs: None,
-        popup_choice=lambda *args, **kwargs: "Cancel",
+        popup_choice=lambda *args, **kwargs: "Plate is installed",
     )
     widget.model = SimpleNamespace(
         machine_model=SimpleNamespace(
@@ -101,6 +101,7 @@ def test_open_calibration_dialog_uses_guarded_entry_without_generic_plate_move(t
 
 def test_historical_calibration_review_issues_no_motion_and_requires_new_launch():
     calls = []
+    choices = iter(("Plate is installed", "Review Existing Calibration"))
     widget = WellPlateWidget.__new__(WellPlateWidget)
     widget._plate_calibration_session_token = None
     widget._plate_calibration_dialog = None
@@ -117,7 +118,7 @@ def test_historical_calibration_review_issues_no_motion_and_requires_new_launch(
         ),
     )
     widget.main_window = SimpleNamespace(
-        popup_choice=lambda *args, **kwargs: "Review Existing Calibration",
+        popup_choice=lambda *args, **kwargs: next(choices),
         review_configuration_target=lambda target: calls.append(("review", target)),
         popup_message=lambda *args, **kwargs: calls.append(("message", args)),
     )
@@ -128,6 +129,26 @@ def test_historical_calibration_review_issues_no_motion_and_requires_new_launch(
     assert calls[0] == ("review", "plate:plate-a")
     assert not any(call[0] == "motion" for call in calls)
     assert widget._plate_calibration_session_token is None
+
+
+def test_plate_installation_cancel_precedes_preflight_and_motion():
+    calls = []
+    widget = WellPlateWidget.__new__(WellPlateWidget)
+    widget._plate_calibration_session_token = None
+    widget._plate_calibration_dialog = None
+    widget.model = SimpleNamespace()
+    widget.controller = SimpleNamespace(
+        plate_calibration_entry_preflight=lambda: calls.append("preflight"),
+        begin_plate_calibration_entry=lambda **kwargs: calls.append(
+            ("motion", kwargs)
+        ),
+    )
+    widget.main_window = SimpleNamespace(
+        popup_choice=lambda *args, **kwargs: "Cancel",
+    )
+
+    assert WellPlateWidget.open_calibration_dialog(widget) is False
+    assert calls == []
 
 
 def test_well_plate_calibration_save_updates_local_copy_without_touching_preset(tmp_path):

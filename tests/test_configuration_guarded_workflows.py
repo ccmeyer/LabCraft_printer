@@ -33,6 +33,31 @@ class _Machine:
         return True
 
 
+def _position_capture(workflow, name, point, machine_uuid, *, trust_epoch=7):
+    return {
+        "workflow": workflow,
+        "target_key": name,
+        "ready": True,
+        "reason_codes": [],
+        "machine_uuid": machine_uuid,
+        "trust_epoch": trust_epoch,
+        "captured_position": copy.deepcopy(point),
+        "expected_position": copy.deepcopy(point),
+        "position_reconciliation": {
+            "state": "settled",
+            "expected_position": copy.deepcopy(point),
+            "reported_position": copy.deepcopy(point),
+            "trust_epoch": trust_epoch,
+        },
+        "telemetry": {
+            axis: {"generation": 4, "age_ms": 2.0, "value": point[axis]}
+            for axis in ("X", "Y", "Z")
+        },
+        "captured_monotonic": 10.0,
+        "telemetry_max_age_ms": 2500,
+    }
+
+
 def test_v2_guard_confirmation_requires_exact_hash_checkbox_and_version(tmp_path):
     _base, context = _active_context(tmp_path)
     try:
@@ -105,6 +130,16 @@ def test_production_transaction_requires_hash_bound_guard_evidence(tmp_path):
             workflow="named_location_modify",
             target_keys=("camera",),
             hardware_profile="current",
+            preconditions={
+                "captures": [
+                    _position_capture(
+                        "named_location_modify",
+                        "camera",
+                        locations["camera"],
+                        context.identity.machine_uuid,
+                    )
+                ]
+            },
             governed_file_sha256=state.config_sha256,
         )
         result = service.commit_documents(
@@ -117,7 +152,192 @@ def test_production_transaction_requires_hash_bound_guard_evidence(tmp_path):
         )
         event = json.loads((context.paths.machine_root / result.state.latest_event_path).read_text(encoding="utf-8"))
         assert event["changes"][-1]["guard_assessment"]["proposal_sha256"] == assessment["proposal_sha256"]
-        assert result.state.authorization["location:camera"]["state"] == "revoked_pending_verification"
+        authorization = result.state.authorization["location:camera"]
+        assert authorization["state"] == "operator_verified"
+        assert authorization["verification_method"] == "controlled_position_capture"
+    finally:
+        context.close()
+
+
+def test_current_generic_location_verification_uses_internal_value_and_checkbox(
+    tmp_path,
+):
+    _base, context = _active_context(tmp_path)
+    try:
+        service = context.configuration_transactions
+        before = read_governed_documents(context.paths)
+        changed = copy.deepcopy(before["Locations.json"])
+        changed["camera"]["Y"] += 25
+        changed_result = service.commit_documents(
+            {"Locations.json": changed},
+            operator="Alice",
+            reason="simulate previously imported location",
+            workflow="test_setup",
+        )
+        assert (
+            changed_result.state.authorization["location:camera"]["state"]
+            == "revoked_pending_verification"
+        )
+        errors = _Signal()
+        controller = Controller.__new__(Controller)
+        controller.configuration_transactions = service
+        controller.configuration_safety_guard = context.configuration_safety_guard
+        controller.error_occurred_signal = errors
+        controller._configuration_recovery_required = False
+        controller.model = SimpleNamespace(
+            well_plate=SimpleNamespace(
+                get_current_plate_name=lambda: before["Settings.json"][
+                    "DEFAULT_PLATE"
+                ]
+            )
+        )
+        snapshot = controller.configuration_target_verification_snapshot(
+            "location:camera"
+        )
+
+        assert snapshot["value"] == changed["camera"]
+        assert snapshot["verification_route"] == "location_verification"
+        assert controller.verify_current_configuration_target(
+            snapshot,
+            operator="Alice",
+            acknowledged=False,
+            acknowledgement_version=1,
+        ) is False
+
+        result = controller.verify_current_configuration_target(
+            snapshot,
+            operator="Alice",
+            acknowledged=True,
+            acknowledgement_version=1,
+        )
+        authorization = result.state.authorization["location:camera"]
+        assert authorization["state"] == "operator_verified"
+        assert authorization["verification_method"] == "physical_check"
+        event = json.loads(
+            (context.paths.machine_root / result.state.latest_event_path).read_text(
+                encoding="utf-8"
+            )
+        )
+        assert event["reason"] == "Operator physically verified the displayed current target."
+        assert errors.events[0][0] == "Configuration Verification Failed"
+    finally:
+        context.close()
+
+
+def test_current_location_verification_rejects_a_stale_displayed_value(tmp_path):
+    _base, context = _active_context(tmp_path)
+    try:
+        service = context.configuration_transactions
+        before = read_governed_documents(context.paths)
+        changed = copy.deepcopy(before["Locations.json"])
+        changed["camera"]["Y"] += 25
+        service.commit_documents(
+            {"Locations.json": changed},
+            operator="Alice",
+            reason="first imported value",
+            workflow="test_setup",
+        )
+        controller = Controller.__new__(Controller)
+        controller.configuration_transactions = service
+        controller.configuration_safety_guard = context.configuration_safety_guard
+        controller.error_occurred_signal = _Signal()
+        controller._configuration_recovery_required = False
+        controller.model = SimpleNamespace(
+            well_plate=SimpleNamespace(
+                get_current_plate_name=lambda: before["Settings.json"][
+                    "DEFAULT_PLATE"
+                ]
+            )
+        )
+        stale = controller.configuration_target_verification_snapshot(
+            "location:camera"
+        )
+        later = copy.deepcopy(changed)
+        later["camera"]["Y"] += 1
+        service.commit_documents(
+            {"Locations.json": later},
+            operator="Alice",
+            reason="later imported value",
+            workflow="test_setup",
+        )
+
+        assert controller.verify_current_configuration_target(
+            stale,
+            operator="Alice",
+            acknowledged=True,
+            acknowledgement_version=1,
+        ) is False
+        assert service.refresh(allow_pending=False).authorization[
+            "location:camera"
+        ]["state"] == "revoked_pending_verification"
+        assert "changed while its verification dialog was open" in (
+            controller.error_occurred_signal.events[-1][1]
+        )
+    finally:
+        context.close()
+
+
+@pytest.mark.parametrize(
+    ("target_kind", "expected_route"),
+    (("plate", "plate_calibration"), ("rack", "rack_calibration")),
+)
+def test_calibration_targets_cannot_use_generic_checkbox_verification(
+    tmp_path, target_kind, expected_route
+):
+    _base, context = _active_context(tmp_path)
+    try:
+        service = context.configuration_transactions
+        before = read_governed_documents(context.paths)
+        if target_kind == "plate":
+            proposed = copy.deepcopy(before["Plates.json"])
+            plate = next(item for item in proposed if item["default"])
+            for point in plate["calibrations"].values():
+                point["X"] += 10
+            service.commit_documents(
+                {"Plates.json": proposed},
+                operator="Alice",
+                reason="simulate pending plate",
+                workflow="test_setup",
+            )
+            target_key = f"plate:{plate['name'].casefold()}"
+        else:
+            proposed = copy.deepcopy(before["Locations.json"])
+            for name in ("rack_position_Left", "rack_position_Right"):
+                proposed[name]["X"] += 10
+            service.commit_documents(
+                {"Locations.json": proposed},
+                operator="Alice",
+                reason="simulate pending rack",
+                workflow="test_setup",
+            )
+            target_key = "rack:primary"
+        controller = Controller.__new__(Controller)
+        controller.configuration_transactions = service
+        controller.configuration_safety_guard = context.configuration_safety_guard
+        controller.error_occurred_signal = _Signal()
+        controller._configuration_recovery_required = False
+        controller.model = SimpleNamespace(
+            well_plate=SimpleNamespace(
+                get_current_plate_name=lambda: before["Settings.json"][
+                    "DEFAULT_PLATE"
+                ]
+            )
+        )
+        snapshot = controller.configuration_target_verification_snapshot(target_key)
+
+        assert snapshot["verification_route"] == expected_route
+        assert controller.verify_current_configuration_target(
+            snapshot,
+            operator="Alice",
+            acknowledged=True,
+            acknowledgement_version=1,
+        ) is False
+        assert "must be verified by their calibration workflow" in (
+            controller.error_occurred_signal.events[-1][1]
+        )
+        assert service.refresh(allow_pending=False).authorization[target_key][
+            "state"
+        ] == "revoked_pending_verification"
     finally:
         context.close()
 
@@ -468,6 +688,10 @@ def test_production_controller_capture_preview_commit_and_trust_epoch_recheck(qa
         # Intentional rejection below must not open the real modal MainWindow
         # error dialog in this headless integration test.
         controller.error_occurred_signal.disconnect()
+        errors = []
+        controller.error_occurred_signal.connect(
+            lambda title, message: errors.append((title, message))
+        )
         machine_model = components.model.machine_model
         camera = components.model.location_model.get_location_dict("camera")
         captured = {"X": camera["X"], "Y": camera["Y"] + 250, "Z": camera["Z"]}
@@ -476,7 +700,7 @@ def test_production_controller_capture_preview_commit_and_trust_epoch_recheck(qa
         machine_model.motors_enabled = True
         machine_model.handle_home_complete()
         machine_model.update_reported_position(captured)
-        controller.expected_position = copy.deepcopy(captured)
+        controller.update_expected_with_current()
 
         proposal = controller.prepare_named_location_change("camera", require_existing=True)
         assessment = proposal["assessment"]
@@ -500,7 +724,7 @@ def test_production_controller_capture_preview_commit_and_trust_epoch_recheck(qa
         machine_model.motors_enabled = True
         machine_model.handle_home_complete()
         machine_model.update_reported_position(captured)
-        controller.expected_position = copy.deepcopy(captured)
+        controller.update_expected_with_current()
         proposal = controller.prepare_named_location_change("camera", require_existing=True)
         assessment = proposal["assessment"]
         confirmation.update(
@@ -513,7 +737,12 @@ def test_production_controller_capture_preview_commit_and_trust_epoch_recheck(qa
             reason="Camera calibration test",
             confirmation=confirmation,
         )
-        assert result.state.authorization["location:camera"]["state"] == "revoked_pending_verification"
+        assert result is not False, errors
+        assert result.state.authorization["location:camera"]["state"] == "operator_verified"
+        assert (
+            result.state.authorization["location:camera"]["verification_method"]
+            == "controlled_position_capture"
+        )
         assert components.model.location_model.get_location_dict("camera") == captured
     finally:
         assert components.close() is True

@@ -121,6 +121,7 @@ def test_rack_and_plate_adapters_commit_complete_aggregates_once_then_clear_temp
     locations = {
         "rack_position_Left": {"X": 1, "Y": 2, "Z": 3},
         "rack_position_Right": {"X": 4, "Y": 5, "Z": 6},
+        "Pause": {"X": 7, "Y": 8, "Z": 9},
     }
     rack_temp = {
         "rack_position_Left": {"X": 11, "Y": 12, "Z": 13},
@@ -128,7 +129,12 @@ def test_rack_and_plate_adapters_commit_complete_aggregates_once_then_clear_temp
     }
     rack_clears = []
     plate_clears = []
-    plates = [{"name": "plate-a", "calibrations": {"top_left": {"X": 1}}}]
+    plates = [
+        {
+            "name": "plate-a",
+            "calibrations": {"top_left": {"X": 1, "Y": 2, "Z": 30}},
+        }
+    ]
     model = SimpleNamespace(
         location_model=SimpleNamespace(get_all_locations=lambda: copy.deepcopy(locations)),
         rack_model=SimpleNamespace(
@@ -137,6 +143,7 @@ def test_rack_and_plate_adapters_commit_complete_aggregates_once_then_clear_temp
         ),
         well_plate=SimpleNamespace(
             proposed_calibration_document=lambda: copy.deepcopy(plates),
+            get_current_plate_name=lambda: "plate-a",
             discard_temp_calibrations=lambda: plate_clears.append(True),
         ),
         install_committed_locations=lambda _value: order.append("locations-memory"),
@@ -157,7 +164,19 @@ def test_rack_and_plate_adapters_commit_complete_aggregates_once_then_clear_temp
     rack_document = service.calls[0][0]["Locations.json"]
     assert rack_document["rack_position_Left"] == rack_temp["rack_position_Left"]
     assert rack_document["rack_position_Right"] == rack_temp["rack_position_Right"]
-    assert service.calls[1][0] == {"Plates.json": plates}
+    plate_documents = service.calls[1][0]
+    assert plate_documents["Plates.json"] == plates
+    assert plate_documents["Locations.json"]["Pause"] == {
+        "X": 7,
+        "Y": 8,
+        "Z": 30,
+    }
     assert rack_clears == [True]
     assert plate_clears == [True]
-    assert order == ["disk", "locations-memory", "disk", "plates-memory"]
+    assert order == [
+        "disk",
+        "locations-memory",
+        "disk",
+        "locations-memory",
+        "plates-memory",
+    ]

@@ -1,260 +1,169 @@
 from types import SimpleNamespace
 
+from PySide6 import QtWidgets
+
 import View
 
 
-LEFT = {"X": 1000, "Y": 100, "Z": 48000}
-RIGHT = {"X": 1000, "Y": 4000, "Z": 48000}
-HOME = {"X": 500, "Y": 500, "Z": 500}
-
-
-class FakeMainWindow:
-    def __init__(self):
-        self.color_dict = {
-            "dark_blue": "#000088",
-            "darker_gray": "#222222",
-        }
-        self.messages = []
-
-    def popup_message(self, title, message):
-        self.messages.append((title, message))
-
-
-class FakeController:
-    def __init__(self):
-        self.calls = []
-
-    def set_absolute_coordinates(self, x, y, z, **kwargs):
-        self.calls.append((int(x), int(y), int(z), dict(kwargs)))
-        return True
-
-
-class FakeButton:
+class _Button:
     def __init__(self):
         self.enabled = None
-        self.styles = []
 
     def setEnabled(self, enabled):
         self.enabled = bool(enabled)
 
-    def setStyleSheet(self, style):
-        self.styles.append(style)
 
-
-class FakeLabel:
+class _Controller:
     def __init__(self):
-        self.text = ""
+        self.calls = []
 
-    def setText(self, text):
-        self.text = text
+    def capture_and_advance_rack_calibration(self, token, point_name):
+        self.calls.append(("capture", token, point_name))
+        return True
 
+    def move_rack_calibration_to_point(self, token, point_name):
+        self.calls.append(("back", token, point_name))
+        return True
 
-class FakeMachineModel:
-    def __init__(self, current_position):
-        self.current_position = current_position.copy()
-
-    def get_current_position_dict_capital(self):
-        return self.current_position.copy()
-
-    def is_busy(self):
-        return False
+    def jog_rack_calibration(self, token, **deltas):
+        self.calls.append(("jog", token, deltas))
+        return True
 
 
-class FakeLocationModel:
-    def __init__(self, home_location=HOME):
-        self.home_location = home_location
-
-    def get_location_dict(self, name):
-        if name == "home":
-            return self.home_location
-        return None
-
-
-class FakeRackModel:
-    def __init__(self):
-        self.calibrations = {
-            "rack_position_Left": LEFT.copy(),
-            "rack_position_Right": RIGHT.copy(),
-        }
-        self.temp_calibration_data = {}
-
-    def get_all_current_rack_calibrations(self):
-        return self.calibrations
-
-    def get_calibration_by_name(self, name):
-        return self.calibrations.get(name)
-
-    def get_temp_calibration_by_name(self, name):
-        return self.temp_calibration_data.get(name)
-
-    def set_calibration_position(self, name, position):
-        self.temp_calibration_data[name] = position.copy()
-
-    def discard_temp_calibrations(self):
-        self.temp_calibration_data.clear()
-
-
-class FakeWellPlate:
-    def __init__(self):
-        self.calibrations = {
-            "top_left": {"X": 100, "Y": 200, "Z": 300},
-            "top_right": {"X": 100, "Y": 400, "Z": 300},
-            "bottom_right": {"X": 300, "Y": 400, "Z": 300},
-            "bottom_left": {"X": 300, "Y": 200, "Z": 300},
-        }
-        self.temp_calibration_data = {}
-
-    def get_all_current_plate_calibrations(self):
-        return self.calibrations
-
-    def get_calibration_by_name(self, name):
-        return self.calibrations.get(name)
-
-    def get_temp_calibration_by_name(self, name):
-        return self.temp_calibration_data.get(name)
-
-    def set_calibration_position(self, name, position):
-        self.temp_calibration_data[name] = position.copy()
-
-    def discard_temp_calibrations(self):
-        self.temp_calibration_data.clear()
-
-
-def _install_ui_stubs(dialog):
-    dialog.instructions_label = FakeLabel()
-    dialog.next_button = FakeButton()
-    dialog.back_button = FakeButton()
-    dialog.submit_button = FakeButton()
-    dialog.update_step_labels = lambda: None
-    dialog.update_visual_aid = lambda: None
-
-
-def make_rack_dialog(*, current_step=0, current_position=None, home_location=HOME):
+def _dialog(*, current_step=0):
     dialog = View.RackCalibrationDialog.__new__(View.RackCalibrationDialog)
-    dialog.main_window = FakeMainWindow()
-    dialog.color_dict = dialog.main_window.color_dict
-    dialog.controller = FakeController()
+    dialog.session_token = "rack-session"
+    dialog._automatic_motion_pending = False
+    dialog._workflow_interrupted = False
+    dialog.current_step = current_step
     dialog.steps = ["Left", "Right"]
     dialog.name_dict = {
         "Left": "rack_position_Left",
         "Right": "rack_position_Right",
     }
-    dialog.offsets = {"X": 2500, "Y": 0, "Z": 0}
-    dialog.current_step = current_step
+    dialog.controller = _Controller()
     dialog.model = SimpleNamespace(
-        rack_model=FakeRackModel(),
-        machine_model=FakeMachineModel(current_position or LEFT),
-        location_model=FakeLocationModel(home_location),
+        machine_model=SimpleNamespace(is_busy=lambda: False),
     )
-    _install_ui_stubs(dialog)
+    dialog.main_window = SimpleNamespace(popup_message=lambda *_args: None)
+    dialog.next_button = _Button()
+    dialog.back_button = _Button()
+    dialog.submit_button = _Button()
+    dialog.set_automatic_motion_pending = lambda pending: setattr(
+        dialog, "_automatic_motion_pending", bool(pending)
+    )
+    dialog.update_step_labels = lambda: None
+    dialog.update_visual_aid = lambda: None
     return dialog
 
 
-def make_plate_dialog():
-    dialog = View.PlateCalibrationDialog.__new__(View.PlateCalibrationDialog)
-    dialog.main_window = FakeMainWindow()
-    dialog.color_dict = dialog.main_window.color_dict
-    dialog.controller = FakeController()
-    dialog.steps = ["Top-Left", "Top-Right", "Bottom-Right", "Bottom-Left"]
-    dialog.name_dict = {
-        "Top-Left": "top_left",
-        "Top-Right": "top_right",
-        "Bottom-Right": "bottom_right",
-        "Bottom-Left": "bottom_left",
-    }
-    dialog.offsets = {"X": 0, "Y": 0, "Z": -500}
-    dialog.current_step = 0
-    dialog.model = SimpleNamespace(
-        well_plate=FakeWellPlate(),
-        machine_model=FakeMachineModel({"X": 100, "Y": 200, "Z": 300}),
-    )
-    return dialog
-
-
-def coord_calls(dialog):
-    return [(x, y, z, kwargs) for x, y, z, kwargs in dialog.controller.calls]
-
-
-def test_initial_rack_dialog_move_uses_existing_clearance_then_target():
-    dialog = make_rack_dialog(current_step=0, current_position=HOME)
+def test_rack_dialog_initial_move_is_side_effect_free():
+    dialog = _dialog()
 
     result = View.RackCalibrationDialog.move_to_initial_position(dialog)
 
     assert result is True
-    assert coord_calls(dialog) == [
-        (3500, 100, 48000, {"override": True}),
-        (1000, 100, 48000, {"override": True}),
-    ]
-    assert dialog.main_window.messages == []
+    assert dialog.controller.calls == []
 
 
-def test_rack_next_step_lifts_to_home_z_before_crossing_left_to_right():
-    dialog = make_rack_dialog(current_step=0, current_position=LEFT)
+def test_rack_dialog_constructor_is_motion_free(qapp, monkeypatch):
+    monkeypatch.setattr(
+        View,
+        "SimplePositionWidget",
+        lambda *_args, **_kwargs: QtWidgets.QWidget(),
+    )
+    monkeypatch.setattr(
+        View,
+        "ShortcutTableWidget",
+        lambda *_args, **_kwargs: QtWidgets.QWidget(),
+    )
+    motion_calls = []
+    machine_model = SimpleNamespace(
+        step_size=500,
+        increase_step_size=lambda: None,
+        decrease_step_size=lambda: None,
+    )
+    rack_model = SimpleNamespace(
+        get_all_current_rack_calibrations=lambda: {
+            "rack_position_Left": {"X": 104, "Y": 2000, "Z": 65500},
+            "rack_position_Right": {"X": 204, "Y": 41350, "Z": 66600},
+        }
+    )
+    model = SimpleNamespace(machine_model=machine_model, rack_model=rack_model)
+    main_window = SimpleNamespace(
+        color_dict={
+            "dark_blue": "#000088",
+            "dark_red": "#880000",
+            "dark_gray": "#444444",
+            "darker_gray": "#222222",
+        }
+    )
+    controller = SimpleNamespace(
+        set_absolute_coordinates=lambda *args, **kwargs: motion_calls.append(
+            (args, kwargs)
+        ),
+        jog_rack_calibration=lambda *args, **kwargs: motion_calls.append(
+            (args, kwargs)
+        ),
+    )
+
+    dialog = View.RackCalibrationDialog(
+        main_window,
+        model,
+        controller,
+        session_token="rack-session",
+        manual_first=True,
+    )
+
+    assert motion_calls == []
+    assert "safe Z=500" in dialog.instructions_label.text()
+    dialog.deleteLater()
+
+
+def test_rack_dialog_capture_delegates_to_session_controller():
+    dialog = _dialog(current_step=0)
 
     result = View.RackCalibrationDialog.next_step(dialog)
 
     assert result is True
     assert dialog.current_step == 1
-    assert coord_calls(dialog) == [
-        (3500, 100, 48000, {"override": True}),
-        (3500, 4000, 500, {"override": True}),
-        (3500, 4000, 48000, {"override": True}),
-        (1000, 4000, 48000, {"override": True}),
+    assert dialog._automatic_motion_pending is True
+    assert dialog.controller.calls == [
+        ("capture", "rack-session", "rack_position_Left")
     ]
 
 
-def test_rack_previous_step_lifts_to_home_z_before_crossing_right_to_left():
-    dialog = make_rack_dialog(current_step=1, current_position=RIGHT)
+def test_rack_dialog_back_delegates_to_session_controller():
+    dialog = _dialog(current_step=1)
 
     result = View.RackCalibrationDialog.previous_step(dialog)
 
     assert result is True
     assert dialog.current_step == 0
-    assert coord_calls(dialog) == [
-        (3500, 4000, 48000, {"override": True}),
-        (3500, 100, 500, {"override": True}),
-        (3500, 100, 48000, {"override": True}),
-        (1000, 100, 48000, {"override": True}),
+    assert dialog._automatic_motion_pending is True
+    assert dialog.controller.calls == [
+        ("back", "rack-session", "rack_position_Left")
     ]
 
 
-def test_rack_final_confirm_only_moves_to_existing_clearance_position():
-    dialog = make_rack_dialog(current_step=1, current_position=RIGHT)
+def test_rack_dialog_manual_jog_is_session_bound():
+    dialog = _dialog()
 
-    result = View.RackCalibrationDialog.next_step(dialog)
+    result = View.RackCalibrationDialog.request_relative_jog(
+        dialog, 0, 0, -500
+    )
 
     assert result is True
-    assert dialog.current_step == 2
-    assert coord_calls(dialog) == [
-        (3500, 4000, 48000, {"override": True}),
-    ]
-    assert dialog.instructions_label.text == "Calibration complete."
-    assert dialog.next_button.enabled is False
-    assert dialog.submit_button.enabled is True
-
-
-def test_rack_side_to_side_blocks_when_home_z_is_unavailable():
-    dialog = make_rack_dialog(current_step=0, current_position=LEFT, home_location={"X": 1, "Y": 2})
-
-    result = View.RackCalibrationDialog.next_step(dialog)
-
-    assert result is False
-    assert dialog.current_step == 0
-    assert coord_calls(dialog) == []
-    assert dialog.model.rack_model.temp_calibration_data == {}
-    assert dialog.main_window.messages == [
-        (
-            "Rack Calibration Move Error",
-            "Cannot move between rack calibration positions because home Z is unavailable.",
-        )
+    assert dialog.controller.calls == [
+        ("jog", "rack-session", {"x": 0, "y": 0, "z": -500})
     ]
 
 
-def test_plate_calibration_dialog_initial_move_is_side_effect_free():
-    dialog = make_plate_dialog()
+def test_rack_dialog_rejects_actions_during_automatic_motion():
+    dialog = _dialog(current_step=1)
+    dialog._automatic_motion_pending = True
 
-    result = View.PlateCalibrationDialog.move_to_initial_position(dialog)
-
-    assert result is True
-    assert coord_calls(dialog) == []
-    assert dialog.main_window.messages == []
+    assert View.RackCalibrationDialog.next_step(dialog) is False
+    assert View.RackCalibrationDialog.previous_step(dialog) is False
+    assert View.RackCalibrationDialog.request_relative_jog(dialog, 500, 0, 0) is False
+    assert dialog.controller.calls == []

@@ -244,6 +244,53 @@ def test_motion_trust_change_during_reconciliation_is_fail_closed():
     assert "position_reconciliation_trust_changed" in readiness["reason_codes"]
 
 
+def test_home_completion_replaces_stale_pre_home_reconciliation():
+    clock = [45.0]
+    controller, machine_model = _capture_controller(
+        clock,
+        position={"X": 3186, "Y": 34792, "Z": 66416},
+    )
+    controller.expected_position = {"X": 3186, "Y": 34792, "Z": 66416}
+    controller._position_reconciliation = {
+        "state": "mismatch",
+        "reason": "fresh_post_drain_position_mismatch",
+        "expected_position": copy.deepcopy(controller.expected_position),
+    }
+    controller._pending_motion_endpoint_evidence = {"queue_result": "obsolete"}
+
+    controller.home_complete_handler()
+
+    record = controller._position_reconciliation
+    assert controller.expected_position == {"X": 500, "Y": 500, "Z": 500}
+    assert controller.expected_location == "Home"
+    assert controller._pending_motion_endpoint_evidence is None
+    assert record["state"] == "pending"
+    assert record["reason"] == "homing_completed"
+    assert record["expected_position"] == {"X": 500, "Y": 500, "Z": 500}
+    assert record["trust_epoch"] == machine_model.get_motion_trust_epoch()
+
+
+def test_post_home_reconciliation_requires_complete_fresh_xyz_generation():
+    clock = [47.0]
+    controller, machine_model = _capture_controller(
+        clock,
+        position={"X": 3186, "Y": 34792, "Z": 66416},
+    )
+
+    controller.home_complete_handler()
+
+    assert _advance_axis(controller, machine_model, clock, "X", 500)["state"] == "pending"
+    assert _advance_axis(controller, machine_model, clock, "Y", 500)["state"] == "pending"
+    readiness = controller._configuration_capture_readiness()
+    assert "position_reconciliation_pending" in readiness["reason_codes"]
+
+    settled = _advance_axis(controller, machine_model, clock, "Z", 500)
+
+    assert settled["state"] == "settled"
+    assert settled["reported_position"] == {"X": 500, "Y": 500, "Z": 500}
+    assert controller._configuration_capture_readiness()["ready"] is True
+
+
 def test_later_queue_drain_supersedes_older_pending_record():
     clock = [50.0]
     controller, machine_model = _capture_controller(clock)
@@ -278,6 +325,10 @@ def test_explicit_current_resync_clears_pending_reconciliation():
     assert controller.expected_position == {"X": 33049, "Y": 29873, "Z": 84349}
     assert controller._position_reconciliation["state"] == "settled"
     assert controller._position_reconciliation["reason"] == "explicit_current_resync"
+    assert (
+        controller._position_reconciliation["trust_epoch"]
+        == machine_model.get_motion_trust_epoch()
+    )
     assert controller._pending_motion_endpoint_evidence is None
 
 

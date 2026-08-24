@@ -856,6 +856,59 @@ class ConfigurationChangeGuard:
                 )
                 hard_checks.extend(plate_checks)
                 hard_checks.append({"code": "plate_derived_wells", "passed": True, "message": f"{len(derived)} derived wells are hard-valid."})
+                if self.policy.schema_version != LEGACY_POLICY_SCHEMA_VERSION:
+                    if "Locations.json" not in proposed_documents:
+                        raise ConfigurationSafetyError(
+                            "Plate calibration must include the derived Pause location."
+                        )
+                    pause_names = [
+                        str(name)
+                        for name in locations_after
+                        if str(name).casefold() == "pause"
+                    ]
+                    if len(pause_names) != 1:
+                        raise ConfigurationSafetyError(
+                            "Plate calibration requires one saved Pause location."
+                        )
+                    pause_name = pause_names[0]
+                    prior_pause = _point(
+                        locations_before.get(pause_name), "prior Pause location"
+                    )
+                    proposed_pause = _point(
+                        locations_after.get(pause_name), "proposed Pause location"
+                    )
+                    if any(
+                        proposed_pause[axis] != prior_pause[axis]
+                        for axis in ("X", "Y")
+                    ):
+                        raise ConfigurationSafetyError(
+                            "Plate calibration cannot change Pause X or Y."
+                        )
+                    top_left = _point(
+                        proposed_plate["calibrations"].get("top_left"),
+                        "proposed plate top-left",
+                    )
+                    if proposed_pause["Z"] != top_left["Z"]:
+                        raise ConfigurationSafetyError(
+                            "Pause Z must exactly match the calibrated top-left Z."
+                        )
+                    changes.extend(
+                        _coordinate_changes(
+                            locations_before,
+                            locations_after,
+                            names=(pause_name,),
+                        )
+                    )
+                    hard_checks.append(
+                        {
+                            "code": "plate_pause_location_derived",
+                            "passed": True,
+                            "message": (
+                                "Pause X/Y are preserved and Pause Z exactly matches "
+                                "the calibrated top-left Z."
+                            ),
+                        }
+                    )
                 target_class = "plate"
             else:
                 # Imports/restores compare every changed coordinate so the
@@ -972,11 +1025,15 @@ class ConfigurationChangeGuard:
         ):
             result = "routine_confirmation"
         target_label = ", ".join(target_keys)
-        authorization_consequence = (
-            "verified_by_controlled_calibration"
-            if workflow in {"rack_calibration", "plate_calibration"}
-            else "revoked_pending_verification"
-        )
+        if workflow in {"rack_calibration", "plate_calibration"}:
+            authorization_consequence = "verified_by_controlled_calibration"
+        elif (
+            self.policy.schema_version != LEGACY_POLICY_SCHEMA_VERSION
+            and workflow in {"named_location_add", "named_location_modify"}
+        ):
+            authorization_consequence = "verified_by_controlled_position_capture"
+        else:
+            authorization_consequence = "revoked_pending_verification"
         largest_delta = max(
             (
                 value
@@ -1004,7 +1061,12 @@ class ConfigurationChangeGuard:
             consequence = (
                 "This completed calibration will be saved as verified."
                 if authorization_consequence == "verified_by_controlled_calibration"
-                else "Changed targets will remain motion-blocked until separately verified."
+                else (
+                    "This captured machine position will be saved as verified."
+                    if authorization_consequence
+                    == "verified_by_controlled_position_capture"
+                    else "Changed targets will remain motion-blocked until separately verified."
+                )
             )
             acknowledgement = (
                 f"I reviewed every displayed coordinate and delta for {target_label}, "
@@ -1133,6 +1195,10 @@ def parse_guard_assessment(payload: object) -> dict[str, object]:
         "rack_calibration", "plate_calibration"
     }:
         allowed_consequences.add("verified_by_controlled_calibration")
+    if schema_version == ASSESSMENT_SCHEMA_VERSION and payload.get("workflow") in {
+        "named_location_add", "named_location_modify"
+    }:
+        allowed_consequences.add("verified_by_controlled_position_capture")
     if payload.get("authorization_consequence") not in allowed_consequences:
         raise ConfigurationSafetyError("Assessment authorization consequence is invalid.")
     return copy.deepcopy(payload)

@@ -589,6 +589,12 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
                 "Any changed target remains motion-blocked until a separate exact-value "
                 "physical or service-record verification is audited."
             )
+        elif authorization_consequence == "verified_by_controlled_position_capture":
+            notice_text = (
+                "This location was captured from fresh, reconciled machine telemetry. "
+                "Saving records the coordinate and verifies the exact location in the "
+                "same audited transaction."
+            )
         else:
             notice_text = (
                 "Saving does not verify this target. The changed value remains motion-blocked "
@@ -619,6 +625,8 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
             action_text = "Save Verified Calibration"
         elif workflow == "configuration_restore":
             action_text = "Restore Exact Backup and Revoke Changed Targets"
+        elif authorization_consequence == "verified_by_controlled_position_capture":
+            action_text = "Save Verified Location"
         else:
             action_text = "Save and Revoke"
         self.action_button = QtWidgets.QPushButton(action_text, self)
@@ -753,6 +761,84 @@ class ControlledCalibrationPromotionDialog(QtWidgets.QDialog):
         return {
             "operator": self.operator_edit.text().strip(),
             "reason": self.reason_edit.text().strip(),
+        }
+
+
+class LocationVerificationDialog(QtWidgets.QDialog):
+    """Acknowledge one current saved location without transcribing JSON."""
+
+    def __init__(self, snapshot, parent=None):
+        super().__init__(parent)
+        self.snapshot = copy.deepcopy(dict(snapshot))
+        self.setWindowTitle("Verify Saved Location")
+        self.resize(560, 320)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        target_key = str(self.snapshot.get("target_key") or "")
+        value = dict(self.snapshot.get("value") or {})
+        machine_id = str(self.snapshot.get("machine_id") or "")
+        introduction = QtWidgets.QLabel(
+            "Physically confirm the displayed saved position. Verification records "
+            "an audit event and allows future movement to this exact value; it does "
+            "not move the machine.",
+            self,
+        )
+        introduction.setWordWrap(True)
+        layout.addWidget(introduction)
+
+        details = QtWidgets.QPlainTextEdit(self)
+        details.setReadOnly(True)
+        details.setMaximumHeight(125)
+        details.setPlainText(
+            f"Machine: {machine_id}\n"
+            f"Target: {target_key}\n"
+            f"X: {value.get('X')}\nY: {value.get('Y')}\nZ: {value.get('Z')}"
+        )
+        layout.addWidget(details)
+
+        form = QtWidgets.QFormLayout()
+        self.operator_edit = QtWidgets.QLineEdit(self)
+        self.operator_edit.setText(str(self.snapshot.get("operator_default") or ""))
+        self.acknowledge = QtWidgets.QCheckBox(
+            f"I physically verified {target_key} at the exact X/Y/Z values displayed above.",
+            self,
+        )
+        form.addRow("Operator:", self.operator_edit)
+        form.addRow("", self.acknowledge)
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Cancel, parent=self
+        )
+        self.verify_button = buttons.addButton(
+            "Verify Location", QtWidgets.QDialogButtonBox.AcceptRole
+        )
+        buttons.rejected.connect(self.reject)
+        self.verify_button.clicked.connect(self._accept_if_complete)
+        layout.addWidget(buttons)
+
+    def _accept_if_complete(self):
+        if not self.operator_edit.text().strip():
+            QMessageBox.warning(
+                self, "Operator Required", "Enter the operator performing verification."
+            )
+            return
+        if not self.acknowledge.isChecked():
+            QMessageBox.warning(
+                self,
+                "Verification Required",
+                "Acknowledge that the displayed saved location was physically verified.",
+            )
+            return
+        self.accept()
+
+    def review_result(self):
+        return {
+            "operator": self.operator_edit.text().strip(),
+            "acknowledged": self.acknowledge.isChecked(),
+            "acknowledgement_version": self.snapshot.get(
+                "acknowledgement_version"
+            ),
         }
 
 
@@ -912,57 +998,114 @@ class ConfigurationHistoryWindow(QtWidgets.QDialog):
                     f"Target {target} does not currently require verification"
                 )
                 return
+        snapshot_getter = getattr(
+            self.controller, "configuration_target_verification_snapshot", None
+        )
+        if not callable(snapshot_getter):
+            self.status_label.setText("Target verification is unavailable")
+            return
+        snapshot = snapshot_getter(target)
+        if not snapshot:
+            return
         candidate = dict((promotion_candidates or {}).get(target) or {})
-        if candidate:
-            dialog = ControlledCalibrationPromotionDialog(candidate, self)
-            if dialog.exec() != QDialog.Accepted:
-                return
-            review = dialog.review_result()
-            promote = getattr(
-                self.controller, "promote_controlled_calibration", None
+        route = snapshot.get("verification_route")
+
+        if route in {"plate_calibration", "rack_calibration"}:
+            parent = self.parent()
+            is_plate = route == "plate_calibration"
+            calibration_label = (
+                "Run Plate Calibration" if is_plate else "Run Rack Calibration"
             )
-            if not callable(promote):
+            options = []
+            if candidate:
+                options.append("Review Existing Calibration")
+            options.extend([calibration_label, "Cancel"])
+            message = (
+                "Plate positions must be verified by completing Plate Calibration."
+                if is_plate
+                else "Rack positions must be verified by completing Rack Calibration."
+            )
+            if candidate:
+                message += (
+                    " Eligible immutable evidence from an earlier completed calibration "
+                    "can also be reviewed without motion."
+                )
+            chooser = getattr(parent, "popup_choice", None)
+            choice = (
+                chooser(
+                    "Calibration Verification Required",
+                    message,
+                    options,
+                    default="Cancel",
+                )
+                if callable(chooser)
+                else "Cancel"
+            )
+            if choice == "Review Existing Calibration":
+                dialog = ControlledCalibrationPromotionDialog(candidate, self)
+                if dialog.exec() != QDialog.Accepted:
+                    return
+                review = dialog.review_result()
+                promote = getattr(
+                    self.controller, "promote_controlled_calibration", None
+                )
+                if not callable(promote):
+                    self.status_label.setText(
+                        "Controlled calibration promotion is unavailable"
+                    )
+                    return
+                result = promote(
+                    target,
+                    candidate["source_event_id"],
+                    operator=review["operator"],
+                    reason=review["reason"],
+                )
+                if result:
+                    self.refresh()
+                return
+            if choice != calibration_label:
+                return
+            if is_plate and not snapshot.get("calibration_launch_allowed"):
+                active_name = snapshot.get("active_plate_name") or "none"
                 self.status_label.setText(
-                    "Controlled calibration promotion is unavailable"
+                    f"Load or select {target.split(':', 1)[-1]} before calibration; "
+                    f"the active plate is {active_name}."
                 )
                 return
-            result = promote(
-                target,
-                candidate["source_event_id"],
-                operator=review["operator"],
-                reason=review["reason"],
-            )
-            if result:
-                self.refresh()
+            self.hide()
+            if is_plate:
+                launcher = getattr(
+                    getattr(parent, "well_plate_widget", None),
+                    "open_calibration_dialog",
+                    None,
+                )
+            else:
+                launcher = getattr(
+                    getattr(parent, "rack_box", None),
+                    "open_rack_calibration_dialog",
+                    None,
+                )
+            if callable(launcher):
+                QtCore.QTimer.singleShot(0, launcher)
+            else:
+                self.status_label.setText("Calibration launcher is unavailable")
             return
-        value = values[target]
-        expected_text = json.dumps(value, indent=2, sort_keys=True)
-        confirmation_text, ok = QtWidgets.QInputDialog.getMultiLineText(
-            self,
-            "Exact Target Verification",
-            "Physically verify the target, then enter or paste the exact JSON shown "
-            f"below. Camera is always verified as its own target.\n\nTarget: {target}\n"
-            f"Expected value:\n{expected_text}\n\nExact confirmation JSON:",
-            "",
+
+        dialog = LocationVerificationDialog(snapshot, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        review = dialog.review_result()
+        verify = getattr(
+            self.controller, "verify_current_configuration_target", None
         )
-        if not ok:
+        if not callable(verify):
+            self.status_label.setText("Location verification is unavailable")
             return
-        try:
-            confirmed_value = json.loads(confirmation_text)
-        except json.JSONDecodeError as exc:
-            self.status_label.setText(f"Confirmation is not valid JSON: {exc}")
-            return
-        if confirmed_value != value:
-            self.status_label.setText("Exact confirmation differs; target remains unverified")
-            return
-        operator, ok = QtWidgets.QInputDialog.getText(self, "Target Verification", "Operator name:")
-        if not ok or not operator.strip():
-            return
-        reason, ok = QtWidgets.QInputDialog.getText(self, "Target Verification", "Verification reason/method:")
-        if not ok or not reason.strip():
-            return
-        result = self.controller.verify_configuration_targets(
-            {target: confirmed_value}, operator=operator.strip(), reason=reason.strip()
+        result = verify(
+            snapshot,
+            operator=review["operator"],
+            acknowledged=review["acknowledged"],
+            acknowledgement_version=review["acknowledgement_version"],
         )
         if result:
             self.refresh()
@@ -1416,6 +1559,13 @@ class MainWindow(QMainWindow):
         self._close_disconnect_signal_hooked = False
 
         self.controller.error_occurred_signal.connect(self.popup_message)
+        verification_required = getattr(
+            self.controller, "configuration_verification_required", None
+        )
+        if verification_required is not None:
+            verification_required.connect(
+                self.show_configuration_verification_required
+            )
         xy_recovery_requested = getattr(self.controller, "xy_motion_recovery_requested", None)
         if xy_recovery_requested is not None:
             xy_recovery_requested.connect(self.show_xy_motion_recovery)
@@ -1882,6 +2032,61 @@ class MainWindow(QMainWindow):
         transparent_icon = self.make_transparent_icon()
         msg.setWindowIcon(transparent_icon)
         msg.exec()
+
+    def show_configuration_verification_required(self, payload):
+        """Explain a saved-target denial and offer the correct audited action."""
+
+        if not isinstance(payload, dict):
+            return
+        target_key = str(payload.get("target_key") or "saved target")
+        route = str(payload.get("verification_route") or "")
+        message = str(payload.get("message") or "This saved target is not verified.")
+        message += (
+            "\n\nNo motion was queued. After successful verification, request the "
+            "move again."
+        )
+        if route == "plate_calibration":
+            action = "Run Plate Calibration..."
+            message += "\n\nComplete Plate Calibration to verify this plate target."
+        elif route == "rack_calibration":
+            action = "Run Rack Calibration..."
+            message += "\n\nComplete Rack Calibration to verify this rack target."
+        else:
+            action = "Verify Location..."
+            message += "\n\nReview and physically confirm the saved XYZ position."
+        choice = self.popup_choice(
+            "Saved Position Requires Verification",
+            f"Target: {target_key}\n\n{message}",
+            [action, "Cancel"],
+            default="Cancel",
+        )
+        if choice != action:
+            return
+        if route == "plate_calibration":
+            launcher = getattr(
+                getattr(self, "well_plate_widget", None),
+                "open_calibration_dialog",
+                None,
+            )
+        elif route == "rack_calibration":
+            launcher = getattr(
+                getattr(self, "rack_box", None),
+                "open_rack_calibration_dialog",
+                None,
+            )
+        else:
+            QtCore.QTimer.singleShot(
+                0,
+                lambda key=target_key: self.review_configuration_target(key),
+            )
+            return
+        if callable(launcher):
+            QtCore.QTimer.singleShot(0, launcher)
+        else:
+            self.popup_message(
+                "Calibration Unavailable",
+                "The requested calibration launcher is unavailable.",
+            )
 
     def _popup_board_reset_message(self, title, message):
         self._popup_debug_bundle_message(title, message, self.controller.export_last_reset_debug_bundle)
@@ -2758,7 +2963,7 @@ class MainWindow(QMainWindow):
             if proposal and self.review_guarded_configuration_proposal(proposal, title="Save Location"):
                 self.popup_message(
                     "Location Saved",
-                    "The location was saved and audited. Movement to the new value is blocked until its exact coordinates are verified.",
+                    "The location was saved, audited, and verified from the fresh live machine position.",
                 )
             return
         try:
@@ -2803,7 +3008,7 @@ class MainWindow(QMainWindow):
             if proposal and self.review_guarded_configuration_proposal(proposal, title="Modify Location"):
                 self.popup_message(
                     "Location Saved",
-                    "The location was saved and audited. Movement to the changed value is blocked until its exact coordinates are verified.",
+                    "The location was saved, audited, and verified from the fresh live machine position.",
                 )
             return
         try:
@@ -7394,6 +7599,16 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 "Wait for the current plate calibration to finish or cancel it.",
             )
             return False
+        installation = self.main_window.popup_choice(
+            "Install Plate Before Calibration",
+            "Install the calibration plate with all four corner markers, or the "
+            "plate of interest, before beginning calibration. No plate-directed "
+            "motion will occur until you confirm that the plate is installed.",
+            ["Plate is installed", "Cancel"],
+            default="Cancel",
+        )
+        if installation != "Plate is installed":
+            return False
         preflight_getter = getattr(
             self.controller, "plate_calibration_entry_preflight", None
         )
@@ -9506,10 +9721,19 @@ class PlateCalibrationDialog(BaseCalibrationDialog):
             self.visual_aid_scene.addEllipse(pos[0], pos[1], well_radius * 2, well_radius * 2, pen=pen, brush=brush)
 
 class RackCalibrationDialog(BaseCalibrationDialog):
-    RACK_MOVE_ERROR_TITLE = "Rack Calibration Move Error"
     configuration_capture_workflow = "rack_calibration"
 
-    def __init__(self, main_window, model, controller):
+    def __init__(
+        self,
+        main_window,
+        model,
+        controller,
+        *,
+        session_token,
+        manual_first,
+    ):
+        self.session_token = str(session_token)
+        self.manual_first = bool(manual_first)
         steps = ["Left","Right"]
         name_dict = {
             "Left": "rack_position_Left",
@@ -9521,6 +9745,16 @@ class RackCalibrationDialog(BaseCalibrationDialog):
             'Z': 0
         }
         super().__init__(main_window, model, controller, "Rack Calibration", steps, name_dict,offsets)
+        if self.manual_first:
+            self.instructions_label.setText(
+                "The machine is stopped at rack clearance and safe Z=500. "
+                "Manually descend and align the Left rack anchor, then confirm it."
+            )
+        else:
+            self.instructions_label.setText(
+                "The machine reached the verified Left rack anchor through the "
+                "safe-height route. Align it if needed, then confirm it."
+            )
 
     def get_initial_calibrations(self):
         return self.model.rack_model.get_all_current_rack_calibrations()
@@ -9537,179 +9771,114 @@ class RackCalibrationDialog(BaseCalibrationDialog):
     def discard_temp_calibrations(self):
         self.model.rack_model.discard_temp_calibrations()
 
-    def _rack_move_error(self, message):
-        self.main_window.popup_message(self.RACK_MOVE_ERROR_TITLE, message)
-        return False
-
-    def _rack_home_z(self):
-        location_model = getattr(self.model, "location_model", None)
-        getter = getattr(location_model, "get_location_dict", None)
-        home_location = getter("home") if callable(getter) else None
-        try:
-            return int(home_location["Z"])
-        except (TypeError, ValueError, KeyError):
-            return None
-
-    def _rack_target_for_step(self, step_index):
-        step_name = self.steps[step_index]
-        converted_step_name = self.name_dict[step_name]
-        starting_coordinates = self.get_calibration_by_name(converted_step_name)
-        temp_coordinates = self.get_temp_calibration_by_name(converted_step_name)
-
-        if temp_coordinates:
-            target_coordinates = temp_coordinates.copy()
-        elif starting_coordinates:
-            avg_offset = self.calculate_average_offset()
-            target_coordinates = {
-                axis: int(starting_coordinates[axis]) + int(avg_offset[axis]) for axis in ['X', 'Y', 'Z']
-            }
-        else:
-            return None
-
-        try:
-            return {axis: int(target_coordinates[axis]) for axis in ['X', 'Y', 'Z']}
-        except (TypeError, ValueError, KeyError):
-            return None
-
-    def _rack_clearance_position(self, coordinates, z_override=None):
-        return {
-            'X': int(coordinates['X']) + int(self.offsets['X']),
-            'Y': int(coordinates['Y']) + int(self.offsets['Y']),
-            'Z': int(z_override) if z_override is not None else int(coordinates['Z']) + int(self.offsets['Z']),
-        }
-
-    def _queue_rack_absolute_coordinates(self, coordinates, error_message):
-        if self.controller.set_absolute_coordinates(*self.convert_dict_coords(coordinates), override=True) is False:
-            return self._rack_move_error(error_message)
-        return True
-
-    def _queue_rack_target_approach(self, target_coordinates):
-        clearance_coordinates = self._rack_clearance_position(target_coordinates)
-        if self._queue_rack_absolute_coordinates(
-            clearance_coordinates,
-            "Failed to queue the rack calibration clearance move.",
-        ) is False:
-            return False
-        return self._queue_rack_absolute_coordinates(
-            target_coordinates,
-            "Failed to queue the rack calibration target move.",
-        )
-
-    def _queue_rack_home_z_traverse_to_step(self, step_index):
-        home_z = self._rack_home_z()
-        if home_z is None:
-            return self._rack_move_error(
-                "Cannot move between rack calibration positions because home Z is unavailable.",
-            )
-
-        target_coordinates = self._rack_target_for_step(step_index)
-        if target_coordinates is None:
-            return True
-
-        try:
-            current_position = self.model.machine_model.get_current_position_dict_capital().copy()
-            current_position = {axis: int(current_position[axis]) for axis in ['X', 'Y', 'Z']}
-        except (TypeError, ValueError, KeyError):
-            return self._rack_move_error("Current machine position is unavailable for rack calibration travel.")
-        departure_clearance = self._rack_clearance_position(current_position)
-        target_home_clearance = self._rack_clearance_position(target_coordinates, z_override=home_z)
-        target_rack_clearance = self._rack_clearance_position(target_coordinates)
-
-        for coordinates, error_message in (
-            (departure_clearance, "Failed to queue the rack calibration departure clearance move."),
-            (target_home_clearance, "Failed to queue the rack calibration home-Z traverse move."),
-            (target_rack_clearance, "Failed to queue the rack calibration descent clearance move."),
-            (target_coordinates, "Failed to queue the rack calibration target move."),
-        ):
-            if self._queue_rack_absolute_coordinates(coordinates, error_message) is False:
-                return False
-        return True
-
     def move_to_initial_position(self):
-        """Move to the current rack calibration point using rack-specific safe travel."""
-        target_coordinates = self._rack_target_for_step(self.current_step)
-        if target_coordinates is None:
-            return True
-        return self._queue_rack_target_approach(target_coordinates)
+        """Dialog construction and activation never issue rack motion."""
+
+        return True
 
     def move_to_offset_position(self):
-        """Move away from the current rack point using the existing +X rack clearance."""
-        current_position = self.model.machine_model.get_current_position_dict_capital().copy()
-        try:
-            current_position = {axis: int(current_position[axis]) for axis in ['X', 'Y', 'Z']}
-        except (TypeError, ValueError, KeyError):
-            return self._rack_move_error("Current machine position is unavailable for rack calibration travel.")
-        offset_position = self._rack_clearance_position(current_position)
-        return self._queue_rack_absolute_coordinates(
-            offset_position,
-            "Failed to queue the rack calibration offset move.",
-        )
+        return False
+
+    def request_relative_jog(self, x, y, z):
+        if self._automatic_motion_pending or self._workflow_interrupted:
+            return False
+        jog = getattr(self.controller, "jog_rack_calibration", None)
+        if not callable(jog):
+            return False
+        return jog(self.session_token, x=x, y=y, z=z)
+
+    def handle_controller_state(self, snapshot):
+        if snapshot.get("session_token") != self.session_token:
+            return
+        state = snapshot.get("state")
+        if state in {"staging", "reconciling"}:
+            self.set_automatic_motion_pending(True)
+            self.instructions_label.setText(
+                "Rack calibration motion is in progress. Wait for position telemetry to settle."
+            )
+            return
+        if state in {"manual_first_point", "automatic_points"}:
+            self.set_automatic_motion_pending(False)
+            if self.current_step < len(self.steps):
+                self.instructions_label.setText(
+                    f"Align the {self.steps[self.current_step]} rack anchor and confirm it."
+                )
+            return
+        if state == "complete":
+            self.current_step = len(self.steps)
+            self._automatic_motion_pending = False
+            self.instructions_label.setText(
+                "Rack calibration capture is complete and the head is at safe Z=500."
+            )
+            self.next_button.setEnabled(False)
+            self.back_button.setEnabled(False)
+            self.submit_button.setEnabled(True)
+            self.submit_button.setStyleSheet(
+                f"background-color: {self.color_dict['dark_blue']}; color: white;"
+            )
+            self.update_step_labels()
+            self.update_visual_aid()
+            return
+        if state in {"failed", "cancelled"}:
+            self._workflow_interrupted = True
+            self._automatic_motion_pending = False
+            self.next_button.setEnabled(False)
+            self.back_button.setEnabled(False)
+            self.submit_button.setEnabled(False)
+            self.instructions_label.setText(
+                "Rack calibration was interrupted. Close this window and start again."
+            )
+            QtCore.QTimer.singleShot(0, self.reject)
 
     def next_step(self):
-        if self.model.machine_model.is_busy():
-            self.main_window.popup_message("Machine Busy", "The machine is currently executing a command. Please wait for it to complete.")
+        if self._automatic_motion_pending or self._workflow_interrupted:
             return False
-
-        if self.current_step < len(self.steps):
-            next_step_index = self.current_step + 1
-            if next_step_index < len(self.steps) and self._rack_home_z() is None:
-                return self._rack_move_error(
-                    "Cannot move between rack calibration positions because home Z is unavailable.",
-                )
-
-            step_name = self.steps[self.current_step]
-            converted_step_name = self.name_dict[step_name]
-            capture = getattr(self.controller, "capture_configuration_point", None)
-            if callable(capture) and getattr(self.controller, "configuration_safety_guard", None) is not None:
-                current_position = capture(
-                    converted_step_name,
-                    workflow=self.configuration_capture_workflow,
-                )
-                if current_position is False:
-                    return False
-            else:
-                current_position = self.model.machine_model.get_current_position_dict_capital()
-            self.set_calibration_position(converted_step_name, current_position)
-
-            if next_step_index < len(self.steps):
-                if self._queue_rack_home_z_traverse_to_step(next_step_index) is False:
-                    return False
-            else:
-                if self.move_to_offset_position() is False:
-                    return False
-
-            self.current_step += 1
-
-            if self.current_step < len(self.steps):
-                self.instructions_label.setText(f"Move to the {self.steps[self.current_step]} position and confirm the location.")
-            else:
-                self.instructions_label.setText("Calibration complete.")
-                self.next_button.setEnabled(False)
-                self.submit_button.setEnabled(True)
-                self.submit_button.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
-            self.back_button.setEnabled(True)
-
-            self.update_step_labels()
-            self.update_visual_aid()
-            return True
-        return False
+        if self.current_step >= len(self.steps):
+            return False
+        if self.model.machine_model.is_busy():
+            self.main_window.popup_message(
+                "Machine Busy",
+                "The machine is currently executing a command. Please wait for it to complete.",
+            )
+            return False
+        point_name = self.name_dict[self.steps[self.current_step]]
+        capture = getattr(
+            self.controller, "capture_and_advance_rack_calibration", None
+        )
+        if not callable(capture) or capture(self.session_token, point_name) is False:
+            return False
+        self.current_step += 1
+        self.set_automatic_motion_pending(True)
+        self.update_step_labels()
+        self.update_visual_aid()
+        return True
 
     def previous_step(self):
-        if self.current_step > 0:
-            previous_step_index = self.current_step - 1
-            if self._queue_rack_home_z_traverse_to_step(previous_step_index) is False:
-                return False
+        if (
+            self._automatic_motion_pending
+            or self._workflow_interrupted
+            or self.current_step <= 0
+            or self.current_step >= len(self.steps)
+        ):
+            return False
+        previous_index = self.current_step - 1
+        point_name = self.name_dict[self.steps[previous_index]]
+        mover = getattr(
+            self.controller, "move_rack_calibration_to_point", None
+        )
+        if not callable(mover) or mover(self.session_token, point_name) is False:
+            return False
+        self.current_step = previous_index
+        self.set_automatic_motion_pending(True)
+        self.update_step_labels()
+        self.update_visual_aid()
+        return True
 
-            self.current_step = previous_step_index
-            self.instructions_label.setText(f"Move to the {self.steps[self.current_step]} position and confirm the location.")
-            self.next_button.setEnabled(True)
-            if self.current_step == 0:
-                self.back_button.setEnabled(False)
-
-            self.update_step_labels()
-            self.update_visual_aid()
-            return True
-        return False
+    def submit_calibration(self):
+        if self._automatic_motion_pending or self.current_step != len(self.steps):
+            return False
+        self.accept()
+        return True
 
     def update_visual_aid(self):
         """Update the visual aid for the rack position calibration."""
@@ -9927,6 +10096,10 @@ class RackBox(QGroupBox):
         self.model = model
         self.rack_model = model.rack_model
         self.controller = controller
+        self._rack_calibration_session_token = None
+        self._rack_calibration_dialog = None
+        self._rack_calibration_manual_chip_loaded = False
+        self._rack_calibration_origin_slot_number = None
         self.init_ui()
         self.current_volume = 0
 
@@ -9938,6 +10111,11 @@ class RackBox(QGroupBox):
         self.model.experiment_loaded.connect(self.update_all_slots)
         self.controller.array_complete.connect(self.update_all_slots)
         self.controller.update_slots_signal.connect(self.update_all_slots)
+        rack_state_signal = getattr(
+            self.controller, "rack_calibration_state_changed", None
+        )
+        if rack_state_signal is not None:
+            rack_state_signal.connect(self._on_rack_calibration_state_changed)
         self.popup_message_signal.connect(self.main_window.popup_message)
 
         self.update_button_states(self.model.machine_model.is_connected())
@@ -9972,9 +10150,9 @@ class RackBox(QGroupBox):
         gripper_layout.addWidget(self.gripper_state)
 
         # Add a button to trigger the rack calibration
-        calibrate_button = QPushButton("Calibrate Rack")
-        calibrate_button.clicked.connect(self.open_rack_calibration_dialog)
-        gripper_layout.addWidget(calibrate_button)
+        self.calibrate_button = QPushButton("Calibrate Rack")
+        self.calibrate_button.clicked.connect(self.open_rack_calibration_dialog)
+        gripper_layout.addWidget(self.calibrate_button)
 
          # Add a spacer to separate slots and gripper visually
         spacer = QSpacerItem(20, 0, QSizePolicy.Minimum, QSizePolicy.Expanding)
@@ -10038,6 +10216,12 @@ class RackBox(QGroupBox):
     
     def open_rack_calibration_dialog(self):
         """Open the rack calibration dialog."""
+        if self._rack_calibration_session_token is not None:
+            self.main_window.popup_message(
+                "Rack Calibration Active",
+                "Wait for the current rack calibration to finish or cancel it.",
+            )
+            return False
         if not self._rack_calibration_machine_ready():
             return False
 
@@ -10138,14 +10322,128 @@ class RackBox(QGroupBox):
         )
 
     def _run_guided_rack_calibration(self, manual_chip_loaded=False, origin_slot_number=None):
-        rack_calibration_dialog = RackCalibrationDialog(self.main_window, self.model, self.controller)
-        if rack_calibration_dialog.move_to_initial_position() is False:
-            self.model.rack_model.discard_temp_calibrations()
-            if manual_chip_loaded:
-                self._prompt_manual_rack_calibration_chip_cleanup(origin_slot_number)
+        preflight_getter = getattr(
+            self.controller, "rack_calibration_entry_preflight", None
+        )
+        starter = getattr(self.controller, "begin_rack_calibration_entry", None)
+        if not callable(preflight_getter) or not callable(starter):
+            self.main_window.popup_message(
+                "Rack Calibration Unavailable",
+                "The guarded rack-calibration entry workflow is unavailable.",
+            )
+            return False
+        preflight = preflight_getter()
+        if not preflight.get("allowed"):
+            self.main_window.popup_message(
+                "Rack Calibration Not Started",
+                preflight.get("message", "Rack calibration preflight failed."),
+            )
             return False
 
-        if rack_calibration_dialog.exec() == QDialog.Accepted:
+        manual_first = not bool(preflight.get("verified"))
+        if manual_first:
+            choice = self.main_window.popup_choice(
+                "Unverified Rack Calibration",
+                "The stored rack anchors are not authorized. Calibration will raise "
+                "to safe Z=500, travel to the Left-anchor X clearance, and stop. "
+                "You must manually descend and align the first anchor.",
+                ["Calibrate from Safe Height", "Cancel"],
+                default="Cancel",
+            )
+            if choice != "Calibrate from Safe Height":
+                return False
+
+        self.calibrate_button.setEnabled(False)
+        self.calibrate_button.setText("Staging Rack Safely...")
+        self._rack_calibration_manual_chip_loaded = bool(manual_chip_loaded)
+        self._rack_calibration_origin_slot_number = origin_slot_number
+        result = starter(manual_first=manual_first)
+        if result is False:
+            self._reset_rack_calibration_launch_ui()
+            self._rack_calibration_manual_chip_loaded = False
+            self._rack_calibration_origin_slot_number = None
+            return False
+        self._rack_calibration_session_token = result["session_token"]
+        self._on_rack_calibration_state_changed(result)
+        return True
+
+    def _reset_rack_calibration_launch_ui(self):
+        self.calibrate_button.setText("Calibrate Rack")
+        self.calibrate_button.setEnabled(True)
+
+    def _on_rack_calibration_state_changed(self, snapshot):
+        if not isinstance(snapshot, dict):
+            return
+        token = snapshot.get("session_token")
+        if token != self._rack_calibration_session_token:
+            return
+        dialog = self._rack_calibration_dialog
+        if dialog is not None:
+            handler = getattr(dialog, "handle_controller_state", None)
+            if callable(handler):
+                handler(snapshot)
+        state = snapshot.get("state")
+        if state in {"manual_first_point", "automatic_points"} and dialog is None:
+            QtCore.QTimer.singleShot(
+                0,
+                lambda expected_token=token: self._open_staged_rack_calibration_dialog(
+                    expected_token
+                ),
+            )
+        elif state in {"failed", "cancelled"} and dialog is None:
+            manual_chip_loaded = self._rack_calibration_manual_chip_loaded
+            self._rack_calibration_session_token = None
+            self._rack_calibration_manual_chip_loaded = False
+            self._rack_calibration_origin_slot_number = None
+            self._reset_rack_calibration_launch_ui()
+            finisher = getattr(
+                self.controller, "finish_rack_calibration_session", None
+            )
+            if callable(finisher):
+                finisher(token, accepted=False)
+            if manual_chip_loaded:
+                self.main_window.popup_message(
+                    "Calibration Chip Remains Loaded",
+                    "The interrupted rack calibration left the calibration chip in "
+                    "the gripper. Remove or return it through the normal rack controls.",
+                )
+
+    def _open_staged_rack_calibration_dialog(self, session_token):
+        if (
+            session_token != self._rack_calibration_session_token
+            or self._rack_calibration_dialog is not None
+        ):
+            return
+        snapshot_getter = getattr(
+            self.controller, "_rack_calibration_session_snapshot", None
+        )
+        snapshot = snapshot_getter() if callable(snapshot_getter) else {}
+        if snapshot.get("session_token") != session_token or snapshot.get("state") not in {
+            "manual_first_point",
+            "automatic_points",
+        }:
+            return
+        dialog = RackCalibrationDialog(
+            self.main_window,
+            self.model,
+            self.controller,
+            session_token=session_token,
+            manual_first=bool(snapshot.get("manual_first")),
+        )
+        self._rack_calibration_dialog = dialog
+        accepted = dialog.exec() == QDialog.Accepted
+        finisher = getattr(
+            self.controller, "finish_rack_calibration_session", None
+        )
+        if callable(finisher):
+            finished = finisher(session_token, accepted=accepted)
+            if finished is False:
+                accepted = False
+        self._rack_calibration_dialog = None
+        self._rack_calibration_session_token = None
+        self._reset_rack_calibration_launch_ui()
+
+        if accepted:
             print("Rack calibration completed successfully.")
             commit = getattr(self.controller, "commit_rack_calibration", None)
             identity_getter = getattr(self.main_window, "request_configuration_identity", None)
@@ -10172,9 +10470,13 @@ class RackBox(QGroupBox):
             print("Rack calibration was canceled or failed.")
             self.model.rack_model.discard_temp_calibrations()
 
+        manual_chip_loaded = self._rack_calibration_manual_chip_loaded
+        origin_slot_number = self._rack_calibration_origin_slot_number
+        self._rack_calibration_manual_chip_loaded = False
+        self._rack_calibration_origin_slot_number = None
         if manual_chip_loaded:
             self._prompt_manual_rack_calibration_chip_cleanup(origin_slot_number)
-        return True
+        return accepted
 
     def _prompt_manual_rack_calibration_chip_cleanup(self, origin_slot_number):
         if not self._rack_calibration_cleanup_chip_ready(silent_if_empty=True):
