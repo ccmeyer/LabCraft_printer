@@ -4,7 +4,7 @@ Status: `in_progress`
 
 Prepared: 2026-08-19
 
-Current target release: `v1.3.0-rc.5`
+Current target: post-`v1.3.0-rc.6` correction candidate
 
 Milestone 7 rc.4 correction plan:
 [Exact-Restore Correction Plan](machine_data_migration_milestone_7_rc4_correction_plan.md)
@@ -1587,9 +1587,10 @@ strict v2 policy for new proposals:
   integrity. Promotion adds one non-mutating event, never rewrites history,
   and is rejected after replay, later target changes, value mismatch,
   incomplete evidence, cross-machine evidence, or integrity failure;
-- imports, restores, generic location edits, and direct unguarded transaction
-  calls continue to use `revoked_pending_verification` and retain exact-JSON
-  verification where applicable;
+- imports, restores, and direct unguarded transaction calls continue to use
+  `revoked_pending_verification`; new v2 named-location saves require complete
+  live capture evidence and are covered by the later controlled-position
+  correction;
 - well-grid reconstruction now immediately repaints the selected stock ID, and
   experiment reload preserves that stock selection when the dropdown is
   repopulated.
@@ -1643,6 +1644,55 @@ motion session:
 
 The later observed pause/resume inactive-Z behavior remains a separate defect
 and is intentionally not changed by this correction.
+
+### Controlled position verification and derived Pause correction
+
+Status: `implementation and focused Windows validation complete` on
+2026-08-24
+
+Post-rc.6 use found that a position saved through **Save New Location** or
+**Modify Location** was immediately revoked even though the operation already
+captured the machine's physical position. The fallback history workflow then
+required the operator to transcribe exact JSON, which proved only that numbers
+could be copied and did not add meaningful physical evidence. An unverified
+move also explained the block without presenting the appropriate recovery
+action. Plate calibration separately left the saved Pause Z independent of
+the newly calibrated plate surface.
+
+The correction keeps verification fail-closed while removing transcription:
+
+- a v2 named-location save is authorized as `operator_verified` with method
+  `controlled_position_capture` only when the transaction layer proves one
+  fresh, complete, machine-bound X/Y/Z capture, settled exact reconciliation,
+  unchanged trust epoch, exact proposed value, and successful hard checks;
+- changed bytes, audit event, and authorization are committed atomically. An
+  unchanged live capture creates a non-mutating verification event and
+  refreshes its verification evidence;
+- missing, stale, mismatched, cross-machine, or trust-changed capture evidence
+  rejects the entire save. A workflow label by itself grants no authority;
+- a previously revoked ordinary named location is shown read-only with its
+  current machine ID and X/Y/Z values. The operator enters or accepts the
+  prefilled identity and checks one physical-verification acknowledgement;
+  Controller rereads the target and hash before recording a fixed-reason
+  `physical_check` event. The UI never accepts operator-supplied JSON;
+- rack and plate targets cannot use the ordinary checkbox. They direct the
+  operator to their controlled calibration workflow, while eligible immutable
+  historical calibration evidence remains available as a no-motion review;
+- a blocked saved-target move queues nothing and offers the applicable
+  **Verify Location**, **Run Rack Calibration**, or **Run Plate Calibration**
+  action. The operator must request the original move again after verification;
+- every plate-calibration proposal includes `Plates.json` and
+  `Locations.json` in one transaction. Pause X/Y remain unchanged, Pause Z is
+  derived from the proposed top-left plate Z, hard validation proves that
+  relationship, and the plate plus Pause authorization are updated together;
+- before any plate preflight or motion, the UI requires an explicit
+  **Plate is installed** choice. Cancellation exits before preflight, session
+  creation, or command dispatch.
+
+Policy v1 and immutable historical events remain readable. Imports, restores,
+and unguarded/direct configuration mutations still revoke changed targets.
+No persistent schema, firmware, protocol, release metadata, production
+checkout, or production machine-data behavior is bypassed.
 
 ## Milestone 6: Protect future updates and controlled rollback
 
@@ -2182,6 +2232,10 @@ Hardware use is last. It requires:
 | 2026-08-20 | Retain a 2,500 ms per-axis capture freshness ceiling | The qualified synthetic Pi delivery interval was 100 ms and the first over-limit case failed closed; future changes require new evidence |
 | 2026-08-23 | Make plate calibration entry and corner travel Controller-owned and session-bound | A rejected saved-target move must never fall through to constructor-side or View-issued override motion |
 | 2026-08-23 | Treat unverified plate coordinates as XY guidance only at Z=500 | Stored unverified Z cannot safely authorize automatic descent, while the stored XY plus qualified dogleg provides a bounded manual-recovery starting point |
+| 2026-08-24 | Treat a complete guarded Save/Modify live-position capture as physical verification | The capture already proves the machine's exact fresh position; JSON transcription adds no independent safety fact |
+| 2026-08-24 | Restrict checkbox-only historical verification to ordinary named locations | Rack and plate geometry must be established by their controlled calibration workflows or eligible immutable calibration evidence |
+| 2026-08-24 | Derive Pause Z from plate top-left Z in the same guarded transaction | Pause is plate-relative in Z, so independent persistence can leave a stale or newly revoked motion target after calibration |
+| 2026-08-24 | Require a plate-installed acknowledgement before calibration preflight or motion | The physical fixture must be present before any plate-directed route begins, and cancellation must dispatch nothing |
 
 ### Open decisions
 
@@ -2244,6 +2298,9 @@ Hardware use is last. It requires:
 | 2026-08-20 | Post-M7 calibration restart | Active `CalibrationMemory/config.json` and `entities/reagents.json` changed only their runtime `updated_at_utc` fields, but the migration manifest treated every migrated byte as permanently immutable | Keep the copied/unverified phase byte-exact; in the active phase permit validated runtime-owned `CalibrationMemory/` and `calibration/` evolution while retaining exact schema, config, identity, activation, and history checks |
 | 2026-08-20 | Post-M7 development workflow | A direct switch from tagged rc.4 to `main` correctly conflicted with the production deployment anchor, encouraging release creation for every development iteration | Add a separately marked, byte-verified external development clone; bind each launch to its exact commit/operator; default to simulated hardware; require an exact attended confirmation for hardware; never bypass the production anchor in the production root |
 | 2026-08-23 | Plate calibration collision investigation | `move_to_location('plate')` correctly rejected the revoked target, but the View ignored `False`; `BaseCalibrationDialog.__init__` then issued raw override XY/Z moves | Remove constructor motion, require successful Controller staging and telemetry reconciliation before dialog creation, and block non-session motion until calibration ends |
+| 2026-08-24 | Post-rc.6 position verification review | Exact-JSON confirmation verified transcription rather than physical position, while the guarded Save/Modify capture already contained fresh machine-bound evidence | Validate the live capture at transaction time; replace generic historical JSON entry with read-only values plus one acknowledgement checkbox |
+| 2026-08-24 | Post-rc.6 plate/Pause review | Plate calibration updated four corners without deriving the plate-relative Pause Z, so Pause could remain stale and separately revoked | Commit both governed documents atomically, preserve Pause X/Y, derive Z from top-left, and authorize plate plus Pause from the same controlled evidence |
+| 2026-08-24 | Focused implementation validation | Explicit current-position resynchronization marked reconciliation settled without retaining the telemetry trust epoch | Include the current trust epoch in settled evidence and reject capture readiness when telemetry trust is unavailable |
 
 Add findings here as work proceeds. Do not rewrite prior findings to hide an
 earlier assumption; add a correction with date and evidence.
@@ -2284,6 +2341,7 @@ earlier assumption; add a correction with date and evidence.
 | 2026-08-20 | Post-M7 correction | Published rc.5 and completed the attended LC-001 protected update | Tag `v1.3.0-rc.5` peels to `34841fe0` and was published before `main`; exact verified-source restoration changed only the two known timestamp-only runtime bytes; protected update `3255339d...` authorized relaunch/recovery false; first launch passed; closed bootstrap ready; history 8/8 with zero pending; Locations unchanged; no-activity operator attestation; technical archive `FD74FEDE...14784CD2`, attestation `3F037F7B...6F48AB6D` | Retain immutable tags and evidence; proceed only with separately attended representative rc.6/rc.1 pilots and remaining physical Camera/HIL gates |
 | 2026-08-23 | Post-M7 calibration correction | Closed the attended development session, restored exact released firmware, and implemented policy-v2 checkbox confirmation, evidence-validated atomic calibration authorization, historical v1 calibration promotion, and deterministic well-grid repaint | Released restoration evidence `20260823T214105027316Z`; clean status evidence `20260823T214235691644Z`; 156 focused Windows tests passed | Commit/push the exact branch revision, then run isolated Pi no-hardware, SAFE roundtrip, and a fresh attended calibration campaign |
 | 2026-08-23 | Plate-entry collision correction | Replaced ignored generic plate motion and constructor-side overrides with a token-bound Controller route that stages at Z=500, handles unverified plates manually, reconciles telemetry, and fails closed on interruption | 187 focused Windows tests passed on `fix/limit-switch`; compilation and diff checks passed; firmware/protocol/release/data schemas unchanged | Review and commit/push the exact revision, then run isolated Pi plus a fresh attended entry qualification |
+| 2026-08-24 | Post-rc.6 position-verification correction | Implemented controlled Save/Modify authorization, read-only checkbox verification for ordinary revoked locations, actionable blocked-move routing, atomic plate/Pause derivation, and the pre-motion plate-installed acknowledgement on `fix/limit-switch` | 250 focused Windows tests passed; changed modules compiled; no firmware, protocol, release metadata, or persistent schema changes | Complete diff review, commit/push the exact revision, then run isolated Pi and SAFE roundtrip before a fresh attended UI/calibration campaign |
 
 ## Definition of done for v1.3.0-rc.2
 
@@ -2316,6 +2374,7 @@ The work is complete only when:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-24 | Added the post-rc.6 position-verification correction: evidence-validated Save/Modify authorization, read-only checkbox verification for ordinary targets, calibration-specific recovery guidance, atomic plate/Pause Z derivation, actionable blocked-move UI, and a plate-installed pre-motion acknowledgement. |
 | 2026-08-23 | Added the post-Milestone 7 controlled-calibration correction: versioned checkbox confirmation, transaction-layer physical-evidence validation, atomic verified calibration authorization, unchanged-calibration verification events, explicit eligible v1 event promotion, and selected-reagent well-grid repaint ordering. |
 | 2026-08-23 | Added the attended plate-entry collision finding and the fail-closed Controller session contract: safe-Z-first entry, manual first point for unverified plates, motion-free dialogs, token-bound corner travel, telemetry reconciliation, and interruption cancellation. |
 | 2026-08-20 | Recorded published rc.5 tag `34841fe0`, exact verified-source recovery of the two rc.4 timestamp-only runtime files, the attended protected rc.4 -> rc.5 update/first launch/closed postflight, no-activity attestation, and independently transferred evidence hashes. |

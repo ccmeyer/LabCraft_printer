@@ -589,6 +589,12 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
                 "Any changed target remains motion-blocked until a separate exact-value "
                 "physical or service-record verification is audited."
             )
+        elif authorization_consequence == "verified_by_controlled_position_capture":
+            notice_text = (
+                "This location was captured from fresh, reconciled machine telemetry. "
+                "Saving records the coordinate and verifies the exact location in the "
+                "same audited transaction."
+            )
         else:
             notice_text = (
                 "Saving does not verify this target. The changed value remains motion-blocked "
@@ -619,6 +625,8 @@ class ConfigurationChangePreviewDialog(QtWidgets.QDialog):
             action_text = "Save Verified Calibration"
         elif workflow == "configuration_restore":
             action_text = "Restore Exact Backup and Revoke Changed Targets"
+        elif authorization_consequence == "verified_by_controlled_position_capture":
+            action_text = "Save Verified Location"
         else:
             action_text = "Save and Revoke"
         self.action_button = QtWidgets.QPushButton(action_text, self)
@@ -753,6 +761,84 @@ class ControlledCalibrationPromotionDialog(QtWidgets.QDialog):
         return {
             "operator": self.operator_edit.text().strip(),
             "reason": self.reason_edit.text().strip(),
+        }
+
+
+class LocationVerificationDialog(QtWidgets.QDialog):
+    """Acknowledge one current saved location without transcribing JSON."""
+
+    def __init__(self, snapshot, parent=None):
+        super().__init__(parent)
+        self.snapshot = copy.deepcopy(dict(snapshot))
+        self.setWindowTitle("Verify Saved Location")
+        self.resize(560, 320)
+        layout = QtWidgets.QVBoxLayout(self)
+
+        target_key = str(self.snapshot.get("target_key") or "")
+        value = dict(self.snapshot.get("value") or {})
+        machine_id = str(self.snapshot.get("machine_id") or "")
+        introduction = QtWidgets.QLabel(
+            "Physically confirm the displayed saved position. Verification records "
+            "an audit event and allows future movement to this exact value; it does "
+            "not move the machine.",
+            self,
+        )
+        introduction.setWordWrap(True)
+        layout.addWidget(introduction)
+
+        details = QtWidgets.QPlainTextEdit(self)
+        details.setReadOnly(True)
+        details.setMaximumHeight(125)
+        details.setPlainText(
+            f"Machine: {machine_id}\n"
+            f"Target: {target_key}\n"
+            f"X: {value.get('X')}\nY: {value.get('Y')}\nZ: {value.get('Z')}"
+        )
+        layout.addWidget(details)
+
+        form = QtWidgets.QFormLayout()
+        self.operator_edit = QtWidgets.QLineEdit(self)
+        self.operator_edit.setText(str(self.snapshot.get("operator_default") or ""))
+        self.acknowledge = QtWidgets.QCheckBox(
+            f"I physically verified {target_key} at the exact X/Y/Z values displayed above.",
+            self,
+        )
+        form.addRow("Operator:", self.operator_edit)
+        form.addRow("", self.acknowledge)
+        layout.addLayout(form)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Cancel, parent=self
+        )
+        self.verify_button = buttons.addButton(
+            "Verify Location", QtWidgets.QDialogButtonBox.AcceptRole
+        )
+        buttons.rejected.connect(self.reject)
+        self.verify_button.clicked.connect(self._accept_if_complete)
+        layout.addWidget(buttons)
+
+    def _accept_if_complete(self):
+        if not self.operator_edit.text().strip():
+            QMessageBox.warning(
+                self, "Operator Required", "Enter the operator performing verification."
+            )
+            return
+        if not self.acknowledge.isChecked():
+            QMessageBox.warning(
+                self,
+                "Verification Required",
+                "Acknowledge that the displayed saved location was physically verified.",
+            )
+            return
+        self.accept()
+
+    def review_result(self):
+        return {
+            "operator": self.operator_edit.text().strip(),
+            "acknowledged": self.acknowledge.isChecked(),
+            "acknowledgement_version": self.snapshot.get(
+                "acknowledgement_version"
+            ),
         }
 
 
@@ -912,57 +998,114 @@ class ConfigurationHistoryWindow(QtWidgets.QDialog):
                     f"Target {target} does not currently require verification"
                 )
                 return
+        snapshot_getter = getattr(
+            self.controller, "configuration_target_verification_snapshot", None
+        )
+        if not callable(snapshot_getter):
+            self.status_label.setText("Target verification is unavailable")
+            return
+        snapshot = snapshot_getter(target)
+        if not snapshot:
+            return
         candidate = dict((promotion_candidates or {}).get(target) or {})
-        if candidate:
-            dialog = ControlledCalibrationPromotionDialog(candidate, self)
-            if dialog.exec() != QDialog.Accepted:
-                return
-            review = dialog.review_result()
-            promote = getattr(
-                self.controller, "promote_controlled_calibration", None
+        route = snapshot.get("verification_route")
+
+        if route in {"plate_calibration", "rack_calibration"}:
+            parent = self.parent()
+            is_plate = route == "plate_calibration"
+            calibration_label = (
+                "Run Plate Calibration" if is_plate else "Run Rack Calibration"
             )
-            if not callable(promote):
+            options = []
+            if candidate:
+                options.append("Review Existing Calibration")
+            options.extend([calibration_label, "Cancel"])
+            message = (
+                "Plate positions must be verified by completing Plate Calibration."
+                if is_plate
+                else "Rack positions must be verified by completing Rack Calibration."
+            )
+            if candidate:
+                message += (
+                    " Eligible immutable evidence from an earlier completed calibration "
+                    "can also be reviewed without motion."
+                )
+            chooser = getattr(parent, "popup_choice", None)
+            choice = (
+                chooser(
+                    "Calibration Verification Required",
+                    message,
+                    options,
+                    default="Cancel",
+                )
+                if callable(chooser)
+                else "Cancel"
+            )
+            if choice == "Review Existing Calibration":
+                dialog = ControlledCalibrationPromotionDialog(candidate, self)
+                if dialog.exec() != QDialog.Accepted:
+                    return
+                review = dialog.review_result()
+                promote = getattr(
+                    self.controller, "promote_controlled_calibration", None
+                )
+                if not callable(promote):
+                    self.status_label.setText(
+                        "Controlled calibration promotion is unavailable"
+                    )
+                    return
+                result = promote(
+                    target,
+                    candidate["source_event_id"],
+                    operator=review["operator"],
+                    reason=review["reason"],
+                )
+                if result:
+                    self.refresh()
+                return
+            if choice != calibration_label:
+                return
+            if is_plate and not snapshot.get("calibration_launch_allowed"):
+                active_name = snapshot.get("active_plate_name") or "none"
                 self.status_label.setText(
-                    "Controlled calibration promotion is unavailable"
+                    f"Load or select {target.split(':', 1)[-1]} before calibration; "
+                    f"the active plate is {active_name}."
                 )
                 return
-            result = promote(
-                target,
-                candidate["source_event_id"],
-                operator=review["operator"],
-                reason=review["reason"],
-            )
-            if result:
-                self.refresh()
+            self.hide()
+            if is_plate:
+                launcher = getattr(
+                    getattr(parent, "well_plate_widget", None),
+                    "open_calibration_dialog",
+                    None,
+                )
+            else:
+                launcher = getattr(
+                    getattr(parent, "rack_box", None),
+                    "open_rack_calibration_dialog",
+                    None,
+                )
+            if callable(launcher):
+                QtCore.QTimer.singleShot(0, launcher)
+            else:
+                self.status_label.setText("Calibration launcher is unavailable")
             return
-        value = values[target]
-        expected_text = json.dumps(value, indent=2, sort_keys=True)
-        confirmation_text, ok = QtWidgets.QInputDialog.getMultiLineText(
-            self,
-            "Exact Target Verification",
-            "Physically verify the target, then enter or paste the exact JSON shown "
-            f"below. Camera is always verified as its own target.\n\nTarget: {target}\n"
-            f"Expected value:\n{expected_text}\n\nExact confirmation JSON:",
-            "",
+
+        dialog = LocationVerificationDialog(snapshot, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        review = dialog.review_result()
+        verify = getattr(
+            self.controller, "verify_current_configuration_target", None
         )
-        if not ok:
+        if not callable(verify):
+            self.status_label.setText("Location verification is unavailable")
             return
-        try:
-            confirmed_value = json.loads(confirmation_text)
-        except json.JSONDecodeError as exc:
-            self.status_label.setText(f"Confirmation is not valid JSON: {exc}")
-            return
-        if confirmed_value != value:
-            self.status_label.setText("Exact confirmation differs; target remains unverified")
-            return
-        operator, ok = QtWidgets.QInputDialog.getText(self, "Target Verification", "Operator name:")
-        if not ok or not operator.strip():
-            return
-        reason, ok = QtWidgets.QInputDialog.getText(self, "Target Verification", "Verification reason/method:")
-        if not ok or not reason.strip():
-            return
-        result = self.controller.verify_configuration_targets(
-            {target: confirmed_value}, operator=operator.strip(), reason=reason.strip()
+        result = verify(
+            snapshot,
+            operator=review["operator"],
+            acknowledged=review["acknowledged"],
+            acknowledgement_version=review["acknowledgement_version"],
         )
         if result:
             self.refresh()
@@ -1416,6 +1559,13 @@ class MainWindow(QMainWindow):
         self._close_disconnect_signal_hooked = False
 
         self.controller.error_occurred_signal.connect(self.popup_message)
+        verification_required = getattr(
+            self.controller, "configuration_verification_required", None
+        )
+        if verification_required is not None:
+            verification_required.connect(
+                self.show_configuration_verification_required
+            )
         xy_recovery_requested = getattr(self.controller, "xy_motion_recovery_requested", None)
         if xy_recovery_requested is not None:
             xy_recovery_requested.connect(self.show_xy_motion_recovery)
@@ -1882,6 +2032,61 @@ class MainWindow(QMainWindow):
         transparent_icon = self.make_transparent_icon()
         msg.setWindowIcon(transparent_icon)
         msg.exec()
+
+    def show_configuration_verification_required(self, payload):
+        """Explain a saved-target denial and offer the correct audited action."""
+
+        if not isinstance(payload, dict):
+            return
+        target_key = str(payload.get("target_key") or "saved target")
+        route = str(payload.get("verification_route") or "")
+        message = str(payload.get("message") or "This saved target is not verified.")
+        message += (
+            "\n\nNo motion was queued. After successful verification, request the "
+            "move again."
+        )
+        if route == "plate_calibration":
+            action = "Run Plate Calibration..."
+            message += "\n\nComplete Plate Calibration to verify this plate target."
+        elif route == "rack_calibration":
+            action = "Run Rack Calibration..."
+            message += "\n\nComplete Rack Calibration to verify this rack target."
+        else:
+            action = "Verify Location..."
+            message += "\n\nReview and physically confirm the saved XYZ position."
+        choice = self.popup_choice(
+            "Saved Position Requires Verification",
+            f"Target: {target_key}\n\n{message}",
+            [action, "Cancel"],
+            default="Cancel",
+        )
+        if choice != action:
+            return
+        if route == "plate_calibration":
+            launcher = getattr(
+                getattr(self, "well_plate_widget", None),
+                "open_calibration_dialog",
+                None,
+            )
+        elif route == "rack_calibration":
+            launcher = getattr(
+                getattr(self, "rack_box", None),
+                "open_rack_calibration_dialog",
+                None,
+            )
+        else:
+            QtCore.QTimer.singleShot(
+                0,
+                lambda key=target_key: self.review_configuration_target(key),
+            )
+            return
+        if callable(launcher):
+            QtCore.QTimer.singleShot(0, launcher)
+        else:
+            self.popup_message(
+                "Calibration Unavailable",
+                "The requested calibration launcher is unavailable.",
+            )
 
     def _popup_board_reset_message(self, title, message):
         self._popup_debug_bundle_message(title, message, self.controller.export_last_reset_debug_bundle)
@@ -2758,7 +2963,7 @@ class MainWindow(QMainWindow):
             if proposal and self.review_guarded_configuration_proposal(proposal, title="Save Location"):
                 self.popup_message(
                     "Location Saved",
-                    "The location was saved and audited. Movement to the new value is blocked until its exact coordinates are verified.",
+                    "The location was saved, audited, and verified from the fresh live machine position.",
                 )
             return
         try:
@@ -2803,7 +3008,7 @@ class MainWindow(QMainWindow):
             if proposal and self.review_guarded_configuration_proposal(proposal, title="Modify Location"):
                 self.popup_message(
                     "Location Saved",
-                    "The location was saved and audited. Movement to the changed value is blocked until its exact coordinates are verified.",
+                    "The location was saved, audited, and verified from the fresh live machine position.",
                 )
             return
         try:
@@ -7393,6 +7598,16 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 "Plate Calibration Active",
                 "Wait for the current plate calibration to finish or cancel it.",
             )
+            return False
+        installation = self.main_window.popup_choice(
+            "Install Plate Before Calibration",
+            "Install the calibration plate with all four corner markers, or the "
+            "plate of interest, before beginning calibration. No plate-directed "
+            "motion will occur until you confirm that the plate is installed.",
+            ["Plate is installed", "Cancel"],
+            default="Cancel",
+        )
+        if installation != "Plate is installed":
             return False
         preflight_getter = getattr(
             self.controller, "plate_calibration_entry_preflight", None

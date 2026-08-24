@@ -37,6 +37,8 @@ from CaptureTypes import CaptureResult, CaptureSource, CaptureStatus
 from ApplicationComposition import ExperimentalFeatures, PRODUCTION_RUNTIME_CONTEXT
 from MachineDataVerification import (
     SavedTargetAuthorizationRequest,
+    VerificationError,
+    build_target_snapshot_from_documents,
     canonical_value_sha256,
 )
 from MachineDataTransactions import (
@@ -917,6 +919,7 @@ class Controller(QObject):
     update_slots_signal = Signal()
     update_volumes_in_view_signal = Signal()
     error_occurred_signal = Signal(str,str)
+    configuration_verification_required = Signal(object)
     transport_fault_ui_signal = Signal(object)
     machine_workflow_interrupted_signal = Signal(object)
     plate_calibration_state_changed = Signal(object)
@@ -7399,6 +7402,9 @@ class Controller(QObject):
             machine_model.get_current_position_dict,
         )
         position = position_getter()
+        telemetry = self._position_reconciliation_snapshot(
+            now_monotonic=now
+        ) or {}
         self._position_reconciliation = {
             "state": "settled",
             "reason": str(reason),
@@ -7407,6 +7413,7 @@ class Controller(QObject):
             "reported_position": {
                 axis: int(position[axis]) for axis in self._position_axes()
             },
+            "trust_epoch": telemetry.get("trust_epoch"),
         }
         return copy.deepcopy(self._position_reconciliation)
 
@@ -7575,6 +7582,8 @@ class Controller(QObject):
         else:
             axes = telemetry.get("axes", {})
             trust_epoch = telemetry.get("trust_epoch")
+            if type(trust_epoch) is not int:
+                reasons.append("position_trust_unavailable")
             for axis in ("X", "Y", "Z"):
                 evidence = axes.get(axis, {})
                 age = evidence.get("age_ms")
@@ -8392,19 +8401,63 @@ class Controller(QObject):
             {"Locations.json": proposed}, workflow=workflow, target_keys=keys, captures=captures
         )
 
+    def _proposed_plate_calibration_documents(self):
+        """Build one atomic plate plus derived-Pause configuration proposal."""
+
+        proposed_plates = self.model.well_plate.proposed_calibration_document()
+        proposed_locations = copy.deepcopy(
+            self.model.location_model.get_all_locations()
+        )
+        pause_names = [
+            str(name)
+            for name in proposed_locations
+            if str(name).casefold() == "pause"
+        ]
+        if len(pause_names) != 1:
+            raise ValueError("Plate calibration requires one saved Pause location.")
+        plate_name = self.model.well_plate.get_current_plate_name()
+        proposed_plate = next(
+            (
+                plate
+                for plate in proposed_plates
+                if plate.get("name") == plate_name
+            ),
+            None,
+        )
+        if proposed_plate is None:
+            raise ValueError(f"Plate format {plate_name!r} was not found.")
+        top_left = proposed_plate.get("calibrations", {}).get("top_left")
+        pause_name = pause_names[0]
+        pause = proposed_locations.get(pause_name)
+        if not isinstance(top_left, dict) or not isinstance(pause, dict):
+            raise ValueError("Plate top-left or Pause coordinates are invalid.")
+        if any(type(pause.get(axis)) is not int for axis in ("X", "Y", "Z")):
+            raise ValueError("Pause coordinates must be exact integers.")
+        if type(top_left.get("Z")) is not int:
+            raise ValueError("Plate top-left Z must be an exact integer.")
+        proposed_locations[pause_name] = {
+            "X": pause["X"],
+            "Y": pause["Y"],
+            "Z": top_left["Z"],
+        }
+        return {
+            "Locations.json": proposed_locations,
+            "Plates.json": proposed_plates,
+        }, plate_name
+
     def prepare_plate_calibration_change(self):
         workflow = "plate_calibration"
         keys = ("top_left", "top_right", "bottom_right", "bottom_left")
         try:
             captures = self._capture_bundle(workflow, keys)
-            proposed = self.model.well_plate.proposed_calibration_document()
+            documents, plate_name = self._proposed_plate_calibration_documents()
         except Exception as exc:
             self.error_occurred_signal.emit("Plate Calibration Not Saved", str(exc))
             return False
         return self._prepare_guarded_proposal(
-            {"Plates.json": proposed},
+            documents,
             workflow=workflow,
-            target_keys=(self.model.well_plate.get_current_plate_name(),),
+            target_keys=(plate_name,),
             captures=captures,
         )
 
@@ -8663,12 +8716,12 @@ class Controller(QObject):
 
     def commit_plate_calibration(self, *, operator, reason):
         try:
-            proposed = self.model.well_plate.proposed_calibration_document()
+            proposed, _plate_name = self._proposed_plate_calibration_documents()
         except Exception as exc:
             self.error_occurred_signal.emit("Plate Calibration Not Saved", str(exc))
             return False
         result = self._commit_configuration_documents(
-            {"Plates.json": proposed},
+            proposed,
             operator=operator,
             reason=reason,
             workflow="plate_calibration",
@@ -8694,6 +8747,137 @@ class Controller(QObject):
                 self._configuration_recovery_required = True
             self.error_occurred_signal.emit("Configuration Audit Failed", str(exc))
             return False
+
+    @staticmethod
+    def _configuration_verification_route(target_key, target_kind):
+        key = str(target_key or "").casefold()
+        kind = str(target_kind or "").casefold()
+        if kind == "plate" or key.startswith("plate:"):
+            return "plate_calibration"
+        if kind == "rack" or key in {
+            "rack:primary",
+            "location:rack_position_left",
+            "location:rack_position_right",
+        }:
+            return "rack_calibration"
+        return "location_verification"
+
+    def configuration_target_verification_snapshot(self, target_key):
+        """Return one current, hash-bound target snapshot for verification UI."""
+
+        service = getattr(self, "configuration_transactions", None)
+        if service is None:
+            return False
+        key = str(target_key or "").strip()
+        try:
+            state = service.refresh(allow_pending=False)
+            documents = read_governed_documents(service.paths)
+            guard = getattr(self, "configuration_safety_guard", None)
+            if guard is not None:
+                guard.validate_active_documents(documents)
+            targets = build_target_snapshot_from_documents(
+                documents["Locations.json"],
+                documents["Plates.json"],
+                documents["Settings.json"],
+            )
+            if key not in targets or key not in state.authorization:
+                raise ConfigurationValidationError(
+                    f"Unknown current target: {key}"
+                )
+            kind, _source_file, value = targets[key]
+            authorization = dict(state.authorization[key])
+            route = self._configuration_verification_route(key, kind)
+            active_plate_name = None
+            if route == "plate_calibration":
+                getter = getattr(self.model.well_plate, "get_current_plate_name", None)
+                if callable(getter):
+                    active_plate_name = str(getter() or "")
+            target_plate_name = key.split(":", 1)[1] if key.startswith("plate:") else None
+            return {
+                "target_key": key,
+                "target_kind": str(kind),
+                "value": copy.deepcopy(value),
+                "value_sha256": canonical_value_sha256(value),
+                "authorization_state": authorization.get("state"),
+                "verification_route": route,
+                "operator_default": str(
+                    getattr(service, "os_account", "application operator")
+                ),
+                "acknowledgement_version": 1,
+                "machine_id": service.identity.machine_id,
+                "active_plate_name": active_plate_name,
+                "calibration_launch_allowed": (
+                    route != "plate_calibration"
+                    or (
+                        target_plate_name is not None
+                        and (active_plate_name or "").casefold()
+                        == target_plate_name.casefold()
+                    )
+                ),
+            }
+        except (
+            ConfigurationTransactionError,
+            ConfigurationSafetyError,
+            VerificationError,
+            KeyError,
+        ) as exc:
+            if isinstance(exc, ConfigurationRecoveryRequired):
+                self._configuration_recovery_required = True
+            self.error_occurred_signal.emit(
+                "Configuration Verification Failed", str(exc)
+            )
+            return False
+
+    def verify_current_configuration_target(
+        self,
+        verification_snapshot,
+        *,
+        operator,
+        acknowledged,
+        acknowledgement_version,
+    ):
+        """Verify one ordinary saved target without accepting UI-supplied JSON."""
+
+        if not isinstance(verification_snapshot, dict):
+            return False
+        if acknowledged is not True or acknowledgement_version != 1:
+            self.error_occurred_signal.emit(
+                "Configuration Verification Failed",
+                "The displayed target was not acknowledged.",
+            )
+            return False
+        current = self.configuration_target_verification_snapshot(
+            verification_snapshot.get("target_key")
+        )
+        if not current:
+            return False
+        if current["verification_route"] != "location_verification":
+            self.error_occurred_signal.emit(
+                "Configuration Verification Failed",
+                "Rack and plate targets must be verified by their calibration workflow.",
+            )
+            return False
+        if current["authorization_state"] != "revoked_pending_verification":
+            self.error_occurred_signal.emit(
+                "Configuration Verification Failed",
+                "The target no longer requires verification.",
+            )
+            return False
+        if (
+            current["value_sha256"]
+            != verification_snapshot.get("value_sha256")
+        ):
+            self.error_occurred_signal.emit(
+                "Configuration Verification Failed",
+                "The saved target changed while its verification dialog was open.",
+            )
+            return False
+        return self.verify_configuration_targets(
+            {current["target_key"]: current["value"]},
+            operator=str(operator or "").strip(),
+            reason="Operator physically verified the displayed current target.",
+            method="physical_check",
+        )
 
     def verify_configuration_targets(self, confirmations, *, operator, reason, method="physical_check", service_record_reference=None):
         service = getattr(self, "configuration_transactions", None)
@@ -8931,12 +9115,42 @@ class Controller(QObject):
         decision = authorizer.authorize(request)
         if decision.allowed:
             return True
-        self.error_occurred_signal.emit("Move Blocked", decision.message)
+        if not self._emit_configuration_verification_required(decision, request):
+            self.error_occurred_signal.emit("Move Blocked", decision.message)
         print(
             f"Move blocked by saved-target verification: "
             f"{decision.reason_code}: {decision.message}"
         )
         return False
+
+    def _emit_configuration_verification_required(self, decision, request):
+        if str(getattr(decision, "reason_code", "")) not in {
+            "target_revoked",
+            "target_unverified",
+        }:
+            return False
+        try:
+            signal = getattr(self, "configuration_verification_required", None)
+        except RuntimeError:
+            signal = None
+        if signal is None or not hasattr(signal, "emit"):
+            return False
+        route = self._configuration_verification_route(
+            request.target_key, request.target_kind
+        )
+        try:
+            signal.emit(
+                {
+                    "target_key": request.target_key,
+                    "target_kind": request.target_kind,
+                    "reason_code": decision.reason_code,
+                    "message": decision.message,
+                    "verification_route": route,
+                }
+            )
+        except RuntimeError:
+            return False
+        return True
 
     def _authorize_active_plate_derived_target(self, final_target, workflow):
         authorizer = getattr(self, "saved_target_authorizer", None)
@@ -8966,7 +9180,8 @@ class Controller(QObject):
         decision = authorizer.authorize(request)
         if decision.allowed:
             return True
-        self.error_occurred_signal.emit("Move Blocked", decision.message)
+        if not self._emit_configuration_verification_required(decision, request):
+            self.error_occurred_signal.emit("Move Blocked", decision.message)
         print(
             f"Plate-derived move blocked by verification: "
             f"{decision.reason_code}: {decision.message}"

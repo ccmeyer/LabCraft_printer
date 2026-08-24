@@ -278,6 +278,10 @@ def test_explicit_current_resync_clears_pending_reconciliation():
     assert controller.expected_position == {"X": 33049, "Y": 29873, "Z": 84349}
     assert controller._position_reconciliation["state"] == "settled"
     assert controller._position_reconciliation["reason"] == "explicit_current_resync"
+    assert (
+        controller._position_reconciliation["trust_epoch"]
+        == machine_model.get_motion_trust_epoch()
+    )
     assert controller._pending_motion_endpoint_evidence is None
 
 

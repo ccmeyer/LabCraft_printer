@@ -46,6 +46,6 @@
     "acknowledgement_version": 1,
     "mode": "explicit_checkbox"
   },
-  "rationale": "All guarded coordinate changes remain strongly reviewed while replacing typed proposal phrases with one explicit, proposal-bound acknowledgement checkbox. Successful controlled rack and plate calibrations carry their own physical verification evidence.",
+  "rationale": "All guarded coordinate changes remain strongly reviewed with one explicit, proposal-bound acknowledgement checkbox. Successful controlled rack and plate calibrations and strict live named-location captures carry their own physical verification evidence.",
   "approval_reference": "docs/machine_data_migration_and_location_safety_plan.md"
 }

@@ -38,7 +38,7 @@ def test_tracked_policy_loads_with_stable_release_hash_and_all_strong_fallback()
     policy = load_configuration_change_policy()
 
     assert policy.policy_id == "labcraft-configuration-guard-v2"
-    assert policy.raw_sha256 == "2abdf88bb54ede0a326034f9f44a0a8b5af51a9f55c1b97f9a091edd93cca3ba"
+    assert policy.raw_sha256 == "baecb5f39a6f1efa9fbd0adaa478f3fde44b56c4c24df89511f66b72b8d924c4"
     assert policy.schema_version == 2
     assert policy.confirmation_mode == "explicit_checkbox"
     assert policy.position_telemetry_max_age_ms == 2500
@@ -155,9 +155,85 @@ def test_camera_assessment_contains_exact_delta_policy_and_proposal_binding():
     assert assessment["changes"][0]["signed_delta"] == {"X": 0, "Y": 1234, "Z": 0}
     assert assessment["confirmation_mode"] == "explicit_checkbox"
     assert assessment["confirmation_version"] == 1
+    assert (
+        assessment["authorization_consequence"]
+        == "verified_by_controlled_position_capture"
+    )
     assert "camera" in assessment["required_acknowledgement"]
     assert "1234 steps" in assessment["required_acknowledgement"]
     assert parse_guard_assessment(assessment) == assessment
+
+
+def test_plate_calibration_requires_atomic_pause_z_derivation():
+    docs = _documents()
+    plates = copy.deepcopy(docs["Plates.json"])
+    active = next(plate for plate in plates if plate["default"])
+    for point in active["calibrations"].values():
+        point["Z"] += 25
+    locations = copy.deepcopy(docs["Locations.json"])
+    pause_name = next(name for name in locations if name.casefold() == "pause")
+    original_pause = copy.deepcopy(locations[pause_name])
+    locations[pause_name]["Z"] = active["calibrations"]["top_left"]["Z"]
+
+    assessment = _guard().assess(
+        before_documents=docs,
+        proposed_documents={
+            "Plates.json": plates,
+            "Locations.json": locations,
+        },
+        workflow="plate_calibration",
+        target_keys=(active["name"],),
+        hardware_profile="current",
+    )
+
+    assert assessment["result"] != "reject"
+    assert locations[pause_name]["X"] == original_pause["X"]
+    assert locations[pause_name]["Y"] == original_pause["Y"]
+    assert locations[pause_name]["Z"] == active["calibrations"]["top_left"]["Z"]
+    assert "plate_pause_location_derived" in {
+        check["code"] for check in assessment["hard_checks"]
+    }
+    assert any(change["target_key"] == pause_name for change in assessment["changes"])
+
+    bad_locations = copy.deepcopy(locations)
+    bad_locations[pause_name]["X"] += 1
+    rejected = _guard().assess(
+        before_documents=docs,
+        proposed_documents={
+            "Plates.json": plates,
+            "Locations.json": bad_locations,
+        },
+        workflow="plate_calibration",
+        target_keys=(active["name"],),
+        hardware_profile="current",
+    )
+    assert rejected["result"] == "reject"
+    assert "cannot change Pause X or Y" in rejected["hard_checks"][-1]["message"]
+
+    missing = _guard().assess(
+        before_documents=docs,
+        proposed_documents={"Plates.json": plates},
+        workflow="plate_calibration",
+        target_keys=(active["name"],),
+        hardware_profile="current",
+    )
+    assert missing["result"] == "reject"
+    assert "must include the derived Pause" in missing["hard_checks"][-1]["message"]
+
+    wrong_z = copy.deepcopy(locations)
+    wrong_z[pause_name]["Z"] += 1
+    rejected = _guard().assess(
+        before_documents=docs,
+        proposed_documents={
+            "Plates.json": plates,
+            "Locations.json": wrong_z,
+        },
+        workflow="plate_calibration",
+        target_keys=(active["name"],),
+        hardware_profile="current",
+    )
+    assert rejected["result"] == "reject"
+    assert "must exactly match" in rejected["hard_checks"][-1]["message"]
 
 
 def test_generic_editor_cannot_write_rack_pair_or_slot_namespace():
