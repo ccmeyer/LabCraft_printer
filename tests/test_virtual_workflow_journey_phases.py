@@ -16,6 +16,7 @@ from tools.virtual_workflows.journey_phases import (
     DisconnectFailClosedSpec,
     StockPassSpec,
     ManualRefuelCheckSpec,
+    _expected_completed_array_control_text,
     _run_stock_pass,
     capture_completion_midpoint,
     machine_startup_steps,
@@ -26,6 +27,26 @@ from tools.virtual_workflows.journey_phases import (
     normalized_calibration_only_steps,
     normalized_precalibrated_stock_pass_steps,
 )
+
+
+@pytest.mark.parametrize(
+    ("expected_plan_state", "head_returned", "expected_text"),
+    (
+        ("completed", False, "Experiment Complete"),
+        ("completed", True, "Experiment Complete"),
+        ("active", False, "Array Complete"),
+        ("active", True, "Start Array"),
+    ),
+)
+def test_completed_array_control_text_follows_terminal_state_before_head_state(
+    expected_plan_state,
+    head_returned,
+    expected_text,
+):
+    assert _expected_completed_array_control_text(
+        expected_plan_state=expected_plan_state,
+        head_returned=head_returned,
+    ) == expected_text
 
 
 def test_final_stock_pass_wait_uses_the_outer_scenario_deadline():
