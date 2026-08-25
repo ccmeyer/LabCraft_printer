@@ -1783,6 +1783,7 @@ class CalibrationManager(QObject):
         self._pw_sweep_active = False
         self._pw_values = []     # list[int] pulse widths in us
         self._pw_index  = -1     # current index in _pw_values
+        self._pw_diagnostic_only_confirmed = False
 
         # --- Async apply-PW wait plumbing ---
         self._pw_apply_timer = None         # QTimer guard
@@ -4078,6 +4079,8 @@ class CalibrationManager(QObject):
                         "message": "This calibration process may start without changing the execution plan.",
                         "requires_execution_lock": False,
                         "diagnostic_only": False,
+                        "requires_diagnostic_confirmation": False,
+                        "application_eligibility_code": None,
                         "plan_state": None,
                     }
                 raise RuntimeError("the calibration-process policy is unavailable")
@@ -4094,8 +4097,57 @@ class CalibrationManager(QObject):
                 "message": f"Calibration-process eligibility could not be determined: {exc}",
                 "requires_execution_lock": False,
                 "diagnostic_only": False,
+                "requires_diagnostic_confirmation": False,
+                "application_eligibility_code": None,
                 "plan_state": None,
             }
+
+    def _calibration_start_policy_allows(
+        self,
+        eligibility,
+        *,
+        diagnostic_only_confirmed=False,
+        emit_error=True,
+    ) -> bool:
+        eligibility = dict(eligibility or {})
+        if not bool(eligibility.get("ok")):
+            message = str(
+                eligibility.get("message")
+                or "Calibration cannot start in the current experiment state."
+            )
+        elif (
+            bool(eligibility.get("requires_diagnostic_confirmation"))
+            and not bool(diagnostic_only_confirmed)
+        ):
+            message = (
+                "This calibration can only be recorded as a diagnostic result. "
+                "Explicit diagnostic-only confirmation is required before it starts."
+            )
+        else:
+            return True
+        if emit_error:
+            self.calibrationStageChanged.emit(message, "red")
+            self.calibrationError.emit(message)
+        return False
+
+    def _record_diagnostic_only_confirmation(self, process_obj, eligibility):
+        if not bool(getattr(process_obj, "_diagnostic_only_confirmed", False)):
+            return None
+        return self._record_calibration_audit_event(
+            "calibration_diagnostic_confirmation_recorded",
+            "Operator confirmed recording a diagnostic-only calibration result.",
+            details={
+                "diagnostic_only_confirmed": True,
+                "application_eligibility_code": eligibility.get(
+                    "application_eligibility_code"
+                ),
+                "application_eligibility_message": eligibility.get(
+                    "application_eligibility_message"
+                ),
+            },
+            level="warning",
+            process_obj=process_obj,
+        )
 
     def _should_record_calibration_audit_event(self, event_type, process_obj=None):
         event_type = str(event_type or "")
@@ -4718,6 +4770,12 @@ class CalibrationManager(QObject):
         ):
             start_kwargs["_allow_stream_calibration_sequence"] = True
             start_kwargs["_stream_calibration_sequence_phase"] = str(next_cal)
+            if bool(
+                (self._stream_calibration_sequence_state or {}).get(
+                    "diagnostic_only_confirmed", False
+                )
+            ):
+                start_kwargs["diagnostic_only_confirmed"] = True
         droplet_sequence_status = str(
             (getattr(self, "_droplet_calibration_sequence_state", None) or {}).get("status") or "idle"
         )
@@ -4727,6 +4785,12 @@ class CalibrationManager(QObject):
         ):
             start_kwargs["_allow_droplet_calibration_sequence"] = True
             start_kwargs["_droplet_calibration_sequence_phase"] = str(next_cal)
+            if bool(
+                (self._droplet_calibration_sequence_state or {}).get(
+                    "diagnostic_only_confirmed", False
+                )
+            ):
+                start_kwargs["diagnostic_only_confirmed"] = True
             if next_cal == "pressure_scan":
                 pressure_scan_mode = self._normalize_droplet_sequence_pressure_scan_mode(
                     (getattr(self, "_droplet_calibration_sequence_state", None) or {}).get(
@@ -4736,6 +4800,11 @@ class CalibrationManager(QObject):
                 )
                 if pressure_scan_mode == "single_candidate":
                     start_kwargs["mode"] = "single_candidate"
+
+        if self.is_pulsewidth_sweep_active() and bool(
+            getattr(self, "_pw_diagnostic_only_confirmed", False)
+        ):
+            start_kwargs["diagnostic_only_confirmed"] = True
 
         if not self._try_start_process(proc_cls, **start_kwargs):
             # Stop the queue on error to avoid cascading failures.
@@ -4779,15 +4848,17 @@ class CalibrationManager(QObject):
         eligibility = self._get_calibration_process_start_eligibility(
             result_producing=result_producing
         )
+        diagnostic_only_confirmed = bool(
+            getattr(self.activeCalibration, "_diagnostic_only_confirmed", False)
+        )
 
-        if not bool(eligibility.get("ok")):
-            message = str(
-                eligibility.get("message")
-                or "Calibration cannot start in the current experiment state."
-            )
-            self.calibrationStageChanged.emit(message, "red")
-            self.calibrationError.emit(message)
+        if not self._calibration_start_policy_allows(
+            eligibility,
+            diagnostic_only_confirmed=diagnostic_only_confirmed,
+        ):
             self.clear_calibration_queue()
+            process_obj = self.activeCalibration
+            self._cleanup_finished_process(process_obj)
             self.activeCalibration = None
             self.calibrationQueueCompleted.emit()
             return False
@@ -4866,7 +4937,17 @@ class CalibrationManager(QObject):
         self._record_calibration_audit_event(
             "calibration_process_started",
             f"Calibration process started: {process_name}",
+            details={
+                "diagnostic_only_confirmed": bool(diagnostic_only_confirmed),
+                "application_eligibility_code": eligibility.get(
+                    "application_eligibility_code"
+                ),
+            },
             process_obj=self.activeCalibration,
+        )
+        self._record_diagnostic_only_confirmation(
+            self.activeCalibration,
+            eligibility,
         )
         self.activeCalibration.start()
         return True
@@ -4876,6 +4957,7 @@ class CalibrationManager(QObject):
         self._pw_sweep_active = False
         self._pw_values = []
         self._pw_index = -1
+        self._pw_diagnostic_only_confirmed = False
         self._cancel_pw_apply_wait()
         self.clear_pending_process_verdict(reason="process_stopped")
         droplet_sequence_open = self.has_open_droplet_calibration_sequence()
@@ -4937,6 +5019,109 @@ class CalibrationManager(QObject):
             )
         self.calibrationError.emit("Calibration terminated by user")
 
+    def interrupt_machine_workflow(self, reason) -> bool:
+        """Immediately invalidate calibration work after transport state is lost.
+
+        Unlike the operator Stop path, this never waits for a graceful process
+        boundary.  It only releases manager-owned in-memory/process resources;
+        controller capture cancellation is deliberately performed first.
+        """
+        reason_text = str(reason or "machine_workflow_interrupted")
+        error_message = f"Calibration interrupted by machine workflow: {reason_text}"
+        process_obj = getattr(self, "activeCalibration", None)
+        had_open_capture = bool(self.has_open_stream_gravimetric_capture())
+        had_droplet_sequence = bool(self.has_open_droplet_calibration_sequence())
+        had_stream_sequence = bool(self.has_open_stream_calibration_sequence())
+        had_owned_work = bool(
+            process_obj is not None
+            or list(getattr(self, "calibration_queue", []) or [])
+            or bool(getattr(self, "_pw_sweep_active", False))
+            or had_open_capture
+            or had_droplet_sequence
+            or had_stream_sequence
+        )
+
+        self._pw_sweep_active = False
+        self._pw_values = []
+        self._pw_index = -1
+        self._pw_diagnostic_only_confirmed = False
+        self._cancel_pw_apply_wait()
+        self.clear_calibration_queue()
+        self.clear_pending_process_verdict(reason=reason_text)
+
+        if process_obj is not None:
+            # Disconnect first so stop/release or any late capture callback cannot
+            # re-enter completion/error handlers or advance the queue.
+            self._disconnect_process_callbacks(process_obj)
+            try:
+                process_obj.stop()
+            except Exception:
+                pass
+            self._finalize_process_recording(
+                "error",
+                error_message=error_message,
+            )
+            self._record_stream_capture_process_result(
+                process_obj,
+                outcome="error",
+                error_message=error_message,
+            )
+            self._record_calibration_audit_event(
+                "calibration_process_interrupted",
+                f"Calibration process interrupted: {process_obj.__class__.__name__}",
+                details={
+                    "outcome": "error",
+                    "error_message": error_message,
+                    "machine_workflow_reason": reason_text,
+                },
+                level="error",
+                process_obj=process_obj,
+            )
+            self._close_process_owned_calibration_memory_session(
+                process_obj,
+                outcome="error",
+                error_message=error_message,
+            )
+            self._cleanup_finished_process(process_obj)
+            self.activeCalibration = None
+
+        if had_open_capture:
+            self._mark_stream_capture_terminal_state(
+                status="error",
+                error_message=error_message,
+            )
+            self._reset_stream_gravimetric_capture_state(
+                status_message=error_message,
+            )
+        if had_droplet_sequence:
+            self._mark_droplet_calibration_sequence_terminal_state(
+                status="error",
+                error_message=error_message,
+            )
+        if had_stream_sequence:
+            self._mark_stream_calibration_sequence_terminal_state(
+                status="error",
+                error_message=error_message,
+            )
+
+        self._pending_process_verdict = None
+        # Rebuild the visible result surface from retained canonical/synthetic
+        # history.  Directly dropping this candidate leaves an open dialog
+        # selected on a row that can never validate again after reconnect.
+        try:
+            self.clear_transient_characterization_candidate()
+        except Exception:
+            # Interruption cleanup remains fail-closed even if legacy or
+            # partially constructed state does not satisfy the candidate API.
+            self._transient_characterization_candidate = None
+        if not had_owned_work:
+            return False
+        self.calibrationStageChanged.emit(error_message, "red")
+        self.calibrationError.emit(error_message)
+        self.calibrationQueueCompleted.emit()
+        self._emit_readiness()
+        return True
+
     def is_idle(self):
         return not bool(
             self.activeCalibration is not None
@@ -4982,12 +5167,20 @@ class CalibrationManager(QObject):
             self._pw_sweep_active = False
             self._pw_values = []
             self._pw_index = -1
+            self._pw_diagnostic_only_confirmed = False
             self.calibrationStageChanged.emit("Pulse-width sweep stopped by user", "orange")
         # Also stop any active calibration/queue
         self._cancel_pw_apply_wait()
         self.stop()
 
-    def start_pulsewidth_sweep(self, pw_start_us: int, pw_end_us: int, pw_step_us: int):
+    def start_pulsewidth_sweep(
+        self,
+        pw_start_us: int,
+        pw_end_us: int,
+        pw_step_us: int,
+        *,
+        diagnostic_only_confirmed=False,
+    ):
         """
         Run 'Calibrate All' for each pulse width in [start, end] with given step (inclusive).
         Supports start > end (will step downward).
@@ -4999,6 +5192,15 @@ class CalibrationManager(QObject):
             )
             self.calibrationError.emit("Busy: active calibration")
             return
+
+        eligibility = self._get_calibration_process_start_eligibility(
+            result_producing=True
+        )
+        if not self._calibration_start_policy_allows(
+            eligibility,
+            diagnostic_only_confirmed=diagnostic_only_confirmed,
+        ):
+            return False
 
         # Validate
         try:
@@ -5038,6 +5240,10 @@ class CalibrationManager(QObject):
         self._pw_sweep_active = True
         self._pw_values = vals
         self._pw_index = -1
+        self._pw_diagnostic_only_confirmed = bool(
+            diagnostic_only_confirmed
+            and eligibility.get("requires_diagnostic_confirmation")
+        )
         self.calibrationStageChanged.emit(
             f"Starting pulse-width sweep: {vals[0]}→{vals[-1]} us (n={len(vals)}, step={abs(st)} us)", "dark_blue"
         )
@@ -5153,6 +5359,7 @@ class CalibrationManager(QObject):
             self._pw_sweep_active = False
             self._pw_values = []
             self._pw_index = -1
+            self._pw_diagnostic_only_confirmed = False
             self.calibrationStageChanged.emit("Pulse-width sweep completed.", "green")
             self.calibrationQueueCompleted.emit()
             return
@@ -5274,7 +5481,12 @@ class CalibrationManager(QObject):
     def start_droplet_search_calibration(self):
         self._try_start_process(DropletSearchCalibrationProcess)
 
-    def start_manual_droplet_characterization(self, *, start_delay_us: int | None = None):
+    def start_manual_droplet_characterization(
+        self,
+        *,
+        start_delay_us: int | None = None,
+        diagnostic_only_confirmed=False,
+    ):
         context, missing = self.build_manual_current_characterization_context(
             start_delay_us=start_delay_us,
         )
@@ -5288,6 +5500,7 @@ class CalibrationManager(QObject):
             manual_current_context=context,
             replicates_per_pressure=20,
             order="desc",
+            diagnostic_only_confirmed=diagnostic_only_confirmed,
         )
 
     def start_pressure_sweep_characterization(
@@ -5299,6 +5512,7 @@ class CalibrationManager(QObject):
         min_nozzle_clearance_z_steps=1000,
         replicates_per_pressure=20,
         order="desc",
+        diagnostic_only_confirmed=False,
     ):
         return self._try_start_process(PressureSweepCharacterizationProcess,
             sphere_delay_us=sphere_delay_us,
@@ -5306,7 +5520,8 @@ class CalibrationManager(QObject):
             max_nominal_delay_us=max_nominal_delay_us,
             min_nozzle_clearance_z_steps=min_nozzle_clearance_z_steps,
             replicates_per_pressure=replicates_per_pressure,
-            order=order
+            order=order,
+            diagnostic_only_confirmed=diagnostic_only_confirmed,
         )
 
     def build_manual_current_characterization_context(self, *, start_delay_us: int | None = None):
@@ -5848,6 +6063,7 @@ class CalibrationManager(QObject):
         selected_summary_row,
         *,
         replicates_per_pressure=20,
+        diagnostic_only_confirmed=False,
     ):
         context, missing = self.build_droplet_recheck_context(selected_summary_row)
         if missing:
@@ -5861,6 +6077,7 @@ class CalibrationManager(QObject):
             replicates_per_pressure=replicates_per_pressure,
             char_delay_retarget_cap=1,
             order="desc",
+            diagnostic_only_confirmed=diagnostic_only_confirmed,
         )
 
     def start_droplet_timecourse_process(self, *, save_camera_archive: bool = False):
@@ -5869,8 +6086,11 @@ class CalibrationManager(QObject):
             save_camera_archive=bool(save_camera_archive),
         )
 
-    def start_online_stream_calibration(self):
-        return self._try_start_process(OnlineStreamCalibrationProcess)
+    def start_online_stream_calibration(self, *, diagnostic_only_confirmed=False):
+        return self._try_start_process(
+            OnlineStreamCalibrationProcess,
+            diagnostic_only_confirmed=diagnostic_only_confirmed,
+        )
 
     @classmethod
     def _filter_stream_calibration_sequence_missing_requirements(cls, missing_requirements) -> list[str]:
@@ -5888,7 +6108,12 @@ class CalibrationManager(QObject):
         raw_missing = self._process_missing(OnlineStreamCalibrationProcess)
         return self._filter_stream_calibration_sequence_missing_requirements(raw_missing)
 
-    def start_droplet_calibration_sequence(self, *, pressure_scan_mode: str = "band"):
+    def start_droplet_calibration_sequence(
+        self,
+        *,
+        pressure_scan_mode: str = "band",
+        diagnostic_only_confirmed=False,
+    ):
         if self.activeCalibration is not None or len(self.calibration_queue) > 0 or self.is_pulsewidth_sweep_active():
             message = "Stop the current calibration before starting the droplet calibration sequence."
             self.calibrationStageChanged.emit(message, "red")
@@ -5910,6 +6135,15 @@ class CalibrationManager(QObject):
             self.calibrationError.emit(message)
             return False
 
+        eligibility = self._get_calibration_process_start_eligibility(
+            result_producing=True
+        )
+        if not self._calibration_start_policy_allows(
+            eligibility,
+            diagnostic_only_confirmed=diagnostic_only_confirmed,
+        ):
+            return False
+
         pressure_scan_mode = self._normalize_droplet_sequence_pressure_scan_mode(pressure_scan_mode)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._droplet_calibration_sequence_state = self._build_default_droplet_calibration_sequence_state()
@@ -5925,10 +6159,17 @@ class CalibrationManager(QObject):
                 "gripper_settle_deadline_monotonic_s": None,
             }
         )
+        if (
+            diagnostic_only_confirmed
+            and eligibility.get("requires_diagnostic_confirmation")
+        ):
+            self._droplet_calibration_sequence_state[
+                "diagnostic_only_confirmed"
+            ] = True
         self._emit_droplet_calibration_sequence_state_changed()
         return True
 
-    def start_stream_calibration_sequence(self):
+    def start_stream_calibration_sequence(self, *, diagnostic_only_confirmed=False):
         if self.activeCalibration is not None or len(self.calibration_queue) > 0 or self.is_pulsewidth_sweep_active():
             message = "Stop the current calibration before starting the stream calibration sequence."
             self.calibrationStageChanged.emit(message, "red")
@@ -5948,6 +6189,16 @@ class CalibrationManager(QObject):
             message = "Stop the current stream calibration sequence before starting another one."
             self.calibrationStageChanged.emit(message, "red")
             self.calibrationError.emit(message)
+            return False
+
+
+        eligibility = self._get_calibration_process_start_eligibility(
+            result_producing=True
+        )
+        if not self._calibration_start_policy_allows(
+            eligibility,
+            diagnostic_only_confirmed=diagnostic_only_confirmed,
+        ):
             return False
 
         missing = self._stream_calibration_sequence_missing_requirements()
@@ -5970,6 +6221,13 @@ class CalibrationManager(QObject):
                 "gripper_settle_deadline_monotonic_s": None,
             }
         )
+        if (
+            diagnostic_only_confirmed
+            and eligibility.get("requires_diagnostic_confirmation")
+        ):
+            self._stream_calibration_sequence_state[
+                "diagnostic_only_confirmed"
+            ] = True
         self._emit_stream_calibration_sequence_state_changed()
         return True
 
@@ -9446,8 +9704,16 @@ class CalibrationManager(QObject):
     def _safe_get_printer_head_id(self):
         try:
             ph = self.model.rack_model.get_gripper_printer_head()
-            # Prefer a stable id/serial if available; fallback to str()
-            return getattr(ph, "serial", None) or getattr(ph, "id", None) or str(ph)
+            if ph is None:
+                return None
+            # printer_head_id is the durable identity persisted in execution and
+            # calibration records.  serial/id remain legacy fallbacks only.
+            return (
+                getattr(ph, "printer_head_id", None)
+                or getattr(ph, "serial", None)
+                or getattr(ph, "id", None)
+                or str(ph)
+            )
         except Exception:
             return None
 
@@ -9497,6 +9763,9 @@ class CalibrationManager(QObject):
 
     def _try_start_process(self, proc_cls, *args, **kwargs) -> bool:
         kwargs = dict(kwargs or {})
+        diagnostic_only_confirmed = bool(
+            kwargs.pop("diagnostic_only_confirmed", False)
+        )
         storage_block = self.get_calibration_storage_start_block_message()
         if storage_block:
             self.calibrationStageChanged.emit(storage_block, "red")
@@ -9662,23 +9931,14 @@ class CalibrationManager(QObject):
             process_name == "DropletSearchCalibrationProcess"
             and bool(kwargs.get("manual_start", False))
         )
-        eligibility_getter = getattr(
-            self.model,
-            "get_calibration_process_start_eligibility",
-            None,
+        eligibility = self._get_calibration_process_start_eligibility(
+            result_producing=result_producing
         )
-        if callable(eligibility_getter):
-            eligibility = self._get_calibration_process_start_eligibility(
-                result_producing=result_producing
-            )
-            if not bool(eligibility.get("ok")):
-                msg = str(
-                    eligibility.get("message")
-                    or "Calibration cannot start in the current experiment state."
-                )
-                self.calibrationStageChanged.emit(msg, "red")
-                self.calibrationError.emit(msg)
-                return False
+        if not self._calibration_start_policy_allows(
+            eligibility,
+            diagnostic_only_confirmed=diagnostic_only_confirmed,
+        ):
+            return False
 
         session_started = False
         if self._process_owns_calibration_memory_session(proc_cls) and self._run_idx is None:
@@ -9710,6 +9970,11 @@ class CalibrationManager(QObject):
         self.activeCalibration._calibration_memory_session_run_id = (
             str(self._run_id) if session_started and self._run_id else None
         )
+        self.activeCalibration._diagnostic_only_confirmed = bool(
+            diagnostic_only_confirmed
+            and eligibility.get("requires_diagnostic_confirmation")
+        )
+        self.activeCalibration._diagnostic_only_eligibility = dict(eligibility)
         started = self.start_active_calibration()
         return started is not False
 

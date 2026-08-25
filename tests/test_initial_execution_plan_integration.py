@@ -925,7 +925,8 @@ def test_calibration_process_start_eligibility_without_plan_requires_no_lock(
     _configure_design(model.experiment_model)
 
     result = model.get_calibration_process_start_eligibility(
-        result_producing=result_producing
+        result_producing=result_producing,
+        stock_id="draft-stock",
     )
 
     assert result["ok"] is True
@@ -950,14 +951,72 @@ def test_result_process_requires_lock_for_live_nonterminal_execution(
     Model.load_experiment_from_model(model, finalize_execution_plan=True)
     if activate:
         em.lock_execution_plan("printing_started")
+    plan = em.get_execution_plan_snapshot()
+    stock = plan.stocks[0]
 
-    result = model.get_calibration_process_start_eligibility(result_producing=True)
+    result = model.get_calibration_process_start_eligibility(
+        result_producing=True,
+        stock_id=stock.stock_id,
+    )
 
     assert result["ok"] is True
     assert result["code"] == "execution_lock_required"
     assert result["requires_execution_lock"] is True
     assert result["diagnostic_only"] is False
     assert result["plan_state"] == ("active" if activate else "prepared")
+
+
+def test_result_process_start_policy_keeps_missing_progress_and_runtime_fail_closed(
+    experiment_model_factory,
+    monkeypatch,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    stock = em.get_execution_plan_snapshot().stocks[0]
+
+    missing_stock = model.get_calibration_process_start_eligibility(
+        result_producing=True
+    )
+    assert missing_stock["ok"] is False
+    assert missing_stock["code"] == "missing_stock_context"
+
+    outside_plan = model.get_calibration_process_start_eligibility(
+        result_producing=True,
+        stock_id="outside-plan-stock",
+    )
+    assert outside_plan["ok"] is True
+    assert outside_plan["diagnostic_only"] is True
+    assert outside_plan["requires_diagnostic_confirmation"] is True
+    assert outside_plan["application_eligibility_code"] == "stock_not_in_execution"
+
+    monkeypatch.setattr(
+        em,
+        "_added_droplets_for_stock",
+        Mock(side_effect=RuntimeError("corrupt progress")),
+    )
+    bad_progress = model.get_calibration_process_start_eligibility(
+        result_producing=True,
+        stock_id=stock.stock_id,
+    )
+    assert bad_progress["ok"] is False
+    assert bad_progress["code"] == "progress_unavailable"
+    assert bad_progress["requires_diagnostic_confirmation"] is False
+
+    monkeypatch.setattr(em, "_added_droplets_for_stock", Mock(return_value=0))
+    monkeypatch.setattr(
+        em,
+        "_validate_runtime_matches_execution_plan",
+        Mock(side_effect=RuntimeError("runtime mismatch")),
+    )
+    bad_runtime = model.get_calibration_process_start_eligibility(
+        result_producing=True,
+        stock_id=stock.stock_id,
+    )
+    assert bad_runtime["ok"] is False
+    assert bad_runtime["code"] == "runtime_unavailable"
+    assert bad_runtime["requires_diagnostic_confirmation"] is False
 
 
 def test_historical_and_inactive_persisted_executions_reject_calibration_start(
@@ -1036,6 +1095,23 @@ def test_calibration_application_eligibility_is_stock_specific_after_progress(
     assert unprinted["ok"] is True
     assert unprinted["code"] == "execution_stock_eligible"
 
+    diagnostic_start = model.get_calibration_process_start_eligibility(
+        result_producing=True,
+        stock_id=printed_stock.stock_id,
+    )
+    assert diagnostic_start["ok"] is True
+    assert diagnostic_start["diagnostic_only"] is True
+    assert diagnostic_start["requires_diagnostic_confirmation"] is True
+    assert diagnostic_start["application_eligibility_code"] == "printed_progress"
+
+    normal_start = model.get_calibration_process_start_eligibility(
+        result_producing=True,
+        stock_id=unprinted_stock.stock_id,
+    )
+    assert normal_start["ok"] is True
+    assert normal_start["diagnostic_only"] is False
+    assert normal_start["requires_diagnostic_confirmation"] is False
+
 
 @pytest.mark.parametrize(
     ("terminal_state", "message_fragment"),
@@ -1077,14 +1153,17 @@ def test_terminal_execution_disables_apply_without_writing(
     before = _directory_bytes(Path(em.experiment_dir_path))
 
     process_eligibility = model.get_calibration_process_start_eligibility(
-        result_producing=True
+        result_producing=True,
+        stock_id=stock.stock_id,
     )
     eligibility = em.get_calibration_application_eligibility(stock_id=stock.stock_id)
 
     assert process_eligibility["ok"] is True
-    assert process_eligibility["code"] == "terminal_diagnostics"
+    assert process_eligibility["code"] == "diagnostic_only_confirmation_required"
     assert process_eligibility["requires_execution_lock"] is False
     assert process_eligibility["diagnostic_only"] is True
+    assert process_eligibility["requires_diagnostic_confirmation"] is True
+    assert process_eligibility["application_eligibility_code"] == "terminal_execution"
     assert process_eligibility["plan_state"] == terminal_state.value
     assert eligibility["ok"] is False
     assert eligibility["code"] == "terminal_execution"
@@ -1362,6 +1441,109 @@ def test_explicit_uploaded_design_can_preview_and_apply_calibration(
         for well in calibrated.wells
     }
     assert counts_by_well == {"A1": 2, "B2": 4}
+
+
+def test_sparse_explicit_uploaded_design_fill_preview_matches_committed_revision(
+    experiment_model_factory,
+    monkeypatch,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    well_ids = ["A1", "A6", "B3", "C9", "D2", "E11", "F5", "G8", "H12"]
+    frame = pd.DataFrame(
+        {
+            "Well": well_ids,
+            "Signal A (mM)": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+            "Signal B (mM)": [0.0, 0.2, 0.0, 0.4, 0.0, 0.6, 0.0, 0.8, 0.0],
+            "Signal C (mM)": [0.5, 0.0, 0.4, 0.0, 0.3, 0.0, 0.2, 0.0, 0.1],
+            "Signal D (mM)": [0.1] * len(well_ids),
+        }
+    )
+    em.set_metadata(
+        name="sparse-explicit-fill-calibration",
+        randomize_assignments=False,
+        replicates=1,
+        target_reaction_volume_nL=500.0,
+        final_reaction_volume_nL=500.0,
+        printed_volume_tolerance_nL=50.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+    )
+    em.set_uploaded_design_from_dataframe(frame)
+    for factor in em.factors:
+        factor.options[0].forced_stock_conc = 10.0
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    em.save_experiment()
+
+    Model.load_experiment_from_model(model, finalize_execution_plan=True)
+    prepared = load_execution_plan(em.execution_plan_file_path)
+    fill_stocks = [
+        stock
+        for stock in prepared.stocks
+        if stock.factor_name == "Water" and stock.units == "--"
+    ]
+    assert len(fill_stocks) == 1
+    fill_stock = fill_stocks[0]
+    assert [well.well_id for well in prepared.wells] == well_ids
+
+    monkeypatch.setattr(
+        em,
+        "generate_experiment",
+        Mock(side_effect=AssertionError("finalized fill preview regenerated the design")),
+    )
+    monkeypatch.setattr(
+        em,
+        "_iter_reaction_run_specs",
+        Mock(side_effect=AssertionError("finalized fill preview consulted mutable design inputs")),
+    )
+    preview = em.preview_fill_requantized(9.5)
+    assert preview["ok"] is True
+    assert list(preview["well_ids"]) == well_ids
+
+    result = em.apply_fill_droplet_volume(
+        9.5,
+        printing_mode="droplet",
+        applied_calibration={
+            "printer_head": SimpleNamespace(printer_head_id="durable-fill-head"),
+            "measured_volume_nL": 9.5,
+            "pw_us": 1300,
+            "pressure_psi": 0.6,
+            "run_id": "sparse-fill-run",
+            "phase": "pressure_sweep_characterization",
+            "timestamp": "2026-08-25T00:00:00Z",
+            "source_row_fingerprint": ("sparse-fill-run", 1300, 0.6, 9.5),
+            "original_printing_mode": "droplet",
+        },
+    )
+
+    calibrated = load_execution_plan(em.execution_plan_file_path)
+    assert calibrated.plan_revision == prepared.plan_revision + 2
+    assert [well.well_id for well in calibrated.wells] == well_ids
+    committed_counts = {
+        well.well_id: next(
+            (
+                dispense.target_dispenses
+                for dispense in well.dispenses
+                if dispense.stock_id == fill_stock.stock_id
+            ),
+            0,
+        )
+        for well in calibrated.wells
+    }
+    assert committed_counts == {
+        well_id: counts.get(fill_stock.stock_id, 0)
+        for well_id, counts in preview["target_counts_by_well"].items()
+    }
+    assert result["total_drops_new"] == preview["total_drops_new"]
+    assert result["total_drops_old"] == preview["total_drops_old"]
+
+    reloaded = ExperimentModel(prof=CURRENT_PROFILE)
+    reloaded.load_experiment(
+        em.experiment_file_path,
+        em.experiment_dir_path,
+    )
+    assert reloaded.get_execution_plan_snapshot() == calibrated
 
 
 def test_initialize_and_duplicate_do_not_create_execution_plan(

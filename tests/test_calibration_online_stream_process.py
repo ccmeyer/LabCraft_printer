@@ -823,7 +823,17 @@ def test_try_start_process_opens_session_before_online_stream_init(monkeypatch):
     mgr._run_id = None
     mgr._run_idx = None
     mgr.model = SimpleNamespace(
-        experiment_model=SimpleNamespace(get_calibration_file_path=lambda: "C:/tmp/calibration.json")
+        experiment_model=SimpleNamespace(get_calibration_file_path=lambda: "C:/tmp/calibration.json"),
+        get_calibration_process_start_eligibility=lambda **_kwargs: {
+            "ok": True,
+            "code": "mutable_design",
+            "message": "Calibration may start.",
+            "requires_execution_lock": False,
+            "diagnostic_only": False,
+            "requires_diagnostic_confirmation": False,
+            "application_eligibility_code": "mutable_design",
+            "plan_state": None,
+        },
     )
     mgr.calibrationStageChanged = SignalStub()
     mgr.calibrationError = SignalStub()
@@ -862,7 +872,17 @@ def test_try_start_process_closes_auto_started_session_when_online_stream_init_f
     mgr._run_id = None
     mgr._run_idx = None
     mgr.model = SimpleNamespace(
-        experiment_model=SimpleNamespace(get_calibration_file_path=lambda: "C:/tmp/calibration.json")
+        experiment_model=SimpleNamespace(get_calibration_file_path=lambda: "C:/tmp/calibration.json"),
+        get_calibration_process_start_eligibility=lambda **_kwargs: {
+            "ok": True,
+            "code": "mutable_design",
+            "message": "Calibration may start.",
+            "requires_execution_lock": False,
+            "diagnostic_only": False,
+            "requires_diagnostic_confirmation": False,
+            "application_eligibility_code": "mutable_design",
+            "plan_state": None,
+        },
     )
     mgr.calibrationStageChanged = SignalStub()
     mgr.calibrationError = SignalStub()

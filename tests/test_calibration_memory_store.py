@@ -350,6 +350,41 @@ def test_calibration_memory_store_creates_run_summary_catalog_and_observations(t
     assert run_summary["process_results"]["droplet_search"]["latest_result"]["mean_volume"] == 9.84
 
 
+def test_calibration_memory_context_prefers_durable_head_id_over_legacy_serial(tmp_path):
+    model = _make_dummy_model(tmp_path)
+    printer_head = model.rack_model.get_gripper_printer_head()
+    printer_head.printer_head_id = "durable-fill-head"
+    printer_head.serial = "legacy-serial"
+    store = CalibrationMemoryStore(
+        model=model,
+        root_dir=str(tmp_path / "CalibrationMemory"),
+    )
+
+    context = store.context_builder.build(
+        model=model,
+        calibration_file_path=model.experiment_model.calibration_file_path,
+    )
+
+    assert context["printer_head_id"] == "durable-fill-head"
+
+
+def test_calibration_memory_context_uses_object_string_only_without_durable_identity(tmp_path):
+    model = _make_dummy_model(tmp_path)
+    printer_head = model.rack_model.get_gripper_printer_head()
+    del printer_head.serial
+    store = CalibrationMemoryStore(
+        model=model,
+        root_dir=str(tmp_path / "CalibrationMemory"),
+    )
+
+    context = store.context_builder.build(
+        model=model,
+        calibration_file_path=model.experiment_model.calibration_file_path,
+    )
+
+    assert context["printer_head_id"] == str(printer_head)
+
+
 def test_calibration_memory_atomic_write_preserves_previous_file_on_replace_failure(tmp_path, monkeypatch):
     store = CalibrationMemoryStore(root_dir=str(tmp_path / "CalibrationMemory"))
     target = tmp_path / "run_summary.json"

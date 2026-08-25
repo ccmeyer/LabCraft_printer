@@ -4874,6 +4874,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self.update_flash_info()
         if "control_lock" in categories:
             self._refresh_manual_control_lock_state()
+            self._refresh_result_actions_for_context_change()
         self._status_ui_refresh_work_ms.append(
             max(0.0, (time.monotonic_ns() - started_ns) / 1_000_000.0)
         )
@@ -4932,12 +4933,35 @@ class DropletImagingDialog(QtWidgets.QDialog):
             signal.connect(slot)
         self._session_signal_connections.append((signal, slot))
 
+    def _refresh_result_actions_for_context_change(self, *_args):
+        if getattr(self, "_session_state", None) not in {"opening", "active"}:
+            return
+        self._invalidate_selected_characterization_readiness_cache()
+        if hasattr(self, "summary_table_model"):
+            self._sync_applied_summary_row_highlight()
+        if hasattr(self, "load_selected_button"):
+            self._update_load_button_state()
+        if hasattr(self, "bridge_table"):
+            self._refresh_bridge_preview_for_current_state()
+
+    def _on_gripper_calibration_context_changed(self, *_args):
+        self._invalidate_selected_characterization_readiness_cache()
+        if hasattr(self, "bridge_table"):
+            self._bridge_refresh_design_labels()
+        self._refresh_result_actions_for_context_change()
+
+    def _on_machine_workflow_interrupted_for_results(self, *_args):
+        self._machine_state_ui_fingerprint = None
+        self._schedule_machine_state_ui_refresh()
+        self._refresh_result_actions_for_context_change()
+
     def _connect_external_session_signals(self):
         if self._session_signal_connections:
             return
         camera = self.model.droplet_camera_model
         manager = self.model.calibration_manager
         machine = getattr(self.model, "machine_model", None)
+        rack = getattr(self.model, "rack_model", None)
 
         self._connect_session_signal(camera.droplet_image_updated, self.update_image)
         self._connect_session_signal(
@@ -4975,6 +4999,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
             getattr(self.controller, "error_occurred_signal", None),
             self._handle_printer_head_cleaning_controller_error,
         )
+        self._connect_session_signal(
+            getattr(rack, "gripper_updated", None),
+            self._on_gripper_calibration_context_changed,
+        )
+        self._connect_session_signal(
+            getattr(self.controller, "machine_workflow_interrupted_signal", None),
+            self._on_machine_workflow_interrupted_for_results,
+        )
 
         for signal, slot in (
             (manager.calibrationStageChanged, self.update_stage_and_log),
@@ -4996,6 +5028,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             (manager.calibrationCompleted, self._refresh_manual_control_lock_state),
             (manager.calibrationQueueCompleted, self._refresh_manual_control_lock_state),
             (manager.calibrationError, self._refresh_manual_control_lock_state),
+            (manager.calibrationCompleted, self._refresh_result_actions_for_context_change),
+            (manager.calibrationQueueCompleted, self._refresh_result_actions_for_context_change),
+            (manager.calibrationError, self._refresh_result_actions_for_context_change),
             (manager.readinessChanged, self.on_readiness_changed),
         ):
             self._connect_session_signal(signal, slot)
@@ -9880,11 +9915,44 @@ class DropletImagingDialog(QtWidgets.QDialog):
         return container, toggle, content
 
     def _get_current_reagent_context_key(self):
+        experiment_model = getattr(getattr(self, "model", None), "experiment_model", None)
+        plan_getter = getattr(experiment_model, "get_execution_plan_snapshot", None)
         try:
-            reagent = str(self._bridge_get_current_reagent_name() or "").strip()
+            plan = plan_getter() if callable(plan_getter) else None
         except Exception:
-            reagent = ""
-        return reagent or "__none__"
+            plan = None
+        plan_context = (
+            f"{getattr(plan, 'plan_id', '')}:{getattr(plan, 'plan_revision', '')}"
+            if plan is not None
+            else str(getattr(experiment_model, "experiment_dir_path", None) or "draft")
+        )
+
+        printer_head = self._get_loaded_printer_head()
+        stock_id = None
+        if printer_head is not None:
+            stock_getter = getattr(printer_head, "get_stock_id", None)
+            try:
+                stock_id = (
+                    stock_getter()
+                    if callable(stock_getter)
+                    else getattr(printer_head, "stock_id", None)
+                )
+            except Exception:
+                stock_id = None
+        identity_getter = getattr(experiment_model, "_printer_head_identity", None)
+        try:
+            printer_head_id = (
+                identity_getter(printer_head)
+                if callable(identity_getter)
+                else None
+            )
+        except Exception:
+            printer_head_id = None
+        return (
+            str(plan_context),
+            str(stock_id or "__no_stock__"),
+            str(printer_head_id or "__no_head__"),
+        )
 
     def _get_saved_applied_summary_row_fingerprints(self):
         try:
@@ -12447,12 +12515,71 @@ class DropletImagingDialog(QtWidgets.QDialog):
         message_box.exec()
         return message_box.clickedButton() is start_button
 
+    def _confirm_diagnostic_only_calibration(self):
+        eligibility_getter = getattr(
+            getattr(self, "model", None),
+            "get_calibration_process_start_eligibility",
+            None,
+        )
+        if not callable(eligibility_getter):
+            return True, False
+        try:
+            eligibility = eligibility_getter(result_producing=True)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Calibration unavailable",
+                f"Calibration eligibility could not be determined: {exc}",
+            )
+            return False, False
+        if not isinstance(eligibility, dict) or not bool(eligibility.get("ok")):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Calibration unavailable",
+                str(
+                    (eligibility or {}).get("message")
+                    or "Calibration cannot start in the current experiment state."
+                ),
+            )
+            return False, False
+        if not bool(eligibility.get("requires_diagnostic_confirmation")):
+            return True, False
+
+        message_box = QtWidgets.QMessageBox(self)
+        message_box.setIcon(QtWidgets.QMessageBox.Warning)
+        message_box.setWindowTitle("Record diagnostic calibration?")
+        message_box.setText(
+            "This calibration result can be recorded, but it cannot modify the current design or execution."
+        )
+        message_box.setInformativeText(
+            str(eligibility.get("application_eligibility_message") or eligibility.get("message") or "")
+        )
+        record_button = message_box.addButton(
+            "Record Diagnostic Result",
+            QtWidgets.QMessageBox.AcceptRole,
+        )
+        cancel_button = message_box.addButton(
+            "Cancel",
+            QtWidgets.QMessageBox.RejectRole,
+        )
+        message_box.setDefaultButton(cancel_button)
+        message_box.setEscapeButton(cancel_button)
+        message_box.exec()
+        confirmed = message_box.clickedButton() is record_button
+        return confirmed, confirmed
+
     def _start_volume_calibration(
         self,
         requested_mode,
         action_key,
         start_callback,
     ):
+        allowed, diagnostic_only_confirmed = self._confirm_diagnostic_only_calibration()
+        if not allowed:
+            self._set_calibration_action_text(action_key, use_default=True)
+            self._refresh_manual_control_lock_state()
+            return False
+
         # This is a UI consent boundary only. The authoritative model continues
         # to perform the durable calibration_started transition when a selected
         # volume calibration is applied.
@@ -12460,10 +12587,15 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text(action_key, use_default=True)
             self._refresh_manual_control_lock_state()
             return False
+        guarded_callback = start_callback
+        if diagnostic_only_confirmed:
+            guarded_callback = lambda: start_callback(
+                diagnostic_only_confirmed=True
+            )
         return self._start_mode_guarded_calibration(
             requested_mode,
             action_key,
-            start_callback,
+            guarded_callback,
         )
 
     def _sync_pressure_scan_start_pressure_from_profile(self, profile):
@@ -13108,7 +13240,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._set_calibration_action_text("droplet_characterization", use_default=True)
             self.controller.stop_calibration()
         else:
-            self._start_mode_guarded_calibration(
+            self._start_volume_calibration(
                 "droplet",
                 "droplet_characterization",
                 self.controller.start_droplet_characterization_calibration,
@@ -13209,8 +13341,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._start_volume_calibration(
                 "droplet",
                 "calibrate_all",
-                lambda: self.controller.start_droplet_calibration_sequence(
+                lambda diagnostic_only_confirmed=False: self.controller.start_droplet_calibration_sequence(
                     pressure_scan_mode=self._get_calibrate_all_pressure_scan_mode(),
+                    **(
+                        {"diagnostic_only_confirmed": True}
+                        if diagnostic_only_confirmed
+                        else {}
+                    ),
                 ),
             )
         self._refresh_manual_control_lock_state()
@@ -13251,9 +13388,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "Invalid range", "Start and end pulse widths cannot be equal.")
             return
 
+        allowed, diagnostic_only_confirmed = self._confirm_diagnostic_only_calibration()
+        if not allowed:
+            self._set_calibration_action_text("pulsewidth_sweep", use_default=True)
+            self._refresh_manual_control_lock_state()
+            return
+
         # Update button and kick off sweep
         self._set_calibration_action_text("pulsewidth_sweep", "Stop PW Range")
-        mgr.start_pulsewidth_sweep(pw_start, pw_end, pw_step)
+        mgr.start_pulsewidth_sweep(
+            pw_start,
+            pw_end,
+            pw_step,
+            diagnostic_only_confirmed=diagnostic_only_confirmed,
+        )
         self._refresh_manual_control_lock_state()
 
     def on_readiness_changed(self, readiness: dict):
@@ -14776,6 +14924,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._update_recheck_button_state(raw=raw, mismatch_message=mismatch_message)
             return
 
+
+        allowed, diagnostic_only_confirmed = self._confirm_diagnostic_only_calibration()
+        if not allowed:
+            self._update_recheck_button_state(raw=raw, mismatch_message=mismatch_message)
+            return
+
         result_set_no = raw.get("result_set_no")
         pw = raw.get("pw_us")
         pres = raw.get("pressure_psi")
@@ -14785,12 +14939,21 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
 
         starter = getattr(self.controller, "start_droplet_recheck_characterization", None)
+        diagnostic_kwargs = (
+            {"diagnostic_only_confirmed": True}
+            if diagnostic_only_confirmed
+            else {}
+        )
         if callable(starter):
-            started = starter(dict(raw))
+            started = starter(dict(raw), **diagnostic_kwargs)
         else:
             mgr = getattr(getattr(self, "model", None), "calibration_manager", None)
             starter = getattr(mgr, "start_droplet_recheck_characterization", None)
-            started = starter(dict(raw)) if callable(starter) else False
+            started = (
+                starter(dict(raw), **diagnostic_kwargs)
+                if callable(starter)
+                else False
+            )
         if started is False:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -15205,6 +15368,29 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "load_message": message,
                 "recheck_message": message,
                 "preview_message": message,
+            }
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        connected = None
+        connected_getter = getattr(machine_model, "is_connected", None)
+        try:
+            if callable(connected_getter):
+                connected = bool(connected_getter())
+            elif hasattr(machine_model, "machine_connected"):
+                connected = bool(machine_model.machine_connected)
+        except Exception:
+            connected = False
+        if connected is False:
+            return {
+                "code": "machine_disconnected",
+                "load_message": (
+                    "Reconnect to the machine before loading calibration settings."
+                ),
+                "recheck_message": (
+                    "Reconnect to the machine before rechecking this calibration result."
+                ),
+                "preview_message": (
+                    "Calibration results are unavailable while the machine is disconnected."
+                ),
             }
         return None
 

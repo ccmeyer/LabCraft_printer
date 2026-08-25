@@ -1164,6 +1164,9 @@ class Controller(QObject):
         self.machine_workflow_interrupted_signal.connect(
             self._on_rack_calibration_workflow_interrupted
         )
+        self.machine_workflow_interrupted_signal.connect(
+            self._on_droplet_calibration_workflow_interrupted
+        )
         machine_paused_signal = getattr(
             self.model.machine_model, "machine_paused", None
         )
@@ -4613,6 +4616,22 @@ class Controller(QObject):
         }
         self._emit_optional("machine_workflow_interrupted_signal", payload)
         return payload
+
+    def _on_droplet_calibration_workflow_interrupted(self, payload):
+        payload = dict(payload or {})
+        reason = str(payload.get("reason") or "machine_workflow_interrupted")
+        try:
+            self.cancel_pending_droplet_capture(
+                reason,
+                emit_capture_failed=False,
+                recover=False,
+            )
+        finally:
+            manager = getattr(getattr(self, "model", None), "calibration_manager", None)
+            interrupt = getattr(manager, "interrupt_machine_workflow", None)
+            if callable(interrupt):
+                return bool(interrupt(reason))
+        return False
 
     def _ensure_queue_clear_tracking(self):
         """Initialize tracking for compatibility with lightweight test doubles."""
@@ -15008,30 +15027,64 @@ class Controller(QObject):
             save_overlays=save_overlays,
         )
 
-    def start_pressure_sweep_characterization(self):
-        return self.model.calibration_manager.start_pressure_sweep_characterization()
+    def start_pressure_sweep_characterization(self, *, diagnostic_only_confirmed=False):
+        kwargs = (
+            {"diagnostic_only_confirmed": True}
+            if diagnostic_only_confirmed
+            else {}
+        )
+        return self.model.calibration_manager.start_pressure_sweep_characterization(**kwargs)
 
-    def start_droplet_recheck_characterization(self, selected_summary_row):
-        return self.model.calibration_manager.start_droplet_recheck_characterization(selected_summary_row)
+    def start_droplet_recheck_characterization(
+        self,
+        selected_summary_row,
+        *,
+        diagnostic_only_confirmed=False,
+    ):
+        kwargs = (
+            {"diagnostic_only_confirmed": True}
+            if diagnostic_only_confirmed
+            else {}
+        )
+        return self.model.calibration_manager.start_droplet_recheck_characterization(
+            selected_summary_row,
+            **kwargs,
+        )
     
     def start_droplet_timecourse_process(self):
         self.model.calibration_manager.start_droplet_timecourse_process()
 
-    def start_online_stream_calibration(self):
-        return self.model.calibration_manager.start_online_stream_calibration()
+    def start_online_stream_calibration(self, *, diagnostic_only_confirmed=False):
+        kwargs = (
+            {"diagnostic_only_confirmed": True}
+            if diagnostic_only_confirmed
+            else {}
+        )
+        return self.model.calibration_manager.start_online_stream_calibration(**kwargs)
 
     def apply_online_stream_tail_start_override(self, tail_start_delay_from_emergence_us: int):
         return self.model.calibration_manager.apply_online_stream_tail_start_override(
             tail_start_delay_from_emergence_us,
         )
 
-    def start_droplet_calibration_sequence(self, *, pressure_scan_mode: str = "band"):
-        return self.model.calibration_manager.start_droplet_calibration_sequence(
-            pressure_scan_mode=pressure_scan_mode,
-        )
+    def start_droplet_calibration_sequence(
+        self,
+        *,
+        pressure_scan_mode: str = "band",
+        diagnostic_only_confirmed=False,
+    ):
+        kwargs = {"pressure_scan_mode": pressure_scan_mode}
+        if diagnostic_only_confirmed:
+            kwargs["diagnostic_only_confirmed"] = True
+        return self.model.calibration_manager.start_droplet_calibration_sequence(**kwargs)
 
-    def start_stream_calibration_sequence(self):
-        return self.model.calibration_manager.start_stream_calibration_sequence()
+    def start_stream_calibration_sequence(self, *, diagnostic_only_confirmed=False):
+        kwargs = (
+            {"diagnostic_only_confirmed": True}
+            if diagnostic_only_confirmed
+            else {}
+        )
+        return self.model.calibration_manager.start_stream_calibration_sequence(**kwargs)
 
     def start_stream_gravimetric_capture(self, starting_mass_mg, rep_override=None, notes="", capture_mode="timecourse"):
         return self.model.calibration_manager.start_stream_gravimetric_capture(
@@ -15215,9 +15268,18 @@ class Controller(QObject):
         # Tell the Model to start the droplet search calibration.
         self.model.calibration_manager.start_droplet_search_calibration()
 
-    def start_droplet_characterization_calibration(self):
+    def start_droplet_characterization_calibration(
+        self,
+        *,
+        diagnostic_only_confirmed=False,
+    ):
         # Tell the Model to start the droplet characterization calibration.
-        return self.model.calibration_manager.start_manual_droplet_characterization()
+        kwargs = (
+            {"diagnostic_only_confirmed": True}
+            if diagnostic_only_confirmed
+            else {}
+        )
+        return self.model.calibration_manager.start_manual_droplet_characterization(**kwargs)
 
     def start_all_calibrations(self):
         # Tell the Model to start all calibrations.

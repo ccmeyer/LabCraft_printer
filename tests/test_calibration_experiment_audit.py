@@ -285,6 +285,86 @@ def _assert_stock_identity(details):
     }
 
 
+def test_calibration_manager_prefers_durable_printer_head_identity(tmp_path):
+    mgr = _make_manager(tmp_path)
+    printer_head = mgr.model.rack_model.get_gripper_printer_head()
+    printer_head.printer_head_id = "durable-fill-head"
+    printer_head.serial = "legacy-serial"
+    printer_head.id = "legacy-id"
+
+    assert mgr._safe_get_printer_head_id() == "durable-fill-head"
+
+    reconstructed = SimpleNamespace(
+        printer_head_id="durable-fill-head",
+        serial="different-runtime-serial",
+        id="different-runtime-id",
+    )
+    mgr.model.rack_model.get_gripper_printer_head = lambda: reconstructed
+    assert mgr._safe_get_printer_head_id() == "durable-fill-head"
+
+
+def test_machine_interruption_forces_idle_and_ignores_duplicate_and_late_callbacks(tmp_path):
+    mgr = _make_manager(tmp_path)
+    proc = _FakeVolumeCalibrationProcess()
+    mgr.activeCalibration = proc
+    mgr.calibration_queue = ["pressure_sweep_characterization"]
+    mgr._pw_sweep_active = True
+    mgr._pw_values = [1300, 1400]
+    mgr._pw_index = 0
+    mgr._pw_diagnostic_only_confirmed = True
+    mgr._pw_apply_timer = None
+    mgr._pw_apply_slot = None
+    mgr._pw_apply_token = None
+    mgr._pending_process_verdict = {"pending": True}
+    mgr._transient_characterization_candidate = {"candidate": True}
+    mgr._stream_capture_state = {"status": "running"}
+    mgr._droplet_calibration_sequence_state = {
+        "status": "running",
+        "session_id": "droplet-sequence",
+    }
+    mgr._stream_calibration_sequence_state = {
+        "status": "running",
+        "session_id": "stream-sequence",
+    }
+    mgr.dropletCalibrationSequenceStateChanged = SignalStub()
+    mgr.streamCalibrationSequenceStateChanged = SignalStub()
+    mgr._finalize_process_recording = Mock(return_value={"ok": True})
+    mgr._record_stream_capture_process_result = Mock()
+    mgr._close_process_owned_calibration_memory_session = Mock(return_value=False)
+    mgr._emit_readiness = Mock()
+    mgr._mark_stream_capture_terminal_state = Mock()
+    mgr._reset_stream_gravimetric_capture_state = Mock(
+        side_effect=lambda **_kwargs: setattr(
+            mgr,
+            "_stream_capture_state",
+            {"status": "idle"},
+        )
+    )
+
+    proc.calibrationCompleted.connect(mgr.onCalibrationCompleted)
+    proc.calibrationError.connect(mgr.onCalibrationError)
+
+    assert mgr.interrupt_machine_workflow("disconnect_requested") is True
+    error_count = len(mgr.calibrationError.calls)
+    queue_complete_count = len(mgr.calibrationQueueCompleted.calls)
+
+    assert proc.stopped is True
+    assert mgr.is_idle() is True
+    assert mgr.activeCalibration is None
+    assert mgr.calibration_queue == []
+    assert mgr._pending_process_verdict is None
+    assert mgr._transient_characterization_candidate is None
+    mgr._mark_stream_capture_terminal_state.assert_called_once()
+    mgr._reset_stream_gravimetric_capture_state.assert_called_once()
+    assert mgr.interrupt_machine_workflow("disconnect_requested") is False
+    assert len(mgr.calibrationError.calls) == error_count
+    assert len(mgr.calibrationQueueCompleted.calls) == queue_complete_count
+
+    proc.calibrationCompleted.emit()
+    proc.calibrationError.emit("late")
+    assert mgr.activeCalibration is None
+    assert mgr.calibration_queue == []
+
 def test_calibration_audit_ref_carries_committed_canonical_identity(tmp_path):
     mgr = _make_manager(tmp_path)
     mgr._active_shadow_run = SimpleNamespace(
@@ -381,6 +461,64 @@ def test_start_active_calibration_records_volume_process_started(tmp_path, proce
     assert event["details"]["calibration_phase"] == phase_name
     assert event["details"]["artifact_refs"]["process_recording_run_dir"] == "calibration_recordings/start-run"
     _assert_stock_identity(event["details"])
+
+
+def test_diagnostic_only_process_requires_confirmation_before_storage_or_start(tmp_path):
+    mgr = _make_manager(tmp_path)
+    _seed_open_session(mgr)
+    proc = _FakeVolumeCalibrationProcess()
+    mgr.activeCalibration = proc
+    mgr.clear_pending_process_verdict = Mock()
+    mgr._begin_process_recording = Mock(return_value=True)
+    mgr.model.get_calibration_process_start_eligibility.return_value = {
+        "ok": True,
+        "code": "diagnostic_only_confirmation_required",
+        "message": "This printer head has already dispensed droplets.",
+        "requires_execution_lock": False,
+        "diagnostic_only": True,
+        "requires_diagnostic_confirmation": True,
+        "application_eligibility_code": "printed_progress",
+        "application_eligibility_message": "This printer head has already dispensed droplets.",
+        "plan_state": "active",
+    }
+
+    assert mgr.start_active_calibration() is False
+
+    assert proc.started is False
+    mgr._begin_process_recording.assert_not_called()
+    assert mgr.activeCalibration is None
+    assert _event_types(mgr) == []
+
+
+def test_confirmed_diagnostic_only_process_is_audited_and_starts(tmp_path):
+    mgr = _make_manager(tmp_path)
+    _seed_open_session(mgr)
+    proc = _FakeVolumeCalibrationProcess()
+    proc._diagnostic_only_confirmed = True
+    mgr.activeCalibration = proc
+    mgr.clear_pending_process_verdict = Mock()
+    mgr._begin_process_recording = Mock(return_value=True)
+    mgr.model.get_calibration_process_start_eligibility.return_value = {
+        "ok": True,
+        "code": "diagnostic_only_confirmation_required",
+        "message": "This printer head has already dispensed droplets.",
+        "requires_execution_lock": False,
+        "diagnostic_only": True,
+        "requires_diagnostic_confirmation": True,
+        "application_eligibility_code": "printed_progress",
+        "application_eligibility_message": "This printer head has already dispensed droplets.",
+        "plan_state": "active",
+    }
+
+    assert mgr.start_active_calibration() is True
+
+    assert proc.started is True
+    assert _event_types(mgr) == [
+        "calibration_process_started",
+        "calibration_diagnostic_confirmation_recorded",
+    ]
+    assert mgr.audit_sink.events[-1]["details"]["diagnostic_only_confirmed"] is True
+    assert mgr.audit_sink.events[-1]["details"]["application_eligibility_code"] == "printed_progress"
 
 
 def test_non_volume_calibration_process_is_not_audited(tmp_path):

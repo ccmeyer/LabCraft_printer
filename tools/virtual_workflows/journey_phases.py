@@ -1325,6 +1325,18 @@ def run_stock_calibration_only(
     return evidence
 
 
+def _expected_completed_array_control_text(
+    *,
+    expected_plan_state: str,
+    head_returned: bool,
+) -> str:
+    """Return the disabled array-control label at a completed pass boundary."""
+
+    if str(expected_plan_state) == "completed":
+        return "Experiment Complete"
+    return "Start Array" if head_returned else "Array Complete"
+
+
 def run_precalibrated_stock_passes(
     runtime: JourneyRuntime,
     pass_specs: Sequence[PrecalibratedStockPassSpec],
@@ -1451,8 +1463,9 @@ def run_precalibrated_stock_passes(
         )
         if spec.capture_completed_milestone:
             array_control = array.inspect_control(
-                expected_text=(
-                    "Start Array" if returned_before_validation else "Array Complete"
+                expected_text=_expected_completed_array_control_text(
+                    expected_plan_state=spec.expected_plan_state,
+                    head_returned=returned_before_validation,
                 ),
                 expected_enabled=False,
             )
@@ -2391,8 +2404,9 @@ def _run_stock_pass(
         )
     if spec.completed_milestone:
         array_control = ArrayDriver(context).inspect_control(
-            expected_text=(
-                "Start Array" if returned_before_boundary else "Array Complete"
+            expected_text=_expected_completed_array_control_text(
+                expected_plan_state=spec.expected_plan_state,
+                head_returned=returned_before_boundary,
             ),
             expected_enabled=False,
         )

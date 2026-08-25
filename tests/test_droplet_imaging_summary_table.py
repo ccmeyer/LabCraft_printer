@@ -2818,3 +2818,42 @@ def test_results_history_dialog_is_browse_only_and_defaults_to_all_rows(monkeypa
 
     history.close()
     dialog.deleteLater()
+
+
+def test_applied_row_fingerprint_context_uses_plan_stock_and_durable_head_id():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    plan = SimpleNamespace(plan_id="plan-1", plan_revision=3)
+    current_head = {
+        "value": SimpleNamespace(
+            printer_head_id="durable-fill-head",
+            serial="legacy-serial-a",
+            get_stock_id=lambda: "Water_1.00_--",
+        )
+    }
+    experiment_model = SimpleNamespace(
+        get_execution_plan_snapshot=lambda: plan,
+        _printer_head_identity=lambda head: head.printer_head_id,
+    )
+    dialog.model = SimpleNamespace(
+        experiment_model=experiment_model,
+        rack_model=SimpleNamespace(
+            get_gripper_printer_head=lambda: current_head["value"]
+        ),
+    )
+
+    first = dialog._get_current_reagent_context_key()
+    current_head["value"] = SimpleNamespace(
+        printer_head_id="durable-fill-head",
+        serial="legacy-serial-b",
+        get_stock_id=lambda: "Water_1.00_--",
+    )
+    reconstructed = dialog._get_current_reagent_context_key()
+    current_head["value"] = SimpleNamespace(
+        printer_head_id="different-head",
+        serial="legacy-serial-b",
+        get_stock_id=lambda: "Water_1.00_--",
+    )
+    different = dialog._get_current_reagent_context_key()
+
+    assert reconstructed == first
+    assert different != first
