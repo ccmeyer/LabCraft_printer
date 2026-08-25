@@ -5105,7 +5105,15 @@ class CalibrationManager(QObject):
             )
 
         self._pending_process_verdict = None
-        self._transient_characterization_candidate = None
+        # Rebuild the visible result surface from retained canonical/synthetic
+        # history.  Directly dropping this candidate leaves an open dialog
+        # selected on a row that can never validate again after reconnect.
+        try:
+            self.clear_transient_characterization_candidate()
+        except Exception:
+            # Interruption cleanup remains fail-closed even if legacy or
+            # partially constructed state does not satisfy the candidate API.
+            self._transient_characterization_candidate = None
         if not had_owned_work:
             return False
         self.calibrationStageChanged.emit(error_message, "red")

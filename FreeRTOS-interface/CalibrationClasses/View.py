@@ -15369,6 +15369,29 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "recheck_message": message,
                 "preview_message": message,
             }
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        connected = None
+        connected_getter = getattr(machine_model, "is_connected", None)
+        try:
+            if callable(connected_getter):
+                connected = bool(connected_getter())
+            elif hasattr(machine_model, "machine_connected"):
+                connected = bool(machine_model.machine_connected)
+        except Exception:
+            connected = False
+        if connected is False:
+            return {
+                "code": "machine_disconnected",
+                "load_message": (
+                    "Reconnect to the machine before loading calibration settings."
+                ),
+                "recheck_message": (
+                    "Reconnect to the machine before rechecking this calibration result."
+                ),
+                "preview_message": (
+                    "Calibration results are unavailable while the machine is disconnected."
+                ),
+            }
         return None
 
     def _render_selected_result_actions_blocked(self, blocked_state):
