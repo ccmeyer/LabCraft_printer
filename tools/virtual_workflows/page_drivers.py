@@ -2371,9 +2371,11 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                     == "Experiment Complete"
                     and not plate_widget.start_print_array_button.isEnabled()
                 ),
-                "mutation_controls_disabled": (
-                    not plate_widget.stock_prep_button.isEnabled()
-                    and not plate_widget.calibration_button.isEnabled()
+                "stock_prep_calculator_enabled": bool(
+                    plate_widget.stock_prep_button.isEnabled()
+                ),
+                "authoritative_mutation_controls_disabled": not bool(
+                    plate_widget.calibration_button.isEnabled()
                 ),
                 "printer_head_diagnostics_disabled": not bool(
                     calibration_button.isEnabled()
@@ -2700,9 +2702,11 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                     start_button.text() == "Experiment Complete"
                     and not start_button.isEnabled()
                 ),
-                "mutation_controls_disabled": (
-                    not plate_widget.stock_prep_button.isEnabled()
-                    and not plate_widget.calibration_button.isEnabled()
+                "stock_prep_calculator_enabled": bool(
+                    plate_widget.stock_prep_button.isEnabled()
+                ),
+                "authoritative_mutation_controls_disabled": not bool(
+                    plate_widget.calibration_button.isEnabled()
                 ),
                 "printer_head_diagnostics_disabled": not bool(
                     calibration_button.isEnabled()
@@ -2897,9 +2901,11 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                     == "Experiment Read-Only"
                     and not plate_widget.start_print_array_button.isEnabled()
                 ),
-                "mutation_controls_disabled": (
-                    not plate_widget.stock_prep_button.isEnabled()
-                    and not plate_widget.calibration_button.isEnabled()
+                "stock_prep_calculator_enabled": bool(
+                    plate_widget.stock_prep_button.isEnabled()
+                ),
+                "authoritative_mutation_controls_disabled": not bool(
+                    plate_widget.calibration_button.isEnabled()
                 ),
                 "no_machine_or_simulator_dispatch": dispatch_snapshot()
                 == dispatch_before,

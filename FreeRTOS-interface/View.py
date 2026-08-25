@@ -6510,6 +6510,10 @@ class StockPrepDialog(QDialog):
         "No calculated stock solutions are available. Update the experiment in "
         "Experiment Editor first."
     )
+    READ_ONLY_TEXT = (
+        "This completed or historical worksheet is read-only. You can change values "
+        "for calculations in this window, but changes will not be saved."
+    )
 
     def __init__(self, experiment_model: ExperimentModel, main_window):
         parent = main_window if isinstance(main_window, QWidget) else None
@@ -6518,6 +6522,17 @@ class StockPrepDialog(QDialog):
         self.main_window = main_window
         self._stock_rows = self._load_stock_rows()
         self._close_persist_complete = False
+        writable_getter = getattr(
+            self.experiment_model,
+            "can_persist_stock_prep_worksheet",
+            None,
+        )
+        try:
+            self._worksheet_writable = bool(
+                writable_getter() if callable(writable_getter) else True
+            )
+        except Exception:
+            self._worksheet_writable = False
 
         self.setWindowTitle("Stock Prep Calculator")
         self.setModal(True)
@@ -6535,6 +6550,7 @@ class StockPrepDialog(QDialog):
         self._build_ui()
         self._hydrate_defaults_from_model()
         self._populate_table()
+        self._refresh_worksheet_notice()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -6542,6 +6558,14 @@ class StockPrepDialog(QDialog):
         info_label = QLabel(self.INFO_TEXT, self)
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
+
+        self.worksheet_notice_label = QLabel("", self)
+        self.worksheet_notice_label.setWordWrap(True)
+        self.worksheet_notice_label.setStyleSheet(
+            "color:#7a4b00; background:#fff4d6; border:1px solid #d7b45a; padding:6px;"
+        )
+        self.worksheet_notice_label.hide()
+        layout.addWidget(self.worksheet_notice_label)
 
         controls_layout = QHBoxLayout()
         controls_layout.addWidget(QLabel("Dead Volume Extra (uL)", self))
@@ -6590,18 +6614,26 @@ class StockPrepDialog(QDialog):
 
         button_row = QHBoxLayout()
         button_row.addStretch(1)
-        self.close_button = QPushButton("Close", self)
+        self.close_button = QPushButton(
+            "Save and Close" if self._worksheet_writable else "Close",
+            self,
+        )
         self.close_button.clicked.connect(self.accept)
         button_row.addWidget(self.close_button)
         layout.addLayout(button_row)
 
     def _load_stock_rows(self) -> List[Dict[str, Any]]:
-        getter = getattr(self.experiment_model, "get_stock_table_rows", None)
+        getter = getattr(self.experiment_model, "get_stock_prep_rows", None)
+        use_legacy_signature = False
+        if not callable(getter):
+            getter = getattr(self.experiment_model, "get_stock_table_rows", None)
+            use_legacy_signature = True
         if not callable(getter):
             return []
 
         rows: List[Dict[str, Any]] = []
-        for row in getter(include_fill=False):
+        raw_rows = getter(include_fill=False) if use_legacy_signature else getter()
+        for row in raw_rows:
             units = str(row.get("units", "") or "")
             if units == "--":
                 continue
@@ -6618,6 +6650,29 @@ class StockPrepDialog(QDialog):
             normalized["total_volume_uL"] = total_volume_uL
             rows.append(normalized)
         return rows
+
+    def _refresh_worksheet_notice(self):
+        messages = []
+        if not self._worksheet_writable:
+            messages.append(self.READ_ONLY_TEXT)
+        warning_getter = getattr(
+            self.experiment_model,
+            "get_stock_prep_worksheet_warning",
+            None,
+        )
+        if callable(warning_getter):
+            try:
+                warning = str(warning_getter() or "").strip()
+            except Exception:
+                warning = ""
+            if warning:
+                messages.append(warning)
+        if messages:
+            self.worksheet_notice_label.setText("\n\n".join(messages))
+            self.worksheet_notice_label.show()
+        else:
+            self.worksheet_notice_label.clear()
+            self.worksheet_notice_label.hide()
 
     def _populate_table(self):
         self.table.setRowCount(0)
@@ -6803,6 +6858,7 @@ class StockPrepDialog(QDialog):
             if not isinstance(prep_spin, QDoubleSpinBox) or not isinstance(source_spin, QDoubleSpinBox):
                 continue
             snapshot_rows.append({
+                "stock_id": str(row.get("stock_id", "") or ""),
                 "factor_name": str(row.get("factor_name", "") or ""),
                 "option_name": str(row.get("option_name", "") or ""),
                 "stock_concentration": float(row.get("stock_concentration", 0.0) or 0.0),
@@ -6813,36 +6869,62 @@ class StockPrepDialog(QDialog):
         return snapshot_rows
 
     def _persist_stock_prep_state(self) -> bool:
+        if not self._worksheet_writable:
+            return True
         rows = self._collect_stock_prep_snapshot()
-        setter = getattr(self.experiment_model, "set_stock_prep_snapshot", None)
+        setter = getattr(
+            self.experiment_model,
+            "save_stock_prep_worksheet",
+            None,
+        )
+        if not callable(setter):
+            setter = getattr(self.experiment_model, "set_stock_prep_snapshot", None)
         if callable(setter):
             setter(
                 rows,
                 dead_volume_extra_uL=float(self.dead_volume_spin.value()),
                 calibration_extra_uL=float(self.calibration_extra_spin.value()),
             )
-
-        experiment_path = getattr(self.experiment_model, "experiment_file_path", None)
-        saver = getattr(self.experiment_model, "save_experiment", None)
-        if not experiment_path or not callable(saver):
-            return True
-
-        try:
-            saver()
-        except Exception as exc:
-            popup = getattr(self.main_window, "popup_message", None)
-            if callable(popup):
-                popup("Save Stock Prep Failed", f"Could not save stock prep values: {exc}")
-            return False
         return True
+
+    def _prompt_stock_prep_save_failure(self, exc: Exception) -> bool:
+        message = QMessageBox(self)
+        message.setWindowTitle("Save Stock Prep Failed")
+        message.setText(
+            "Could not save the stock prep worksheet. Execution data was not changed.\n\n"
+            f"{exc}"
+        )
+        retry_button = message.addButton("Retry", QMessageBox.AcceptRole)
+        close_button = message.addButton(
+            "Close Without Saving",
+            QMessageBox.RejectRole,
+        )
+        message.setDefaultButton(close_button)
+        icon_factory = getattr(self.main_window, "make_transparent_icon", None)
+        if callable(icon_factory):
+            try:
+                message.setWindowIcon(icon_factory())
+            except Exception:
+                pass
+        message.exec()
+        return message.clickedButton() is retry_button
 
     def _persist_before_close(self) -> bool:
         if self._close_persist_complete:
             return True
-        if not self._persist_stock_prep_state():
-            return False
-        self._close_persist_complete = True
-        return True
+        if not self._worksheet_writable:
+            self._close_persist_complete = True
+            return True
+        while True:
+            try:
+                self._persist_stock_prep_state()
+            except Exception as exc:
+                if self._prompt_stock_prep_save_failure(exc):
+                    continue
+                self._close_persist_complete = True
+                return True
+            self._close_persist_complete = True
+            return True
 
     def accept(self):
         if not self._persist_before_close():
@@ -7570,10 +7652,12 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         read_only_view = bool(
             callable(read_only_view_getter) and read_only_view_getter()
         )
-        for button_name in ("stock_prep_button", "calibration_button"):
-            button = getattr(self, button_name, None)
-            if button is not None:
-                button.setEnabled(not read_only_view)
+        stock_prep_button = getattr(self, "stock_prep_button", None)
+        if stock_prep_button is not None:
+            stock_prep_button.setEnabled(True)
+        calibration_button = getattr(self, "calibration_button", None)
+        if calibration_button is not None:
+            calibration_button.setEnabled(not read_only_view)
         if getattr(self, "start_print_array_button", None) is not None:
             self.update_start_print_array_button()
         print('Completed experiment load')
@@ -7795,15 +7879,6 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             print("Experiment file generated and loaded.")
 
     def open_stock_prep_dialog(self):
-        read_only_view_getter = getattr(
-            self.model, "is_read_only_experiment_view_active", None
-        )
-        if not callable(read_only_view_getter):
-            read_only_view_getter = getattr(
-                self.model, "is_completed_execution_view_active", None
-            )
-        if callable(read_only_view_getter) and read_only_view_getter():
-            return
         dialog = StockPrepDialog(self.model.experiment_model, self.main_window)
         dialog.exec()
 
