@@ -78,6 +78,24 @@ def test_reader_history_uses_index_projection_and_resolves_exact_bundle(tmp_path
     assert resolved["ok"] is True
     assert resolved["bundle"]["update"]["update_id"] == update.update_id
 
+    reconstructed_same_head = reader.resolve_selection(
+        row,
+        expected_identity={
+            "printer_head_id": "head-1",
+            "stock_id": "stock-1",
+        },
+    )
+    assert reconstructed_same_head["ok"] is True
+
+    different_head = reader.resolve_selection(
+        row,
+        expected_identity={
+            "printer_head_id": "different-head",
+            "stock_id": "stock-1",
+        },
+    )
+    assert different_head["ok"] is False
+
 
 def test_reader_detects_mutation_and_dual_write_conflict(tmp_path):
     _store, run, _update, _commit = _write_case(tmp_path)

@@ -301,6 +301,19 @@ Examples:
 
 The important boundary is that frame selection happens before analysis. Analysis functions such as `identify_droplets(...)` assume the frame handed to them is already the best candidate for the flash event.
 
+## Applying calibration results to an experiment
+
+Result-producing calibration and applying a result are separate operations:
+
+- A finalized execution may be revised only for the stock currently loaded in the gripper, and only before that stock has dispensed any droplets.
+- This progress rule applies to every stock, including the synthesized fill reagent. Because fill is present in most wells, it is often the first stock to become ineligible once printing starts.
+- Fill previews for finalized executions are calculated directly from the immutable execution plan: saved well assignments, stock ejection volumes, and `target_printed_volume_nL`. Previewing a fill result does not regenerate or reinterpret the uploaded design.
+- Completed, aborted, historical/read-only, inactive persisted, runtime-mismatched, or progress-unreadable executions remain fail-closed for Apply.
+
+If a result-producing calibration is useful but cannot be applied because the loaded stock already has progress, the execution is terminal, or the loaded stock is outside the current plan, the dialog asks **Record diagnostic calibration?**. **Cancel** is the default. Choosing **Record Diagnostic Result** records and audits that one diagnostic result, but it does not bypass Apply eligibility and the result cannot modify the design/execution. Missing stock identity, unreadable progress, runtime mismatch, inactive execution, and historical/read-only execution block the calibration instead of offering diagnostic confirmation.
+
+Machine disconnect, reset, serial loss, transport fault, queue clear, pause, or homing interruption invalidates active droplet-calibration work. Pending capture is cancelled without attempting recovery hardware actions, active processes and queues are closed as failed, and late callbacks are ignored. After reconnect, the dialog recomputes selected-result and Apply readiness from the current gripper, connection, capture, fault, and execution context; operators should not need to reselect the result or reopen the dialog.
+
 ## Current frame-identification logic
 
 The frame-identification step is intentionally image-statistics-based:

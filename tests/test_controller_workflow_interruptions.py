@@ -120,3 +120,32 @@ def test_workflow_interruption_payload_defaults_to_non_notifying():
         "notify_user": False,
     }
     assert controller.machine_workflow_interrupted_signal.calls == [payload]
+
+
+def test_droplet_interruption_cancels_capture_before_manager_without_recovery():
+    events = []
+    controller = Controller.__new__(Controller)
+    controller.cancel_pending_droplet_capture = Mock(
+        side_effect=lambda *args, **kwargs: events.append(
+            ("capture", args, kwargs)
+        )
+    )
+    manager = SimpleNamespace(
+        interrupt_machine_workflow=Mock(
+            side_effect=lambda reason: events.append(("manager", reason)) or True
+        )
+    )
+    controller.model = SimpleNamespace(calibration_manager=manager)
+
+    assert controller._on_droplet_calibration_workflow_interrupted(
+        {"reason": "serial_connection_lost"}
+    ) is True
+
+    assert events == [
+        (
+            "capture",
+            ("serial_connection_lost",),
+            {"emit_capture_failed": False, "recover": False},
+        ),
+        ("manager", "serial_connection_lost"),
+    ]

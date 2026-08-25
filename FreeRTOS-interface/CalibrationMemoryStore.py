@@ -231,9 +231,17 @@ class CalibrationContextBuilder:
         }
 
         if printer_head is not None:
-            fallback_printer_head_id = self._clean_str(getattr(printer_head, "serial", None))
+            fallback_printer_head_id = self._clean_str(
+                getattr(printer_head, "printer_head_id", None)
+            )
+            if fallback_printer_head_id is None:
+                fallback_printer_head_id = self._clean_str(
+                    getattr(printer_head, "serial", None)
+                )
             if fallback_printer_head_id is None:
                 fallback_printer_head_id = self._clean_str(getattr(printer_head, "id", None))
+            if fallback_printer_head_id is None:
+                fallback_printer_head_id = self._clean_str(str(printer_head))
             if fallback_printer_head_id:
                 head_info["printer_head_id"] = fallback_printer_head_id
                 head_info["display_name"] = fallback_printer_head_id
@@ -262,6 +270,25 @@ class CalibrationContextBuilder:
                 )
             except Exception:
                 pass
+
+        if printer_head is not None:
+            durable_runtime_id = next(
+                (
+                    self._clean_str(getattr(printer_head, attr_name, None))
+                    for attr_name in ("printer_head_id", "serial", "id")
+                    if self._clean_str(getattr(printer_head, attr_name, None))
+                    is not None
+                ),
+                None,
+            )
+            head_source = (head_info.get("match_source") or {}).get("printer_head")
+            if durable_runtime_id is None and head_source in {None, "unknown", "gripper_slot"}:
+                legacy_object_id = self._clean_str(str(printer_head))
+                if legacy_object_id:
+                    head_info["printer_head_id"] = legacy_object_id
+                    head_info["display_name"] = legacy_object_id
+                    head_info.setdefault("quality", {})["printer_head_id"] = "explicit"
+                    head_info.setdefault("match_source", {})["printer_head"] = "legacy_object_string"
 
         context = {
             "reagent_id": reagent_info.get("reagent_id"),

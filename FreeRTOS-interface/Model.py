@@ -10798,16 +10798,6 @@ class ExperimentModel(QObject):
             raise RuntimeError("Runtime stock identities no longer match the execution plan.")
 
     def _calibrated_target_counts(self, plan, stock, new_volume_nL: float) -> dict:
-        key = (stock.factor_name, stock.option_name)
-        option = None
-        for factor in self.factors:
-            if factor.name != stock.factor_name:
-                continue
-            if factor.kind == "additive":
-                option = factor.options[0] if factor.options else None
-            else:
-                option = next((item for item in factor.options if item.name == stock.option_name), None)
-            break
         fill_stocks = [
             item
             for item in plan.stocks
@@ -10835,6 +10825,40 @@ class ExperimentModel(QObject):
             item.stock_id: (float(new_volume_nL) if item.stock_id == stock.stock_id else item.effective_volume_nL)
             for item in plan.stocks
         }
+        if fill_stock is not None and stock.stock_id == fill_stock.stock_id:
+            results = {}
+            for well in plan.wells:
+                counts = {
+                    item.stock_id: int(item.target_dispenses)
+                    for item in well.dispenses
+                }
+                nonfill_volume = sum(
+                    count * stock_volumes[stock_id]
+                    for stock_id, count in counts.items()
+                    if stock_id != fill_stock.stock_id
+                )
+                remaining = max(
+                    0.0,
+                    plan.volume_basis.target_printed_volume_nL - nonfill_volume,
+                )
+                fill_count = max(0, int(round(remaining / new_volume_nL)))
+                if fill_count > 0 or fill_stock.stock_id in counts:
+                    counts[fill_stock.stock_id] = fill_count
+                else:
+                    counts.pop(fill_stock.stock_id, None)
+                results[well.well_id] = counts
+            return results
+
+        key = (stock.factor_name, stock.option_name)
+        option = None
+        for factor in self.factors:
+            if factor.name != stock.factor_name:
+                continue
+            if factor.kind == "additive":
+                option = factor.options[0] if factor.options else None
+            else:
+                option = next((item for item in factor.options if item.name == stock.option_name), None)
+            break
         run_specs = list(self._iter_reaction_run_specs())
         reaction_targets = {
             f"R{index + 1}": spec.get("reaction", {})
@@ -10844,26 +10868,23 @@ class ExperimentModel(QObject):
         for well in plan.wells:
             old_counts = {item.stock_id: item.target_dispenses for item in well.dispenses}
             counts = dict(old_counts)
-            if fill_stock is not None and stock.stock_id == fill_stock.stock_id:
-                pass
+            if option is None:
+                raise RuntimeError("The calibrated stock cannot be mapped to the frozen design.")
+            reaction = reaction_targets.get(well.reaction_id)
+            if reaction is None:
+                raise RuntimeError(f"No frozen design reaction matches {well.reaction_id!r}.")
+            target = reaction.get(key)
+            if target is None:
+                new_count = 0
             else:
-                if option is None:
-                    raise RuntimeError("The calibrated stock cannot be mapped to the frozen design.")
-                reaction = reaction_targets.get(well.reaction_id)
-                if reaction is None:
-                    raise RuntimeError(f"No frozen design reaction matches {well.reaction_id!r}.")
-                target = reaction.get(key)
-                if target is None:
-                    new_count = 0
-                else:
-                    starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
-                    target_add = max(0.0, float(target) - starting)
-                    delta = stock.concentration * float(new_volume_nL) / plan.volume_basis.final_reaction_volume_nL
-                    new_count = max(0, int(round(target_add / delta))) if delta > 0 else 0
-                if new_count > 0 or stock.stock_id in counts:
-                    counts[stock.stock_id] = new_count
-                else:
-                    counts.pop(stock.stock_id, None)
+                starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+                target_add = max(0.0, float(target) - starting)
+                delta = stock.concentration * float(new_volume_nL) / plan.volume_basis.final_reaction_volume_nL
+                new_count = max(0, int(round(target_add / delta))) if delta > 0 else 0
+            if new_count > 0 or stock.stock_id in counts:
+                counts[stock.stock_id] = new_count
+            else:
+                counts.pop(stock.stock_id, None)
             nonfill_volume = sum(
                 count * stock_volumes[stock_id]
                 for stock_id, count in counts.items()
@@ -11997,8 +12018,70 @@ class ExperimentModel(QObject):
             new_fill_droplet_nL = float(new_fill_droplet_nL)
         except Exception:
             return {"ok": False, "reason": "Invalid fill droplet volume."}
-        if new_fill_droplet_nL <= 0:
+        if not math.isfinite(new_fill_droplet_nL) or new_fill_droplet_nL <= 0:
             return {"ok": False, "reason": "Fill droplet volume must be > 0."}
+
+        plan = self.get_execution_plan_snapshot()
+        if plan is not None and self.get_execution_plan_source() != "legacy_reconstruction":
+            fill_name = self.get_fill_reagent_name()
+            matching = [
+                stock
+                for stock in plan.stocks
+                if stock.factor_name == fill_name and stock.units == "--"
+            ]
+            if len(matching) != 1:
+                return {
+                    "ok": False,
+                    "reason": "The fill reagent does not map to exactly one execution stock.",
+                }
+            fill_stock = matching[0]
+            try:
+                new_counts = self._calibrated_target_counts(
+                    plan,
+                    fill_stock,
+                    new_fill_droplet_nL,
+                )
+            except Exception as exc:
+                return {"ok": False, "reason": str(exc)}
+
+            old_counts = {
+                well.well_id: {
+                    dispense.stock_id: int(dispense.target_dispenses)
+                    for dispense in well.dispenses
+                }
+                for well in plan.wells
+            }
+            total_old = sum(
+                counts.get(fill_stock.stock_id, 0) for counts in old_counts.values()
+            )
+            total_new = sum(
+                counts.get(fill_stock.stock_id, 0) for counts in new_counts.values()
+            )
+            printed_nL_old = float(total_old * fill_stock.effective_volume_nL)
+            printed_nL_new = float(total_new * new_fill_droplet_nL)
+            return {
+                "ok": True,
+                "is_fill": True,
+                "rows": [{
+                    "target_final": None,
+                    "achieved_final": None,
+                    "error": 0.0,
+                    "drops": int(total_new),
+                    "delta_per_drop": new_fill_droplet_nL,
+                    "printed_nL_new": printed_nL_new,
+                    "printed_nL_old": printed_nL_old,
+                    "printed_nL_shift": printed_nL_new - printed_nL_old,
+                    "units": "--",
+                }],
+                "new_fill_droplet_nL": new_fill_droplet_nL,
+                "total_drops_old": int(total_old),
+                "total_drops_new": int(total_new),
+                "total_drops_delta": int(total_new - total_old),
+                "well_ids": tuple(well.well_id for well in plan.wells),
+                "target_counts_by_well": new_counts,
+                "plan_id": plan.plan_id,
+                "plan_revision": plan.plan_revision,
+            }
 
         # Ensure we have a current reactions frame with nonfill volumes.
         if self._reactions_df is None or self._reactions_df.empty or "nonfill_volume_nL" not in self._reactions_df.columns:
@@ -18214,6 +18297,8 @@ class Model(QObject):
         self,
         *,
         result_producing: bool,
+        printer_head=None,
+        stock_id: str | None = None,
     ) -> dict[str, Any]:
         """Return whether a calibration process may start in this session.
 
@@ -18238,6 +18323,9 @@ class Model(QObject):
             *,
             requires_execution_lock: bool = False,
             diagnostic_only: bool = False,
+            requires_diagnostic_confirmation: bool = False,
+            application_eligibility_code: str | None = None,
+            application_eligibility_message: str | None = None,
         ) -> dict[str, Any]:
             return {
                 "ok": bool(ok),
@@ -18245,6 +18333,11 @@ class Model(QObject):
                 "message": str(message),
                 "requires_execution_lock": bool(requires_execution_lock),
                 "diagnostic_only": bool(diagnostic_only),
+                "requires_diagnostic_confirmation": bool(
+                    requires_diagnostic_confirmation
+                ),
+                "application_eligibility_code": application_eligibility_code,
+                "application_eligibility_message": application_eligibility_message,
                 "plan_state": plan_state,
             }
 
@@ -18290,11 +18383,98 @@ class Model(QObject):
                 "This calibration process may start without changing the execution plan.",
             )
 
+        if printer_head is None:
+            rack_model = getattr(self, "rack_model", None)
+            head_getter = getattr(rack_model, "get_gripper_printer_head", None)
+            try:
+                printer_head = (
+                    head_getter()
+                    if callable(head_getter)
+                    else getattr(rack_model, "gripper_printer_head", None)
+                )
+            except Exception:
+                printer_head = None
+        if not stock_id:
+            stock_resolver = getattr(experiment_model, "_printer_head_stock_id", None)
+            try:
+                stock_id = (
+                    stock_resolver(printer_head)
+                    if callable(stock_resolver)
+                    else None
+                )
+            except Exception:
+                stock_id = None
+        if stock_id not in (None, ""):
+            stock_id = str(stock_id)
+        if not stock_id:
+            return _result(
+                False,
+                "missing_stock_context",
+                "The loaded printer-head stock identity is unavailable.",
+                application_eligibility_code="missing_stock_context",
+                application_eligibility_message=(
+                    "The loaded printer-head stock identity is unavailable."
+                ),
+            )
+
+        application_getter = getattr(
+            experiment_model,
+            "get_calibration_application_eligibility",
+            None,
+        )
+        try:
+            if not callable(application_getter):
+                raise RuntimeError("the calibration-application policy is unavailable")
+            application = application_getter(
+                printer_head=printer_head,
+                stock_id=stock_id,
+            )
+            if not isinstance(application, dict):
+                raise RuntimeError("the calibration-application policy returned an invalid result")
+        except Exception as exc:
+            return _result(
+                False,
+                "application_policy_unavailable",
+                f"Calibration application eligibility could not be determined: {exc}",
+                application_eligibility_code="application_policy_unavailable",
+                application_eligibility_message=str(exc),
+            )
+
+        application_code = str(application.get("code") or "application_policy_unavailable")
+        application_message = str(
+            application.get("message")
+            or "Calibration application eligibility could not be determined."
+        )
+        if not bool(application.get("ok")):
+            if application_code in {
+                "printed_progress",
+                "terminal_execution",
+                "stock_not_in_execution",
+            }:
+                return _result(
+                    True,
+                    "diagnostic_only_confirmation_required",
+                    application_message,
+                    diagnostic_only=True,
+                    requires_diagnostic_confirmation=True,
+                    application_eligibility_code=application_code,
+                    application_eligibility_message=application_message,
+                )
+            return _result(
+                False,
+                application_code,
+                application_message,
+                application_eligibility_code=application_code,
+                application_eligibility_message=application_message,
+            )
+
         if plan is None:
             return _result(
                 True,
                 "mutable_design",
                 "This calibration process may record results without an execution-plan lock.",
+                application_eligibility_code=application_code,
+                application_eligibility_message=application_message,
             )
 
         if state in {ExecutionPlanState.PREPARED, ExecutionPlanState.ACTIVE}:
@@ -18303,20 +18483,8 @@ class Model(QObject):
                 "execution_lock_required",
                 "This result-producing calibration requires the active execution plan to be durably locked.",
                 requires_execution_lock=True,
-            )
-
-        if state in {ExecutionPlanState.COMPLETED, ExecutionPlanState.ABORTED}:
-            terminal_label = (
-                "completed"
-                if state is ExecutionPlanState.COMPLETED
-                else "aborted"
-            )
-            return _result(
-                True,
-                "terminal_diagnostics",
-                f"This {terminal_label} execution may record diagnostic calibration results, "
-                "but those results cannot modify the execution.",
-                diagnostic_only=True,
+                application_eligibility_code=application_code,
+                application_eligibility_message=application_message,
             )
 
         return _result(

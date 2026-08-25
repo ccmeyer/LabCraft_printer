@@ -97,6 +97,62 @@ def test_volume_calibration_cancel_precedes_mode_preflight_and_queue_changes(qap
     assert original_queue == []
 
 
+def test_diagnostic_only_confirmation_defaults_to_cancel_and_threads_one_start(qapp, monkeypatch):
+    dialog = _dialog_with_plan_state("active")
+    dialog.model.get_calibration_process_start_eligibility = lambda **_kwargs: {
+        "ok": True,
+        "code": "diagnostic_only_confirmation_required",
+        "message": "This printer head has already dispensed droplets.",
+        "diagnostic_only": True,
+        "requires_diagnostic_confirmation": True,
+        "application_eligibility_code": "printed_progress",
+        "application_eligibility_message": "This printer head has already dispensed droplets.",
+    }
+    observed = {}
+
+    def cancel(message_box):
+        observed["title"] = message_box.windowTitle()
+        observed["default"] = message_box.defaultButton().text()
+        observed["escape"] = message_box.escapeButton().text()
+        observed["buttons"] = [button.text() for button in message_box.buttons()]
+        _click_message_box_button(message_box, "Cancel")
+        return 0
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", cancel)
+    dialog._start_mode_guarded_calibration = Mock()
+    start_callback = Mock()
+
+    assert dialog._start_volume_calibration(
+        "droplet",
+        "pressure_sweep_characterization",
+        start_callback,
+    ) is False
+    assert observed == {
+        "title": "Record diagnostic calibration?",
+        "default": "Cancel",
+        "escape": "Cancel",
+        "buttons": ["Record Diagnostic Result", "Cancel"],
+    }
+    dialog._start_mode_guarded_calibration.assert_not_called()
+    start_callback.assert_not_called()
+
+    def confirm(message_box):
+        _click_message_box_button(message_box, "Record Diagnostic Result")
+        return 0
+
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", confirm)
+    dialog._start_mode_guarded_calibration = Mock(
+        side_effect=lambda _mode, _action, callback: callback()
+    )
+
+    assert dialog._start_volume_calibration(
+        "droplet",
+        "pressure_sweep_characterization",
+        start_callback,
+    ) is not False
+    start_callback.assert_called_once_with(diagnostic_only_confirmed=True)
+
+
 def test_volume_calibration_confirmation_is_prepared_only(
     qapp,
     monkeypatch,

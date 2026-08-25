@@ -433,6 +433,16 @@ def _make_manager_model(tmp_path, *, experiment_dir_name="experiment", num_flash
         droplet_camera_model=droplet_camera_model,
         machine_model=machine_model,
     )
+    model.get_calibration_process_start_eligibility = lambda **_kwargs: {
+        "ok": True,
+        "code": "mutable_design",
+        "message": "Calibration may start.",
+        "requires_execution_lock": False,
+        "diagnostic_only": False,
+        "requires_diagnostic_confirmation": False,
+        "application_eligibility_code": "mutable_design",
+        "plan_state": None,
+    }
     return model
 
 

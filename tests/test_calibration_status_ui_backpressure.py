@@ -1,7 +1,9 @@
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from CalibrationClasses.Model import DropletCameraModel
+from CalibrationClasses.View import DropletImagingDialog
 from Model import MachineModel, Model
 from tests.test_calibration_memory_ui_recommendation import _build_real_dialog_for_layout
 
@@ -331,3 +333,37 @@ def test_result_actions_ignore_cached_readiness_after_external_mutation(
     dialog.deactivate_session(reason="test_complete")
     dialog.deleteLater()
     qapp.processEvents()
+
+
+def test_context_change_revalidates_selected_result_and_bridge_actions():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    dialog._session_state = "active"
+    dialog.summary_table_model = object()
+    dialog.load_selected_button = object()
+    dialog.bridge_table = object()
+    dialog._invalidate_selected_characterization_readiness_cache = Mock()
+    dialog._sync_applied_summary_row_highlight = Mock()
+    dialog._update_load_button_state = Mock()
+    dialog._refresh_bridge_preview_for_current_state = Mock()
+
+    dialog._refresh_result_actions_for_context_change()
+
+    dialog._invalidate_selected_characterization_readiness_cache.assert_called_once_with()
+    dialog._sync_applied_summary_row_highlight.assert_called_once_with()
+    dialog._update_load_button_state.assert_called_once_with()
+    dialog._refresh_bridge_preview_for_current_state.assert_called_once_with()
+
+
+def test_workflow_interruption_schedules_connection_refresh_and_revalidates_actions():
+    dialog = DropletImagingDialog.__new__(DropletImagingDialog)
+    dialog._machine_state_ui_fingerprint = (True, True, False, True, False)
+    dialog._schedule_machine_state_ui_refresh = Mock()
+    dialog._refresh_result_actions_for_context_change = Mock()
+
+    dialog._on_machine_workflow_interrupted_for_results(
+        {"reason": "disconnect_requested"}
+    )
+
+    assert dialog._machine_state_ui_fingerprint is None
+    dialog._schedule_machine_state_ui_refresh.assert_called_once_with()
+    dialog._refresh_result_actions_for_context_change.assert_called_once_with()

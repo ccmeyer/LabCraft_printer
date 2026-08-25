@@ -87,6 +87,17 @@ def _make_model(tmp_path):
         droplet_camera_model=droplet_camera_model,
         machine_model=machine_model,
         profile=SimpleNamespace(name="test-profile"),
+        get_calibration_process_start_eligibility=lambda **_kwargs: {
+            "ok": True,
+            "code": "mutable_design",
+            "message": "Calibration may start.",
+            "requires_execution_lock": False,
+            "diagnostic_only": False,
+            "requires_diagnostic_confirmation": False,
+            "application_eligibility_code": "mutable_design",
+            "application_eligibility_message": "Calibration may be applied.",
+            "plan_state": None,
+        },
     )
     model.calibration_memory_store = CalibrationMemoryStore(
         model=model,
