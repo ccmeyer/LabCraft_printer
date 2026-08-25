@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.3.0-rc.9 - 2026-08-25
+
+### Fixed
+
+- Restored printer-head cleaning return to the exact pre-cleaning imager position by replacing the blocked custom Camera target with a Controller-owned, in-memory checkpoint bound to the current machine, motion-trust epoch, telemetry, command state, and exact endpoint.
+- Kept cleaning recovery fail-closed: forged or released tokens, changed trust, stale telemetry, unsafe endpoints, failed dispatch, and stale completion callbacks cannot authorize a different coordinate or silently finish the workflow.
+- Prevented Prep Stocks from trapping users after an execution plan is locked. **Save and Close**, the window X, and Escape now write only the optional worksheet sidecar; a failed write offers Retry or a default **Close Without Saving** path that always dismisses the dialog.
+
+### Changed
+
+- Moved mutable preparation volume, source concentration, and worksheet defaults into optional `stock_prep.json`. Target concentrations, effective dispense volumes, stock identities, and total required volumes remain derived from the current execution plan.
+- Allowed Prep Stocks during PREPARED and ACTIVE executions. Completed, aborted, invalid-authoritative, and recorded legacy experiments expose the same editable calculator without persistence, while calibration remains disabled in historical views.
+- Preserved exact matching stock entries across a legitimate prepared-plan replacement and ignored malformed worksheet entries, bindings, schemas, and files without affecting execution eligibility.
+
+### Safety and compatibility
+
+- The cleaning return exception is scoped only to the exact zero-offset Camera checkpoint captured for the current cleaning session; ordinary saved-target authorization remains unchanged for every other request.
+- `stock_prep.json` is non-authoritative and is excluded from design hashes, execution bundles, immutable revisions, resume checkpoints, calibration evidence, and active-runtime file monitoring. Existing embedded worksheet data remains unchanged for older software and fallback loading.
+- Device protocol, machine-data schema version 1, update preservation contract, execution-plan schema, and firmware source are unchanged.
+- The bundled firmware is byte-identical to rc.7 and rc.8: 367,968 bytes with SHA-256 `1FEC7C6C8D3C0022844695CDF51A860539BCFBDA291BB18C12A99062C7A32577`. Direct legacy upgrades must still deploy and verify this exact artifact.
+
+### Validation
+
+- Focused cleaning checkpoint, cleaning-dialog, Stock Prep, execution-plan, authoritative-load, duplication, updater, and virtual-workflow tests passed.
+- Complete Python suite passed 5,821 tests with 156 expected skips; release-metadata validation, strict release-JSON parsing, firmware identity, and static diff checks passed on the release candidate.
+- During an attended LC-001 hardware-capable development session at exact pushed commit `e39ebf3f`, the operator verified both printer-head cleaning return and Prep Stocks behavior. The launch exited normally, exact released firmware restoration passed strict SAFE, final production readiness was true, and no related process remained.
+
+### Rollback
+
+- The reviewed application rollback target remains stable `v1.2.0`. Because it predates external machine data, use only the support-guided compatibility export and restore its paired firmware.
+- Older software ignores `stock_prep.json`; the frozen embedded worksheet remains available. Do not manually edit authoritative execution files, machine data, or firmware-state evidence during rollback.
+
 ## v1.3.0-rc.8 - 2026-08-24
 
 ### Fixed
