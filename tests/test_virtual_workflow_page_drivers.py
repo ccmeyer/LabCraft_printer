@@ -4,10 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 from PySide6 import QtCore, QtGui, QtTest, QtWidgets
+import shiboken6
 
 from tools.virtual_workflows.page_drivers import (
     _click_button_with_bounded_retry,
+    _qt_dialog_is_visible,
     ArrayDriver,
+    CalibrationDialogDriver,
     ExperimentEditorDriver,
     ExperimentLoaderDriver,
     MainWindowDriver,
@@ -15,6 +18,121 @@ from tools.virtual_workflows.page_drivers import (
     ManualRefuelCheckDriver,
     RackDriver,
 )
+
+
+def test_deleted_qt_dialog_wrapper_is_not_visible(qapp):
+    dialog = QtWidgets.QDialog()
+    dialog.show()
+    qapp.processEvents()
+    assert _qt_dialog_is_visible(dialog) is True
+
+    shiboken6.delete(dialog)
+
+    assert _qt_dialog_is_visible(dialog) is False
+
+
+def test_calibration_result_selection_waits_for_proxy_visibility(qapp):
+    class RawModel(QtGui.QStandardItemModel):
+        def raw_row_at(self, row):
+            if row != 0:
+                return None
+            return {
+                "synthetic_result_fingerprint": "result-fingerprint",
+                "result": "visible-after-filter-refresh",
+            }
+
+    window = QtWidgets.QWidget()
+    table = QtWidgets.QTableView(window)
+    source = RawModel(1, 2, window)
+    source.setItem(0, 0, QtGui.QStandardItem("result"))
+    source.setItem(0, 1, QtGui.QStandardItem("select"))
+    proxy = QtCore.QSortFilterProxyModel(window)
+    proxy.setSourceModel(source)
+    proxy.setFilterFixedString("not-yet-visible")
+    table.setModel(proxy)
+    table.resize(320, 120)
+    window.resize(320, 120)
+    window.show()
+    qapp.processEvents()
+
+    def selected_summary_row():
+        current = table.currentIndex()
+        if not current.isValid():
+            return None, {}
+        source_index = proxy.mapToSource(current)
+        return current, source.raw_row_at(source_index.row()) or {}
+
+    dialog = SimpleNamespace(
+        summary_table=table,
+        summary_table_proxy_model=proxy,
+        summary_table_model=source,
+        _selected_summary_row=selected_summary_row,
+    )
+    QtCore.QTimer.singleShot(50, lambda: proxy.setFilterFixedString(""))
+
+    selected = CalibrationDialogDriver(
+        qapp, dialog, timeout_seconds=1.0
+    ).select_result("result-fingerprint")
+
+    assert selected["result"] == "visible-after-filter-refresh"
+    window.close()
+
+
+def test_calibration_result_selection_opens_its_exact_result_set(qapp):
+    class RawModel(QtGui.QStandardItemModel):
+        def raw_row_at(self, row):
+            if row != 0:
+                return None
+            return {
+                "synthetic_result_fingerprint": "older-result",
+                "result_set_key": "set-older",
+                "result": "visible-after-set-selection",
+            }
+
+    window = QtWidgets.QWidget()
+    table = QtWidgets.QTableView(window)
+    source = RawModel(1, 2, window)
+    source.setItem(0, 0, QtGui.QStandardItem("result"))
+    source.setItem(0, 1, QtGui.QStandardItem("select"))
+    proxy = QtCore.QSortFilterProxyModel(window)
+    proxy.setSourceModel(source)
+    proxy.setFilterFixedString("hidden-by-latest")
+    table.setModel(proxy)
+    result_sets = QtWidgets.QComboBox(window)
+    result_sets.addItem("Latest", "latest")
+    result_sets.addItem("Older", "set-older")
+    result_sets.currentIndexChanged.connect(
+        lambda: proxy.setFilterFixedString(
+            "" if result_sets.currentData() == "set-older" else "hidden-by-latest"
+        )
+    )
+    table.resize(320, 120)
+    window.resize(320, 150)
+    window.show()
+    qapp.processEvents()
+
+    def selected_summary_row():
+        current = table.currentIndex()
+        if not current.isValid():
+            return None, {}
+        source_index = proxy.mapToSource(current)
+        return current, source.raw_row_at(source_index.row()) or {}
+
+    dialog = SimpleNamespace(
+        summary_table=table,
+        summary_table_proxy_model=proxy,
+        summary_table_model=source,
+        summary_result_set_combo=result_sets,
+        _selected_summary_row=selected_summary_row,
+    )
+
+    selected = CalibrationDialogDriver(
+        qapp, dialog, timeout_seconds=1.0
+    ).select_result("older-result")
+
+    assert result_sets.currentData() == "set-older"
+    assert selected["result"] == "visible-after-set-selection"
+    window.close()
 
 
 def _context(qapp, view):
@@ -121,6 +239,43 @@ def test_bounded_button_click_fails_on_ambiguous_activation(qapp):
             description="test button",
         )
 
+    view.close()
+
+
+def test_bounded_button_click_waits_for_delayed_postcondition_after_activation(
+    qapp,
+):
+    view = QtWidgets.QWidget()
+    button = QtWidgets.QPushButton("Printable Wells", view)
+    view.show()
+    qapp.processEvents()
+    clicked = []
+    ready = []
+    button.clicked.connect(lambda: clicked.append(True))
+    button.clicked.connect(
+        lambda: QtCore.QTimer.singleShot(50, lambda: ready.append(True))
+    )
+
+    evidence = _click_button_with_bounded_retry(
+        SimpleNamespace(app=qapp),
+        button,
+        postcondition=lambda: bool(ready),
+        description="test button",
+        activated_postcondition_timeout_seconds=0.5,
+    )
+
+    assert clicked == [True]
+    assert evidence == {
+        "attempt_count": 1,
+        "retried": False,
+        "attempts": [
+            {
+                "attempt": 1,
+                "activated": True,
+                "postcondition_met": True,
+            },
+        ],
+    }
     view.close()
 
 

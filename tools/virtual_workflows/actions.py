@@ -2146,7 +2146,7 @@ def _expected_editor_progress_dialog(context: ScenarioContext):
 def _expected_editor_well_selection_dialog(context: ScenarioContext):
     registry = getattr(context.app, "_sil_expected_dialog_specs", [])
     setattr(context.app, "_sil_expected_dialog_specs", registry)
-    entry = {"title": "Printable Wells", "type": "WellSelectionDialog"}
+    entry = {"title": "Select Reaction Wells", "type": "WellSelectionDialog"}
     registry.append(entry)
     try:
         yield
@@ -2341,6 +2341,10 @@ def drive_editor_create_finalize(
         *,
         excluded_well_ids: list[str] | None = None,
     ) -> dict[str, Any]:
+        from tools.virtual_workflows.page_drivers import (
+            _click_button_with_bounded_retry,
+        )
+
         expected_excluded = sorted(
             str(value) for value in (excluded_well_ids or ())
         )
@@ -2349,6 +2353,9 @@ def drive_editor_create_finalize(
             "error": None,
             "evidence": None,
         }
+        selection_deadline = time.monotonic() + context.deadline.remaining_seconds(
+            10.0
+        )
 
         def well_position(well_id: str) -> tuple[int, int]:
             row_label = "".join(
@@ -2363,18 +2370,30 @@ def drive_editor_create_finalize(
             return row - 1, int(column_text) - 1
 
         def drive_selection() -> None:
-            selection_state["entered"] = True
             active = context.app.activeModalWidget()
+            if not isinstance(active, WellSelectionDialog):
+                if (
+                    (active is None or active is dialog)
+                    and time.monotonic() < selection_deadline
+                ):
+                    QtCore.QTimer.singleShot(10, drive_selection)
+                    return
+                selection_state["entered"] = True
+                title = active.windowTitle() if active is not None else None
+                selection_state["error"] = RuntimeError(
+                    "unexpected printable-wells modal: "
+                    f"{type(active).__name__ if active is not None else None} "
+                    f"{title!r}"
+                )
+                if (
+                    isinstance(active, QtWidgets.QDialog)
+                    and active is not dialog
+                    and active.isVisible()
+                ):
+                    active.reject()
+                return
+            selection_state["entered"] = True
             try:
-                if not isinstance(active, WellSelectionDialog):
-                    title = active.windowTitle() if active is not None else None
-                    if isinstance(active, QtWidgets.QDialog):
-                        active.reject()
-                    raise RuntimeError(
-                        "unexpected printable-wells modal: "
-                        f"{type(active).__name__ if active is not None else None} "
-                        f"{title!r}"
-                    )
                 click(active.clear_btn)
                 disabled = sorted(str(value) for value in active.grid._disabled)
                 if disabled != expected_excluded:
@@ -2425,15 +2444,50 @@ def drive_editor_create_finalize(
                 click(active.ok_btn)
             except BaseException as exc:
                 selection_state["error"] = exc
-                if isinstance(active, QtWidgets.QDialog) and active.isVisible():
+                if (
+                    isinstance(active, QtWidgets.QDialog)
+                    and active is not dialog
+                    and active.isVisible()
+                ):
                     active.reject()
 
         QtCore.QTimer.singleShot(0, drive_selection)
         with _expected_editor_well_selection_dialog(context):
-            QtTest.QTest.mouseClick(
-                dialog.well_selection_btn,
-                QtCore.Qt.MouseButton.LeftButton,
-            )
+            try:
+                _click_button_with_bounded_retry(
+                    context,
+                    dialog.well_selection_btn,
+                    postcondition=lambda: bool(
+                        selection_state["entered"]
+                        or selection_state["error"] is not None
+                    ),
+                    description="Printable Wells",
+                    activated_postcondition_timeout_seconds=1.0,
+                )
+            except RuntimeError as exc:
+                status_label = getattr(dialog, "status_lbl", None)
+                diagnostic = {
+                    "manual_assignments_active": bool(
+                        dialog._manual_assignments_active()
+                    ),
+                    "progress_protected": bool(
+                        getattr(dialog, "_progress_protected", False)
+                    ),
+                    "editing_locked_by_gripper": bool(
+                        getattr(dialog, "_editing_locked_by_gripper", False)
+                    ),
+                    "well_selection_enabled": bool(
+                        dialog.well_selection_btn.isEnabled()
+                    ),
+                    "status": (
+                        status_label.text()
+                        if status_label is not None
+                        else None
+                    ),
+                }
+                raise RuntimeError(
+                    f"{exc}; editor state: {diagnostic}"
+                ) from exc
         if selection_state["error"] is not None:
             raise selection_state["error"]
         if not selection_state["entered"]:
@@ -3762,6 +3816,8 @@ def drive_editor_create_finalize(
         except BaseException as exc:
             state["error"] = exc
             if isinstance(active, QtWidgets.QDialog) and active.isVisible():
+                if isinstance(active, ExperimentDesignDialog):
+                    active._allow_close_without_prompt = True
                 active.reject()
 
     driver_timer.timeout.connect(run_driver)

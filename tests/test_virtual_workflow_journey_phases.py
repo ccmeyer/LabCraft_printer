@@ -32,7 +32,7 @@ from tools.virtual_workflows.journey_phases import (
 @pytest.mark.parametrize(
     ("expected_plan_state", "head_returned", "expected_text"),
     (
-        ("completed", False, "Experiment Complete"),
+        ("completed", False, "Array Complete"),
         ("completed", True, "Experiment Complete"),
         ("active", False, "Array Complete"),
         ("active", True, "Start Array"),

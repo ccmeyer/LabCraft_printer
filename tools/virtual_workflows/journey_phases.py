@@ -1332,9 +1332,11 @@ def _expected_completed_array_control_text(
 ) -> str:
     """Return the disabled array-control label at a completed pass boundary."""
 
+    if not head_returned:
+        return "Array Complete"
     if str(expected_plan_state) == "completed":
         return "Experiment Complete"
-    return "Start Array" if head_returned else "Array Complete"
+    return "Start Array"
 
 
 def run_precalibrated_stock_passes(

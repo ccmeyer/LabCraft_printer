@@ -18,6 +18,7 @@ from tools.virtual_workflows.actions import (
     InteractionSurface,
     ScenarioActionError,
     ScenarioContext,
+    _expected_editor_well_selection_dialog,
     capture_milestone,
     close_simulated_session,
     drive_editor_create_finalize,
@@ -45,6 +46,30 @@ def test_composed_multi_stock_actions_report_truthful_surfaces():
     assert ACTION_INTERACTION_SURFACES["head.bind_identity"] is (
         InteractionSurface.MODEL
     )
+
+
+def test_expected_printable_wells_spec_matches_real_dialog(qapp):
+    from View import WellSelectionDialog
+
+    dialog = WellSelectionDialog(
+        "test plate",
+        1,
+        1,
+        selected_wells=["A1"],
+    )
+    context = SimpleNamespace(app=qapp)
+
+    with _expected_editor_well_selection_dialog(context):
+        assert qapp._sil_expected_dialog_specs == [
+            {
+                "title": dialog.windowTitle(),
+                "type": type(dialog).__name__,
+            }
+        ]
+
+    assert qapp._sil_expected_dialog_specs == []
+    dialog.deleteLater()
+    qapp.processEvents()
 
 
 def test_composed_soft_stop_actions_add_one_truthful_resume_contract():
@@ -687,6 +712,7 @@ def test_editor_driver_propagates_global_deadline_and_rejects_dialog(
     assert caught.value.action_id == "editor.open_via_ui"
     assert caught.value.stage == "timeout"
     assert context.action_results[0]["failure_stage"] == "timeout"
+    assert dialog._allow_close_without_prompt is True
     assert dialog.isVisible() is False
     dialog.deleteLater()
     button.deleteLater()

@@ -9,6 +9,17 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from PySide6 import QtCore, QtTest, QtWidgets
+import shiboken6
+
+
+def _qt_dialog_is_visible(dialog: Any) -> bool:
+    """Return false once Qt has deleted a retained Python dialog wrapper."""
+
+    return bool(
+        isinstance(dialog, QtWidgets.QDialog)
+        and shiboken6.isValid(dialog)
+        and dialog.isVisible()
+    )
 
 
 def _click_button_with_bounded_retry(
@@ -17,6 +28,7 @@ def _click_button_with_bounded_retry(
     *,
     postcondition: Callable[[], bool],
     description: str,
+    activated_postcondition_timeout_seconds: float = 0.0,
 ) -> dict[str, Any]:
     """Use mouse-only activation with one retry after a proven no-op."""
 
@@ -54,6 +66,17 @@ def _click_button_with_bounded_retry(
 
             activated = len(activations) > activation_count
             satisfied = bool(postcondition())
+            if activated and not satisfied:
+                postcondition_deadline = time.monotonic() + max(
+                    0.0, float(activated_postcondition_timeout_seconds)
+                )
+                while (
+                    not satisfied
+                    and time.monotonic() < postcondition_deadline
+                ):
+                    QtTest.QTest.qWait(10)
+                    context.app.processEvents()
+                    satisfied = bool(postcondition())
             attempts.append(
                 {
                     "attempt": attempt,
@@ -3953,15 +3976,39 @@ class CalibrationDialogDriver:
         table = self.dialog.summary_table
         proxy = self.dialog.summary_table_proxy_model
         source = self.dialog.summary_table_model
-        match = None
-        for proxy_row in range(proxy.rowCount()):
-            source_index = proxy.mapToSource(proxy.index(proxy_row, 0))
-            raw = source.raw_row_at(source_index.row()) or {}
-            if raw.get("synthetic_result_fingerprint") == str(result_fingerprint):
-                match = (proxy_row, raw)
-                break
+        expected = str(result_fingerprint)
+        match: tuple[int, Mapping[str, Any]] | None = None
+
+        for source_row in range(source.rowCount()):
+            raw = source.raw_row_at(source_row) or {}
+            if raw.get("synthetic_result_fingerprint") != expected:
+                continue
+            result_set_key = str(raw.get("result_set_key") or "")
+            combo = getattr(self.dialog, "summary_result_set_combo", None)
+            if result_set_key and isinstance(combo, QtWidgets.QComboBox):
+                result_set_index = combo.findData(result_set_key)
+                if result_set_index >= 0 and combo.currentIndex() != result_set_index:
+                    combo.setCurrentIndex(result_set_index)
+                    self.app.processEvents()
+            break
+
+        def _result_visible() -> bool:
+            nonlocal match
+            match = None
+            for proxy_row in range(proxy.rowCount()):
+                source_index = proxy.mapToSource(proxy.index(proxy_row, 0))
+                raw = source.raw_row_at(source_index.row()) or {}
+                if raw.get("synthetic_result_fingerprint") == expected:
+                    match = (proxy_row, raw)
+                    return True
+            return False
+
+        self.wait_until(
+            _result_visible,
+            f"synthetic calibration result visibility: {expected}",
+        )
         if match is None:
-            raise RuntimeError(f"synthetic result is not visible: {result_fingerprint}")
+            raise RuntimeError(f"synthetic result is not visible: {expected}")
         proxy_row, raw = match
         target = proxy.index(proxy_row, 1)
         rect = table.visualRect(target)
@@ -4398,7 +4445,7 @@ class ManualRefuelCheckDriver(_QTestSurfaceDriver):
             if state["error"] is None:
                 state["error"] = RuntimeError(message)
             dialog = state.get("dialog")
-            if isinstance(dialog, QtWidgets.QDialog) and dialog.isVisible():
+            if _qt_dialog_is_visible(dialog):
                 dialog.reject()
 
         def reschedule() -> None:
@@ -4530,7 +4577,7 @@ class ManualRefuelCheckDriver(_QTestSurfaceDriver):
                 active_launch = bool(
                     getattr(pressure_box, "_manual_refuel_check_launch_is_active")()
                 )
-                if dialog.isVisible() or active_launch:
+                if _qt_dialog_is_visible(dialog) or active_launch:
                     reschedule()
                     return
                 state["phase"] = "done"
