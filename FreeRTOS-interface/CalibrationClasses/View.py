@@ -1952,12 +1952,14 @@ class PrinterHeadCleaningDialog(QtWidgets.QDialog):
     PHASE_RETURNING = "returning"
     PHASE_RECOVERY_ERROR = "recovery_error"
 
-    def __init__(self, parent, model, controller, saved_position, read_camera_was_armed):
+    def __init__(self, parent, model, controller, return_checkpoint, read_camera_was_armed):
         super().__init__(parent)
         self.model = model
         self.controller = controller
+        self.return_checkpoint_id = str(return_checkpoint["checkpoint_id"])
         self.saved_position = {
-            axis: int(saved_position[axis]) for axis in ("X", "Y", "Z")
+            axis: int(return_checkpoint["position"][axis])
+            for axis in ("X", "Y", "Z")
         }
         self.read_camera_was_armed = bool(read_camera_was_armed)
         self.phase = self.PHASE_CONFIRM
@@ -2111,25 +2113,25 @@ class PrinterHeadCleaningDialog(QtWidgets.QDialog):
             return False
         return True
 
-    def _begin_move(self, phase, name, *, coords=None, completion):
+    def _begin_move(self, phase, name, *, completion, dispatcher=None):
         self.phase = phase
         self._pending_failure_reason = None
         self._move_token += 1
         token = self._move_token
         self._completion_observed_token = None
         self._render_phase()
-        mover = getattr(self.controller, "move_to_location", None)
-        if not callable(mover):
-            self._enter_recovery_error("The move-to-location command is unavailable.")
-            return False
         try:
-            kwargs = {
-                "manual": True,
-                "on_complete": lambda: completion(token),
-            }
-            if coords is not None:
-                kwargs["coords"] = dict(coords)
-            result = mover(name, **kwargs)
+            callback = lambda: completion(token)
+            if dispatcher is None:
+                mover = getattr(self.controller, "move_to_location", None)
+                if not callable(mover):
+                    self._enter_recovery_error(
+                        "The move-to-location command is unavailable."
+                    )
+                    return False
+                result = mover(name, manual=True, on_complete=callback)
+            else:
+                result = dispatcher(callback)
         except Exception as exc:
             self._pending_failure_reason = f"Could not queue the move: {exc}"
             if self._commands_idle():
@@ -2195,11 +2197,24 @@ class PrinterHeadCleaningDialog(QtWidgets.QDialog):
             return
         if not self._confirm_clear_to_return():
             return
+        returner = getattr(
+            self.controller,
+            "return_to_printer_head_cleaning_checkpoint",
+            None,
+        )
+        if not callable(returner):
+            self._enter_recovery_error(
+                "The Controller-owned cleaning return command is unavailable."
+            )
+            return
         self._begin_move(
             self.PHASE_RETURNING,
             "camera",
-            coords=self.saved_position,
             completion=self._on_return_complete,
+            dispatcher=lambda callback: returner(
+                self.return_checkpoint_id,
+                on_complete=callback,
+            ),
         )
 
     def _on_return_complete(self, token):
@@ -2295,6 +2310,16 @@ class PrinterHeadCleaningDialog(QtWidgets.QDialog):
         self._cleanup_done = True
         self._completion_observed_token = None
         self._monitor_timer.stop()
+        releaser = getattr(
+            self.controller,
+            "release_printer_head_cleaning_checkpoint",
+            None,
+        )
+        if callable(releaser):
+            try:
+                releaser(self.return_checkpoint_id)
+            except Exception:
+                pass
 
     def reject(self):
         if self.phase != self.PHASE_CONFIRM and not self._allow_close:
@@ -6121,25 +6146,6 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return False, "Wait for all queued machine commands to finish."
         return True, ""
 
-    def _head_cleaning_position_snapshot(self):
-        machine_model = getattr(self.model, "machine_model", None)
-        getter = getattr(machine_model, "get_current_position_dict", None)
-        if not callable(getter):
-            return None
-        try:
-            raw = getter()
-            if not isinstance(raw, dict):
-                return None
-            position = {}
-            for axis in ("X", "Y", "Z"):
-                value = raw.get(axis)
-                if isinstance(value, bool) or not np.isfinite(float(value)):
-                    return None
-                position[axis] = int(value)
-            return position
-        except (TypeError, ValueError, OverflowError):
-            return None
-
     def _head_cleaning_preflight(self):
         if bool(getattr(self, "result_presentation_only", False)):
             return None, "Printer-head cleaning motion is unavailable in a result-only window."
@@ -6160,10 +6166,49 @@ class DropletImagingDialog(QtWidgets.QDialog):
         ready, reason = self._head_cleaning_motion_ready(require_idle=True)
         if not ready:
             return None, reason
-        position = self._head_cleaning_position_snapshot()
-        if position is None:
-            return None, "The current XYZ position could not be verified."
-        return position, ""
+        creator = getattr(
+            self.controller,
+            "create_printer_head_cleaning_checkpoint",
+            None,
+        )
+        if not callable(creator):
+            return None, "The Controller-owned cleaning checkpoint is unavailable."
+        try:
+            checkpoint = creator()
+        except Exception as exc:
+            return None, f"The cleaning return position could not be captured: {exc}"
+        if not isinstance(checkpoint, dict) or not checkpoint.get("allowed"):
+            message = (
+                checkpoint.get("message")
+                if isinstance(checkpoint, dict)
+                else None
+            )
+            return None, str(
+                message or "The current XYZ position could not be verified."
+            )
+        try:
+            if not checkpoint.get("checkpoint_id"):
+                raise ValueError("checkpoint ID is missing")
+            position = checkpoint["position"]
+            if set(position) != {"X", "Y", "Z"}:
+                raise ValueError("checkpoint position must contain exact XYZ")
+            checkpoint = dict(checkpoint)
+            checkpoint["position"] = {
+                axis: int(position[axis]) for axis in ("X", "Y", "Z")
+            }
+        except (KeyError, TypeError, ValueError, OverflowError):
+            releaser = getattr(
+                self.controller,
+                "release_printer_head_cleaning_checkpoint",
+                None,
+            )
+            if callable(releaser):
+                try:
+                    releaser(checkpoint.get("checkpoint_id"))
+                except Exception:
+                    pass
+            return None, "The Controller returned an invalid cleaning checkpoint."
+        return checkpoint, ""
 
     def open_printer_head_cleaning_dialog(self):
         existing = getattr(self, "_printer_head_cleaning_dialog", None)
@@ -6172,18 +6217,38 @@ class DropletImagingDialog(QtWidgets.QDialog):
             existing.activateWindow()
             return
 
-        position, error = self._head_cleaning_preflight()
-        if position is None:
+        checkpoint, error = self._head_cleaning_preflight()
+        if checkpoint is None:
             QtWidgets.QMessageBox.warning(self, "Clean Printer Head", error)
             return
 
-        dialog = PrinterHeadCleaningDialog(
-            self,
-            self.model,
-            self.controller,
-            position,
-            read_camera_was_armed=bool(getattr(self, "_read_camera_stream_armed", False)),
-        )
+        try:
+            dialog = PrinterHeadCleaningDialog(
+                self,
+                self.model,
+                self.controller,
+                checkpoint,
+                read_camera_was_armed=bool(
+                    getattr(self, "_read_camera_stream_armed", False)
+                ),
+            )
+        except Exception as exc:
+            releaser = getattr(
+                self.controller,
+                "release_printer_head_cleaning_checkpoint",
+                None,
+            )
+            if callable(releaser):
+                try:
+                    releaser(checkpoint.get("checkpoint_id"))
+                except Exception:
+                    pass
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Clean Printer Head",
+                f"The cleaning dialog could not be opened: {exc}",
+            )
+            return
         self._printer_head_cleaning_dialog = dialog
 
         def clear_dialog_reference(_result, dialog=dialog):

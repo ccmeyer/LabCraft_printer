@@ -12,6 +12,8 @@ from tests.calibration_test_utils import SignalStub, ensure_calibration_import_s
 ensure_calibration_import_stubs()
 
 from ApplicationComposition import SIMULATION_RUNTIME_CONTEXT
+from ConfigurationSafetyPolicy import ConfigurationSafetyError
+from MachineDataVerification import SavedTargetAuthorizationDecision
 from MotionPositionContract import canonicalize_position
 from CalibrationClasses.Model import CalibrationManager
 from CalibrationClasses.View import (
@@ -61,12 +63,68 @@ def _wait_for(qapp, predicate, label, *, attempts=1200):
     raise AssertionError(f"Timed out waiting for {label}")
 
 
+class _ProductionLikeSilGuard:
+    policy = SimpleNamespace(position_telemetry_max_age_ms=2500)
+
+    @staticmethod
+    def validate_endpoint(point):
+        normalized = {axis: int(point[axis]) for axis in ("X", "Y", "Z")}
+        if any(value < 0 or value > 150000 for value in normalized.values()):
+            raise ConfigurationSafetyError("endpoint outside SIL bounds")
+        return normalized
+
+
+class _ProductionLikeLocationAuthorizer:
+    def __init__(self, location_model):
+        self.location_model = location_model
+        self.requests = []
+
+    def authorize(self, request):
+        self.requests.append(request)
+        normalized = str(request.target_key or "").split(":", 1)[-1]
+        expected = self.location_model.get_location_dict(normalized)
+        allowed = (
+            request.target_kind == "location"
+            and isinstance(expected, dict)
+            and dict(request.base_value) == dict(expected)
+        )
+        return SavedTargetAuthorizationDecision(
+            allowed=allowed,
+            reason_code="authorized" if allowed else "target_value_changed",
+            message=(
+                "Saved target matches current configuration history."
+                if allowed
+                else "Saved target values changed after verification."
+            ),
+            target_key=request.target_key,
+        )
+
+
+def _install_production_like_saved_target_gate(controller, model):
+    authorizer = _ProductionLikeLocationAuthorizer(model.location_model)
+    controller.saved_target_authorizer = authorizer
+    controller.machine_data_paths = SimpleNamespace(
+        machine_uuid="sil-printer-head-cleaning-machine"
+    )
+    controller.configuration_safety_guard = _ProductionLikeSilGuard()
+    return authorizer
+
+
 def _connect_home_and_move_to_custom_camera(session, qapp, custom_position):
     assert session.connect_simulator() is not False
     _wait_for(
         qapp,
         lambda: session.components.model.machine_model.is_connected(),
         "simulator connection",
+    )
+    session.components.controller.toggle_motors()
+    _wait_for(
+        qapp,
+        lambda: (
+            session.components.model.machine_model.motors_are_enabled()
+            and session.components.machine.check_if_all_completed()
+        ),
+        "simulator motor enable",
     )
     session.components.controller.home_machine()
     _wait_for(
@@ -102,6 +160,20 @@ def _connect_home_and_move_to_custom_camera(session, qapp, custom_position):
         == accepted_position
     )
     return accepted_position
+
+
+def _emit_fresh_post_drain_position_cycle(session, qapp):
+    """Model the next periodic firmware status frame after a drained SIL move."""
+
+    session.components.machine._emit_status()
+    _wait_for(
+        qapp,
+        lambda: (
+            session.components.controller._position_reconciliation.get("state")
+            == "settled"
+        ),
+        "fresh post-drain position telemetry",
+    )
 
 
 def _launch_motion_capable_imager(monkeypatch, session, qapp):
@@ -759,6 +831,7 @@ def test_imager_head_cleaning_camera_free_sil_round_trip(
         )
     )
     dialog = None
+    warnings = []
     try:
         view = session.launch()
         model = session.components.model
@@ -800,6 +873,14 @@ def test_imager_head_cleaning_camera_free_sil_round_trip(
             "_confirm_clear_to_return",
             lambda self: True,
         )
+        monkeypatch.setattr(
+            "CalibrationClasses.View.QtWidgets.QMessageBox.warning",
+            lambda *args, **kwargs: warnings.append(args[2]),
+        )
+        monkeypatch.setattr(
+            "View.QtWidgets.QMessageBox.exec",
+            lambda self: 0,
+        )
 
         dialog = view.pressure_box._launch_simulation_calibration_dialog()
         qapp.processEvents()
@@ -809,6 +890,8 @@ def test_imager_head_cleaning_camera_free_sil_round_trip(
 
         dialog.open_printer_head_cleaning_dialog()
         cleaning = dialog._printer_head_cleaning_dialog
+        assert warnings == []
+        assert cleaning is not None
         assert cleaning.saved_position == camera_position
         cleaning.move_to_loading_button.click()
         _wait_for(
@@ -854,11 +937,16 @@ def test_imager_head_cleaning_sil_round_trip_resume_and_exit(
         )
     )
     dialog = None
+    warnings = []
+    controller_errors = []
     custom_position = {"X": 12000, "Y": 39000, "Z": 98000}
     try:
         view = session.launch()
         box = view.pressure_box
         controller = session.components.controller
+        controller.error_occurred_signal.connect(
+            lambda title, message: controller_errors.append((title, message))
+        )
         machine = session.components.machine
         model = session.components.model
         lifecycle = []
@@ -872,11 +960,23 @@ def test_imager_head_cleaning_sil_round_trip_resume_and_exit(
             "CalibrationClasses.View.QtWidgets.QMessageBox.question",
             lambda *args, **kwargs: QtWidgets.QMessageBox.Yes,
         )
+        monkeypatch.setattr(
+            "CalibrationClasses.View.QtWidgets.QMessageBox.warning",
+            lambda *args, **kwargs: warnings.append(args[2]),
+        )
+        monkeypatch.setattr(
+            "View.QtWidgets.QMessageBox.exec",
+            lambda self: 0,
+        )
 
         custom_position = _connect_home_and_move_to_custom_camera(
             session,
             qapp,
             custom_position,
+        )
+        production_like_authorizer = _install_production_like_saved_target_gate(
+            controller,
+            model,
         )
         dialog = _launch_motion_capable_imager(monkeypatch, session, qapp)
         manager = model.calibration_manager
@@ -898,6 +998,8 @@ def test_imager_head_cleaning_sil_round_trip_resume_and_exit(
         lifecycle_before_cancel = len(lifecycle)
         dialog.open_printer_head_cleaning_dialog()
         cleaning = dialog._printer_head_cleaning_dialog
+        assert warnings == []
+        assert cleaning is not None
         assert cleaning.saved_position == custom_position
         cleaning.cancel_button.click()
         qapp.processEvents()
@@ -907,6 +1009,8 @@ def test_imager_head_cleaning_sil_round_trip_resume_and_exit(
         motion_start = len(lifecycle)
         dialog.open_printer_head_cleaning_dialog()
         cleaning = dialog._printer_head_cleaning_dialog
+        assert warnings == []
+        assert cleaning is not None
         assert QtWidgets.QApplication.activeModalWidget() is cleaning
         cleaning.move_to_loading_button.click()
         assert dialog._read_camera_stream_armed is False
@@ -922,8 +1026,10 @@ def test_imager_head_cleaning_sil_round_trip_resume_and_exit(
         assert machine_model.get_current_position_dict() == loading_position
         assert controller.expected_location == "loading"
         assert QtWidgets.QApplication.activeModalWidget() is cleaning
+        _emit_fresh_post_drain_position_cycle(session, qapp)
 
         cleaning.return_button.click()
+        assert controller_errors == []
         _wait_for(
             qapp,
             lambda: (
@@ -936,6 +1042,9 @@ def test_imager_head_cleaning_sil_round_trip_resume_and_exit(
         assert machine_model.get_current_position_dict() == custom_position
         assert controller.expected_position == custom_position
         assert controller.expected_location == "camera"
+        assert [
+            request.target_key for request in production_like_authorizer.requests
+        ] == ["location:loading"]
         assert dialog._read_camera_stream_armed is True
         assert dialog.calibration_tabs.currentWidget() is selected_tab
         assert manager.data == calibration_before
@@ -976,8 +1085,11 @@ def test_imager_head_cleaning_sil_round_trip_resume_and_exit(
             "capture pending cleanup",
         )
 
+        _emit_fresh_post_drain_position_cycle(session, qapp)
         dialog.open_printer_head_cleaning_dialog()
         cleaning = dialog._printer_head_cleaning_dialog
+        assert warnings == []
+        assert cleaning is not None
         cleaning.move_to_loading_button.click()
         _wait_for(
             qapp,
@@ -1030,6 +1142,7 @@ def test_imager_head_cleaning_sil_recovers_from_interrupted_move(
         )
     )
     dialog = None
+    warnings = []
     custom_position = {"X": 12100, "Y": 38900, "Z": 97900}
     try:
         session.launch()
@@ -1051,6 +1164,14 @@ def test_imager_head_cleaning_sil_recovers_from_interrupted_move(
             "CalibrationClasses.View.QtWidgets.QMessageBox.question",
             lambda *args, **kwargs: QtWidgets.QMessageBox.Yes,
         )
+        monkeypatch.setattr(
+            "CalibrationClasses.View.QtWidgets.QMessageBox.warning",
+            lambda *args, **kwargs: warnings.append(args[2]),
+        )
+        monkeypatch.setattr(
+            "View.QtWidgets.QMessageBox.exec",
+            lambda self: 0,
+        )
 
         custom_position = _connect_home_and_move_to_custom_camera(
             session,
@@ -1066,6 +1187,8 @@ def test_imager_head_cleaning_sil_recovers_from_interrupted_move(
 
         dialog.open_printer_head_cleaning_dialog()
         cleaning = dialog._printer_head_cleaning_dialog
+        assert warnings == []
+        assert cleaning is not None
         cleaning.move_to_loading_button.click()
         _wait_for(
             qapp,
@@ -1089,6 +1212,8 @@ def test_imager_head_cleaning_sil_recovers_from_interrupted_move(
         }
 
         assert machine.reset_faults() is True
+        _emit_fresh_post_drain_position_cycle(session, qapp)
+        controller.update_expected_with_current()
         cleaning.return_button.click()
         _wait_for(
             qapp,

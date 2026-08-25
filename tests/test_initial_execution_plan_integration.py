@@ -235,6 +235,59 @@ def test_fresh_finalization_writes_prepared_plan_before_linked_progress(
     assert details["execution_plan_status"] == "created"
 
 
+@pytest.mark.parametrize("activate", [False, True])
+def test_stock_prep_sidecar_does_not_change_authoritative_execution(
+    experiment_model_factory,
+    activate,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_design(em)
+    Model.load_experiment_from_model(
+        model,
+        load_progress=False,
+        finalize_execution_plan=True,
+    )
+    if activate:
+        plan = em.lock_execution_plan("printing_started")
+        assert plan.state is ExecutionPlanState.ACTIVE
+    else:
+        plan = em.get_execution_plan_snapshot()
+        assert plan.state is ExecutionPlanState.PREPARED
+
+    design_path = Path(em.experiment_file_path)
+    design_before = design_path.read_bytes()
+    design_payload = json.loads(design_before)
+    identities_before, revisions_before = em._capture_authoritative_runtime_files()
+    rows = em.get_stock_prep_rows()
+    em.unsaved_changes = False
+
+    em.save_stock_prep_worksheet(
+        [
+            {
+                **row,
+                "prep_volume_uL": float(row["total_volume_uL"]) + 30.0,
+                "source_concentration": float(row["stock_concentration"]) * 2.0,
+            }
+            for row in rows
+        ],
+        dead_volume_extra_uL=20.0,
+        calibration_extra_uL=10.0,
+    )
+
+    identities_after, revisions_after = em._capture_authoritative_runtime_files()
+    assert Path(em.stock_prep_file_path).is_file()
+    assert design_path.read_bytes() == design_before
+    assert canonical_sha256(json.loads(design_path.read_bytes())) == plan.design_sha256
+    assert identities_after == identities_before
+    assert revisions_after == revisions_before
+    assert em.unsaved_changes is False
+    assert em.get_execution_plan_snapshot() == plan
+    bundle = inspect_authoritative_execution(em.experiment_dir_path, design_payload)
+    assert bundle.valid
+    assert bundle.plan == plan
+
+
 def test_prepared_name_only_rename_replaces_and_reloads_authoritative_bundle(
     experiment_model_factory,
 ):
@@ -244,6 +297,18 @@ def test_prepared_name_only_rename_replaces_and_reloads_authoritative_bundle(
     Model.load_experiment_from_model(model, finalize_execution_plan=True)
     original_dir = Path(em.experiment_dir_path)
     original_plan = load_execution_plan(em.execution_plan_file_path)
+    stock_row = em.get_stock_prep_rows()[0]
+    em.save_stock_prep_worksheet(
+        [
+            {
+                **stock_row,
+                "prep_volume_uL": float(stock_row["total_volume_uL"]) + 30.0,
+                "source_concentration": float(stock_row["stock_concentration"]) * 2.0,
+            }
+        ],
+        dead_volume_extra_uL=20.0,
+        calibration_extra_uL=10.0,
+    )
 
     em.metadata["name"] = "prepared-renamed"
     assert em.rename_experiment("prepared-renamed")
@@ -283,6 +348,23 @@ def test_prepared_name_only_rename_replaces_and_reloads_authoritative_bundle(
     ) == (original_plan,)
     assert not list(original_dir.parent.glob(".*.staging-*"))
     assert not list(original_dir.parent.glob(".*.rollback-*"))
+
+    rebound_worksheet = em.load_stock_prep_worksheet(force=True)
+    assert rebound_worksheet["plan_id"] == plan.plan_id
+    assert list(rebound_worksheet["entries"]) == [stock_row["stock_id"]]
+    em.save_stock_prep_worksheet(
+        [
+            {
+                **em.get_stock_prep_rows()[0],
+                **rebound_worksheet["entries"][stock_row["stock_id"]],
+            }
+        ],
+        **rebound_worksheet["defaults"],
+    )
+    saved_worksheet = json.loads(
+        Path(em.stock_prep_file_path).read_text(encoding="utf-8")
+    )
+    assert saved_worksheet["plan_id"] == plan.plan_id
 
     reloaded = ExperimentModel(prof=CURRENT_PROFILE)
     reloaded_bundle = reloaded.load_experiment(

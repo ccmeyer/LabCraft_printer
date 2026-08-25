@@ -133,6 +133,29 @@ A validation failure never causes the source document to be rewritten. Future
 non-execution annotations must be introduced through a versioned, explicitly
 non-authoritative field; v1 has no free-form extension container.
 
+## Non-authoritative stock preparation worksheet
+
+`stock_prep.json` is an optional operator worksheet stored beside the experiment
+files. It is not part of the execution bundle, design hash, immutable revision
+history, resume checkpoint, calibration evidence, or active-runtime file identity
+set. Creating, changing, losing, or corrupting this file cannot change execution
+eligibility.
+
+The worksheet uses schema name `labcraft.stock_prep`, version `1`, and records the
+current plan ID/revision, dead-volume and calibration extras, plus per-stock
+preparation volume and source concentration keyed by the exact execution stock
+ID. A draft without a plan uses a null plan ID and revision `1`. Target
+concentration and total required volume are always derived from the current plan
+and are never accepted from the worksheet. PREPARED and ACTIVE
+executions may update the file atomically; COMPLETED, ABORTED, and recorded legacy
+executions expose the calculator without persistence.
+
+Older `stock_prep` values embedded in `experiment_design.json` remain frozen for
+hash compatibility. When no sidecar exists they may seed the worksheet in memory,
+but the calculator never rewrites the embedded field. A plan-ID change carries
+worksheet inputs only for exact matching stock IDs. Editable copies and duplicate
+experiments begin without a sidecar.
+
 ## Persistence
 
 The slice 1 writer:

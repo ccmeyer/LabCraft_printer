@@ -1006,6 +1006,8 @@ class Controller(QObject):
         self._configuration_recovery_required = False
         self._plate_calibration_session = None
         self._rack_calibration_session = None
+        self._printer_head_cleaning_checkpoint = None
+        self._printer_head_cleaning_return_scope = None
         self.experimental_features = (
             experimental_features or ExperimentalFeatures()
         )
@@ -9799,6 +9801,443 @@ class Controller(QObject):
         """Check if all commands have been completed."""
         return self.machine.check_if_all_completed()
 
+    @staticmethod
+    def _printer_head_cleaning_checkpoint_failure(reason_code, message):
+        return {
+            "allowed": False,
+            "reason_code": str(reason_code),
+            "message": str(message),
+        }
+
+    def _validate_printer_head_cleaning_endpoint(self, position):
+        normalized = {
+            axis: int(position[axis]) for axis in self._position_axes()
+        }
+        guard = getattr(self, "configuration_safety_guard", None)
+        if guard is not None:
+            validated = guard.validate_endpoint(normalized)
+            if dict(validated) != normalized:
+                raise ConfigurationSafetyError(
+                    "checkpoint endpoint changed during validation"
+                )
+            return normalized
+
+        location_model = getattr(getattr(self, "model", None), "location_model", None)
+        boundaries_getter = getattr(location_model, "get_boundaries", None)
+        if not callable(boundaries_getter):
+            raise ConfigurationSafetyError("global motion bounds are unavailable")
+        boundaries = boundaries_getter()
+        for axis in self._position_axes():
+            lower = int(boundaries["min"][axis])
+            upper = int(boundaries["max"][axis])
+            if lower > normalized[axis] or normalized[axis] > upper:
+                raise ConfigurationSafetyError(
+                    f"{axis}={normalized[axis]} is outside [{lower}, {upper}]"
+                )
+        return normalized
+
+    def _printer_head_cleaning_readiness(self):
+        """Return current, fail-closed evidence for a transient cleaning checkpoint."""
+
+        guard = getattr(self, "configuration_safety_guard", None)
+        authorizer = getattr(self, "saved_target_authorizer", None)
+        paths = getattr(self, "machine_data_paths", None)
+        governed_parts = (guard, authorizer, paths)
+        if any(part is not None for part in governed_parts) and not all(
+            part is not None for part in governed_parts
+        ):
+            return self._printer_head_cleaning_checkpoint_failure(
+                "configuration_safety_unavailable",
+                "The governed machine-data safety service is incomplete.",
+            )
+
+        if guard is not None:
+            readiness = self._configuration_capture_readiness()
+            if not readiness.get("ready"):
+                reasons = ", ".join(
+                    readiness.get("reason_codes") or ["machine_not_ready"]
+                )
+                return self._printer_head_cleaning_checkpoint_failure(
+                    "machine_not_ready",
+                    f"Machine position is not ready for printer-head cleaning: {reasons}.",
+                )
+            return {
+                "allowed": True,
+                "reason_code": "ready",
+                "message": "Printer-head cleaning position is ready.",
+                "position": copy.deepcopy(readiness["captured_position"]),
+                "machine_uuid": paths.machine_uuid,
+                "trust_epoch": readiness.get("trust_epoch"),
+                "captured_monotonic": readiness.get("captured_monotonic"),
+            }
+
+        machine_model = getattr(getattr(self, "model", None), "machine_model", None)
+        if machine_model is None:
+            return self._printer_head_cleaning_checkpoint_failure(
+                "machine_state_unavailable", "Machine state is unavailable."
+            )
+
+        connected_getter = getattr(machine_model, "is_connected", None)
+        try:
+            connected = bool(
+                connected_getter()
+                if callable(connected_getter)
+                else getattr(machine_model, "machine_connected", False)
+            )
+        except Exception:
+            connected = False
+        if not connected:
+            return self._printer_head_cleaning_checkpoint_failure(
+                "not_connected", "Connect to the machine before cleaning the printer head."
+            )
+
+        enabled_getter = getattr(machine_model, "motors_are_enabled", None)
+        try:
+            enabled = bool(
+                enabled_getter()
+                if callable(enabled_getter)
+                else getattr(machine_model, "motors_enabled", True)
+            )
+        except Exception:
+            enabled = False
+        homed_getter = getattr(machine_model, "motors_are_homed", None)
+        try:
+            homed = bool(
+                homed_getter()
+                if callable(homed_getter)
+                else getattr(machine_model, "motors_homed", False)
+            )
+        except Exception:
+            homed = False
+        if not enabled or not homed:
+            return self._printer_head_cleaning_checkpoint_failure(
+                "motors_not_ready",
+                "Enable and home the motors before cleaning the printer head.",
+            )
+
+        if bool(getattr(machine_model, "paused", False)) or bool(
+            getattr(machine_model, "transport_paused", False)
+        ):
+            return self._printer_head_cleaning_checkpoint_failure(
+                "motion_paused",
+                "Resume or recover the motion system before cleaning the printer head.",
+            )
+
+        recovery_getter = getattr(self, "get_xy_motion_recovery_state", None)
+        try:
+            recovery_state = recovery_getter() if callable(recovery_getter) else "idle"
+        except Exception:
+            recovery_state = "unavailable"
+        if str(recovery_state) != "idle":
+            return self._printer_head_cleaning_checkpoint_failure(
+                "motion_recovery_active",
+                "Finish motion recovery before cleaning the printer head.",
+            )
+
+        try:
+            queue_empty = bool(self.check_if_all_completed())
+        except Exception:
+            queue_empty = False
+        busy_getter = getattr(machine_model, "is_busy", None)
+        try:
+            machine_busy = bool(busy_getter()) if callable(busy_getter) else False
+        except Exception:
+            machine_busy = True
+        if not queue_empty or machine_busy:
+            return self._printer_head_cleaning_checkpoint_failure(
+                "command_queue_not_idle", "Wait for the command queue to become idle."
+            )
+
+        try:
+            reconciliation = self._advance_position_reconciliation()
+        except Exception:
+            reconciliation = {"state": "unavailable"}
+        if str(reconciliation.get("state") or "unavailable") != "settled":
+            return self._printer_head_cleaning_checkpoint_failure(
+                "position_reconciliation_pending",
+                "Wait for the reported XYZ position to reconcile after motion.",
+            )
+
+        position_getter = getattr(
+            machine_model,
+            "get_current_position_dict_capital",
+            getattr(machine_model, "get_current_position_dict", None),
+        )
+        try:
+            raw_position = position_getter() if callable(position_getter) else None
+            position = {
+                axis: int(raw_position[axis]) for axis in self._position_axes()
+            }
+            if any(
+                isinstance(raw_position[axis], bool)
+                or not math.isfinite(float(raw_position[axis]))
+                or int(raw_position[axis]) != raw_position[axis]
+                for axis in self._position_axes()
+            ):
+                raise ValueError("position must contain finite integer coordinates")
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return self._printer_head_cleaning_checkpoint_failure(
+                "position_invalid", "The current XYZ position could not be verified."
+            )
+        try:
+            position = self._validate_printer_head_cleaning_endpoint(position)
+        except (ConfigurationSafetyError, KeyError, TypeError, ValueError) as exc:
+            return self._printer_head_cleaning_checkpoint_failure(
+                "position_outside_global_bounds",
+                f"The current XYZ position is outside the allowed motion envelope: {exc}",
+            )
+
+        try:
+            expected = {
+                axis: int(self.expected_position[axis])
+                for axis in self._position_axes()
+            }
+        except (AttributeError, KeyError, TypeError, ValueError):
+            expected = None
+        if expected != position:
+            return self._printer_head_cleaning_checkpoint_failure(
+                "expected_position_mismatch",
+                "The reported XYZ position does not match the expected machine position.",
+            )
+
+        telemetry_getter = getattr(machine_model, "get_position_telemetry_snapshot", None)
+        telemetry = None
+        if callable(telemetry_getter):
+            try:
+                telemetry_now = self._position_reconciliation_now()
+                telemetry = telemetry_getter(
+                    now_monotonic=telemetry_now
+                )
+            except Exception:
+                telemetry = None
+            if not isinstance(telemetry, dict):
+                return self._printer_head_cleaning_checkpoint_failure(
+                    "position_telemetry_unavailable",
+                    "Fresh XYZ position telemetry is unavailable.",
+                )
+            telemetry_max_age_ms = self._position_reconciliation_timeout_ms()
+            axes = telemetry.get("axes", {})
+            for axis in self._position_axes():
+                evidence = axes.get(axis, {})
+                try:
+                    generation = int(evidence.get("generation", 0))
+                    age_ms = float(evidence["age_ms"])
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    generation = 0
+                    age_ms = math.inf
+                if (
+                    generation <= 0
+                    or not math.isfinite(age_ms)
+                    or age_ms > telemetry_max_age_ms
+                ):
+                    return self._printer_head_cleaning_checkpoint_failure(
+                        "position_telemetry_stale",
+                        "Wait for a fresh complete XYZ position update before cleaning.",
+                    )
+        return {
+            "allowed": True,
+            "reason_code": "ready",
+            "message": "Printer-head cleaning position is ready.",
+            "position": position,
+            "machine_uuid": None,
+            "trust_epoch": (
+                telemetry.get("trust_epoch") if isinstance(telemetry, dict) else None
+            ),
+            "captured_monotonic": self._position_reconciliation_now(),
+        }
+
+    def create_printer_head_cleaning_checkpoint(self):
+        """Capture one Controller-owned exact imager return position."""
+
+        self._printer_head_cleaning_checkpoint = None
+        if str(getattr(self, "expected_location", "") or "").strip().casefold() != "camera":
+            return self._printer_head_cleaning_checkpoint_failure(
+                "not_camera_context",
+                "Move through the Camera location before cleaning the printer head.",
+            )
+
+        readiness = self._printer_head_cleaning_readiness()
+        if not readiness.get("allowed"):
+            return readiness
+
+        checkpoint_id = str(uuid.uuid4())
+        self._printer_head_cleaning_checkpoint = {
+            "checkpoint_id": checkpoint_id,
+            "state": "active",
+            "machine_uuid": readiness.get("machine_uuid"),
+            "trust_epoch": readiness.get("trust_epoch"),
+            "captured_monotonic": readiness.get("captured_monotonic"),
+            "position": copy.deepcopy(readiness["position"]),
+            "attempt_count": 0,
+        }
+        return {
+            "allowed": True,
+            "checkpoint_id": checkpoint_id,
+            "position": copy.deepcopy(readiness["position"]),
+            "state": "active",
+        }
+
+    def _validate_printer_head_cleaning_checkpoint(self, checkpoint_id):
+        checkpoint = getattr(self, "_printer_head_cleaning_checkpoint", None)
+        if (
+            not isinstance(checkpoint, dict)
+            or str(checkpoint.get("checkpoint_id") or "") != str(checkpoint_id or "")
+        ):
+            return False, "checkpoint_unavailable", (
+                "The printer-head cleaning return checkpoint is unavailable."
+            )
+        if checkpoint.get("state") not in {"active", "returning"}:
+            return False, "checkpoint_not_active", (
+                "The printer-head cleaning return checkpoint is no longer active."
+            )
+
+        readiness = self._printer_head_cleaning_readiness()
+        if not readiness.get("allowed"):
+            return False, str(readiness.get("reason_code") or "machine_not_ready"), str(
+                readiness.get("message") or "Machine position is not ready."
+            )
+
+        if readiness.get("machine_uuid") != checkpoint.get("machine_uuid"):
+            checkpoint["state"] = "revoked"
+            return False, "machine_uuid_changed", (
+                "The authorized machine changed after the cleaning position was captured."
+            )
+        captured_epoch = checkpoint.get("trust_epoch")
+        if (
+            captured_epoch is not None
+            and readiness.get("trust_epoch") != captured_epoch
+        ):
+            checkpoint["state"] = "revoked"
+            return False, "motion_trust_epoch_changed", (
+                "Motion trust changed after the cleaning position was captured. "
+                "Reconnect and home before starting a new cleaning workflow."
+            )
+
+        try:
+            self._validate_printer_head_cleaning_endpoint(checkpoint["position"])
+        except (ConfigurationSafetyError, KeyError, TypeError, ValueError) as exc:
+            checkpoint["state"] = "revoked"
+            return False, "checkpoint_endpoint_invalid", (
+                f"The saved cleaning return position is outside the allowed motion envelope: {exc}"
+            )
+        return True, "ready", "Printer-head cleaning return is ready."
+
+    @contextmanager
+    def _printer_head_cleaning_return_motion_scope(self, checkpoint_id):
+        previous = getattr(self, "_printer_head_cleaning_return_scope", None)
+        self._printer_head_cleaning_return_scope = {
+            "checkpoint_id": str(checkpoint_id),
+            "scope_token": object(),
+        }
+        try:
+            yield
+        finally:
+            self._printer_head_cleaning_return_scope = previous
+
+    def _printer_head_cleaning_scope_authorization(self, **kwargs):
+        scope = getattr(self, "_printer_head_cleaning_return_scope", None)
+        if not isinstance(scope, dict):
+            return None
+        checkpoint = getattr(self, "_printer_head_cleaning_checkpoint", None)
+        if not isinstance(checkpoint, dict):
+            return False
+        try:
+            original = {
+                axis: int(kwargs["original_target"][axis])
+                for axis in self._position_axes()
+            }
+            final = {
+                axis: int(kwargs["final_target"][axis])
+                for axis in self._position_axes()
+            }
+        except (KeyError, TypeError, ValueError):
+            return False
+        checkpoint_position = dict(checkpoint.get("position") or {})
+        return bool(
+            checkpoint.get("state") == "returning"
+            and checkpoint.get("checkpoint_id") == scope.get("checkpoint_id")
+            and str(kwargs.get("name") or "").strip().casefold() == "camera"
+            and set(dict(kwargs.get("original_target") or {})) == set(self._position_axes())
+            and set(dict(kwargs.get("final_target") or {})) == set(self._position_axes())
+            and original == checkpoint_position
+            and final == checkpoint_position
+            and int(kwargs.get("x_offset", 0)) == 0
+            and int(kwargs.get("z_offset", 0)) == 0
+            and kwargs.get("manual") is True
+            and kwargs.get("override") is False
+            and kwargs.get("ignore_safe_height") is False
+        )
+
+    def return_to_printer_head_cleaning_checkpoint(
+        self, checkpoint_id, *, on_complete=None
+    ):
+        """Queue the ordinary Camera route to one exact session checkpoint."""
+
+        valid, reason_code, message = self._validate_printer_head_cleaning_checkpoint(
+            checkpoint_id
+        )
+        if not valid:
+            self.error_occurred_signal.emit("Move Blocked", message)
+            print(
+                "Move blocked by printer-head cleaning checkpoint: "
+                f"{reason_code}: {message}"
+            )
+            return False
+
+        checkpoint = self._printer_head_cleaning_checkpoint
+        checkpoint["state"] = "returning"
+        checkpoint["attempt_count"] = int(checkpoint.get("attempt_count", 0)) + 1
+        attempt_count = checkpoint["attempt_count"]
+
+        def complete_return():
+            current = getattr(self, "_printer_head_cleaning_checkpoint", None)
+            consumed = False
+            if (
+                isinstance(current, dict)
+                and current.get("checkpoint_id") == str(checkpoint_id)
+                and current.get("state") == "returning"
+                and current.get("attempt_count") == attempt_count
+            ):
+                current["state"] = "completed"
+                consumed = True
+            if consumed and callable(on_complete):
+                on_complete()
+
+        try:
+            with self._printer_head_cleaning_return_motion_scope(checkpoint_id):
+                queued = self.move_to_location(
+                    "camera",
+                    coords=copy.deepcopy(checkpoint["position"]),
+                    manual=True,
+                    override=False,
+                    ignore_safe_height=False,
+                    on_complete=complete_return,
+                )
+        except Exception:
+            current = getattr(self, "_printer_head_cleaning_checkpoint", None)
+            if isinstance(current, dict) and current.get("state") == "returning":
+                current["state"] = "active"
+            raise
+        if queued is False:
+            current = getattr(self, "_printer_head_cleaning_checkpoint", None)
+            if isinstance(current, dict) and current.get("state") == "returning":
+                current["state"] = "active"
+            return False
+        return True
+
+    def release_printer_head_cleaning_checkpoint(self, checkpoint_id):
+        """Invalidate one transient cleaning checkpoint without issuing motion."""
+
+        checkpoint = getattr(self, "_printer_head_cleaning_checkpoint", None)
+        if (
+            not isinstance(checkpoint, dict)
+            or checkpoint.get("checkpoint_id") != str(checkpoint_id or "")
+        ):
+            return False
+        checkpoint["state"] = "released"
+        self._printer_head_cleaning_checkpoint = None
+        return True
+
     def _saved_target_authorization_request(
         self,
         *,
@@ -9861,6 +10300,22 @@ class Controller(QObject):
         )
 
     def _authorize_saved_target(self, **kwargs):
+        cleaning_scope_allowed = self._printer_head_cleaning_scope_authorization(
+            **kwargs
+        )
+        if cleaning_scope_allowed is not None:
+            if cleaning_scope_allowed:
+                return True
+            message = (
+                "The printer-head cleaning return request does not match its "
+                "Controller-owned checkpoint."
+            )
+            self.error_occurred_signal.emit("Move Blocked", message)
+            print(
+                "Move blocked by printer-head cleaning checkpoint: "
+                f"checkpoint_target_mismatch: {message}"
+            )
+            return False
         authorizer = getattr(self, "saved_target_authorizer", None)
         request = self._saved_target_authorization_request(**kwargs)
         if request is None:

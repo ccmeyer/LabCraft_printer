@@ -204,6 +204,58 @@ def _build_droplet_dialog(
         move_to_location=_command_mock("move_to_location"),
         check_if_all_completed=Mock(return_value=True),
     )
+
+    checkpoint_counter = {"value": 0}
+    active_checkpoints = {}
+
+    def _create_cleaning_checkpoint():
+        raw = model.machine_model.get_current_position_dict()
+        try:
+            position = {axis: int(raw[axis]) for axis in ("X", "Y", "Z")}
+            if any(
+                isinstance(raw[axis], bool) or int(raw[axis]) != raw[axis]
+                for axis in ("X", "Y", "Z")
+            ):
+                raise ValueError("invalid coordinate")
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {
+                "allowed": False,
+                "reason_code": "position_invalid",
+                "message": "The current XYZ position could not be verified.",
+            }
+        checkpoint_counter["value"] += 1
+        checkpoint_id = f"cleaning-checkpoint-{checkpoint_counter['value']}"
+        active_checkpoints[checkpoint_id] = dict(position)
+        return {
+            "allowed": True,
+            "checkpoint_id": checkpoint_id,
+            "position": position,
+            "state": "active",
+        }
+
+    def _return_to_cleaning_checkpoint(checkpoint_id, *, on_complete=None):
+        position = active_checkpoints.get(str(checkpoint_id))
+        if position is None:
+            return False
+        return controller.move_to_location(
+            "camera",
+            coords=dict(position),
+            manual=True,
+            on_complete=on_complete,
+        )
+
+    def _release_cleaning_checkpoint(checkpoint_id):
+        return active_checkpoints.pop(str(checkpoint_id), None) is not None
+
+    controller.create_printer_head_cleaning_checkpoint = Mock(
+        side_effect=_create_cleaning_checkpoint
+    )
+    controller.return_to_printer_head_cleaning_checkpoint = Mock(
+        side_effect=_return_to_cleaning_checkpoint
+    )
+    controller.release_printer_head_cleaning_checkpoint = Mock(
+        side_effect=_release_cleaning_checkpoint
+    )
     if capture_ui_state is not None:
         controller.get_droplet_capture_ui_state = Mock(return_value=dict(capture_ui_state))
     else:
@@ -462,6 +514,9 @@ def test_head_cleaning_cancel_then_round_trip_restores_exact_position(monkeypatc
     qapp.processEvents()
     assert moves == []
     controller.stop_read_camera.assert_not_called()
+    controller.release_printer_head_cleaning_checkpoint.assert_called_with(
+        "cleaning-checkpoint-1"
+    )
 
     dialog.open_printer_head_cleaning_dialog()
     cleaning = dialog._printer_head_cleaning_dialog
@@ -478,6 +533,10 @@ def test_head_cleaning_cancel_then_round_trip_restores_exact_position(monkeypatc
     assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_AT_LOADING
     cleaning.return_button.click()
     assert cleaning.phase == PrinterHeadCleaningDialog.PHASE_RETURNING
+    controller.return_to_printer_head_cleaning_checkpoint.assert_called_once_with(
+        "cleaning-checkpoint-2",
+        on_complete=ANY,
+    )
     assert moves[1][0] == "camera"
     assert moves[1][1]["coords"] == {"X": 111, "Y": 222, "Z": 333}
     assert moves[1][1]["manual"] is True
@@ -488,6 +547,9 @@ def test_head_cleaning_cancel_then_round_trip_restores_exact_position(monkeypatc
     assert dialog._printer_head_cleaning_dialog is None
     assert dialog._read_camera_stream_armed is True
     assert controller.start_read_camera.call_count == 2
+    controller.release_printer_head_cleaning_checkpoint.assert_called_with(
+        "cleaning-checkpoint-2"
+    )
 
 
 def test_head_cleaning_completion_callback_wins_idle_monitor_race(monkeypatch, qapp):
@@ -589,6 +651,32 @@ def test_head_cleaning_preflight_blocks_unsafe_states(monkeypatch, qapp):
     controller.move_to_location.assert_not_called()
 
 
+def test_head_cleaning_construction_failure_releases_checkpoint(monkeypatch, qapp):
+    warnings = []
+    dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "warning",
+        lambda _parent, title, message: warnings.append((str(title), str(message))),
+    )
+
+    def fail_construction(*_args, **_kwargs):
+        raise RuntimeError("simulated construction failure")
+
+    monkeypatch.setattr(
+        "CalibrationClasses.View.PrinterHeadCleaningDialog",
+        fail_construction,
+    )
+
+    dialog.open_printer_head_cleaning_dialog()
+
+    assert dialog._printer_head_cleaning_dialog is None
+    controller.release_printer_head_cleaning_checkpoint.assert_called_once_with(
+        "cleaning-checkpoint-1"
+    )
+    assert "simulated construction failure" in warnings[-1][1]
+
+
 def test_head_cleaning_failed_dispatch_and_missing_callback_enter_recovery(monkeypatch, qapp):
     dialog, _refuel_model, controller = _build_droplet_dialog(monkeypatch, qapp)
     controller.move_to_location = Mock(return_value=False)
@@ -605,6 +693,9 @@ def test_head_cleaning_failed_dispatch_and_missing_callback_enter_recovery(monke
 
     cleaning.close_for_parent()
     qapp.processEvents()
+    controller.release_printer_head_cleaning_checkpoint.assert_called_with(
+        cleaning.return_checkpoint_id
+    )
     controller.move_to_location = Mock(return_value=object())
     dialog.open_printer_head_cleaning_dialog()
     cleaning = dialog._printer_head_cleaning_dialog
@@ -701,6 +792,9 @@ def test_head_cleaning_requires_explicit_loading_choice_and_exit_stays_at_loadin
     assert moves == [("loading", moves[0][1])]
     assert dialog.isVisible() is False
     assert dialog._printer_head_cleaning_dialog is None
+    controller.release_printer_head_cleaning_checkpoint.assert_called_with(
+        cleaning.return_checkpoint_id
+    )
 
 
 def test_legacy_full_rgb_detection_checkbox_toggles_profile_and_is_not_persisted(monkeypatch, qapp):

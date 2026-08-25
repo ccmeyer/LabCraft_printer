@@ -33,6 +33,7 @@ import shutil
 import csv
 import math
 import re
+import uuid
 from pathlib import Path
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import matplotlib.pyplot as plt
@@ -505,6 +506,8 @@ class ExperimentModel(QObject):
     MAX_GENERATED_REACTIONS = 10_000
     MAX_SUBSET_SOURCE_COMBINATIONS = 10_000
     MAX_SUBSET_INTERMEDIATE_ROWS = 10_000
+    STOCK_PREP_SCHEMA_NAME = "labcraft.stock_prep"
+    STOCK_PREP_SCHEMA_VERSION = 1
 
     # Signals to mirror the classic API
     stock_updated = Signal()
@@ -557,6 +560,10 @@ class ExperimentModel(QObject):
             new_experiment_policy()
         )
         self.stock_prep_state: Dict[str, Any] = self._default_stock_prep_state()
+        self._stock_prep_worksheet_state: Dict[str, Any] | None = None
+        self._stock_prep_worksheet_warning: str | None = None
+        self._stock_prep_worksheet_source: str | None = None
+        self._stock_prep_worksheet_loaded_path: str | None = None
         self.applied_imaging_calibrations: Dict[str, Any] = {
             "schema_version": 1,
             "records": {},
@@ -591,6 +598,7 @@ class ExperimentModel(QObject):
         self.calibration_recordings_dir_path: Optional[str] = None
         self.calibration_index_file_path: Optional[str] = None
         self.experiment_audit_file_path: Optional[str] = None
+        self.stock_prep_file_path: Optional[str] = None
         self.execution_plan_file_path: Optional[str] = None
         self.execution_plan_revisions_dir_path: Optional[str] = None
         self.execution_calibrations_file_path: Optional[str] = None
@@ -973,21 +981,429 @@ class ExperimentModel(QObject):
         concentration = format(float((row or {}).get("stock_concentration", 0.0) or 0.0), ".12g")
         return "|".join([factor_name, option_name, concentration, units])
 
+    @staticmethod
+    def build_stock_prep_stock_id(row) -> str:
+        """Return the stock ID used by finalized execution plans."""
+        reagent_name = str(
+            (row or {}).get("option_name")
+            or (row or {}).get("factor_name")
+            or ""
+        ).strip()
+        units = str((row or {}).get("units", "") or "").strip()
+        concentration = float(
+            (row or {}).get("stock_concentration", 0.0) or 0.0
+        )
+        return f"{reagent_name}_{concentration:.2f}_{units}"
+
+    def _stock_prep_plan_for_rows(self):
+        """Return the usable plan and whether authoritative state is invalid."""
+        plan = self.get_execution_plan_snapshot()
+        source = self.get_execution_plan_source()
+        if source == "persisted_execution_plan":
+            bundle = self.get_authoritative_execution_bundle()
+            if bundle is None or not bundle.valid or bundle.plan is None:
+                return None, True
+            return bundle.plan, False
+        if source == "legacy_reconstruction":
+            reconstruction = getattr(self, "_legacy_execution_reconstruction", None)
+            if (
+                reconstruction is None
+                or reconstruction.plan is None
+                or reconstruction.has_fatal_issues
+            ):
+                return None, True
+            return reconstruction.plan, False
+        return plan, False
+
+    def get_stock_prep_rows(self) -> List[Dict[str, Any]]:
+        """Return non-fill stock requirements from the current frozen plan."""
+        plan, invalid_authoritative = self._stock_prep_plan_for_rows()
+        if invalid_authoritative:
+            return []
+        if plan is None:
+            rows = []
+            for raw_row in self.get_stock_table_rows(include_fill=False):
+                row = dict(raw_row)
+                try:
+                    row["stock_id"] = self.build_stock_prep_stock_id(row)
+                except Exception:
+                    continue
+                rows.append(row)
+            return rows
+
+        totals = {stock.stock_id: 0 for stock in plan.stocks}
+        for well in plan.wells:
+            for dispense in well.dispenses:
+                if dispense.stock_id in totals:
+                    totals[dispense.stock_id] += int(dispense.target_dispenses)
+
+        fill_name = str(self.metadata.get("fill_reagent_name", "Water"))
+        rows = []
+        for stock in plan.stocks:
+            if stock.reagent_name == fill_name and stock.units == "--":
+                continue
+            total_droplets = totals[stock.stock_id]
+            rows.append(
+                {
+                    "stock_id": stock.stock_id,
+                    "factor_name": stock.factor_name,
+                    "option_name": stock.option_name or "",
+                    "stock_concentration": float(stock.concentration),
+                    "units": stock.units,
+                    "droplet_volume_nL": float(stock.effective_volume_nL),
+                    "total_droplets": total_droplets,
+                    "total_volume_uL": round(
+                        total_droplets * float(stock.effective_volume_nL) / 1000.0,
+                        3,
+                    ),
+                }
+            )
+        return rows
+
+    def _current_stock_prep_binding(self) -> tuple[str | None, int]:
+        plan, invalid_authoritative = self._stock_prep_plan_for_rows()
+        if invalid_authoritative or plan is None:
+            return None, 1
+        return str(plan.plan_id), int(plan.plan_revision)
+
+    def _default_stock_prep_worksheet_state(self) -> Dict[str, Any]:
+        plan_id, plan_revision = self._current_stock_prep_binding()
+        defaults = self._default_stock_prep_state()["defaults"]
+        return {
+            "schema_name": self.STOCK_PREP_SCHEMA_NAME,
+            "schema_version": self.STOCK_PREP_SCHEMA_VERSION,
+            "plan_id": plan_id,
+            "plan_revision": plan_revision,
+            "defaults": dict(defaults),
+            "entries": {},
+        }
+
+    def _normalize_stock_prep_worksheet_document(
+        self,
+        raw_state: Any,
+    ) -> Dict[str, Any]:
+        if not isinstance(raw_state, dict):
+            raise ValueError("stock_prep.json must contain an object")
+        if raw_state.get("schema_name") != self.STOCK_PREP_SCHEMA_NAME:
+            raise ValueError("stock_prep.json has an unsupported schema name")
+        schema_version = raw_state.get("schema_version")
+        if (
+            type(schema_version) is not int
+            or schema_version != self.STOCK_PREP_SCHEMA_VERSION
+        ):
+            raise ValueError("stock_prep.json has an unsupported schema version")
+
+        plan_id = raw_state.get("plan_id")
+        if plan_id is not None:
+            if not isinstance(plan_id, str):
+                raise ValueError("stock_prep.json plan_id must be a UUID or null")
+            parsed_plan_id = uuid.UUID(plan_id)
+            if str(parsed_plan_id) != plan_id:
+                raise ValueError("stock_prep.json plan_id is not canonical")
+
+        plan_revision = raw_state.get("plan_revision")
+        if type(plan_revision) is not int or plan_revision < 1:
+            raise ValueError("stock_prep.json plan_revision must be a positive integer")
+        if plan_id is None and plan_revision != 1:
+            raise ValueError("stock_prep.json has an invalid draft binding")
+
+        normalized = self._default_stock_prep_worksheet_state()
+        normalized["plan_id"] = plan_id
+        normalized["plan_revision"] = plan_revision
+        raw_defaults = raw_state.get("defaults")
+        if isinstance(raw_defaults, dict):
+            for key in ("dead_volume_extra_uL", "calibration_extra_uL"):
+                raw_value = raw_defaults.get(key, normalized["defaults"][key])
+                if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+                    continue
+                value = float(raw_value)
+                if math.isfinite(value) and value >= 0.0:
+                    normalized["defaults"][key] = value
+
+        entries: Dict[str, Dict[str, float]] = {}
+        raw_entries = raw_state.get("entries")
+        if isinstance(raw_entries, dict):
+            for stock_id, entry in raw_entries.items():
+                if not isinstance(stock_id, str) or not stock_id or not isinstance(entry, dict):
+                    continue
+                raw_prep_volume = entry.get("prep_volume_uL")
+                raw_source_concentration = entry.get("source_concentration")
+                if (
+                    isinstance(raw_prep_volume, bool)
+                    or not isinstance(raw_prep_volume, (int, float))
+                    or isinstance(raw_source_concentration, bool)
+                    or not isinstance(raw_source_concentration, (int, float))
+                ):
+                    continue
+                prep_volume = float(raw_prep_volume)
+                source_concentration = float(raw_source_concentration)
+                if not (
+                    math.isfinite(prep_volume)
+                    and math.isfinite(source_concentration)
+                    and prep_volume >= 0.0
+                    and source_concentration >= 0.0
+                ):
+                    continue
+                entries[stock_id] = {
+                    "prep_volume_uL": prep_volume,
+                    "source_concentration": source_concentration,
+                }
+        normalized["entries"] = entries
+        return normalized
+
+    def _legacy_stock_prep_worksheet_state(self) -> Dict[str, Any]:
+        state = self._default_stock_prep_worksheet_state()
+        legacy = self.stock_prep_state if isinstance(self.stock_prep_state, dict) else {}
+        legacy_defaults = legacy.get("defaults")
+        if isinstance(legacy_defaults, dict):
+            for key in ("dead_volume_extra_uL", "calibration_extra_uL"):
+                try:
+                    value = float(legacy_defaults.get(key, state["defaults"][key]))
+                except Exception:
+                    continue
+                if math.isfinite(value) and value >= 0.0:
+                    state["defaults"][key] = value
+
+        legacy_entries = legacy.get("entries")
+        if not isinstance(legacy_entries, dict):
+            return state
+        for row in self.get_stock_prep_rows():
+            entry = legacy_entries.get(self.build_stock_prep_key(row))
+            if not isinstance(entry, dict):
+                continue
+            try:
+                prep_volume = float(entry.get("prep_volume_uL", 0.0))
+                source_concentration = float(entry.get("source_concentration", 0.0))
+            except Exception:
+                continue
+            if not (
+                math.isfinite(prep_volume)
+                and math.isfinite(source_concentration)
+                and prep_volume >= 0.0
+                and source_concentration >= 0.0
+            ):
+                continue
+            state["entries"][str(row["stock_id"])] = {
+                "prep_volume_uL": prep_volume,
+                "source_concentration": source_concentration,
+            }
+        return state
+
+    def _align_stock_prep_worksheet_to_current_plan(
+        self,
+        state: Dict[str, Any],
+    ) -> tuple[Dict[str, Any], bool]:
+        aligned = copy.deepcopy(state)
+        plan_id, plan_revision = self._current_stock_prep_binding()
+        rebound = (
+            aligned.get("plan_id") != plan_id
+            or aligned.get("plan_revision") != plan_revision
+        )
+        valid_stock_ids = {
+            str(row["stock_id"])
+            for row in self.get_stock_prep_rows()
+            if row.get("stock_id")
+        }
+        entries = aligned.get("entries") if isinstance(aligned.get("entries"), dict) else {}
+        aligned["entries"] = {
+            stock_id: dict(entry)
+            for stock_id, entry in entries.items()
+            if stock_id in valid_stock_ids and isinstance(entry, dict)
+        }
+        aligned["plan_id"] = plan_id
+        aligned["plan_revision"] = plan_revision
+        return aligned, rebound
+
+    def load_stock_prep_worksheet(self, *, force: bool = False) -> Dict[str, Any]:
+        path = self.stock_prep_file_path
+        resolved_path = str(Path(path).resolve()) if path else None
+        if (
+            not force
+            and self._stock_prep_worksheet_state is not None
+            and self._stock_prep_worksheet_loaded_path == resolved_path
+        ):
+            aligned, rebound = self._align_stock_prep_worksheet_to_current_plan(
+                self._stock_prep_worksheet_state
+            )
+            self._stock_prep_worksheet_state = aligned
+            if rebound and self._stock_prep_worksheet_source == "sidecar":
+                self._stock_prep_worksheet_warning = (
+                    "Stock prep values were matched to the current execution by exact stock ID; "
+                    "unmatched values were ignored."
+                )
+            return copy.deepcopy(aligned)
+
+        warning = None
+        source = "defaults"
+        if path and os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    raw_state = json.load(handle)
+                state = self._normalize_stock_prep_worksheet_document(raw_state)
+                source = "sidecar"
+            except Exception as exc:
+                state = self._default_stock_prep_worksheet_state()
+                source = "invalid_sidecar"
+                warning = (
+                    f"The saved stock prep worksheet could not be loaded: {exc}. "
+                    "Defaults are shown; execution is unaffected."
+                )
+        else:
+            state = self._legacy_stock_prep_worksheet_state()
+            if state["entries"] or state["defaults"] != self._default_stock_prep_state()["defaults"]:
+                source = "legacy_embedded"
+                warning = (
+                    "Legacy stock prep values were loaded from the frozen experiment design. "
+                    "They will be copied into stock_prep.json when this writable worksheet is saved."
+                )
+
+        state, rebound = self._align_stock_prep_worksheet_to_current_plan(state)
+        if rebound and source == "sidecar":
+            warning = (
+                "Stock prep values were matched to the current execution by exact stock ID; "
+                "unmatched values were ignored."
+            )
+        self._stock_prep_worksheet_state = state
+        self._stock_prep_worksheet_warning = warning
+        self._stock_prep_worksheet_source = source
+        self._stock_prep_worksheet_loaded_path = resolved_path
+        return copy.deepcopy(state)
+
+    def get_stock_prep_worksheet_warning(self) -> str | None:
+        self.load_stock_prep_worksheet()
+        return self._stock_prep_worksheet_warning
+
+    def get_stock_prep_worksheet_source(self) -> str | None:
+        self.load_stock_prep_worksheet()
+        return self._stock_prep_worksheet_source
+
+    def can_persist_stock_prep_worksheet(self) -> bool:
+        if self.is_read_only_legacy_execution():
+            return False
+        plan, invalid_authoritative = self._stock_prep_plan_for_rows()
+        if invalid_authoritative:
+            return False
+        if plan is None:
+            return True
+        return plan.state in {
+            ExecutionPlanState.PREPARED,
+            ExecutionPlanState.ACTIVE,
+        }
+
     def get_stock_prep_defaults(self) -> Dict[str, float]:
-        defaults = self.stock_prep_state.get("defaults", {}) if isinstance(self.stock_prep_state, dict) else {}
+        defaults = self.load_stock_prep_worksheet().get("defaults", {})
         return {
             "dead_volume_extra_uL": float(defaults.get("dead_volume_extra_uL", 20.0) or 0.0),
             "calibration_extra_uL": float(defaults.get("calibration_extra_uL", 10.0) or 0.0),
         }
 
     def get_stock_prep_entry(self, row) -> Dict[str, Any] | None:
-        entries = self.stock_prep_state.get("entries", {}) if isinstance(self.stock_prep_state, dict) else {}
+        entries = self.load_stock_prep_worksheet().get("entries", {})
         if not isinstance(entries, dict):
             return None
-        entry = entries.get(self.build_stock_prep_key(row))
+        stock_id = str((row or {}).get("stock_id") or "")
+        if not stock_id:
+            try:
+                stock_id = self.build_stock_prep_stock_id(row)
+            except Exception:
+                return None
+        entry = entries.get(stock_id)
         if not isinstance(entry, dict):
             return None
         return dict(entry)
+
+    def save_stock_prep_worksheet(
+        self,
+        rows,
+        *,
+        dead_volume_extra_uL: float,
+        calibration_extra_uL: float,
+    ) -> Dict[str, Any]:
+        if not self.can_persist_stock_prep_worksheet():
+            raise RuntimeError("This stock prep worksheet is read-only.")
+        defaults = self._default_stock_prep_state()["defaults"]
+        if isinstance(dead_volume_extra_uL, bool) or not isinstance(
+            dead_volume_extra_uL, (int, float)
+        ):
+            dead_value = defaults["dead_volume_extra_uL"]
+        else:
+            dead_value = float(dead_volume_extra_uL)
+        if isinstance(calibration_extra_uL, bool) or not isinstance(
+            calibration_extra_uL, (int, float)
+        ):
+            calibration_value = defaults["calibration_extra_uL"]
+        else:
+            calibration_value = float(calibration_extra_uL)
+
+        if not math.isfinite(dead_value) or dead_value < 0.0:
+            dead_value = defaults["dead_volume_extra_uL"]
+        if not math.isfinite(calibration_value) or calibration_value < 0.0:
+            calibration_value = defaults["calibration_extra_uL"]
+
+        valid_stock_ids = {
+            str(row["stock_id"])
+            for row in self.get_stock_prep_rows()
+            if row.get("stock_id")
+        }
+        entries: Dict[str, Dict[str, float]] = {}
+        for row in rows or []:
+            try:
+                stock_id = str((row or {}).get("stock_id") or "")
+                if not stock_id:
+                    stock_id = self.build_stock_prep_stock_id(row)
+                raw_prep_volume = (row or {}).get("prep_volume_uL")
+                raw_source_concentration = (row or {}).get("source_concentration")
+            except Exception:
+                continue
+            if (
+                isinstance(raw_prep_volume, bool)
+                or not isinstance(raw_prep_volume, (int, float))
+                or isinstance(raw_source_concentration, bool)
+                or not isinstance(raw_source_concentration, (int, float))
+            ):
+                continue
+            prep_volume_uL = float(raw_prep_volume)
+            source_concentration = float(raw_source_concentration)
+            if not (
+                math.isfinite(prep_volume_uL)
+                and math.isfinite(source_concentration)
+            ):
+                continue
+            if prep_volume_uL < 0.0 or source_concentration < 0.0:
+                continue
+            if stock_id not in valid_stock_ids:
+                continue
+
+            entries[stock_id] = {
+                "prep_volume_uL": prep_volume_uL,
+                "source_concentration": source_concentration,
+            }
+
+        plan_id, plan_revision = self._current_stock_prep_binding()
+        state = {
+            "schema_name": self.STOCK_PREP_SCHEMA_NAME,
+            "schema_version": self.STOCK_PREP_SCHEMA_VERSION,
+            "plan_id": plan_id,
+            "plan_revision": plan_revision,
+            "defaults": {
+                "dead_volume_extra_uL": dead_value,
+                "calibration_extra_uL": calibration_value,
+            },
+            "entries": entries,
+        }
+        if self.stock_prep_file_path:
+            self._atomic_json_dump(self.stock_prep_file_path, state)
+        self._stock_prep_worksheet_state = copy.deepcopy(state)
+        self._stock_prep_worksheet_warning = None
+        self._stock_prep_worksheet_source = (
+            "sidecar" if self.stock_prep_file_path else "memory"
+        )
+        self._stock_prep_worksheet_loaded_path = (
+            str(Path(self.stock_prep_file_path).resolve())
+            if self.stock_prep_file_path
+            else None
+        )
+        return copy.deepcopy(state)
 
     def set_stock_prep_snapshot(
         self,
@@ -995,61 +1411,13 @@ class ExperimentModel(QObject):
         *,
         dead_volume_extra_uL: float,
         calibration_extra_uL: float,
-    ) -> None:
-        defaults = self._default_stock_prep_state()["defaults"]
-        try:
-            dead_value = float(dead_volume_extra_uL)
-        except Exception:
-            dead_value = defaults["dead_volume_extra_uL"]
-        try:
-            calibration_value = float(calibration_extra_uL)
-        except Exception:
-            calibration_value = defaults["calibration_extra_uL"]
-
-        if not math.isfinite(dead_value) or dead_value < 0.0:
-            dead_value = defaults["dead_volume_extra_uL"]
-        if not math.isfinite(calibration_value) or calibration_value < 0.0:
-            calibration_value = defaults["calibration_extra_uL"]
-
-        entries: Dict[str, Dict[str, Any]] = {}
-        for row in rows or []:
-            try:
-                factor_name = str((row or {}).get("factor_name", "") or "")
-                option_name = str((row or {}).get("option_name", "") or "")
-                stock_concentration = float((row or {}).get("stock_concentration", 0.0) or 0.0)
-                units = str((row or {}).get("units", "") or "")
-                prep_volume_uL = float((row or {}).get("prep_volume_uL", 0.0) or 0.0)
-                source_concentration = float((row or {}).get("source_concentration", 0.0) or 0.0)
-            except Exception:
-                continue
-            if not (
-                math.isfinite(stock_concentration)
-                and math.isfinite(prep_volume_uL)
-                and math.isfinite(source_concentration)
-            ):
-                continue
-            if prep_volume_uL < 0.0 or source_concentration < 0.0:
-                continue
-
-            key = self.build_stock_prep_key(row)
-            entries[key] = {
-                "factor_name": factor_name,
-                "option_name": option_name,
-                "stock_concentration": stock_concentration,
-                "units": units,
-                "prep_volume_uL": prep_volume_uL,
-                "source_concentration": source_concentration,
-            }
-
-        self.stock_prep_state = {
-            "version": 1,
-            "defaults": {
-                "dead_volume_extra_uL": dead_value,
-                "calibration_extra_uL": calibration_value,
-            },
-            "entries": entries,
-        }
-        self.unsaved_changes = True
+    ) -> Dict[str, Any]:
+        """Compatibility wrapper for callers predating stock_prep.json."""
+        return self.save_stock_prep_worksheet(
+            rows,
+            dead_volume_extra_uL=dead_volume_extra_uL,
+            calibration_extra_uL=calibration_extra_uL,
+        )
 
     def _allow_two_from_metadata(self) -> bool:
         return bool(self.metadata.get("allow_two_stock_solutions", False))
@@ -7251,6 +7619,10 @@ class ExperimentModel(QObject):
         )
         self._sync_calibration_storage_policy_to_manager()
         self.stock_prep_state = self._normalize_stock_prep_state(d.get("stock_prep"))
+        self._stock_prep_worksheet_state = None
+        self._stock_prep_worksheet_warning = None
+        self._stock_prep_worksheet_source = None
+        self._stock_prep_worksheet_loaded_path = None
         self.additional_conditions = self._normalize_additional_conditions(
             d.get("additional_conditions")
         )
@@ -7656,6 +8028,7 @@ class ExperimentModel(QObject):
             self.experiment_dir_path, "calibration_index.jsonl"
         )
         self.experiment_audit_file_path = os.path.join(self.experiment_dir_path, "experiment_audit.jsonl")
+        self.stock_prep_file_path = os.path.join(self.experiment_dir_path, "stock_prep.json")
         self.execution_plan_file_path = os.path.join(self.experiment_dir_path, "execution_plan.json")
         self.execution_plan_revisions_dir_path = os.path.join(
             self.experiment_dir_path, REVISION_DIRECTORY_NAME
@@ -12788,6 +13161,10 @@ class ExperimentModel(QObject):
         self.calibration_storage_policy = new_experiment_policy()
         self._sync_calibration_storage_policy_to_manager()
         self.stock_prep_state = self._default_stock_prep_state()
+        self._stock_prep_worksheet_state = None
+        self._stock_prep_worksheet_warning = None
+        self._stock_prep_worksheet_source = None
+        self._stock_prep_worksheet_loaded_path = None
         self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(None)
         self.manual_refuel_checks = self._normalize_manual_refuel_checks(None)
         self.plans_per_option.clear()
@@ -12808,6 +13185,7 @@ class ExperimentModel(QObject):
         self.calibration_recordings_dir_path = None
         self.calibration_index_file_path = None
         self.experiment_audit_file_path = None
+        self.stock_prep_file_path = None
         self.execution_plan_file_path = None
         self.execution_plan_revisions_dir_path = None
         self.execution_calibrations_file_path = None

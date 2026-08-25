@@ -2291,6 +2291,7 @@ Hardware use is last. It requires:
 | 2026-08-24 | Replace pre-home reconciliation at homing completion with a fresh exact Home telemetry barrier | A trust-epoch transition invalidates the old endpoint; readiness must be proved by a complete post-home X/Y/Z generation |
 | 2026-08-24 | Make all rack-calibration travel Controller-owned and session-bound at Z=500 | View-owned overrides allowed rack-directed XY before the qualified travel plane and could not provide stale-callback or interruption guarantees |
 | 2026-08-24 | Treat unverified rack anchors as manual-first guidance from X clearance at Z=500 | Revoked rack Z cannot authorize descent; a safe-height stop preserves an attended recovery path without trusting it |
+| 2026-08-24 | Treat the printer-head cleaning return point as a Controller-owned in-memory session checkpoint, not as the canonical Camera target | The exact imager point is transient workflow state. A machine/trust-bound token can authorize only its exact zero-offset Camera return through the ordinary guarded route without weakening saved-target authorization for any other coordinate request |
 
 ### Open decisions
 
@@ -2359,6 +2360,7 @@ Hardware use is last. It requires:
 | 2026-08-24 | Attended calibration follow-up | Home completion advanced the motion trust epoch but retained a reconciliation record for the pre-home queue endpoint, allowing a misleading mismatch to outrank the missing-head diagnosis | Discard the old record and start a fresh all-axis Home barrier before any configuration capture can become ready |
 | 2026-08-24 | Attended rack collision investigation | Rack Calibration still delegated initial and inter-anchor motion to the View; its initial route approached Left in XY without first proving Z=500 | Replace every rack route with explicit Controller-owned Z/XY steps and open the motion-free dialog only after queue drain plus exact telemetry reconciliation |
 | 2026-08-24 | Rc.7 exact-tag legacy rehearsal | Direct rc.1 activation reached the active pointer but rc.7 rejected genesis enrollment because only rc.2/rc.3 were approved target versions | Block direct legacy rollout of rc.7; in rc.8 grant one-shot enrollment only inside the reviewed activation transaction, require exact legacy migration/verification/activation evidence, and durably create the anchor before publishing the pointer |
+| 2026-08-24 | Printer-head cleaning return regression | The cleaning dialog passed its transient pre-cleaning XYZ snapshot to `move_to_location("camera", coords=...)`; saved-target authorization correctly treated those differing values as a changed canonical Camera target and blocked before queuing the return | Keep ordinary custom Camera requests fail-closed; capture the transient position in a Controller-owned runtime checkpoint and allow only its exact token-bound return after live machine, telemetry, trust, queue, and endpoint revalidation |
 
 Add findings here as work proceeds. Do not rewrite prior findings to hide an
 earlier assumption; add a correction with date and evidence.
@@ -2437,6 +2439,7 @@ The work is complete only when:
 
 | Date | Change |
 | --- | --- |
+| 2026-08-24 | Recorded the printer-head cleaning return regression and the Controller-owned, runtime-only checkpoint decision that preserves the canonical Camera saved-target gate. |
 | 2026-08-24 | Added the homing/rack-travel collision correction: fresh post-home exact telemetry reconciliation, deterministic missing-head preflight, Controller-owned token-bound rack motion, Z=500 travel ordering, manual-first unverified entry, and fail-closed interruption handling. |
 | 2026-08-24 | Added the post-rc.6 position-verification correction: evidence-validated Save/Modify authorization, read-only checkbox verification for ordinary targets, calibration-specific recovery guidance, atomic plate/Pause Z derivation, actionable blocked-move UI, and a plate-installed pre-motion acknowledgement. |
 | 2026-08-24 | Prepared rc.7 release documentation after merging endpoint-safe motion and the verified plate/rack calibration corrections; advanced current Pi firmware/hardware recovery examples from rc.5 to rc.7. |

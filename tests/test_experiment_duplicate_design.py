@@ -79,6 +79,20 @@ def test_duplicate_design_from_source_creates_fresh_run_state(tmp_path):
     _configure_factor_design(source_model)
     source_dir = tmp_path / "source"
     _write_source_artifacts(source_model, source_dir)
+    stock_rows = source_model.get_stock_prep_rows()
+    source_model.save_stock_prep_worksheet(
+        [
+            {
+                **row,
+                "prep_volume_uL": float(row["total_volume_uL"]) + 30.0,
+                "source_concentration": float(row["stock_concentration"]) * 2.0,
+            }
+            for row in stock_rows
+        ],
+        dead_volume_extra_uL=20.0,
+        calibration_extra_uL=10.0,
+    )
+    assert (source_dir / "stock_prep.json").is_file()
 
     source_design_path = source_dir / "experiment_design.json"
     source_progress_path = source_dir / "progress.json"
@@ -127,6 +141,7 @@ def test_duplicate_design_from_source_creates_fresh_run_state(tmp_path):
     assert not (duplicate_dir / "execution_plan.json").exists()
     assert not (duplicate_dir / "execution_resume.json").exists()
     assert not (duplicate_dir / "execution_calibrations.json").exists()
+    assert not (duplicate_dir / "stock_prep.json").exists()
 
     status = duplicate_model.get_progress_status(str(duplicate_dir / "progress.json"))
     assert status["has_printed_progress"] is False

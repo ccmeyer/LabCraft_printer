@@ -726,7 +726,7 @@ def test_completed_loader_inspects_terminal_bundle_without_activation(
     start_button = QtWidgets.QPushButton("Experiment Complete")
     start_button.setEnabled(False)
     stock_prep_button = QtWidgets.QPushButton()
-    stock_prep_button.setEnabled(False)
+    stock_prep_button.setEnabled(True)
     calibration_button = QtWidgets.QPushButton()
     calibration_button.setEnabled(False)
     printer_head_calibration_button = QtWidgets.QPushButton(
