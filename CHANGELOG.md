@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.3.0-rc.10 - 2026-08-25
+
+### Fixed
+
+- Made fill calibration preview and application share one authoritative calculation from the immutable finalized execution plan. Sparse uploaded designs retain their exact explicit well IDs, while preview and committed revisions use identical old/new droplet counts and totals.
+- Made printer-head calibration identity durable across object reconstruction by consistently preferring `printer_head_id`, then `serial`, then legacy `id`. A genuinely different durable head remains ineligible for the recorded calibration.
+- Made machine interruptions terminate droplet-calibration work immediately and idempotently. Disconnect, serial loss, reset, transport faults, queue clearing, pause, and homing interruption now cancel pending capture without recovery hardware actions, clear queued work, close active sequences, and prevent late callbacks from reviving work.
+- Refreshed selected calibration result readiness when connection, busy, capture, fault, dirty-shutdown, and gripper context changes. An open fill-calibration dialog now regains preview and Apply readiness after reconnect and same-head reconstruction without row reselection.
+- Corrected SIL workflow handling for delayed printable-well dialogs, deleted Qt wrappers, and calibration results hidden by an older result-set filter. The terminal-label oracle now distinguishes **Array Complete** while the final head remains loaded from **Experiment Complete** after that head is returned.
+
+### Changed
+
+- Added explicit, default-cancelled **Record diagnostic calibration?** consent for progressed, terminal, or known out-of-plan stocks. Confirmed diagnostic results remain recorded for analysis but cannot modify the current design or execution.
+- Routed pressure sweep, manual characterization, online stream calibration, recheck, Calibrate All, stream sequences, and pulse-width sweeps through the same non-sticky diagnostic-consent eligibility check.
+
+### Safety and compatibility
+
+- Printed-progress and terminal execution safeguards remain authoritative for fill and non-fill stocks. Diagnostic confirmation never bypasses Apply eligibility, and missing identity, unreadable progress, runtime mismatch, inactive persisted execution, and historical/read-only execution remain hard blockers.
+- Disconnect cleanup never initiates capture-recovery hardware actions. Ordinary user Stop behavior remains graceful and all existing execution, progress, storage, and canonical-result integrity checks remain fail-closed.
+- Device protocol, execution-plan and calibration-record schemas, machine-data schema version 1, update preservation contract, dependencies, and firmware source are unchanged.
+- The bundled firmware is byte-identical to rc.7, rc.8, and rc.9: 367,968 bytes with SHA-256 `1FEC7C6C8D3C0022844695CDF51A860539BCFBDA291BB18C12A99062C7A32577`. Direct legacy upgrades must still deploy and verify this exact artifact.
+
+### Validation
+
+- Focused fill lifecycle SIL, fill requantization, durable identity, calibration audit, interruption/capture, reconnect UI, and workflow-harness regressions passed on the merged release candidate.
+- Complete Python suite passed 5,843 tests with 158 expected skips; release-metadata validation, strict release-JSON parsing, firmware identity, and static diff checks passed on the release candidate.
+- During attended LC-001 verification at exact pushed implementation commit `465446ba`, the operator confirmed the simulated fill-calibration workflow behaved as intended. A separate hardware-capable window-only launch exited normally; exact released-firmware restoration then passed strict SAFE 30/30, final production readiness was true, and no related process remained.
+
+### Rollback
+
+- The reviewed application rollback target remains stable `v1.2.0`. Because it predates external machine data, use only the support-guided compatibility export and restore its paired firmware.
+- Do not manually edit authoritative execution files, calibration history, machine data, or firmware-state evidence during rollback.
+
 ## v1.3.0-rc.9 - 2026-08-25
 
 ### Fixed
