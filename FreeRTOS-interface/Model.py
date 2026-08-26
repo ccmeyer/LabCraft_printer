@@ -5,7 +5,7 @@ import copy
 from dataclasses import dataclass, field, replace
 from math import gcd
 from numbers import Integral, Real
-from functools import reduce
+from functools import cmp_to_key, reduce
 from typing import List, Dict, Tuple, Optional, Any, Set, Iterable, Mapping, Callable
 
 from PySide6 import QtCore, QtWidgets, QtGui
@@ -488,6 +488,8 @@ class TwoStockPlan:
     max_volume_nL: float
     conc_sum: float
     n_stocks: int = 2
+    target_rows: Dict[float, Dict[str, Any]] = field(default_factory=dict)
+    fits_nominal_volume: bool = True
 
 
 @dataclass(frozen=True)
@@ -1519,20 +1521,13 @@ class ExperimentModel(QObject):
             concentration_burden = float(plan.stock_concentration)
             n_stocks = 1
         else:
-            rows = [
-                self._evaluate_two_stock_target(
-                    t_final=float(target),
-                    starting_conc=starting,
-                    stock_concentrations=(
-                        float(plan.stock_concs[0]),
-                        float(plan.stock_concs[1]),
-                    ),
-                    droplet_nL=float(plan.droplet_nL),
-                    final_volume_nL=float(final_volume_nL),
-                    units=str(plan.units or getattr(opt, "units", "")),
-                )
-                for target in target_values
-            ]
+            rows = self._evaluate_two_stock_plan_rows(
+                plan,
+                target_values=target_values,
+                starting_conc=starting,
+                final_volume_nL=float(final_volume_nL),
+                units=str(plan.units or getattr(opt, "units", "")),
+            )
             concentration_burden = float(plan.conc_sum)
             n_stocks = 2
 
@@ -1621,6 +1616,8 @@ class ExperimentModel(QObject):
         droplet_nL: float,
         final_volume_nL: float,
         units: str,
+        max_total_drops: Optional[int] = None,
+        droplets_override: Optional[Tuple[int, int]] = None,
     ) -> Dict[str, Any]:
         requested_final = float(t_final)
         starting = float(starting_conc or 0.0)
@@ -1644,7 +1641,17 @@ class ExperimentModel(QObject):
             reachable = True
             reason = "nearest_achievable"
         elif d1 > 0.0 and d2 > 0.0:
-            a, b, err = self._nearest_two_stock(requested_adjusted, d1, d2)
+            if droplets_override is None:
+                a, b, err = self._nearest_two_stock(
+                    requested_adjusted,
+                    d1,
+                    d2,
+                    max_total_drops=max_total_drops,
+                )
+            else:
+                a = max(0, int(droplets_override[0]))
+                b = max(0, int(droplets_override[1]))
+                err = abs(a * d1 + b * d2 - requested_adjusted)
             droplets = (int(a), int(b))
             achieved_adjusted = float(a * d1 + b * d2)
             tol = 0.5 * min(d1, d2) + 1e-12
@@ -1667,6 +1674,9 @@ class ExperimentModel(QObject):
             "achieved_adjusted": achieved_adjusted,
             "droplets": droplets,
             "delta_per_drop": (float(d1), float(d2)),
+            "printed_volume_nL": float(
+                (int(droplets[0]) + int(droplets[1])) * float(droplet_nL)
+            ),
             "abs_error": float(abs_error),
             "signed_error": float(signed_error),
             "reachable": bool(reachable),
@@ -1759,25 +1769,69 @@ class ExperimentModel(QObject):
         final_volume_nL: float,
         units: str,
     ) -> _PlanAccuracyScore:
-        rows = [
-            self._evaluate_two_stock_target(
-                t_final=float(t_final),
-                starting_conc=float(starting_conc),
-                stock_concentrations=(
-                    float(plan.stock_concs[0]),
-                    float(plan.stock_concs[1]),
-                ),
-                droplet_nL=float(plan.droplet_nL),
-                final_volume_nL=float(final_volume_nL),
-                units=str(units),
-            )
-            for t_final in target_values
-        ]
+        rows = self._evaluate_two_stock_plan_rows(
+            plan,
+            target_values=target_values,
+            starting_conc=float(starting_conc),
+            final_volume_nL=float(final_volume_nL),
+            units=str(units),
+        )
         return self._summarize_plan_accuracy_rows(
             rows,
             concentration_burden=float(plan.conc_sum),
             max_volume_nL=float(plan.max_volume_nL),
         )
+
+    def _evaluate_two_stock_plan_rows(
+        self,
+        plan: TwoStockPlan,
+        *,
+        target_values: Iterable[float],
+        starting_conc: float,
+        final_volume_nL: float,
+        units: str,
+    ) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        starting = float(starting_conc)
+        for target_final in target_values:
+            target_adjusted = self._normalize_target_key(
+                max(0.0, float(target_final) - starting)
+            )
+            cached_row = plan.target_rows.get(target_adjusted)
+            if cached_row is not None:
+                row = dict(cached_row)
+                row["requested_final"] = float(target_final)
+                row["requested_adjusted"] = float(target_adjusted)
+                row["starting_conc"] = starting
+                row["achieved_final"] = starting + float(
+                    row.get("achieved_adjusted", 0.0)
+                )
+                row["signed_error"] = float(row["achieved_final"]) - float(
+                    target_final
+                )
+                row["abs_error"] = abs(float(row["signed_error"]))
+                rows.append(row)
+                continue
+            droplets = plan.droplets_per_target.get(target_adjusted)
+            rows.append(
+                self._evaluate_two_stock_target(
+                    t_final=float(target_final),
+                    starting_conc=starting,
+                    stock_concentrations=(
+                        float(plan.stock_concs[0]),
+                        float(plan.stock_concs[1]),
+                    ),
+                    droplet_nL=float(plan.droplet_nL),
+                    final_volume_nL=float(final_volume_nL),
+                    units=str(units),
+                    droplets_override=(
+                        (int(droplets[0]), int(droplets[1]))
+                        if droplets is not None
+                        else None
+                    ),
+                )
+            )
+        return rows
 
     def _score_two_stock_plan(
         self,
@@ -2099,9 +2153,19 @@ class ExperimentModel(QObject):
             else:
                 st1, st2 = plan["stocks"]
                 for t_final in self._effective_targets_for_key(key, opt):
+                    starting = float(
+                        getattr(opt, "starting_conc", 0.0) or 0.0
+                    )
+                    target_adjusted = max(0.0, float(t_final) - starting)
+                    k1, _, un1, _ = self._resolve_drops_for_target(
+                        st1, target_adjusted
+                    )
+                    k2, _, un2, _ = self._resolve_drops_for_target(
+                        st2, target_adjusted
+                    )
                     row = self._evaluate_two_stock_target(
                         t_final=t_final,
-                        starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
+                        starting_conc=starting,
                         stock_concentrations=(
                             float(st1["stock_concentration"]),
                             float(st2["stock_concentration"]),
@@ -2109,7 +2173,11 @@ class ExperimentModel(QObject):
                         droplet_nL=float(st1["droplet_volume_nL"]),
                         final_volume_nL=V_final,
                         units=st1.get("units", opt.units),
+                        droplets_override=(int(k1), int(k2)),
                     )
+                    if un1 or un2:
+                        row["reachable"] = False
+                        row["reason"] = "missing_target_mapping"
                     row["plan_mode"] = "auto"
                     rows.append(row)
 
@@ -2255,6 +2323,7 @@ class ExperimentModel(QObject):
         *,
         final_volume_nL: float,
         volume_budget_nL: float,
+        nominal_volume_budget_nL: Optional[float] = None,
         quantum: float = 0.1,
         max_refine: int = 30,
         kmax_multiples: int = 12,
@@ -2268,6 +2337,23 @@ class ExperimentModel(QObject):
         xs_pos = [t for t in xs if t > 1e-12]
         if not xs_pos:
             return [], False
+        if float(droplet_nL) <= 0.0:
+            return [], False
+        maximum_total_drops = max(
+            0,
+            int(
+                math.floor(
+                    (float(volume_budget_nL) + 1e-6) / float(droplet_nL)
+                )
+            ),
+        )
+        if maximum_total_drops <= 0:
+            return [], False
+        nominal_budget = (
+            float(volume_budget_nL)
+            if nominal_volume_budget_nL is None
+            else min(float(nominal_volume_budget_nL), float(volume_budget_nL))
+        )
 
         deltas = self._candidate_single_stock_deltas(xs_pos, max_refine=max_refine, min_delta=1e-6)
         if max_stock_conc is not None:
@@ -2312,6 +2398,7 @@ class ExperimentModel(QObject):
                     continue
 
                 drops_map: Dict[float, Tuple[int, int]] = {}
+                target_rows: Dict[float, Dict[str, Any]] = {}
                 max_drops = 0
                 feasible = True
                 for t_real in xs:
@@ -2322,12 +2409,15 @@ class ExperimentModel(QObject):
                         droplet_nL=droplet_nL,
                         final_volume_nL=final_volume_nL,
                         units=units,
+                        max_total_drops=maximum_total_drops,
                     )
                     if not row["reachable"]:
                         feasible = False
                         break
                     a, b = row["droplets"]
-                    drops_map[self._normalize_target_key(float(t_real))] = (int(a), int(b))
+                    target_key = self._normalize_target_key(float(t_real))
+                    drops_map[target_key] = (int(a), int(b))
+                    target_rows[target_key] = dict(row)
                     max_drops = max(max_drops, int(a) + int(b))
 
                 if not feasible:
@@ -2352,7 +2442,9 @@ class ExperimentModel(QObject):
                     droplets_per_target=drops_map,
                     max_volume_nL=max_vol,
                     conc_sum=conc_sum,
-                    n_stocks=2
+                    n_stocks=2,
+                    target_rows=target_rows,
+                    fits_nominal_volume=(max_vol <= nominal_budget + 1e-6),
                 ))
             if pair_limit_hit:
                 break
@@ -2369,7 +2461,13 @@ class ExperimentModel(QObject):
         # most accurate candidate at every feasible printed-volume tier. The
         # latter is required because the final selection refines accuracy only
         # after this bounded enumeration step.
-        pairs.sort(key=lambda p: (p.conc_sum, p.max_volume_nL))
+        pairs.sort(
+            key=lambda p: (
+                not bool(p.fits_nominal_volume),
+                p.conc_sum,
+                p.max_volume_nL,
+            )
+        )
         pruned: List[TwoStockPlan] = []
         best_vol = float("inf")
         for pair_index, p in enumerate(pairs):
@@ -2411,20 +2509,13 @@ class ExperimentModel(QObject):
                 accuracy_by_volume[volume_key] = (p, accuracy_score)
 
             if resolution_first:
-                rows = [
-                    self._evaluate_two_stock_target(
-                        t_final=float(target),
-                        starting_conc=0.0,
-                        stock_concentrations=(
-                            float(p.stock_concs[0]),
-                            float(p.stock_concs[1]),
-                        ),
-                        droplet_nL=float(p.droplet_nL),
-                        final_volume_nL=float(final_volume_nL),
-                        units=str(units),
-                    )
-                    for target in xs
-                ]
+                rows = self._evaluate_two_stock_plan_rows(
+                    p,
+                    target_values=xs,
+                    starting_conc=0.0,
+                    final_volume_nL=float(final_volume_nL),
+                    units=str(units),
+                )
                 summary = self._summarize_target_resolution_rows(rows)
                 errors = [abs(float(row.get("abs_error", 0.0) or 0.0)) for row in rows]
                 score = (
@@ -2445,7 +2536,13 @@ class ExperimentModel(QObject):
             if p not in pruned:
                 pruned.append(p)
 
-        pruned.sort(key=lambda p: (p.conc_sum, p.max_volume_nL))
+        pruned.sort(
+            key=lambda p: (
+                not bool(p.fits_nominal_volume),
+                p.conc_sum,
+                p.max_volume_nL,
+            )
+        )
 
         return pruned[:max_pairs], pair_limit_hit
 
@@ -2457,6 +2554,7 @@ class ExperimentModel(QObject):
         *,
         final_volume_nL: float,
         volume_budget_nL: float,
+        nominal_volume_budget_nL: Optional[float] = None,
         quantum: float = 0.1,
         max_refine: int = 30,
         kmax_multiples: int = 12,
@@ -2470,6 +2568,7 @@ class ExperimentModel(QObject):
             units,
             final_volume_nL=final_volume_nL,
             volume_budget_nL=volume_budget_nL,
+            nominal_volume_budget_nL=nominal_volume_budget_nL,
             quantum=quantum,
             max_refine=max_refine,
             kmax_multiples=kmax_multiples,
@@ -2936,7 +3035,8 @@ class ExperimentModel(QObject):
                             return _failure(reason)
                         twos, search_limited = self._enumerate_two_stock_candidates_with_meta(
                             t_adj, o.droplet_nL, o.units,
-                            final_volume_nL=V_final, volume_budget_nL=V_print,
+                            final_volume_nL=V_final, volume_budget_nL=V_accept,
+                            nominal_volume_budget_nL=V_print,
                             quantum=quantum, max_refine=two_max_refine,
                             max_stock_conc=max_stock,
                             resolution_first=not allow_avoidable_grouping,
@@ -3023,7 +3123,8 @@ class ExperimentModel(QObject):
                                 return _failure(reason)
                             twos, search_limited = self._enumerate_two_stock_candidates_with_meta(
                                 t_adj, opt.droplet_nL, opt.units,
-                                final_volume_nL=V_final, volume_budget_nL=V_print,
+                                final_volume_nL=V_final, volume_budget_nL=V_accept,
+                                nominal_volume_budget_nL=V_print,
                                 quantum=quantum, max_refine=two_max_refine,
                                 max_stock_conc=max_stock,
                                 resolution_first=not allow_avoidable_grouping,
@@ -3065,7 +3166,8 @@ class ExperimentModel(QObject):
                     opt.droplet_nL,
                     opt.units,
                     final_volume_nL=V_final,
-                    volume_budget_nL=V_print,
+                    volume_budget_nL=V_accept,
+                    nominal_volume_budget_nL=V_print,
                     quantum=quantum,
                     max_refine=two_max_refine,
                     max_stock_conc=getattr(opt, "max_stock_conc", None),
@@ -3091,7 +3193,8 @@ class ExperimentModel(QObject):
                     opt.droplet_nL,
                     opt.units,
                     final_volume_nL=V_final,
-                    volume_budget_nL=V_print,
+                    volume_budget_nL=V_accept,
+                    nominal_volume_budget_nL=V_print,
                     quantum=quantum,
                     max_refine=two_max_refine,
                     max_stock_conc=getattr(opt, "max_stock_conc", None),
@@ -3750,24 +3853,37 @@ class ExperimentModel(QObject):
                             break
             return singles_this is not None and (ch_idx[(gname, oname)] + 1 < len(singles_this))
 
-        def _refine_single_selection(
+        def _accuracy_candidate_compare(
+            left: Tuple[int, _PlanAccuracyScore],
+            right: Tuple[int, _PlanAccuracyScore],
+        ) -> int:
+            if self._plan_accuracy_score_is_better(left[1], right[1]):
+                return -1
+            if self._plan_accuracy_score_is_better(right[1], left[1]):
+                return 1
+            return (left[0] > right[0]) - (left[0] < right[0])
+
+        def _refine_single_candidates(
             key: Tuple[str, Optional[str]],
             opt: OptionSpec,
             singles: List[SingleStockPlan],
             current_index: int,
-        ) -> int:
+        ) -> List[int]:
             current_plan = singles[current_index]
-            volume_limit = float(current_plan.max_volume_nL)
-            best_index = int(current_index)
+            local_volume_limit = float(current_plan.max_volume_nL)
             targets_final = _effective_targets_for_opt(key, opt)
-            best_score = self._score_single_stock_plan(
+            current_score = self._score_single_stock_plan(
                 opt,
                 current_plan,
                 final_volume_nL=V_final,
                 targets_final=targets_final,
             )
+            candidates: List[Tuple[int, _PlanAccuracyScore]] = []
             for idx, candidate in enumerate(singles):
-                if float(candidate.max_volume_nL) > volume_limit + 1e-12:
+                if (
+                    idx == current_index
+                    or float(candidate.max_volume_nL) > local_volume_limit + 1e-12
+                ):
                     continue
                 candidate_score = self._score_single_stock_plan(
                     opt,
@@ -3775,29 +3891,34 @@ class ExperimentModel(QObject):
                     final_volume_nL=V_final,
                     targets_final=targets_final,
                 )
-                if self._plan_accuracy_score_is_better(candidate_score, best_score):
-                    best_index = idx
-                    best_score = candidate_score
-            return best_index
+                if self._plan_accuracy_score_is_better(
+                    candidate_score, current_score
+                ):
+                    candidates.append((idx, candidate_score))
+            candidates.sort(key=cmp_to_key(_accuracy_candidate_compare))
+            return [idx for idx, _score in candidates]
 
-        def _refine_two_selection(
+        def _refine_two_candidates(
             key: Tuple[str, Optional[str]],
             opt: OptionSpec,
             twos: List[TwoStockPlan],
             current_index: int,
-        ) -> int:
+        ) -> List[int]:
             current_plan = twos[current_index]
-            volume_limit = float(current_plan.max_volume_nL)
-            best_index = int(current_index)
+            local_volume_limit = float(current_plan.max_volume_nL)
             targets_final = _effective_targets_for_opt(key, opt)
-            best_score = self._score_two_stock_plan(
+            current_score = self._score_two_stock_plan(
                 opt,
                 current_plan,
                 final_volume_nL=V_final,
                 targets_final=targets_final,
             )
+            candidates: List[Tuple[int, _PlanAccuracyScore]] = []
             for idx, candidate in enumerate(twos):
-                if float(candidate.max_volume_nL) > volume_limit + 1e-12:
+                if (
+                    idx == current_index
+                    or float(candidate.max_volume_nL) > local_volume_limit + 1e-12
+                ):
                     continue
                 candidate_score = self._score_two_stock_plan(
                     opt,
@@ -3805,10 +3926,12 @@ class ExperimentModel(QObject):
                     final_volume_nL=V_final,
                     targets_final=targets_final,
                 )
-                if self._plan_accuracy_score_is_better(candidate_score, best_score):
-                    best_index = idx
-                    best_score = candidate_score
-            return best_index
+                if self._plan_accuracy_score_is_better(
+                    candidate_score, current_score
+                ):
+                    candidates.append((idx, candidate_score))
+            candidates.sort(key=cmp_to_key(_accuracy_candidate_compare))
+            return [idx for idx, _score in candidates]
 
         # -----------------------------
         # Step 1: single-stock only
@@ -4134,17 +4257,47 @@ class ExperimentModel(QObject):
                                 _invalidate_selected_volume_cache(key)
                                 break
 
-        # Improve target matching without increasing local printed-volume demand.
+        # Improve target matching only when the exact global reaction rows remain
+        # feasible. Keep the last feasible selection immutable while each
+        # substitution is tested.
+        pre_refinement_snapshot = {
+            "add_idx": dict(add_idx),
+            "add_two_idx": dict(add_two_idx),
+            "ch_idx": dict(ch_idx),
+            "ch_two_idx": dict(ch_two_idx),
+        }
+        pre_refinement_worst = worst_case_nonfill_volume()
+        refinement_volume_limit = (
+            V_print if pre_refinement_worst <= V_print + 1e-6 else V_accept
+        )
+
         for name, singles, twos in additives:
             opt = additive_option_map[name]
             if getattr(opt, "forced_stock_conc", None) not in (None, 0.0):
                 continue
             if add_two_idx[name] is not None:
-                if twos:
-                    add_two_idx[name] = _refine_two_selection((name, None), opt, twos, add_two_idx[name])
+                resolved_twos = twos if twos is not None else _ensure_additive_twos(name)
+                current_index = int(add_two_idx[name])
+                for candidate_index in _refine_two_candidates(
+                    (name, None), opt, resolved_twos, current_index
+                ):
+                    add_two_idx[name] = candidate_index
+                    _invalidate_selected_volume_cache((name, None))
+                    if worst_case_nonfill_volume() <= refinement_volume_limit + 1e-6:
+                        break
+                    add_two_idx[name] = current_index
+                    _invalidate_selected_volume_cache((name, None))
             else:
-                add_idx[name] = _refine_single_selection((name, None), opt, singles, add_idx[name])
-        _invalidate_selected_volume_cache()
+                current_index = int(add_idx[name])
+                for candidate_index in _refine_single_candidates(
+                    (name, None), opt, singles, current_index
+                ):
+                    add_idx[name] = candidate_index
+                    _invalidate_selected_volume_cache((name, None))
+                    if worst_case_nonfill_volume() <= refinement_volume_limit + 1e-6:
+                        break
+                    add_idx[name] = current_index
+                    _invalidate_selected_volume_cache((name, None))
 
         for gname, bucket in choice_groups.items():
             for oname, singles, twos in bucket:
@@ -4153,11 +4306,40 @@ class ExperimentModel(QObject):
                 if getattr(opt, "forced_stock_conc", None) not in (None, 0.0):
                     continue
                 if ch_two_idx[key] is not None:
-                    if twos:
-                        ch_two_idx[key] = _refine_two_selection(key, opt, twos, ch_two_idx[key])
+                    resolved_twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
+                    current_index = int(ch_two_idx[key])
+                    for candidate_index in _refine_two_candidates(
+                        key, opt, resolved_twos, current_index
+                    ):
+                        ch_two_idx[key] = candidate_index
+                        _invalidate_selected_volume_cache(key)
+                        if worst_case_nonfill_volume() <= refinement_volume_limit + 1e-6:
+                            break
+                        ch_two_idx[key] = current_index
+                        _invalidate_selected_volume_cache(key)
                 else:
-                    ch_idx[key] = _refine_single_selection(key, opt, singles, ch_idx[key])
+                    current_index = int(ch_idx[key])
+                    for candidate_index in _refine_single_candidates(
+                        key, opt, singles, current_index
+                    ):
+                        ch_idx[key] = candidate_index
+                        _invalidate_selected_volume_cache(key)
+                        if worst_case_nonfill_volume() <= refinement_volume_limit + 1e-6:
+                            break
+                        ch_idx[key] = current_index
+                        _invalidate_selected_volume_cache(key)
         _invalidate_selected_volume_cache()
+
+        if worst_case_nonfill_volume() > refinement_volume_limit + 1e-6:
+            add_idx.clear()
+            add_idx.update(pre_refinement_snapshot["add_idx"])
+            add_two_idx.clear()
+            add_two_idx.update(pre_refinement_snapshot["add_two_idx"])
+            ch_idx.clear()
+            ch_idx.update(pre_refinement_snapshot["ch_idx"])
+            ch_two_idx.clear()
+            ch_two_idx.update(pre_refinement_snapshot["ch_two_idx"])
+            _invalidate_selected_volume_cache()
 
         # The historical selector above is the immutable feasible seed for the
         # resolution-first pass. Candidate enumeration is shared; the bounded
@@ -4443,7 +4625,8 @@ class ExperimentModel(QObject):
                 opt.droplet_nL,
                 opt.units,
                 final_volume_nL=V_final,
-                volume_budget_nL=V_print,
+                volume_budget_nL=V_accept,
+                nominal_volume_budget_nL=V_print,
                 quantum=quantum,
                 max_refine=two_max_refine,
                 max_stock_conc=getattr(opt, "max_stock_conc", None),
@@ -4461,7 +4644,14 @@ class ExperimentModel(QObject):
                 if signature not in signatures:
                     signatures.add(signature)
                     merged.append(plan)
-            merged.sort(key=lambda plan: (plan.conc_sum, plan.max_volume_nL, plan.deltas))
+            merged.sort(
+                key=lambda plan: (
+                    not bool(plan.fits_nominal_volume),
+                    plan.conc_sum,
+                    plan.max_volume_nL,
+                    plan.deltas,
+                )
+            )
             _replace_twos_for_key(key, merged)
             return bool(merged)
 
@@ -7835,7 +8025,14 @@ class ExperimentModel(QObject):
         return self.plans_per_option.get(key)
 
 
-    def _nearest_two_stock(self, t_add: float, d1: float, d2: float) -> tuple[int, int, float]:
+    def _nearest_two_stock(
+        self,
+        t_add: float,
+        d1: float,
+        d2: float,
+        *,
+        max_total_drops: Optional[int] = None,
+    ) -> tuple[int, int, float]:
         """
         Solve min |a*d1 + b*d2 - t_add| over nonnegative ints (a,b) with a simple bounded search.
         Returns (a,b, err). Bound a to reasonable limit to keep fast.
@@ -7843,15 +8040,27 @@ class ExperimentModel(QObject):
         if d1 <= 0 or d2 <= 0:
             return (0, 0, abs(t_add))
         a_max = int(round(t_add / d1)) + 6  # small slack
+        total_limit = None
+        if max_total_drops is not None:
+            total_limit = max(0, int(max_total_drops))
+            a_max = min(a_max, total_limit)
         best = (0, 0, float("inf"))
         for a in range(max(0, a_max + 1)):
             rem = t_add - a * d1
-            b = 0 if rem <= 0 else int(round(rem / d2))
-            b = max(0, b)
-            err = abs(a * d1 + b * d2 - t_add)
-            # tie-break on smaller (a+b) to keep printed volume small
-            if (err < best[2] - 1e-12) or (abs(err - best[2]) <= 1e-12 and (a + b) < (best[0] + best[1])):
-                best = (a, b, err)
+            raw_b = 0.0 if rem <= 0 else rem / d2
+            b_limit = total_limit - a if total_limit is not None else None
+            b_candidates = {
+                max(0, int(math.floor(raw_b))),
+                max(0, int(math.ceil(raw_b))),
+                max(0, int(round(raw_b))),
+            }
+            if b_limit is not None:
+                b_candidates = {min(value, b_limit) for value in b_candidates}
+            for b in sorted(b_candidates):
+                err = abs(a * d1 + b * d2 - t_add)
+                # tie-break on smaller (a+b) to keep printed volume small
+                if (err < best[2] - 1e-12) or (abs(err - best[2]) <= 1e-12 and (a + b) < (best[0] + best[1])):
+                    best = (a, b, err)
         return best
 
 

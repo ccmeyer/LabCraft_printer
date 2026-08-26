@@ -925,6 +925,20 @@ def test_two_stock_enumeration_retains_exact_accuracy_winner_within_bounds():
     assert pair_limit_hit is False
     assert len(candidates) <= 12000
     assert all(max(candidate.stock_concs) <= 10.0 + 1e-12 for candidate in candidates)
+    assert all(
+        set(candidate.target_rows) == set(candidate.droplets_per_target)
+        and all(
+            row["reachable"] is True
+            and row["droplets"] == candidate.droplets_per_target[target]
+            and row["printed_volume_nL"]
+            == pytest.approx(
+                sum(candidate.droplets_per_target[target])
+                * candidate.droplet_nL
+            )
+            for target, row in candidate.target_rows.items()
+        )
+        for candidate in candidates
+    )
     assert any(
         tuple(sorted(candidate.stock_concs)) == pytest.approx((5.0, 10.0))
         and _two_plan_error_key(
@@ -937,6 +951,90 @@ def test_two_stock_enumeration_retains_exact_accuracy_winner_within_bounds():
         == pytest.approx((0.0, 0.0), abs=1e-12)
         for candidate in candidates
     )
+
+
+def test_bounded_two_stock_solver_uses_reachable_one_drop_alternative():
+    em = _make_model(target_volume_nl=1.0, final_volume_nl=1.0)
+
+    row = em._evaluate_two_stock_target(
+        t_final=0.4,
+        starting_conc=0.0,
+        stock_concentrations=(0.3, 0.2),
+        droplet_nL=1.0,
+        final_volume_nL=1.0,
+        units="mM",
+        max_total_drops=1,
+    )
+
+    assert row["reachable"] is True
+    assert row["droplets"] == (1, 0)
+    assert row["achieved_final"] == pytest.approx(0.3)
+    assert row["abs_error"] == pytest.approx(0.1)
+
+
+def test_bounded_two_stock_solver_matches_small_brute_force_oracle():
+    em = _make_model(target_volume_nl=1.0, final_volume_nl=1.0)
+
+    for d1 in (0.1, 0.2, 0.3, 0.5):
+        for d2 in (0.1, 0.2, 0.4):
+            for target in (0.1, 0.25, 0.4, 0.75, 1.0):
+                for drop_limit in range(1, 6):
+                    actual_a, actual_b, actual_error = em._nearest_two_stock(
+                        target,
+                        d1,
+                        d2,
+                        max_total_drops=drop_limit,
+                    )
+                    oracle = []
+                    for a in range(drop_limit + 1):
+                        for b in range(drop_limit - a + 1):
+                            oracle.append(
+                                (
+                                    abs(a * d1 + b * d2 - target),
+                                    a + b,
+                                    a,
+                                    b,
+                                )
+                            )
+                    best_error = min(row[0] for row in oracle)
+                    best_total = min(
+                        row[1]
+                        for row in oracle
+                        if abs(row[0] - best_error) <= 1e-12
+                    )
+
+                    assert actual_error == pytest.approx(best_error, abs=1e-12)
+                    assert actual_a + actual_b == best_total
+                    assert actual_a + actual_b <= drop_limit
+
+
+def test_two_stock_plan_can_use_printed_volume_tolerance():
+    em = _make_model(
+        target_volume_nl=10.0,
+        final_volume_nl=500.0,
+        printed_volume_tolerance_nl=2.0,
+    )
+    em.set_metadata(allow_avoidable_target_grouping=True)
+    em.add_additive(
+        "R",
+        [0.001, 0.21],
+        "mM",
+        1.0,
+        max_stock_conc=10.0,
+    )
+
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=60,
+        two_max_refine=40,
+        allow_two=True,
+    )
+
+    assert result["best"] is True
+    assert result["effective_printed_volume_limit_nL"] == pytest.approx(12.0)
+    assert result["worst_nonfill_nL"] == pytest.approx(11.0)
+    assert result["two_stock_keys"] == [("R", None)]
+    assert em.plans_per_option[("R", None)]["n_stocks"] == 2
 
 
 def test_fixed_stock_above_max_stock_is_rejected():
@@ -1340,6 +1438,44 @@ def test_uploaded_design_printed_volume_tolerance_extends_final_volume_acceptanc
     assert issue["effective_allowed_volume_nL"] == pytest.approx(1040.0)
 
 
+def test_uploaded_accuracy_refinement_preserves_exact_row_feasibility():
+    em = _make_model(target_volume_nl=30.0, final_volume_nl=500.0)
+    em.set_metadata(
+        allow_avoidable_target_grouping=True,
+        allow_two_stock_solutions=True,
+    )
+    em.set_uploaded_design_from_dataframe(
+        pd.DataFrame(
+            {
+                "A mM": [0.1, 0.2, 0.3],
+                "B mM": [0.3, 0.5, 0.4],
+            }
+        ),
+        units_default="",
+        droplet_nL_default=10.0,
+        starting_conc_default=0.0,
+    )
+
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=60,
+        two_max_refine=40,
+        allow_two=True,
+    )
+
+    assert result["best"] is True
+    assert result["worst_nonfill_nL"] == pytest.approx(30.0)
+    stocks = {
+        row["factor_name"]: row["stock_concentration"]
+        for row in em.get_stock_table_rows(include_fill=False)
+    }
+    assert stocks == pytest.approx({"A": 7.5, "B": 15.0})
+    em.generate_experiment()
+    assert em.get_reactions_dataframe()["nonfill_volume_nL"].tolist() == pytest.approx(
+        [20.0, 30.0, 30.0]
+    )
+
+
 def test_import_feasibility_report_flags_missing_max_stock():
     em = _make_model(target_volume_nl=500.0, final_volume_nl=1000.0)
     df = pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0], "Reagent B mM": [2.0]})
@@ -1493,7 +1629,7 @@ def test_import_feasibility_report_uses_imported_stream_mode_and_canonical_match
     assert report["stock_settings_by_reagent"]["[PolyP]"]["droplet_nL"] == pytest.approx(60.0)
 
 
-def test_bnext_260513_tolerance_does_not_increase_selected_plan_volume():
+def test_bnext_260513_refinement_preserves_nominal_fit_when_available():
     design = pd.read_csv("FreeRTOS-interface/Experiments/bnext_260513/samples_titration_labcraft.csv")
     max_df = pd.read_csv("FreeRTOS-interface/Experiments/bnext_260513/reagents.csv")
 
@@ -1510,25 +1646,25 @@ def test_bnext_260513_tolerance_does_not_increase_selected_plan_volume():
 
     report_50 = report_for(50.0)
     report_100 = report_for(100.0)
-    issue_50 = next(
-        issue
-        for issue in report_50["issues"]
-        if issue.get("code") == "selected_plan_volume_budget_within_tolerance"
-    )
-    issue_100 = next(
-        issue
-        for issue in report_100["issues"]
-        if issue.get("code") == "selected_plan_volume_budget_within_tolerance"
-    )
+    for report in (report_50, report_100):
+        assert report["ok"] is True
+        assert not any(
+            issue.get("code") == "selected_plan_volume_budget_within_tolerance"
+            for issue in report["issues"]
+        )
+        assert all(
+            row.get("status") == "OK" for row in report["composition_rows"]
+        )
 
-    assert issue_50["row_label"] == "well I17"
-    assert issue_100["row_label"] == "well I17"
-    assert issue_50["required_volume_nL"] == pytest.approx(5832.0)
-    assert issue_100["required_volume_nL"] == pytest.approx(issue_50["required_volume_nL"])
-    assert not any(issue.get("row_label") == "well H4" for issue in report_100["issues"])
-    h4_rows = [row for row in report_100["composition_rows"] if "H4" in row.get("wells", [])]
-    assert len(h4_rows) == 1
-    assert h4_rows[0]["status"] == "OK"
+    stocks_50 = {
+        row["reagent"]: row["ideal_stock_conc"]
+        for row in report_50["stock_rows"]
+    }
+    stocks_100 = {
+        row["reagent"]: row["ideal_stock_conc"]
+        for row in report_100["stock_rows"]
+    }
+    assert stocks_100 == pytest.approx(stocks_50)
 
 
 def test_bnext_basis_rep1_total_volume_tolerance_accepts_stream_quantization_overage():
