@@ -293,6 +293,149 @@ def test_valid_two_stock_editor_result_survives_runtime_projection_and_finalizat
     )
 
 
+def _configure_calibratable_two_stock_execution(model):
+    em = model.experiment_model
+    em.factors = []
+    em.set_metadata(
+        name="two-stock-calibration-application",
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=1,
+        target_reaction_volume_nL=240.0,
+        final_reaction_volume_nL=5000.0,
+        printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+        allow_two_stock_solutions=True,
+        allow_avoidable_target_grouping=False,
+    )
+    em.add_additive("Signal", [0.5, 1.0, 5.0, 20.0], "mM", 10.0)
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=True,
+    )
+    assert result["best"] is True
+    assert result["two_stock_keys"] == [("Signal", None)]
+    em.generate_experiment()
+    em.save_experiment()
+    Model.load_experiment_from_model(
+        model,
+        load_progress=False,
+        finalize_execution_plan=True,
+    )
+    return em
+
+
+def test_finalized_two_stock_calibration_requantizes_both_legs_atomically(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = _configure_calibratable_two_stock_execution(model)
+    before = load_execution_plan(em.execution_plan_file_path)
+    signal_stocks = sorted(
+        (stock for stock in before.stocks if stock.factor_name == "Signal"),
+        key=lambda stock: stock.concentration,
+        reverse=True,
+    )
+    calibrated, companion = signal_stocks
+    companion_before = companion
+    old_counts = {
+        well.well_id: {
+            dispense.stock_id: dispense.target_dispenses
+            for dispense in well.dispenses
+        }
+        for well in before.wells
+    }
+
+    result = em.apply_droplet_volume_for_option(
+        "Signal",
+        None,
+        12.0,
+        applied_calibration={
+            "stock_id": calibrated.stock_id,
+            "printer_head": SimpleNamespace(printer_head_id="two-stock-head-final"),
+            "measured_volume_nL": 12.0,
+            "pw_us": 1200,
+            "pressure_psi": 0.8,
+            "run_id": "two-stock-finalized-calibration",
+            "phase": "synthetic_characterization",
+        },
+        printing_mode="droplet",
+    )
+
+    revised = load_execution_plan(em.execution_plan_file_path)
+    revised_by_id = {stock.stock_id: stock for stock in revised.stocks}
+    assert result["n_stocks"] == 2
+    assert result["calibrated_stock_id"] == calibrated.stock_id
+    assert result["companion_stock_id"] == companion.stock_id
+    assert revised_by_id[calibrated.stock_id].effective_volume_nL == pytest.approx(12.0)
+    assert revised_by_id[calibrated.stock_id].calibration_record_key is not None
+    assert revised_by_id[companion.stock_id] == companion_before
+    assert set(revised_by_id) == {stock.stock_id for stock in before.stocks}
+    new_counts = {
+        well.well_id: {
+            dispense.stock_id: dispense.target_dispenses
+            for dispense in well.dispenses
+        }
+        for well in revised.wells
+    }
+    assert any(
+        old_counts[well_id].get(companion.stock_id, 0)
+        != new_counts[well_id].get(companion.stock_id, 0)
+        for well_id in old_counts
+    )
+    assert all(
+        well.expected_printed_volume_nL
+        <= revised.volume_basis.target_printed_volume_nL
+        + revised.volume_basis.design_optimization_tolerance_nL
+        + 1e-9
+        for well in revised.wells
+    )
+
+
+@pytest.mark.parametrize("blocking_role", ["companion", "fill"])
+def test_two_stock_calibration_application_blocks_affected_stock_progress(
+    experiment_model_factory,
+    blocking_role,
+):
+    model = experiment_model_factory()
+    em = _configure_calibratable_two_stock_execution(model)
+    active = em.lock_execution_plan("printing_started")
+    signal_stocks = sorted(
+        (stock for stock in active.stocks if stock.factor_name == "Signal"),
+        key=lambda stock: stock.concentration,
+        reverse=True,
+    )
+    calibrated, companion = signal_stocks
+    fill_stock = next(
+        stock
+        for stock in active.stocks
+        if stock.factor_name == em.get_fill_reagent_name() and stock.units == "--"
+    )
+    blocking_stock = companion if blocking_role == "companion" else fill_stock
+    progress = json.loads(Path(em.progress_file_path).read_text(encoding="utf-8"))
+    values = progress["added_droplets"][blocking_stock.stock_id]
+    target_index = next(index for index, value in enumerate(values) if value is not None)
+    values[target_index] = 1
+    Path(em.progress_file_path).write_text(
+        serialize_execution_progress(progress),
+        encoding="utf-8",
+    )
+    em.read_progress_file(em.progress_file_path)
+
+    eligibility = em.get_calibration_application_eligibility(
+        stock_id=calibrated.stock_id
+    )
+
+    assert eligibility["ok"] is False
+    assert eligibility["code"] == "affected_stock_progress"
+    assert blocking_stock.stock_id in eligibility["affected_stock_ids"]
+    assert eligibility["affected_stock_progress"][blocking_stock.stock_id] == 1
+
+
 @pytest.mark.parametrize("activate", [False, True])
 def test_stock_prep_sidecar_does_not_change_authoritative_execution(
     experiment_model_factory,

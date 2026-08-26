@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from collections import Counter
 
@@ -4379,6 +4379,158 @@ def optimizer_360_design_assertion(
     )
 
 
+def resolution_stock_design_assertion(
+    context: Any,
+    *,
+    case: Any,
+    driver_evidence: Mapping[str, Any],
+) -> tuple[AssertionResult, Any]:
+    """Join compact optimizer output to independent resolution-first truth."""
+
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+    )
+
+    snapshot = capture_authoritative_bundle(context)
+    counts = capture_count_snapshot(context)
+    expected_counts = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("prepared").rows
+        ),
+        label="resolution prepared literal",
+    )
+    observed_counts = {
+        name: normalize_stock_well_counts(
+            counts[name], label=f"resolution prepared {name}"
+        )
+        for name in ("plan_targets", "progress_targets", "runtime_targets")
+    }
+    plan_stocks = {
+        row.stock_id: row
+        for row in context.experiment_model.get_execution_plan_snapshot().stocks
+    }
+    expected_stocks = {row.stock_id: row for row in case.stocks}
+    generated = dict(driver_evidence.get("generated") or {})
+    optimizer = dict(generated.get("optimizer") or {})
+    expected_optimizer = case.optimizer_expectations
+
+    def rank_matches(observed: Any, expected: Any) -> bool:
+        if not isinstance(observed, Mapping):
+            return False
+        expected_row = expected.normalized()
+        integer_fields = {
+            "total_distinct_level_loss",
+            "worst_reagent_level_loss",
+            "stock_solution_count",
+        }
+        return all(
+            (
+                int(observed.get(name, -1)) == int(value)
+                if name in integer_fields
+                else math.isclose(
+                    float(observed.get(name, math.nan)),
+                    float(value),
+                    rel_tol=1e-10,
+                    abs_tol=1e-8,
+                )
+            )
+            for name, value in expected_row.items()
+        )
+
+    time_to_best = optimizer.get("stock_allocation_time_to_best_ms")
+    resolution_elapsed = optimizer.get("stock_allocation_elapsed_ms")
+    states = int(optimizer.get("stock_allocation_states_evaluated") or 0)
+    pairs = int(optimizer.get("two_stock_pairs_evaluated") or 0)
+    checks = {
+        "revision_one_prepared": snapshot.plan_revision == 1
+        and snapshot.plan_state == "prepared",
+        "bundle_and_design_hash_valid": snapshot.bundle_valid
+        and snapshot.plan_design_sha256 == snapshot.design_sha256,
+        "runtime_inactive_zero_progress": not snapshot.runtime_active
+        and snapshot.total_added_droplets == 0,
+        "stock_ids_unique_exact": len(plan_stocks) == len(expected_stocks)
+        and set(plan_stocks) == set(expected_stocks),
+        "stock_concentrations_exact": all(
+            stock_id in plan_stocks
+            and Decimal(str(plan_stocks[stock_id].concentration))
+            == Decimal(expected.concentration)
+            for stock_id, expected in expected_stocks.items()
+        ),
+        "assignments_exact": snapshot.assignments
+        == {row.well_id: row.reaction_id for row in case.assignments},
+        "literal_plan_counts_exact": observed_counts["plan_targets"]
+        == expected_counts,
+        "literal_progress_counts_exact": observed_counts["progress_targets"]
+        == expected_counts,
+        "literal_runtime_counts_exact": observed_counts["runtime_targets"]
+        == expected_counts,
+        "resolution_strategy_exact": optimizer.get("optimizer_strategy_used")
+        == expected_optimizer.strategy,
+        "seed_loss_exact": optimizer.get("optimizer_seed_distinct_level_loss")
+        == expected_optimizer.seed_rank.total_distinct_level_loss,
+        "selected_loss_exact": optimizer.get("distinct_level_loss")
+        == expected_optimizer.selected_rank.total_distinct_level_loss,
+        "seed_rank_exact": rank_matches(
+            optimizer.get("optimizer_seed_rank"), expected_optimizer.seed_rank
+        ),
+        "selected_rank_exact": rank_matches(
+            optimizer.get("optimizer_selected_rank"),
+            expected_optimizer.selected_rank,
+        ),
+        "seed_improved": optimizer.get("stock_allocation_improved_seed")
+        is expected_optimizer.improved_seed,
+        "stop_reason_expected": optimizer.get("stock_allocation_stop_reason")
+        in set(expected_optimizer.allowed_stop_reasons),
+        "no_fallback_or_hard_limit": optimizer.get("optimizer_strategy_used")
+        != "legacy_fallback"
+        and optimizer.get("stock_allocation_search_limited") is False
+        and not (optimizer.get("stock_allocation_limit_reasons") or []),
+        "time_to_best_bounded": time_to_best is not None
+        and 0 <= float(time_to_best) < expected_optimizer.maximum_time_to_best_ms,
+        "resolution_elapsed_bounded": resolution_elapsed is not None
+        and 0 <= float(resolution_elapsed)
+        < expected_optimizer.maximum_resolution_elapsed_ms,
+        "state_and_pair_caps_respected": states <= expected_optimizer.maximum_states
+        and pairs <= expected_optimizer.maximum_pairs,
+        "action_cap_not_exceeded": len(context.action_results)
+        <= case.qualification.action_cap,
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "case_id": case.case_id,
+        "case_sha256": case.sha256(),
+        "count_oracle_sha256": case.count_oracle_sha256(),
+        "prepared": snapshot.prepared_evidence(),
+        "expected_stocks": {
+            stock_id: expected.concentration
+            for stock_id, expected in expected_stocks.items()
+        },
+        "observed_stocks": {
+            stock_id: str(row.concentration) for stock_id, row in plan_stocks.items()
+        },
+        "counts": counts,
+        "optimizer": optimizer,
+    }
+    return (
+        AssertionResult(
+            "experiment.resolution_first_design_exact",
+            "prepared",
+            "pass" if not evidence["failed_checks"] else "fail",
+            ("ui", "model", "persistence"),
+            evidence,
+            (
+                None
+                if not evidence["failed_checks"]
+                else "resolution-first prepared design failed: "
+                + ", ".join(evidence["failed_checks"])
+            ),
+        ),
+        snapshot,
+    )
+
+
 def calibrated_zero_progress_assertion(
     context: Any,
     *,
@@ -4853,6 +5005,417 @@ def joined_remaining_calibrations_assertion(
             ),
         ),
         snapshot,
+    )
+
+
+def same_reagent_two_stock_calibration_assertion(
+    context: Any,
+    *,
+    case: Any,
+    first_calibration_evidence: Mapping[str, Any],
+    remaining_calibration_evidence: Sequence[Mapping[str, Any]],
+    require_fill_calibration: bool = True,
+) -> AssertionResult:
+    """Prove paired-leg requantization is atomic and keyed by stock identity."""
+
+    prepared = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("prepared").rows
+        ),
+        label="paired prepared literal",
+    )
+    high_calibrated = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("high_calibrated").rows
+        ),
+        label="paired high-calibrated literal",
+    )
+    fill_calibrated = (
+        normalize_stock_well_counts(
+            (
+                StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+                for row in case.oracle("fill_calibrated").rows
+            ),
+            label="paired fill-calibrated literal",
+        )
+        if require_fill_calibration
+        else ()
+    )
+    final = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("all_stocks_calibrated").rows
+        ),
+        label="paired all-calibrated literal",
+    )
+
+    def transition_counts(
+        evidence: Mapping[str, Any], boundary: str
+    ) -> tuple[StockWellCount, ...]:
+        transition = dict(evidence.get("count_transition") or {})
+        snapshot = dict(transition.get(boundary) or {})
+        return normalize_stock_well_counts(
+            snapshot.get("plan_targets") or (),
+            label=f"paired {boundary}",
+        )
+
+    remaining = list(remaining_calibration_evidence)
+    signal_calibrations = sorted(
+        (row for row in case.calibrations if row.reagent_name == "Signal"),
+        key=lambda row: float(
+            next(
+                stock.concentration
+                for stock in case.stocks
+                if stock.stock_id == row.stock_id
+            )
+        ),
+        reverse=True,
+    )
+    high_calibration, low_calibration = signal_calibrations
+    low_evidence = next(
+        (
+            row
+            for row in remaining
+            if str(row.get("stock_id") or "") == low_calibration.stock_id
+        ),
+        {},
+    )
+    fill_calibration = next(
+        (row for row in case.calibrations if row.reagent_name == "Water"),
+        None,
+    )
+    fill_evidence = next(
+        (
+            row
+            for row in remaining
+            if fill_calibration is not None
+            and str(row.get("stock_id") or "") == fill_calibration.stock_id
+        ),
+        {},
+    )
+    high_before = transition_counts(first_calibration_evidence, "before")
+    high_after = transition_counts(first_calibration_evidence, "after")
+    fill_before = transition_counts(fill_evidence, "before")
+    fill_after = transition_counts(fill_evidence, "after")
+    low_before = transition_counts(low_evidence, "before")
+    low_after = transition_counts(low_evidence, "after")
+    plan = context.experiment_model.get_execution_plan_snapshot()
+    plan_stocks = {row.stock_id: row for row in plan.stocks}
+    high_id, low_id = high_calibration.stock_id, low_calibration.stock_id
+    def effective_volumes(
+        calibration_evidence: Mapping[str, Any], boundary: str
+    ) -> dict[str, float]:
+        transition = dict(calibration_evidence.get("count_transition") or {})
+        return {
+            str(stock_id): float(volume)
+            for stock_id, volume in dict(
+                transition.get(f"{boundary}_effective_volumes_nL") or {}
+            ).items()
+        }
+
+    def row_volumes(
+        counts: Sequence[StockWellCount], volumes: Mapping[str, float]
+    ) -> dict[str, float]:
+        by_key = {(row.stock_id, row.well_id): row.droplets for row in counts}
+        return {
+            well_id: sum(
+                by_key.get((stock_id, well_id), 0) * float(volume)
+                for stock_id, volume in volumes.items()
+            )
+            for well_id in case.editor.selected_well_ids
+        }
+
+    def only_selected_volume_changed(
+        calibration_evidence: Mapping[str, Any],
+        selected_stock_id: str,
+        expected_volume_nL: float,
+    ) -> bool:
+        before = effective_volumes(calibration_evidence, "before")
+        after = effective_volumes(calibration_evidence, "after")
+        return (
+            bool(before)
+            and set(before) == set(after)
+            and selected_stock_id in after
+            and math.isclose(after[selected_stock_id], expected_volume_nL)
+            and all(
+                stock_id == selected_stock_id
+                or math.isclose(before[stock_id], after[stock_id])
+                for stock_id in before
+            )
+        )
+
+    transition_after_volumes = {
+        "high": row_volumes(
+            high_after, effective_volumes(first_calibration_evidence, "after")
+        ),
+        "low": row_volumes(low_after, effective_volumes(low_evidence, "after")),
+    }
+    if require_fill_calibration:
+        transition_after_volumes["fill"] = row_volumes(
+            fill_after, effective_volumes(fill_evidence, "after")
+        )
+    final_volumes = transition_after_volumes["low"]
+    chain_exact = (
+        fill_before == high_calibrated
+        and fill_after == fill_calibrated
+        and low_before == fill_calibrated
+        and low_after == final
+        if require_fill_calibration
+        else low_before == high_calibrated and low_after == final
+    )
+    selected_volume_updates = only_selected_volume_changed(
+        first_calibration_evidence,
+        high_calibration.stock_id,
+        float(high_calibration.droplet_volume_nL),
+    ) and only_selected_volume_changed(
+        low_evidence,
+        low_calibration.stock_id,
+        float(low_calibration.droplet_volume_nL),
+    )
+    if require_fill_calibration and fill_calibration is not None:
+        selected_volume_updates = selected_volume_updates and only_selected_volume_changed(
+            fill_evidence,
+            fill_calibration.stock_id,
+            float(fill_calibration.droplet_volume_nL),
+        )
+    checks = {
+        "high_transition_prepared_to_literal": high_before == prepared
+        and high_after == high_calibrated,
+        "calibration_chain_matches_literal_checkpoints": chain_exact,
+        "only_selected_effective_volume_changes": selected_volume_updates,
+        "selected_leg_volumes_exact": math.isclose(
+            float(plan_stocks[high_id].effective_volume_nL),
+            float(high_calibration.droplet_volume_nL),
+        )
+        and math.isclose(
+            float(plan_stocks[low_id].effective_volume_nL),
+            float(low_calibration.droplet_volume_nL),
+        ),
+        "paired_identity_preserved": high_id != low_id
+        and plan_stocks[high_id].reagent_name
+        == plan_stocks[low_id].reagent_name
+        == "Signal",
+        "volume_budget_preserved_after_every_transition": all(
+            volume <= float(case.editor.printed_volume_nL) + 1e-9
+            for volumes in transition_after_volumes.values()
+            for volume in volumes.values()
+        ),
+        "progress_stays_zero": all(
+            int(row.get("droplets", 0)) == 0
+            for row in capture_count_snapshot(context)["progress_added"]
+        ),
+        "expected_calibration_transitions_present": len(remaining)
+        == (2 if require_fill_calibration else 1),
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "high_stock_id": high_id,
+        "low_stock_id": low_id,
+        "high_transition": dict(first_calibration_evidence.get("count_transition") or {}),
+        "fill_transition": dict(fill_evidence.get("count_transition") or {}),
+        "low_transition": dict(low_evidence.get("count_transition") or {}),
+        "final_volumes_nL": final_volumes,
+        "transition_after_volumes_nL": transition_after_volumes,
+        "require_fill_calibration": require_fill_calibration,
+    }
+    return AssertionResult(
+        "execution.same_reagent_two_stock_calibration_exact",
+        "all_stocks_calibrated",
+        "pass" if not evidence["failed_checks"] else "fail",
+        ("ui", "model", "persistence"),
+        evidence,
+        (
+            None
+            if not evidence["failed_checks"]
+            else "same-reagent paired calibration failed: "
+            + ", ".join(evidence["failed_checks"])
+        ),
+    )
+
+
+def same_reagent_two_stock_progress_guard_assertion(
+    context: Any,
+    *,
+    case: Any,
+    guard_evidence: Mapping[str, Any],
+) -> AssertionResult:
+    """Prove diagnostic recording cannot mutate a progressed paired plan."""
+
+    before = guard_evidence["before_bundle"]
+    after = guard_evidence["after_bundle"]
+    before_counts = dict(guard_evidence.get("before_counts") or {})
+    after_counts = dict(guard_evidence.get("after_counts") or {})
+    apply_state = dict(guard_evidence.get("apply_state") or {})
+    eligibility = dict(apply_state.get("eligibility") or {})
+    progress_rows = normalize_stock_well_counts(
+        after_counts.get("progress_added") or (),
+        label="paired guard progress",
+    )
+    progressed_id = case.calibrations[0].stock_id
+    progressed_drops = sum(
+        row.droplets for row in progress_rows if row.stock_id == progressed_id
+    )
+    message = str(eligibility.get("message") or apply_state.get("tooltip") or "")
+    checks = {
+        "diagnostic_result_recorded": int(
+            guard_evidence.get("summary_rows_after", 0)
+        )
+        > int(guard_evidence.get("summary_rows_before", 0)),
+        "apply_disabled": apply_state.get("enabled") is False
+        and apply_state.get("state") == "unavailable",
+        "affected_progress_code_exact": eligibility.get("code")
+        == "affected_stock_progress",
+        "progressed_stock_and_drop_count_visible": progressed_id in message
+        and "5 drops" in message,
+        "exact_high_leg_progress": progressed_drops == 5,
+        "plan_identity_revision_history_unchanged": (
+            before.plan_id,
+            before.plan_revision,
+            before.plan_state,
+            before.history,
+        )
+        == (after.plan_id, after.plan_revision, after.plan_state, after.history),
+        "plan_progress_runtime_counts_unchanged": before_counts == after_counts
+        and guard_evidence.get("before_click")
+        == guard_evidence.get("after_click"),
+        "key_and_runtime_mappings_unchanged": before.key_rows == after.key_rows
+        and before.concentration_rows == after.concentration_rows
+        and before.assignments == after.assignments,
+        "array_dispatch_unchanged": guard_evidence.get("before_dispatch")
+        == guard_evidence.get("after_dispatch"),
+        "queue_drained_idle": context.controller.get_array_run_state() == "idle"
+        and context.machine.check_if_all_completed(),
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "apply_state": apply_state,
+        "progressed_stock_id": progressed_id,
+        "progressed_drops": progressed_drops,
+        "before_counts": before_counts,
+        "after_counts": after_counts,
+        "before_dispatch": dict(guard_evidence.get("before_dispatch") or {}),
+        "after_dispatch": dict(guard_evidence.get("after_dispatch") or {}),
+        "diagnostic_summary_rows": {
+            "before": guard_evidence.get("summary_rows_before"),
+            "after": guard_evidence.get("summary_rows_after"),
+        },
+    }
+    return AssertionResult(
+        "execution.same_reagent_two_stock_progress_guard_exact",
+        "progressed_pair_apply_blocked",
+        "pass" if not evidence["failed_checks"] else "fail",
+        ("ui", "model", "persistence", "simulator"),
+        evidence,
+        (
+            None
+            if not evidence["failed_checks"]
+            else "paired progress guard failed: "
+            + ", ".join(evidence["failed_checks"])
+        ),
+    )
+
+
+def two_stock_import_preview_reuse_assertion(
+    context: Any,
+    *,
+    fixture: Mapping[str, Any],
+    driver_evidence: Mapping[str, Any],
+    before_reload: Any,
+    after_reload: Any,
+    reload_evidence: Mapping[str, Any],
+) -> AssertionResult:
+    """Prove both imported legs are visible and the wizard allocation is reused."""
+
+    import_evidence = dict(driver_evidence.get("positive_upload") or {})
+    report_rows = list(import_evidence.get("report_stock_rows") or [])
+    table_rows = list(import_evidence.get("stock_table_rows") or [])
+    labels = [str(row.get("stock_leg_label") or "") for row in report_rows]
+    mappings = {
+        f"R_{float(row.get('ideal_stock_conc')):.2f}_mM": {
+            str(key): int(value)
+            for key, value in dict(row.get("droplets_per_target") or {}).items()
+        }
+        for row in report_rows
+    }
+    expected_mappings = {
+        str(stock_id): {str(key): int(value) for key, value in values.items()}
+        for stock_id, values in dict(
+            fixture.get("expected_target_mappings") or {}
+        ).items()
+    }
+    tooltip_text = "\n".join(
+        tooltip
+        for row in table_rows
+        for tooltip in row.get("tooltips") or []
+        if tooltip
+    )
+    plan = context.experiment_model.get_execution_plan_snapshot()
+    stock_ids = [row.stock_id for row in plan.stocks]
+    optimizer = dict(import_evidence.get("optimizer") or {})
+    checks = {
+        "both_stock_leg_labels_visible": labels
+        == list(fixture["expected_preview_labels"]),
+        "both_target_mappings_exact": mappings == expected_mappings,
+        "mapping_tooltips_exact": all(
+            fragment in tooltip_text
+            for fragment in (
+                "0.1 mM: 0 droplets",
+                "0.2 mM: 1 droplet",
+                "0.1 mM: 1 droplet",
+                "0.2 mM: 0 droplets",
+            )
+        ),
+        "wizard_plan_reused": optimizer.get(
+            "stock_allocation_reused_import_plan"
+        )
+        is True,
+        "outer_optimizer_not_called": int(
+            import_evidence.get("outer_optimizer_calls", -1)
+        )
+        == 0,
+        "stock_ids_unique_exact": len(stock_ids) == len(set(stock_ids))
+        and set(stock_ids) == set(fixture["expected_stock_ids"]),
+        "prepared_plan_exact": str(plan.state.value) == "prepared"
+        and int(plan.plan_revision) == 1,
+        "inactive_reload_exact": bool(reload_evidence.get("checks"))
+        and all(reload_evidence["checks"].values())
+        and not after_reload.runtime_active,
+        "reload_byte_stable": before_reload.core_file_hashes
+        == after_reload.core_file_hashes
+        and before_reload.plan_id == after_reload.plan_id
+        and before_reload.plan_revision == after_reload.plan_revision,
+        "two_reactions_retained": len(plan.wells) == int(
+            fixture["workload"]["completion_count"]
+        ),
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "preview_labels": labels,
+        "target_mappings": mappings,
+        "stock_ids": stock_ids,
+        "optimizer": optimizer,
+        "outer_optimizer_calls": import_evidence.get("outer_optimizer_calls"),
+        "reload": dict(reload_evidence),
+        "core_file_hashes_before": before_reload.core_file_hashes,
+        "core_file_hashes_after": after_reload.core_file_hashes,
+    }
+    return AssertionResult(
+        "experiment.two_stock_import_preview_reuse_exact",
+        "prepared_reloaded",
+        "pass" if not evidence["failed_checks"] else "fail",
+        ("ui", "model", "persistence"),
+        evidence,
+        (
+            None
+            if not evidence["failed_checks"]
+            else "two-stock import preview/reuse failed: "
+            + ", ".join(evidence["failed_checks"])
+        ),
     )
 
 
@@ -6011,6 +6574,10 @@ __all__ = [
     "real_application_assertion",
     "randomized_joined_design_assertion",
     "optimizer_360_design_assertion",
+    "resolution_stock_design_assertion",
+    "same_reagent_two_stock_calibration_assertion",
+    "same_reagent_two_stock_progress_guard_assertion",
+    "two_stock_import_preview_reuse_assertion",
     "regression_evidence_assertions",
     "simulation_identity_assertion",
     "synthetic_calibration_contract",

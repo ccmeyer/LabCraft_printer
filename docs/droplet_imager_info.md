@@ -307,8 +307,13 @@ Result-producing calibration and applying a result are separate operations:
 
 - A finalized execution may be revised only for the stock currently loaded in the gripper, and only before that stock has dispensed any droplets.
 - This progress rule applies to every stock, including the synthesized fill reagent. Because fill is present in most wells, it is often the first stock to become ineligible once printing starts.
+- For a two-stock reagent, the loaded head identifies the one measured stock leg. Applying its measured volume jointly re-quantizes both legs' target counts while leaving the companion leg's concentration, ejection volume, printing mode, and calibration record unchanged.
+- A two-stock Apply is permitted only while both reagent legs and the fill stock have zero printed progress. If the loaded head changes after Preview, the preview must be regenerated for the newly loaded stock leg.
+- Fill is re-quantized to the nearest count that does not exceed the execution plan's tolerance-inclusive printed-volume limit. Unreachable mappings, increased target-level grouping, ambiguous stock identities, and bounded-search exhaustion fail closed without changing the plan.
 - Fill previews for finalized executions are calculated directly from the immutable execution plan: saved well assignments, stock ejection volumes, and `target_printed_volume_nL`. Previewing a fill result does not regenerate or reinterpret the uploaded design.
 - Completed, aborted, historical/read-only, inactive persisted, runtime-mismatched, or progress-unreadable executions remain fail-closed for Apply.
+
+For a mutable design, a successful two-stock Apply is transactional and stores the exact independently-volumed allocation in `calibrated_stock_allocation`. Save/load and layout-only edits retain that allocation without re-running optimization. A stock-affecting input change invalidates it; the stored calibration remains historical but is no longer presented as the active design calibration, and the next optimization computes a normal replacement allocation.
 
 If a result-producing calibration is useful but cannot be applied because the loaded stock already has progress, the execution is terminal, or the loaded stock is outside the current plan, the dialog asks **Record diagnostic calibration?**. **Cancel** is the default. Choosing **Record Diagnostic Result** records and audits that one diagnostic result, but it does not bypass Apply eligibility and the result cannot modify the design/execution. Missing stock identity, unreadable progress, runtime mismatch, inactive execution, and historical/read-only execution block the calibration instead of offering diagnostic confirmation.
 

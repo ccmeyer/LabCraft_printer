@@ -262,19 +262,23 @@ Applying a distinct calibration creates the next immutable plan revision. It:
 
 - verifies the unchanged `experiment_design.json` hash and frozen execution
   identities;
-- rejects two-stock option calibration and any selected stock that already has
-  positive printed progress;
-- changes only that stock's exact effective volume, printing mode, printer-head
-  reference, calibration-record reference, and the resulting target maps;
-- requantizes the selected stock with the existing nearest-integral rule while
-  preserving all other non-fill targets;
-- recalculates fill from remaining target printed volume and clamps it to zero
-  when calibrated non-fill volume is already larger; and
-- recomputes exact expected well volumes without applying the design-time
-  tolerance as an execution feasibility limit.
+- requires the exact loaded stock identity and rejects a selected single stock
+  that already has positive printed progress;
+- for a two-stock reagent, requires zero progress for both reagent legs and the
+  fill stock, then jointly re-quantizes the two count maps;
+- changes calibration metadata only on the measured stock; the companion stock
+  retains its concentration, effective volume, printing mode, printer-head
+  reference, and calibration-record reference;
+- preserves every unrelated non-fill target and permits only the calibrated
+  stock, its one related companion, and fill to change per-well counts;
+- recalculates fill from remaining target printed volume, choosing the nearest
+  nonnegative count that stays within the tolerance-inclusive hard limit; and
+- recomputes exact expected well volumes without re-running the design-time
+  optimizer.
 
-Consequently, a calibrated historical well may legitimately exceed the design
-optimization limit. Progress preserves all added counts while targets and its
+Two-stock calibration never increases distinct target-level loss and fails
+closed when no reachable, volume-safe mapping exists. Progress preserves all
+added counts while targets and its
 `__execution__` revision reference are atomically replaced. `key.csv` and
 `concentration_key.csv` are regenerated from the committed plan, not by running
 stock optimization. `experiment_design.json` remains byte-identical throughout

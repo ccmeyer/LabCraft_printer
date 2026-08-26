@@ -597,6 +597,14 @@ class ExperimentModel(QObject):
             "schema_version": 1,
             "records": {},
         }
+        self.calibrated_stock_allocation: Dict[str, Any] = {
+            "schema_version": 1,
+            "active": False,
+        }
+        self.calibrated_stock_allocation_status: Dict[str, Any] = {
+            "active": False,
+            "reason": "not_configured",
+        }
         self.manual_refuel_checks: Dict[str, Any] = {
             "schema_version": 1,
             "records": {},
@@ -1627,6 +1635,7 @@ class ExperimentModel(QObject):
         droplet_nL: float,
         final_volume_nL: float,
         units: str,
+        droplet_volumes_nL: Optional[Tuple[float, float]] = None,
         max_total_drops: Optional[int] = None,
         droplets_override: Optional[Tuple[int, int]] = None,
         deadline_reached: Optional[Callable[[], bool]] = None,
@@ -1643,9 +1652,14 @@ class ExperimentModel(QObject):
             requested_adjusted = 0.0
 
         c1, c2 = float(stock_concentrations[0]), float(stock_concentrations[1])
+        if droplet_volumes_nL is None:
+            volume1 = volume2 = float(droplet_nL)
+        else:
+            volume1 = float(droplet_volumes_nL[0])
+            volume2 = float(droplet_volumes_nL[1])
         if float(final_volume_nL) > 0.0:
-            d1 = c1 * float(droplet_nL) / float(final_volume_nL)
-            d2 = c2 * float(droplet_nL) / float(final_volume_nL)
+            d1 = c1 * volume1 / float(final_volume_nL)
+            d2 = c2 * volume2 / float(final_volume_nL)
         else:
             d1 = d2 = 0.0
 
@@ -1694,7 +1708,7 @@ class ExperimentModel(QObject):
             "droplets": droplets,
             "delta_per_drop": (float(d1), float(d2)),
             "printed_volume_nL": float(
-                (int(droplets[0]) + int(droplets[1])) * float(droplet_nL)
+                int(droplets[0]) * volume1 + int(droplets[1]) * volume2
             ),
             "abs_error": float(abs_error),
             "signed_error": float(signed_error),
@@ -2192,6 +2206,10 @@ class ExperimentModel(QObject):
                         droplet_nL=float(st1["droplet_volume_nL"]),
                         final_volume_nL=V_final,
                         units=st1.get("units", opt.units),
+                        droplet_volumes_nL=(
+                            float(st1["droplet_volume_nL"]),
+                            float(st2["droplet_volume_nL"]),
+                        ),
                         droplets_override=(int(k1), int(k2)),
                     )
                     if un1 or un2:
@@ -2708,6 +2726,47 @@ class ExperimentModel(QObject):
                 "two_stock_candidates_deduplicated": 0,
                 "two_stock_target_row_cache_reuses": 0,
                 "stock_allocation_stop_reason": "not_run",
+            }
+
+        calibrated_allocation = self._normalize_calibrated_stock_allocation(
+            getattr(self, "calibrated_stock_allocation", None)
+        )
+        if bool(calibrated_allocation.get("active")):
+            allocation_payload = calibrated_allocation.get("allocation")
+            expected_fingerprint = self.stock_allocation_input_fingerprint()
+            stored_fingerprint = (
+                str((allocation_payload or {}).get("input_fingerprint") or "")
+                if isinstance(allocation_payload, Mapping)
+                else ""
+            )
+            if stored_fingerprint == expected_fingerprint:
+                restored = self.install_stock_allocation_reuse_payload(
+                    allocation_payload
+                )
+                if restored.get("reused"):
+                    self.calibrated_stock_allocation = calibrated_allocation
+                    self.calibrated_stock_allocation_status = {
+                        "active": True,
+                        "reason": "reused",
+                    }
+                    result = copy.deepcopy(restored.get("result") or {})
+                    result.update({
+                        "best": True,
+                        "calibrated_stock_allocation_reused": True,
+                        "optimizer_strategy_used": "calibration_requantization",
+                        "stock_allocation_stop_reason": "calibrated_plan_reused",
+                    })
+                    return result
+            calibrated_allocation["active"] = False
+            calibrated_allocation["stale_reason"] = (
+                "stock_input_fingerprint_mismatch"
+                if stored_fingerprint != expected_fingerprint
+                else str(restored.get("reason") or "validation_failed")
+            )
+            self.calibrated_stock_allocation = calibrated_allocation
+            self.calibrated_stock_allocation_status = {
+                "active": False,
+                "reason": calibrated_allocation["stale_reason"],
             }
 
         optimizer_clock = self._stock_optimizer_monotonic
@@ -7497,6 +7556,27 @@ class ExperimentModel(QObject):
             "optimization_result": copy.deepcopy(dict(optimization_result)),
         }
 
+    def _export_calibrated_stock_allocation_payload(
+        self,
+        *,
+        calibrated_stock_id: str,
+        calibration_record_key: str | None = None,
+    ) -> Dict[str, Any]:
+        allocation = self.export_stock_allocation_reuse_payload({
+            "best": True,
+            "optimizer_strategy_used": "calibration_requantization",
+        })
+        allocation["calibrated_independent_volumes"] = True
+        return {
+            "schema_version": 1,
+            "active": True,
+            "calibrated_stock_id": str(calibrated_stock_id),
+            "calibration_record_key": (
+                None if calibration_record_key in (None, "") else str(calibration_record_key)
+            ),
+            "allocation": allocation,
+        }
+
     def install_stock_allocation_reuse_payload(
         self, payload: Mapping[str, Any] | None
     ) -> Dict[str, Any]:
@@ -7510,6 +7590,9 @@ class ExperimentModel(QObject):
 
         plans = copy.deepcopy(payload.get("plans_per_option") or {})
         stock_rows = copy.deepcopy(payload.get("stock_rows") or [])
+        allow_independent_volumes = bool(
+            payload.get("calibrated_independent_volumes", False)
+        )
         plan_fingerprint = self._canonical_payload_sha256(
             self._stock_allocation_plan_document(plans, stock_rows)
         )
@@ -7578,11 +7661,14 @@ class ExperimentModel(QObject):
                         or concentration <= 0.0
                         or not math.isfinite(droplet_volume)
                         or droplet_volume <= 0.0
-                        or not math.isclose(
-                            droplet_volume,
-                            float(getattr(option, "droplet_nL", 0.0)),
-                            rel_tol=1e-12,
-                            abs_tol=1e-12,
+                        or (
+                            not allow_independent_volumes
+                            and not math.isclose(
+                                droplet_volume,
+                                float(getattr(option, "droplet_nL", 0.0)),
+                                rel_tol=1e-12,
+                                abs_tol=1e-12,
+                            )
                         )
                         or str(stock.get("units", "") or "")
                         != str(getattr(option, "units", "") or "")
@@ -7602,14 +7688,38 @@ class ExperimentModel(QObject):
                             raise ValueError(
                                 f"Reusable plan has invalid droplets for {key!r}."
                             )
-                    validated_stock_rows.append(self._build_stock_row(
+                    validated_row = self._build_stock_row(
                         factor_name=key[0],
                         option_name=key[1] or "",
                         stock_concentration=concentration,
                         delta_per_drop=delta_per_drop,
                         units=str(stock.get("units", "") or ""),
                         droplet_volume_nL=droplet_volume,
-                    ))
+                    )
+                    persisted_rows = [
+                        row
+                        for row in stock_rows
+                        if str(row.get("factor_name") or "") == str(key[0])
+                        and (str(row.get("option_name") or "") or None) == (key[1] or None)
+                        and str(row.get("units") or "") == str(stock.get("units", "") or "")
+                        and math.isclose(
+                            float(row.get("stock_concentration")),
+                            concentration,
+                            rel_tol=0.0,
+                            abs_tol=1e-12,
+                        )
+                    ]
+                    if len(persisted_rows) != 1:
+                        raise ValueError(
+                            f"Reusable stock identity is ambiguous for {key!r}."
+                        )
+                    persisted_row = persisted_rows[0]
+                    validated_row["printing_mode"] = normalize_printing_mode(
+                        persisted_row.get("printing_mode"),
+                        fallback=validated_row.get("printing_mode"),
+                    )
+                    stock["printing_mode"] = validated_row["printing_mode"]
+                    validated_stock_rows.append(validated_row)
 
             self.plans_per_option.clear()
             self.plans_per_option.update(plans)
@@ -8545,7 +8655,10 @@ class ExperimentModel(QObject):
                             f"{float(target):.6g}."
                         )
 
-                    used_nL += (k1 + k2) * st1["droplet_volume_nL"]  # same dv for both legs
+                    used_nL += (
+                        k1 * float(st1["droplet_volume_nL"])
+                        + k2 * float(st2["droplet_volume_nL"])
+                    )
                     tot_key1 = (key[0], key[1] or "", st1["stock_concentration"])
                     tot_key2 = (key[0], key[1] or "", st2["stock_concentration"])
                     stock_totals[tot_key1] = stock_totals.get(tot_key1, 0) + k1
@@ -8562,8 +8675,20 @@ class ExperimentModel(QObject):
             worst_nonfill = max(worst_nonfill, used_nL)
 
             # fill reagent for this reaction
-            remaining_nL = max(0.0, V - used_nL)
-            fill_drops = int(round(remaining_nL / fill_dv))
+            printed_tolerance = float(
+                self.metadata.get("printed_volume_tolerance_nL", 0.0) or 0.0
+            )
+            accepted_volume = min(
+                float(self.metadata.get("final_reaction_volume_nL", V))
+                + printed_tolerance,
+                V + printed_tolerance,
+            )
+            fill_drops = self._bounded_fill_count(
+                target_printed_volume_nL=V,
+                accepted_volume_nL=accepted_volume,
+                nonfill_volume_nL=used_nL,
+                fill_volume_nL=fill_dv,
+            )
             fill_total_drops += fill_drops
 
             rows.append({
@@ -8731,6 +8856,7 @@ class ExperimentModel(QObject):
                     "stock_concentration": float(stock.concentration),
                     "droplet_volume_nL": float(stock.effective_volume_nL),
                     "units": stock.units,
+                    "printing_mode": stock.printing_mode,
                     "quantum": 0.1,
                     "droplets_per_target": droplets_per_target,
                 }
@@ -8803,12 +8929,672 @@ class ExperimentModel(QObject):
         return best
 
 
+    def _calibration_plan_with_stock_ids(
+        self,
+        key: tuple[str, Optional[str]],
+    ) -> dict | None:
+        """Return the current option plan with exact runtime stock identities.
+
+        Optimizer plans intentionally contain only concentration/mapping data.
+        Calibration is physical-head specific, so enrich mutable plans from the
+        materialized stock rows and fail closed if a leg cannot be identified
+        uniquely.  Authoritative plans already expose their frozen stock IDs.
+        """
+        plan = self.get_calibration_application_plan_for_key(key)
+        if not plan:
+            return None
+        result = copy.deepcopy(plan)
+        stocks = list(result.get("stocks") or [])
+        if int(result.get("n_stocks", len(stocks))) != len(stocks):
+            return None
+        if result.get("source") == "authoritative_execution_plan":
+            stock_ids = [str(stock.get("stock_id") or "") for stock in stocks]
+            if any(not stock_id for stock_id in stock_ids) or len(set(stock_ids)) != len(stock_ids):
+                return None
+            return result
+
+        factor_name, option_name = key
+        matching_rows = [
+            dict(row)
+            for row in self._stock_rows_cache
+            if str(row.get("factor_name") or "") == str(factor_name)
+            and (str(row.get("option_name") or "") or None) == (option_name or None)
+        ]
+        used_rows: set[int] = set()
+        for stock in stocks:
+            concentration = float(stock.get("stock_concentration"))
+            units = str(stock.get("units") or "")
+            matches = [
+                (index, row)
+                for index, row in enumerate(matching_rows)
+                if index not in used_rows
+                and str(row.get("units") or "") == units
+                and math.isclose(
+                    float(row.get("stock_concentration")),
+                    concentration,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ]
+            if len(matches) != 1:
+                return None
+            row_index, row = matches[0]
+            used_rows.add(row_index)
+            stock["stock_id"] = self.build_stock_prep_stock_id(row)
+            stock["printing_mode"] = normalize_printing_mode(
+                row.get("printing_mode"),
+                fallback=infer_printing_mode_from_volume(
+                    stock.get("droplet_volume_nL")
+                ),
+            )
+        stock_ids = [str(stock.get("stock_id") or "") for stock in stocks]
+        if any(not stock_id for stock_id in stock_ids) or len(set(stock_ids)) != len(stock_ids):
+            return None
+        result["stocks"] = stocks
+        result["source"] = "mutable_materialized_plan"
+        return result
+
+
+    def _calibration_volume_basis(self) -> tuple[float, float, float]:
+        printed = float(self.metadata.get("target_reaction_volume_nL", 2000.0))
+        final = float(self.metadata.get("final_reaction_volume_nL", printed))
+        try:
+            tolerance = float(self.metadata.get("printed_volume_tolerance_nL", 50.0))
+        except (TypeError, ValueError):
+            tolerance = 0.0
+        if not math.isfinite(tolerance) or tolerance < 0.0:
+            tolerance = 0.0
+        printed = min(printed, final)
+        accepted = min(final + tolerance, printed + tolerance)
+        return printed, final, accepted
+
+
+    def _counts_for_plan_target(
+        self,
+        key: tuple[str, Optional[str]],
+        target_final: float,
+        plan: Mapping[str, Any],
+    ) -> tuple[int, ...]:
+        option = self._get_option_for_key(key)
+        if option is None:
+            raise ValueError(f"Design contains no option for {key!r}.")
+        starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+        target_add = max(0.0, float(target_final) - starting)
+        counts: list[int] = []
+        for stock in plan.get("stocks") or []:
+            drops, _, unreachable, _ = self._resolve_drops_for_target(stock, target_add)
+            if unreachable:
+                raise ValueError(
+                    f"The current stock plan has no exact mapping for {self._design_key_label(key)} "
+                    f"at {float(target_final):.6g}."
+                )
+            counts.append(int(drops))
+        return tuple(counts)
+
+
+    def _calibration_target_volume_limits(
+        self,
+        key: tuple[str, Optional[str]],
+        *,
+        accepted_volume_nL: float,
+        excluded_stock_ids: Iterable[str] = (),
+    ) -> tuple[dict[float, float], list[dict[str, Any]]]:
+        """Return each target's tightest remaining row-volume allowance."""
+        limits: dict[float, float] = {}
+        run_rows: list[dict[str, Any]] = []
+        execution_plan = self.get_execution_plan_snapshot()
+        if (
+            execution_plan is not None
+            and self.get_execution_plan_source() != "legacy_reconstruction"
+        ):
+            excluded = {str(stock_id) for stock_id in excluded_stock_ids}
+            fill_name = self.get_fill_reagent_name()
+            stock_lookup = {
+                stock.stock_id: stock for stock in execution_plan.stocks
+            }
+            fill_ids = {
+                stock.stock_id
+                for stock in execution_plan.stocks
+                if stock.factor_name == fill_name and stock.units == "--"
+            }
+            reaction_targets = {
+                f"R{index + 1}": spec.get("reaction", {})
+                for index, spec in enumerate(self._iter_reaction_run_specs())
+            }
+            for index, well in enumerate(execution_plan.wells):
+                reaction = reaction_targets.get(well.reaction_id)
+                if not isinstance(reaction, Mapping) or key not in reaction:
+                    continue
+                other_volume = sum(
+                    int(dispense.target_dispenses)
+                    * float(stock_lookup[dispense.stock_id].effective_volume_nL)
+                    for dispense in well.dispenses
+                    if dispense.stock_id not in excluded
+                    and dispense.stock_id not in fill_ids
+                )
+                target_key = self._normalize_target_key(float(reaction[key]))
+                remaining = float(accepted_volume_nL) - other_volume
+                limits[target_key] = min(
+                    limits.get(target_key, float("inf")), remaining
+                )
+                run_rows.append(
+                    {
+                        "index": index,
+                        "well_id": well.well_id,
+                        "reaction_id": well.reaction_id,
+                        "reaction": dict(reaction),
+                        "target_key": target_key,
+                        "other_nonfill_volume_nL": float(other_volume),
+                    }
+                )
+            return limits, run_rows
+
+        for index, spec in enumerate(self._iter_reaction_run_specs()):
+            reaction = dict(spec.get("reaction") or {})
+            if key not in reaction:
+                continue
+            other_volume = 0.0
+            for other_key, other_target in reaction.items():
+                if other_key == key:
+                    continue
+                other_plan = self.plans_per_option.get(other_key)
+                if not other_plan:
+                    raise ValueError(
+                        f"No materialized stock plan exists for {self._design_key_label(other_key)}."
+                    )
+                counts = self._counts_for_plan_target(other_key, other_target, other_plan)
+                stocks = list(other_plan.get("stocks") or [])
+                other_volume += sum(
+                    int(count) * float(stock.get("droplet_volume_nL"))
+                    for count, stock in zip(counts, stocks)
+                )
+            target_key = self._normalize_target_key(float(reaction[key]))
+            remaining = float(accepted_volume_nL) - other_volume
+            limits[target_key] = min(limits.get(target_key, float("inf")), remaining)
+            run_rows.append(
+                {
+                    "index": index,
+                    "reaction": reaction,
+                    "target_key": target_key,
+                    "other_nonfill_volume_nL": float(other_volume),
+                }
+            )
+        return limits, run_rows
+
+
+    @staticmethod
+    def _calibration_pair_rank(
+        *,
+        loss: int,
+        worst_error: float,
+        error_sum: float,
+        max_volume: float,
+        volume_sum: float,
+        churn: int,
+        path: tuple[tuple[int, int], ...],
+    ) -> tuple:
+        return (
+            int(loss),
+            float(worst_error),
+            float(error_sum),
+            float(max_volume),
+            float(volume_sum),
+            int(churn),
+            tuple(path),
+        )
+
+
+    @staticmethod
+    def _bounded_fill_count(
+        *,
+        target_printed_volume_nL: float,
+        accepted_volume_nL: float,
+        nonfill_volume_nL: float,
+        fill_volume_nL: float,
+    ) -> int:
+        """Choose the nearest fill count without exceeding the hard volume limit."""
+        remaining_to_target = max(
+            0.0,
+            float(target_printed_volume_nL) - float(nonfill_volume_nL),
+        )
+        desired_count = max(
+            0,
+            int(round(remaining_to_target / float(fill_volume_nL))),
+        )
+        remaining_to_limit = max(
+            0.0,
+            float(accepted_volume_nL) - float(nonfill_volume_nL),
+        )
+        maximum_count = max(
+            0,
+            int(math.floor((remaining_to_limit + 1e-12) / float(fill_volume_nL))),
+        )
+        return min(desired_count, maximum_count)
+
+
+    def _requantize_fixed_two_stock_group(
+        self,
+        key: tuple[str, Optional[str]],
+        *,
+        calibrated_stock_id: str,
+        new_effective_volume_nL: float,
+        new_printing_mode: str | None = None,
+        pair_evaluation_cap: int = 12000,
+    ) -> dict:
+        """Re-quantize a fixed two-stock pair with independent leg volumes.
+
+        This is deliberately pure: it returns a complete candidate mapping and
+        never mutates the design, execution plan, calibration records, or runtime.
+        """
+        plan = self._calibration_plan_with_stock_ids(key)
+        if not plan:
+            return {"ok": False, "code": "stock_identity_unavailable", "reason": "The stock plan cannot be mapped to exact stock identities."}
+        stocks = list(plan.get("stocks") or [])
+        if len(stocks) != 2:
+            return {"ok": False, "code": "not_two_stock", "reason": "The selected reagent does not use exactly two stock solutions."}
+        stock_ids = [str(stock.get("stock_id") or "") for stock in stocks]
+        if str(calibrated_stock_id or "") not in stock_ids:
+            return {"ok": False, "code": "calibrated_stock_not_in_plan", "reason": "The loaded printer-head stock is not one of this reagent's two stock solutions."}
+        calibrated_index = stock_ids.index(str(calibrated_stock_id))
+        companion_index = 1 - calibrated_index
+        try:
+            new_volume = float(new_effective_volume_nL)
+        except (TypeError, ValueError):
+            new_volume = float("nan")
+        if not math.isfinite(new_volume) or new_volume <= 0.0:
+            return {"ok": False, "code": "invalid_ejection_volume", "reason": "The measured ejection volume must be positive."}
+
+        modes = [
+            normalize_printing_mode(
+                stock.get("printing_mode"),
+                fallback=infer_printing_mode_from_volume(stock.get("droplet_volume_nL")),
+            )
+            for stock in stocks
+        ]
+        modes[calibrated_index] = normalize_printing_mode(
+            new_printing_mode,
+            fallback=modes[calibrated_index],
+        )
+        try:
+            new_volume = validate_ejection_volume_for_mode(
+                new_volume,
+                modes[calibrated_index],
+                label="Ejection volume",
+            )
+        except Exception as exc:
+            return {"ok": False, "code": "invalid_ejection_volume", "reason": str(exc)}
+
+        printed_volume, final_volume, accepted_volume = self._calibration_volume_basis()
+        if final_volume <= 0.0:
+            return {"ok": False, "code": "invalid_final_volume", "reason": "The final reaction volume must be positive."}
+        volumes = [float(stock.get("droplet_volume_nL")) for stock in stocks]
+        old_volumes = tuple(volumes)
+        volumes[calibrated_index] = new_volume
+        concentrations = [float(stock.get("stock_concentration")) for stock in stocks]
+        deltas = [concentrations[index] * volumes[index] / final_volume for index in range(2)]
+        if any(not math.isfinite(value) or value <= 0.0 for value in deltas + volumes):
+            return {"ok": False, "code": "invalid_stock_plan", "reason": "The stock concentrations and ejection volumes must produce positive concentration increments."}
+
+        option = self._get_option_for_key(key)
+        if option is None:
+            return {"ok": False, "code": "missing_design_option", "reason": "The reagent is absent from the current design."}
+        starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+        units = str(getattr(option, "units", "") or stocks[0].get("units") or "")
+        target_values = {float(target) for target in self.get_targets_for_key(key)}
+        for spec in self._iter_reaction_run_specs():
+            reaction = spec.get("reaction") or {}
+            if key in reaction:
+                target_values.add(float(reaction[key]))
+        ordered_targets = sorted(target_values)
+        if not ordered_targets:
+            return {"ok": False, "code": "missing_targets", "reason": "The reagent has no requested targets."}
+
+        try:
+            target_limits, run_rows = self._calibration_target_volume_limits(
+                key,
+                accepted_volume_nL=accepted_volume,
+                excluded_stock_ids=stock_ids,
+            )
+        except Exception as exc:
+            return {"ok": False, "code": "row_context_invalid", "reason": str(exc)}
+
+        execution_plan = self.get_execution_plan_snapshot()
+        if (
+            execution_plan is not None
+            and self.get_execution_plan_source() != "legacy_reconstruction"
+        ):
+            fill_candidates = [
+                stock
+                for stock in execution_plan.stocks
+                if stock.factor_name == self.get_fill_reagent_name()
+                and stock.units == "--"
+            ]
+            if len(fill_candidates) > 1:
+                return {
+                    "ok": False,
+                    "code": "invalid_fill_identity",
+                    "reason": "The execution plan contains more than one fill stock.",
+                }
+            fill_available = bool(fill_candidates)
+            fill_volume = (
+                float(fill_candidates[0].effective_volume_nL)
+                if fill_candidates
+                else float(self._default_fill_droplet_volume_nl())
+            )
+        else:
+            fill_available = True
+            fill_volume = float(
+                self.metadata.get(
+                    "fill_droplet_volume_nL",
+                    self._default_fill_droplet_volume_nl(),
+                )
+            )
+        if not math.isfinite(fill_volume) or fill_volume <= 0.0:
+            return {
+                "ok": False,
+                "code": "invalid_fill_volume",
+                "reason": "The fill ejection volume must be positive.",
+            }
+
+        rows_by_target: dict[float, list[dict[str, Any]]] = {}
+        for run_row in run_rows:
+            rows_by_target.setdefault(run_row["target_key"], []).append(run_row)
+
+        def _pair_fits_rows(target_key: float, pair_volume: float) -> bool:
+            for run_row in rows_by_target.get(target_key, []):
+                nonfill = float(run_row["other_nonfill_volume_nL"]) + pair_volume
+                if nonfill > accepted_volume + 1e-9:
+                    return False
+                fill_count = self._bounded_fill_count(
+                    target_printed_volume_nL=printed_volume,
+                    accepted_volume_nL=accepted_volume,
+                    nonfill_volume_nL=nonfill,
+                    fill_volume_nL=fill_volume,
+                )
+                if not fill_available and fill_count > 0:
+                    return False
+                total = nonfill + fill_count * fill_volume
+                if total > accepted_volume + 1e-9:
+                    return False
+            return True
+
+        pair_evaluations = 0
+        candidates_by_target: list[list[dict[str, Any]]] = []
+        current_rows: list[dict[str, Any]] = []
+        tolerance = 0.5 * min(deltas) + 1e-12
+        for target_final in ordered_targets:
+            target_key = self._normalize_target_key(target_final)
+            target_add = max(0.0, float(target_final) - starting)
+            volume_limit = min(
+                accepted_volume,
+                target_limits.get(target_key, accepted_volume),
+            )
+            if volume_limit < -1e-9:
+                return {"ok": False, "code": "row_volume_budget_exceeded", "reason": f"Other reagents already exceed the printed-volume limit for target {target_final:.6g}."}
+            current_counts = self._counts_for_plan_target(key, target_final, plan)
+            current_achieved = sum(
+                int(count) * concentrations[index] * old_volumes[index] / final_volume
+                for index, count in enumerate(current_counts)
+            )
+            current_rows.append(
+                {
+                    "target_final": float(target_final),
+                    "achieved_adjusted": float(current_achieved),
+                    "counts": tuple(int(value) for value in current_counts),
+                }
+            )
+
+            if target_add <= 1e-12:
+                candidates_by_target.append([
+                    {
+                        "counts": (0, 0),
+                        "achieved_adjusted": 0.0,
+                        "achieved_key": self._normalize_target_key(0.0),
+                        "abs_error": 0.0,
+                        "printed_volume_nL": 0.0,
+                        "churn": sum(abs(int(value)) for value in current_counts),
+                    }
+                ])
+                continue
+
+            a_max = max(0, int(math.floor((volume_limit + 1e-12) / volumes[0])))
+            by_achieved: dict[float, dict[str, Any]] = {}
+            capped = False
+            for a in range(a_max + 1):
+                remaining_volume = volume_limit - a * volumes[0]
+                if remaining_volume < -1e-9:
+                    continue
+                b_max = max(0, int(math.floor((remaining_volume + 1e-12) / volumes[1])))
+                raw_b = (target_add - a * deltas[0]) / deltas[1]
+                b_values = {
+                    0,
+                    b_max,
+                    max(0, min(b_max, int(math.floor(raw_b)))),
+                    max(0, min(b_max, int(math.ceil(raw_b)))),
+                    max(0, min(b_max, int(round(raw_b)))),
+                }
+                for base in tuple(b_values):
+                    b_values.add(max(0, min(b_max, base - 1)))
+                    b_values.add(max(0, min(b_max, base + 1)))
+                for b in sorted(b_values):
+                    pair_evaluations += 1
+                    if pair_evaluations > int(pair_evaluation_cap):
+                        capped = True
+                        break
+                    if a + b <= 0:
+                        continue
+                    achieved = a * deltas[0] + b * deltas[1]
+                    error = abs(achieved - target_add)
+                    if error > tolerance:
+                        continue
+                    pair_volume = a * volumes[0] + b * volumes[1]
+                    if not _pair_fits_rows(target_key, pair_volume):
+                        continue
+                    candidate = {
+                        "counts": (int(a), int(b)),
+                        "achieved_adjusted": float(achieved),
+                        "achieved_key": self._normalize_target_key(achieved),
+                        "abs_error": float(error),
+                        "printed_volume_nL": float(pair_volume),
+                        "churn": abs(int(a) - int(current_counts[0])) + abs(int(b) - int(current_counts[1])),
+                    }
+                    achieved_key = candidate["achieved_key"]
+                    incumbent = by_achieved.get(achieved_key)
+                    candidate_rank = (
+                        candidate["abs_error"],
+                        candidate["printed_volume_nL"],
+                        candidate["churn"],
+                        candidate["counts"],
+                    )
+                    incumbent_rank = (
+                        incumbent["abs_error"],
+                        incumbent["printed_volume_nL"],
+                        incumbent["churn"],
+                        incumbent["counts"],
+                    ) if incumbent is not None else None
+                    if incumbent_rank is None or candidate_rank < incumbent_rank:
+                        by_achieved[achieved_key] = candidate
+                if capped:
+                    break
+            if capped:
+                return {
+                    "ok": False,
+                    "code": "pair_evaluation_cap",
+                    "reason": "The bounded two-stock calibration search reached its pair-evaluation cap; no changes were applied.",
+                    "pair_evaluations": pair_evaluations,
+                }
+            candidates = sorted(
+                by_achieved.values(),
+                key=lambda row: (
+                    row["abs_error"],
+                    row["printed_volume_nL"],
+                    row["churn"],
+                    row["counts"],
+                ),
+            )[:64]
+            if not candidates:
+                return {
+                    "ok": False,
+                    "code": "unreachable_target",
+                    "reason": f"No reachable two-stock mapping remains for target {target_final:.6g} {units}.",
+                    "target_final": float(target_final),
+                    "pair_evaluations": pair_evaluations,
+                }
+            candidates_by_target.append(candidates)
+
+        states: list[dict[str, Any]] = []
+        for candidate in candidates_by_target[0]:
+            path = (candidate["counts"],)
+            states.append({
+                "candidate": candidate,
+                "path": path,
+                "rank": self._calibration_pair_rank(
+                    loss=0,
+                    worst_error=candidate["abs_error"],
+                    error_sum=candidate["abs_error"],
+                    max_volume=candidate["printed_volume_nL"],
+                    volume_sum=candidate["printed_volume_nL"],
+                    churn=candidate["churn"],
+                    path=path,
+                ),
+            })
+        for candidates in candidates_by_target[1:]:
+            next_states: list[dict[str, Any]] = []
+            for candidate in candidates:
+                best_state = None
+                for previous in states:
+                    previous_candidate = previous["candidate"]
+                    if candidate["achieved_adjusted"] < previous_candidate["achieved_adjusted"] - 1e-12:
+                        continue
+                    collision = int(
+                        candidate["achieved_key"] == previous_candidate["achieved_key"]
+                    )
+                    previous_rank = previous["rank"]
+                    path = previous["path"] + (candidate["counts"],)
+                    rank = self._calibration_pair_rank(
+                        loss=int(previous_rank[0]) + collision,
+                        worst_error=max(float(previous_rank[1]), candidate["abs_error"]),
+                        error_sum=float(previous_rank[2]) + candidate["abs_error"],
+                        max_volume=max(float(previous_rank[3]), candidate["printed_volume_nL"]),
+                        volume_sum=float(previous_rank[4]) + candidate["printed_volume_nL"],
+                        churn=int(previous_rank[5]) + candidate["churn"],
+                        path=path,
+                    )
+                    if best_state is None or rank < best_state["rank"]:
+                        best_state = {"candidate": candidate, "path": path, "rank": rank}
+                if best_state is not None:
+                    next_states.append(best_state)
+            if not next_states:
+                return {"ok": False, "code": "nonmonotonic_mapping", "reason": "No monotonic two-stock calibration mapping is reachable."}
+            states = next_states
+        selected_state = min(states, key=lambda state: state["rank"])
+        selected_counts = selected_state["path"]
+
+        current_achieved_keys = [
+            self._normalize_target_key(row["achieved_adjusted"])
+            for row in current_rows
+        ]
+        current_loss = sum(
+            1
+            for previous, current in zip(current_achieved_keys, current_achieved_keys[1:])
+            if previous == current
+        )
+        selected_loss = int(selected_state["rank"][0])
+        if selected_loss > current_loss:
+            return {
+                "ok": False,
+                "code": "distinct_level_loss_increased",
+                "reason": (
+                    "Applying this calibration would increase grouped target levels "
+                    f"from {current_loss} to {selected_loss}."
+                ),
+                "old_distinct_level_loss": current_loss,
+                "new_distinct_level_loss": selected_loss,
+                "pair_evaluations": pair_evaluations,
+            }
+
+        mapping_by_target: dict[float, tuple[int, int]] = {}
+        rows: list[dict[str, Any]] = []
+        for index, (target_final, counts) in enumerate(zip(ordered_targets, selected_counts)):
+            target_add = max(0.0, float(target_final) - starting)
+            achieved_add = counts[0] * deltas[0] + counts[1] * deltas[1]
+            achieved_final = starting + achieved_add
+            pair_volume = counts[0] * volumes[0] + counts[1] * volumes[1]
+            current_counts = current_rows[index]["counts"]
+            current_volume = current_counts[0] * old_volumes[0] + current_counts[1] * old_volumes[1]
+            target_key = self._normalize_target_key(target_final)
+            mapping_by_target[target_key] = tuple(int(value) for value in counts)
+            rows.append({
+                "target_final": float(target_final),
+                "starting": float(starting),
+                "achieved_final": float(achieved_final),
+                "achieved_adjusted": float(achieved_add),
+                "error": float(achieved_add - target_add),
+                "abs_error": float(abs(achieved_add - target_add)),
+                "drops": tuple(int(value) for value in counts),
+                "old_drops": tuple(int(value) for value in current_counts),
+                "printed_nL_new": float(pair_volume),
+                "printed_nL_old": float(current_volume),
+                "printed_nL_shift": float(pair_volume - current_volume),
+                "delta_per_drop_leg1": float(deltas[0]),
+                "delta_per_drop_leg2": float(deltas[1]),
+                "units": units,
+            })
+
+        worst_nonfill = 0.0
+        for run_row in run_rows:
+            counts = mapping_by_target[run_row["target_key"]]
+            pair_volume = counts[0] * volumes[0] + counts[1] * volumes[1]
+            nonfill = float(run_row["other_nonfill_volume_nL"]) + pair_volume
+            if nonfill > accepted_volume + 1e-9:
+                return {
+                    "ok": False,
+                    "code": "row_volume_budget_exceeded",
+                    "reason": f"Reaction row {run_row['index'] + 1} would require {nonfill:.3f} nL, above the accepted {accepted_volume:.3f} nL limit.",
+                }
+            worst_nonfill = max(worst_nonfill, nonfill)
+
+        return {
+            "ok": True,
+            "code": "ok",
+            "n_stocks": 2,
+            "factor_name": key[0],
+            "option_name": key[1],
+            "calibrated_stock_id": stock_ids[calibrated_index],
+            "companion_stock_id": stock_ids[companion_index],
+            "stock_ids": tuple(stock_ids),
+            "calibrated_stock_index": calibrated_index,
+            "companion_stock_index": companion_index,
+            "old_effective_volumes_nL": tuple(old_volumes),
+            "new_effective_volumes_nL": tuple(volumes),
+            "printing_modes": tuple(modes),
+            "stock_concentrations": tuple(concentrations),
+            "deltas": tuple(deltas),
+            "mapping_by_target": mapping_by_target,
+            "rows": rows,
+            "old_distinct_level_loss": int(current_loss),
+            "new_distinct_level_loss": int(selected_loss),
+            "worst_abs_error": max((row["abs_error"] for row in rows), default=0.0),
+            "mean_abs_error": (
+                sum(row["abs_error"] for row in rows) / len(rows) if rows else 0.0
+            ),
+            "worst_nonfill_volume_nL": float(worst_nonfill),
+            "printed_volume_nL": float(printed_volume),
+            "accepted_volume_nL": float(accepted_volume),
+            "final_volume_nL": float(final_volume),
+            "pair_evaluations": int(pair_evaluations),
+            "source_plan": plan,
+        }
+
+
     def preview_requantized_for_option(
         self,
         key: tuple[str, Optional[str]],
         new_droplet_nL: float,
         *,
-        quantum: float = 0.1
+        quantum: float = 0.1,
+        calibrated_stock_id: str | None = None,
+        printing_mode: str | None = None,
     ) -> dict:
         """
         PREVIEW ONLY. Keep existing stock concentration(s) for 'key' but recompute the mapping
@@ -8879,35 +9665,31 @@ class ExperimentModel(QObject):
                 max_printed_nL_new = max(max_printed_nL_new, printed_nL_new)
             return {"ok": True, "n_stocks": 1, "rows": rows, "max_printed_nL_new": max_printed_nL_new, "units": units, "new_droplet_nL": float(new_droplet_nL)}
 
-        # two-stock case
-        st1, st2 = plan["stocks"]
-        c1 = float(st1["stock_concentration"]); d1 = (c1 * new_droplet_nL) / V_final
-        c2 = float(st2["stock_concentration"]); d2 = (c2 * new_droplet_nL) / V_final
-        for t in targets_final:
-            t_add = max(0.0, float(t) - float(starting))
-            a, b, err_add = self._nearest_two_stock(t_add, d1, d2)
-            achieved_add = a * d1 + b * d2
-            achieved_final = starting + achieved_add
-            # compute old printed volume (sum of legs)
-            k1_old = _orig_k_for(t, st1)
-            k2_old = _orig_k_for(t, st2)
-            printed_nL_old = (k1_old + k2_old) * old_dv
-            printed_nL_new = (a + b) * new_droplet_nL
-            rows.append({
-                "target_final": float(t),
-                "starting": float(starting),
-                "delta_per_drop_leg1": float(d1),
-                "delta_per_drop_leg2": float(d2),
-                "achieved_final": float(achieved_final),
-                "error": float(achieved_final - float(t)),
-                "drops": (int(a), int(b)),
-                "printed_nL_new": float(printed_nL_new),
-                "printed_nL_old": float(printed_nL_old),
-                "printed_nL_shift": float(printed_nL_new - printed_nL_old),
-                "units": units,
-            })
-            max_printed_nL_new = max(max_printed_nL_new, printed_nL_new)
-        return {"ok": True, "n_stocks": 2, "rows": rows, "max_printed_nL_new": max_printed_nL_new, "units": units, "new_droplet_nL": float(new_droplet_nL)}
+        # Two stock legs correspond to separate physical stocks/heads.  A
+        # measured volume applies to exactly one leg; the companion's volume is
+        # fixed while both planned counts may change.
+        if not calibrated_stock_id:
+            return {
+                "ok": False,
+                "code": "missing_stock_context",
+                "reason": "Select or load the exact two-stock printer head before previewing calibration application.",
+            }
+        requantized = self._requantize_fixed_two_stock_group(
+            key,
+            calibrated_stock_id=str(calibrated_stock_id),
+            new_effective_volume_nL=float(new_droplet_nL),
+            new_printing_mode=printing_mode,
+        )
+        if not requantized.get("ok"):
+            return requantized
+        requantized = dict(requantized)
+        requantized["max_printed_nL_new"] = max(
+            (float(row["printed_nL_new"]) for row in requantized["rows"]),
+            default=0.0,
+        )
+        requantized["units"] = units
+        requantized["new_droplet_nL"] = float(new_droplet_nL)
+        return requantized
 
     def find_key_for_reagent(self, reagent_name: str, group_name: str | None = None) -> tuple[str, str | None]:
         """
@@ -8970,6 +9752,25 @@ class ExperimentModel(QObject):
             "schema_version": int(payload.get("schema_version", 1) or 1),
             "records": records,
         }
+
+    @staticmethod
+    def _normalize_calibrated_stock_allocation(payload) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            return {"schema_version": 1, "active": False}
+        try:
+            schema_version = int(payload.get("schema_version", 1) or 1)
+        except (TypeError, ValueError):
+            schema_version = 1
+        if schema_version != 1:
+            return {
+                "schema_version": schema_version,
+                "active": False,
+                "stale_reason": "unsupported_schema",
+            }
+        result = copy.deepcopy(dict(payload))
+        result["schema_version"] = 1
+        result["active"] = bool(result.get("active", False))
+        return result
 
     @staticmethod
     def _normalize_manual_refuel_checks(payload) -> Dict[str, Any]:
@@ -9420,6 +10221,21 @@ class ExperimentModel(QObject):
             context["factor_name"],
             context["option_name"],
         )
+        calibrated_allocation = self._normalize_calibrated_stock_allocation(
+            getattr(self, "calibrated_stock_allocation", None)
+        )
+        if calibrated_allocation.get("calibration_record_key") == key:
+            allocation_payload = calibrated_allocation.get("allocation")
+            stored_fingerprint = (
+                str((allocation_payload or {}).get("input_fingerprint") or "")
+                if isinstance(allocation_payload, Mapping)
+                else ""
+            )
+            if (
+                not calibrated_allocation.get("active")
+                or stored_fingerprint != self.stock_allocation_input_fingerprint()
+            ):
+                return None
         state = self._normalize_applied_imaging_calibrations(
             getattr(self, "applied_imaging_calibrations", None)
         )
@@ -9959,6 +10775,211 @@ class ExperimentModel(QObject):
         return {"ok": True, "code": "ok", "message": "", "record": record}
 
 
+    def _apply_mutable_two_stock_requantization(
+        self,
+        *,
+        key: tuple[str, Optional[str]],
+        calibrated_stock_id: str,
+        new_droplet_nL: float,
+        printing_mode: str | None,
+        applied_calibration: dict | None,
+        write_keys_if_assigned: bool,
+    ) -> dict:
+        result = self._requantize_fixed_two_stock_group(
+            key,
+            calibrated_stock_id=calibrated_stock_id,
+            new_effective_volume_nL=new_droplet_nL,
+            new_printing_mode=printing_mode,
+        )
+        if not result.get("ok"):
+            raise ValueError(str(result.get("reason") or "Two-stock calibration re-quantization failed."))
+
+        option = self._get_option_for_key(key)
+        if option is None:
+            raise ValueError(f"Design contains no OptionSpec for {key!r}.")
+        plan = self.plans_per_option.get(key)
+        if not isinstance(plan, dict) or int(plan.get("n_stocks", 0)) != 2:
+            raise ValueError(f"No mutable two-stock plan exists for {key!r}.")
+
+        snapshot = {
+            "plans": copy.deepcopy(self.plans_per_option),
+            "stock_rows": copy.deepcopy(self._stock_rows_cache),
+            "fill_row": copy.deepcopy(self._fill_row_cache),
+            "preview": copy.deepcopy(self._target_preview_map),
+            "unreachable": copy.deepcopy(self._unreachable_preview_map),
+            "reactions": self._reactions_df.copy(deep=True),
+            "worst_nonfill": self._last_worst_nonfill_volume_nL,
+            "applied_calibrations": copy.deepcopy(self.applied_imaging_calibrations),
+            "calibrated_allocation": copy.deepcopy(self.calibrated_stock_allocation),
+            "calibrated_status": copy.deepcopy(self.calibrated_stock_allocation_status),
+            "unsaved_changes": bool(self.unsaved_changes),
+        }
+
+        def _restore() -> None:
+            self.plans_per_option.clear()
+            self.plans_per_option.update(copy.deepcopy(snapshot["plans"]))
+            self._stock_rows_cache = copy.deepcopy(snapshot["stock_rows"])
+            self._fill_row_cache = copy.deepcopy(snapshot["fill_row"])
+            self._target_preview_map = copy.deepcopy(snapshot["preview"])
+            self._unreachable_preview_map = copy.deepcopy(snapshot["unreachable"])
+            self._reactions_df = snapshot["reactions"].copy(deep=True)
+            self._last_worst_nonfill_volume_nL = snapshot["worst_nonfill"]
+            self.applied_imaging_calibrations = copy.deepcopy(
+                snapshot["applied_calibrations"]
+            )
+            self.calibrated_stock_allocation = copy.deepcopy(
+                snapshot["calibrated_allocation"]
+            )
+            self.calibrated_stock_allocation_status = copy.deepcopy(
+                snapshot["calibrated_status"]
+            )
+            self.unsaved_changes = bool(snapshot["unsaved_changes"])
+
+        try:
+            stocks = list(plan.get("stocks") or [])
+            stock_ids = list(result["stock_ids"])
+            calibrated_index = int(result["calibrated_stock_index"])
+            starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+            final_volume = float(result["final_volume_nL"])
+            mappings = [dict(), dict()]
+            for row in result["rows"]:
+                adjusted = self._normalize_target_key(
+                    max(0.0, float(row["target_final"]) - starting)
+                )
+                mappings[0][adjusted] = int(row["drops"][0])
+                mappings[1][adjusted] = int(row["drops"][1])
+
+            for index, stock in enumerate(stocks):
+                volume = float(result["new_effective_volumes_nL"][index])
+                concentration = float(stock["stock_concentration"])
+                stock["droplet_volume_nL"] = volume
+                stock["delta_per_drop"] = concentration * volume / final_volume
+                stock["droplets_per_target"] = mappings[index]
+                stock["quantum"] = 1e-6
+                stock["stock_id"] = stock_ids[index]
+                stock["printing_mode"] = result["printing_modes"][index]
+
+            matched_rows = 0
+            for row in self._stock_rows_cache:
+                try:
+                    row_stock_id = self.build_stock_prep_stock_id(row)
+                except Exception:
+                    continue
+                if row_stock_id not in stock_ids:
+                    continue
+                index = stock_ids.index(row_stock_id)
+                stock = stocks[index]
+                row["droplet_volume_nL"] = float(stock["droplet_volume_nL"])
+                row["delta_per_drop"] = float(stock["delta_per_drop"])
+                row["printing_mode"] = str(stock["printing_mode"])
+                matched_rows += 1
+            if matched_rows != 2:
+                raise RuntimeError(
+                    "The mutable two-stock plan no longer maps to exactly two stock rows."
+                )
+
+            self.generate_experiment()
+            self._refresh_plan_preview_maps()
+            if self._unreachable_preview_map.get(key):
+                raise RuntimeError(
+                    "The calibrated two-stock plan left one or more targets unreachable."
+                )
+
+            record = None
+            if applied_calibration:
+                record_kwargs = dict(applied_calibration)
+                record_kwargs.pop("stock_id", None)
+                record_kwargs.setdefault(
+                    "printing_mode", result["printing_modes"][calibrated_index]
+                )
+                record_kwargs.setdefault(
+                    "original_printing_mode",
+                    result["source_plan"]["stocks"][calibrated_index].get(
+                        "printing_mode"
+                    ),
+                )
+                record_kwargs.setdefault(
+                    "applied_printing_mode",
+                    result["printing_modes"][calibrated_index],
+                )
+                record = self.record_applied_imaging_calibration(
+                    stock_id=calibrated_stock_id,
+                    factor_name=key[0],
+                    option_name=key[1],
+                    is_fill=False,
+                    applied_design_volume_nL=float(new_droplet_nL),
+                    save=False,
+                    **record_kwargs,
+                )
+
+            record_key = None
+            if isinstance(record, dict):
+                record_key = self._applied_imaging_key(
+                    record.get("stock_id"),
+                    record.get("printer_head_id"),
+                    record.get("printing_mode"),
+                    record.get("factor_name"),
+                    record.get("option_name"),
+                )
+            self.calibrated_stock_allocation = (
+                self._export_calibrated_stock_allocation_payload(
+                    calibrated_stock_id=calibrated_stock_id,
+                    calibration_record_key=record_key,
+                )
+            )
+            self.calibrated_stock_allocation_status = {
+                "active": True,
+                "reason": "applied",
+            }
+            self._refresh_runtime_after_plan_change(
+                write_keys_if_assigned=write_keys_if_assigned
+            )
+            self.unsaved_changes = True
+            saved_experiment = False
+            if getattr(self, "experiment_file_path", None):
+                self.save_experiment()
+                saved_experiment = True
+        except Exception:
+            _restore()
+            raise
+
+        calibrated_rows = [
+            row for row in result["rows"]
+            if tuple(row["old_drops"]) != tuple(row["drops"])
+        ]
+        return {
+            "factor": key[0],
+            "option": key[1],
+            "n_stocks": 2,
+            "calibrated_stock_id": calibrated_stock_id,
+            "companion_stock_id": result["companion_stock_id"],
+            "old_effective_volume_nL": float(
+                result["old_effective_volumes_nL"][calibrated_index]
+            ),
+            "new_droplet_nL": float(
+                result["new_effective_volumes_nL"][calibrated_index]
+            ),
+            "companion_effective_volume_nL": float(
+                result["new_effective_volumes_nL"][result["companion_stock_index"]]
+            ),
+            "old_distinct_level_loss": int(result["old_distinct_level_loss"]),
+            "new_distinct_level_loss": int(result["new_distinct_level_loss"]),
+            "worst_abs_error": float(result["worst_abs_error"]),
+            "worst_nonfill_after_nL": float(result["worst_nonfill_volume_nL"]),
+            "changed_target_count": len(calibrated_rows),
+            "count_changes": [
+                {
+                    "target_final": float(row["target_final"]),
+                    "old_drops": tuple(row["old_drops"]),
+                    "new_drops": tuple(row["drops"]),
+                }
+                for row in calibrated_rows
+            ],
+            "saved_experiment": bool(saved_experiment),
+            "applied_imaging_calibration_recorded": record is not None,
+        }
+
+
     # ---------- apply a new droplet size while keeping stock concentration fixed ----------
     def apply_droplet_volume_for_option(
         self,
@@ -10001,10 +11022,29 @@ class ExperimentModel(QObject):
                 for stock in execution_plan.stocks
                 if stock.factor_name == factor_name and stock.option_name == option_name
             ]
-            if len(matching) != 1:
-                raise RuntimeError("The calibrated design option does not map to exactly one execution stock.")
-            stock = matching[0]
             printer_head = applied_calibration.get("printer_head")
+            calibrated_stock_id = applied_calibration.get("stock_id")
+            if not calibrated_stock_id:
+                calibrated_stock_id = self._printer_head_stock_id(printer_head)
+            if len(matching) not in (1, 2):
+                raise RuntimeError(
+                    "The calibrated design option must map to one or two execution stocks."
+                )
+            if len(matching) == 2:
+                stock = next(
+                    (
+                        item
+                        for item in matching
+                        if item.stock_id == str(calibrated_stock_id or "")
+                    ),
+                    None,
+                )
+                if stock is None:
+                    raise RuntimeError(
+                        "The loaded printer-head stock does not identify one of the two execution stocks."
+                    )
+            else:
+                stock = matching[0]
             printer_head_id = self._printer_head_identity(printer_head)
             if not printer_head_id:
                 raise RuntimeError("The calibrated printer-head identity is unavailable.")
@@ -10031,15 +11071,47 @@ class ExperimentModel(QObject):
                 "applied_imaging_calibration_recorded": True,
                 "execution_plan_revision": result["plan"].plan_revision,
                 "execution_plan_status": result["status"],
+                "n_stocks": len(matching),
+                "calibrated_stock_id": stock.stock_id,
+                "companion_stock_id": (
+                    next(
+                        item.stock_id
+                        for item in matching
+                        if item.stock_id != stock.stock_id
+                    )
+                    if len(matching) == 2
+                    else None
+                ),
+                "changed_target_count": result.get("changed_target_count"),
+                "count_changes": copy.deepcopy(result.get("count_changes") or []),
             }
         key = (factor_name, option_name)
         plan = self.plans_per_option.get(key)
         if not plan:
             raise ValueError(f"No stock plan for {key}; run optimize_stock_solutions() first.")
 
+        if plan.get("n_stocks", 1) == 2:
+            calibrated_stock_id = None
+            if applied_calibration:
+                calibrated_stock_id = applied_calibration.get("stock_id")
+                if not calibrated_stock_id:
+                    calibrated_stock_id = self._printer_head_stock_id(
+                        applied_calibration.get("printer_head")
+                    )
+            if not calibrated_stock_id:
+                raise ValueError(
+                    "Two-stock calibration application requires the exact loaded printer-head stock ID."
+                )
+            return self._apply_mutable_two_stock_requantization(
+                key=key,
+                calibrated_stock_id=str(calibrated_stock_id),
+                new_droplet_nL=float(new_droplet_nL),
+                printing_mode=printing_mode,
+                applied_calibration=applied_calibration,
+                write_keys_if_assigned=write_keys_if_assigned,
+            )
         if plan.get("n_stocks", 1) != 1:
-            # (You can extend this to 2-stock later; see note below.)
-            raise NotImplementedError("Step 2 currently supports single-stock reagents only.")
+            raise ValueError("Calibration application requires one or two stock solutions.")
 
         # ---- Fetch the OptionSpec so we can update its droplet_nL persistently ----
         opt_obj = None
@@ -10411,6 +11483,9 @@ class ExperimentModel(QObject):
             "applied_imaging_calibrations": self._normalize_applied_imaging_calibrations(
                 getattr(self, "applied_imaging_calibrations", None)
             ),
+            "calibrated_stock_allocation": self._normalize_calibrated_stock_allocation(
+                getattr(self, "calibrated_stock_allocation", None)
+            ),
             "manual_refuel_checks": self._normalize_manual_refuel_checks(
                 getattr(self, "manual_refuel_checks", None)
             ),
@@ -10545,6 +11620,13 @@ class ExperimentModel(QObject):
         self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(
             d.get("applied_imaging_calibrations")
         )
+        self.calibrated_stock_allocation = self._normalize_calibrated_stock_allocation(
+            d.get("calibrated_stock_allocation")
+        )
+        self.calibrated_stock_allocation_status = {
+            "active": False,
+            "reason": "not_restored",
+        }
         self.manual_refuel_checks = self._normalize_manual_refuel_checks(
             d.get("manual_refuel_checks")
         )
@@ -10669,6 +11751,42 @@ class ExperimentModel(QObject):
                 else:
                     # Design-only load (no experiment dir yet) – store as-is
                     self._uploaded_design_source = csv_fn
+
+        if bool(self.calibrated_stock_allocation.get("active")):
+            restored = self.install_stock_allocation_reuse_payload(
+                self.calibrated_stock_allocation.get("allocation")
+            )
+            if restored.get("reused"):
+                self.calibrated_stock_allocation_status = {
+                    "active": True,
+                    "reason": "restored",
+                }
+                try:
+                    self.generate_experiment()
+                    self._refresh_plan_preview_maps()
+                except Exception as exc:
+                    self.plans_per_option.clear()
+                    self._stock_rows_cache.clear()
+                    self._fill_row_cache = None
+                    self._target_preview_map = {}
+                    self._unreachable_preview_map = {}
+                    self.calibrated_stock_allocation["active"] = False
+                    self.calibrated_stock_allocation["stale_reason"] = (
+                        f"restore_generation_failed: {type(exc).__name__}: {exc}"
+                    )
+                    self.calibrated_stock_allocation_status = {
+                        "active": False,
+                        "reason": "restore_generation_failed",
+                    }
+            else:
+                self.calibrated_stock_allocation["active"] = False
+                self.calibrated_stock_allocation["stale_reason"] = str(
+                    restored.get("reason") or "restore_failed"
+                )
+                self.calibrated_stock_allocation_status = {
+                    "active": False,
+                    "reason": str(restored.get("reason") or "restore_failed"),
+                }
 
         # Notify UI that the stock table needs rebuilding
         self.stock_updated.emit()
@@ -12458,13 +13576,20 @@ class ExperimentModel(QObject):
         if resolved_stock_id not in (None, ""):
             resolved_stock_id = str(resolved_stock_id)
 
-        def _result(ok: bool, code: str, message: str) -> dict[str, Any]:
-            return {
+        def _result(
+            ok: bool,
+            code: str,
+            message: str,
+            **details,
+        ) -> dict[str, Any]:
+            result = {
                 "ok": bool(ok),
                 "code": str(code),
                 "message": str(message),
                 "stock_id": resolved_stock_id,
             }
+            result.update(details)
+            return result
 
         if self.is_read_only_legacy_execution() or (
             getattr(self, "_execution_plan_reload_read_only", False)
@@ -12543,20 +13668,65 @@ class ExperimentModel(QObject):
                 "The loaded printer-head stock is not part of this execution plan.",
             )
 
+        selected_stock = stocks[resolved_stock_id]
+        related_stocks = [
+            stock
+            for stock in plan.stocks
+            if stock.factor_name == selected_stock.factor_name
+            and stock.option_name == selected_stock.option_name
+        ]
+        affected_stock_ids = [resolved_stock_id]
+        if len(related_stocks) == 2:
+            affected_stock_ids = [stock.stock_id for stock in related_stocks]
+            fill_name = self.get_fill_reagent_name()
+            affected_stock_ids.extend(
+                stock.stock_id
+                for stock in plan.stocks
+                if stock.factor_name == fill_name and stock.units == "--"
+            )
+        affected_stock_ids = list(dict.fromkeys(affected_stock_ids))
+
         try:
-            added_droplets = self._added_droplets_for_stock(resolved_stock_id)
+            affected_progress = {
+                affected_stock_id: self._added_droplets_for_stock(
+                    affected_stock_id
+                )
+                for affected_stock_id in affected_stock_ids
+            }
         except Exception as exc:
             return _result(
                 False,
                 "progress_unavailable",
                 f"Calibration application eligibility could not read execution progress: {exc}",
+                affected_stock_ids=affected_stock_ids,
             )
-        if added_droplets > 0:
+        blocking_progress = {
+            stock_id: count
+            for stock_id, count in affected_progress.items()
+            if int(count) > 0
+        }
+        if blocking_progress:
+            if len(related_stocks) == 2:
+                blocking_names = ", ".join(
+                    f"{stock_id} ({count} drops)"
+                    for stock_id, count in blocking_progress.items()
+                )
+                return _result(
+                    False,
+                    "affected_stock_progress",
+                    "Two-stock calibration cannot change this plan because an affected "
+                    f"stock has already dispensed: {blocking_names}.",
+                    affected_stock_ids=affected_stock_ids,
+                    affected_stock_progress=affected_progress,
+                    related_stock_ids=[stock.stock_id for stock in related_stocks],
+                )
             return _result(
                 False,
                 "printed_progress",
                 "This printer head has already dispensed droplets in this execution; "
                 "its calibration can no longer be changed.",
+                affected_stock_ids=affected_stock_ids,
+                affected_stock_progress=affected_progress,
             )
 
         try:
@@ -12572,6 +13742,9 @@ class ExperimentModel(QObject):
             True,
             "execution_stock_eligible",
             "This calibration result may be applied to the execution plan.",
+            affected_stock_ids=affected_stock_ids,
+            affected_stock_progress=affected_progress,
+            related_stock_ids=[stock.stock_id for stock in related_stocks],
         )
 
     def _execution_progress_reference(self) -> ProgressExecutionReference | None:
@@ -13824,6 +14997,178 @@ class ExperimentModel(QObject):
             results[well.well_id] = counts
         return results
 
+    def _calibrated_two_stock_target_counts(
+        self,
+        plan,
+        requantized: Mapping[str, Any],
+    ) -> dict[str, dict[str, int]]:
+        stock_lookup = {stock.stock_id: stock for stock in plan.stocks}
+        stock_ids = tuple(str(value) for value in requantized["stock_ids"])
+        if len(stock_ids) != 2 or any(stock_id not in stock_lookup for stock_id in stock_ids):
+            raise RuntimeError(
+                "The two-stock calibration result does not match the execution plan."
+            )
+        fill_name = self.get_fill_reagent_name()
+        fill_stocks = [
+            stock
+            for stock in plan.stocks
+            if stock.factor_name == fill_name and stock.units == "--"
+        ]
+        if len(fill_stocks) > 1:
+            raise RuntimeError(
+                "The execution plan must contain at most one identifiable fill stock."
+            )
+        fill_stock = fill_stocks[0] if fill_stocks else None
+        volumes = {
+            stock.stock_id: float(stock.effective_volume_nL)
+            for stock in plan.stocks
+        }
+        for index, stock_id in enumerate(stock_ids):
+            volumes[stock_id] = float(
+                requantized["new_effective_volumes_nL"][index]
+            )
+        key = (str(requantized["factor_name"]), requantized.get("option_name"))
+        reaction_targets = {
+            f"R{index + 1}": spec.get("reaction", {})
+            for index, spec in enumerate(self._iter_reaction_run_specs())
+        }
+        mapping = {
+            self._normalize_target_key(float(target)): tuple(int(value) for value in counts)
+            for target, counts in requantized["mapping_by_target"].items()
+        }
+        accepted = min(
+            float(plan.volume_basis.final_reaction_volume_nL)
+            + float(plan.volume_basis.design_optimization_tolerance_nL),
+            float(plan.volume_basis.target_printed_volume_nL)
+            + float(plan.volume_basis.design_optimization_tolerance_nL),
+        )
+        results: dict[str, dict[str, int]] = {}
+        for well in plan.wells:
+            reaction = reaction_targets.get(well.reaction_id)
+            if not isinstance(reaction, Mapping) or key not in reaction:
+                raise RuntimeError(
+                    f"No frozen design reaction matches {well.reaction_id!r} for the calibrated reagent."
+                )
+            target_key = self._normalize_target_key(float(reaction[key]))
+            if target_key not in mapping:
+                raise RuntimeError(
+                    f"The calibration result has no mapping for target {float(reaction[key]):.6g}."
+                )
+            pair = mapping[target_key]
+            counts = {
+                dispense.stock_id: int(dispense.target_dispenses)
+                for dispense in well.dispenses
+            }
+            for index, stock_id in enumerate(stock_ids):
+                count = int(pair[index])
+                if count > 0 or stock_id in counts:
+                    counts[stock_id] = count
+                else:
+                    counts.pop(stock_id, None)
+            nonfill = sum(
+                int(count) * volumes[stock_id]
+                for stock_id, count in counts.items()
+                if fill_stock is None or stock_id != fill_stock.stock_id
+            )
+            if nonfill > accepted + 1e-9:
+                raise RuntimeError(
+                    f"Calibrating the two-stock reagent would require {nonfill:.3f} nL "
+                    f"in well {well.well_id}, above the accepted {accepted:.3f} nL limit."
+                )
+            if fill_stock is None:
+                default_fill_volume = float(self._default_fill_droplet_volume_nl())
+                required_fill = self._bounded_fill_count(
+                    target_printed_volume_nL=float(
+                        plan.volume_basis.target_printed_volume_nL
+                    ),
+                    accepted_volume_nL=accepted,
+                    nonfill_volume_nL=nonfill,
+                    fill_volume_nL=default_fill_volume,
+                )
+                if required_fill > 0:
+                    raise RuntimeError(
+                        "The calibrated two-stock mapping would require a fill stock "
+                        "that is absent from the finalized execution plan."
+                    )
+            else:
+                fill_volume = volumes[fill_stock.stock_id]
+                fill_count = self._bounded_fill_count(
+                    target_printed_volume_nL=float(
+                        plan.volume_basis.target_printed_volume_nL
+                    ),
+                    accepted_volume_nL=accepted,
+                    nonfill_volume_nL=nonfill,
+                    fill_volume_nL=fill_volume,
+                )
+                if fill_count > 0 or fill_stock.stock_id in counts:
+                    counts[fill_stock.stock_id] = fill_count
+                else:
+                    counts.pop(fill_stock.stock_id, None)
+                total_volume = nonfill + fill_count * fill_volume
+                if total_volume > accepted + 1e-9:
+                    raise RuntimeError(
+                        f"Fill quantization would require {total_volume:.3f} nL in well "
+                        f"{well.well_id}, above the accepted {accepted:.3f} nL limit."
+                    )
+            results[well.well_id] = counts
+        return results
+
+    def _validate_calibrated_target_counts_against_progress(
+        self,
+        plan,
+        target_counts_by_well: Mapping[str, Mapping[str, int]],
+        *,
+        required_unprinted_stock_ids: Iterable[str] = (),
+    ) -> None:
+        progress_payload = self.return_progress_data()
+        progress_wells = self._well_entries_from_progress_payload(progress_payload)
+        required_unprinted = {
+            str(stock_id) for stock_id in required_unprinted_stock_ids
+        }
+        if set(target_counts_by_well) != {well.well_id for well in plan.wells}:
+            raise RuntimeError(
+                "The calibrated target map does not contain exactly the execution wells."
+            )
+        for well in plan.wells:
+            progress_well = progress_wells.get(well.well_id, {})
+            progress_reagents = (
+                progress_well.get("reagents")
+                if isinstance(progress_well, Mapping)
+                else {}
+            )
+            if not isinstance(progress_reagents, Mapping):
+                progress_reagents = {}
+            counts = target_counts_by_well[well.well_id]
+            for stock_id, target_count in counts.items():
+                if isinstance(target_count, bool) or int(target_count) != target_count or int(target_count) < 0:
+                    raise RuntimeError(
+                        f"The calibrated target for {well.well_id}/{stock_id} is invalid."
+                    )
+                details = progress_reagents.get(stock_id, {})
+                added = int(details.get("added_droplets", 0) or 0) if isinstance(details, Mapping) else 0
+                if stock_id in required_unprinted and added > 0:
+                    raise RuntimeError(
+                        f"Calibration cannot change {stock_id!r} after it dispensed droplets."
+                    )
+                if int(target_count) < added:
+                    raise RuntimeError(
+                        f"The calibrated target for {well.well_id}/{stock_id} would be "
+                        f"{int(target_count)}, below {added} already-dispensed droplets."
+                    )
+            for stock_id, details in progress_reagents.items():
+                if not isinstance(details, Mapping):
+                    continue
+                added = int(details.get("added_droplets", 0) or 0)
+                if stock_id in required_unprinted and added > 0:
+                    raise RuntimeError(
+                        f"Calibration cannot change {stock_id!r} after it dispensed droplets."
+                    )
+                if added > 0 and stock_id not in counts:
+                    raise RuntimeError(
+                        f"The calibrated plan would remove {well.well_id}/{stock_id} after "
+                        f"{added} droplets were dispensed."
+                    )
+
     def _apply_plan_targets_to_runtime(self, plan) -> None:
         reaction_by_id = {}
         stock_objects = {}
@@ -13883,10 +15228,11 @@ class ExperimentModel(QObject):
         plan = self.lock_execution_plan("calibration_started", timestamp_utc=timestamp_utc)
         if plan is None:
             raise RuntimeError("A finalized execution plan is required for execution calibration.")
-        if self._added_droplets_for_stock(stock_id) > 0:
-            raise RuntimeError(
-                f"Stock {stock_id!r} has already dispensed droplets and cannot change calibration."
-            )
+        post_lock_eligibility = self.get_calibration_application_eligibility(
+            stock_id=stock_id
+        )
+        if not post_lock_eligibility.get("ok"):
+            raise RuntimeError(str(post_lock_eligibility.get("message") or "Calibration application became ineligible."))
         design_payload = self._validate_plan_design_link(plan)
         self._validate_runtime_matches_execution_plan(plan)
         stocks = {stock.stock_id: stock for stock in plan.stocks}
@@ -13901,9 +15247,9 @@ class ExperimentModel(QObject):
             if item.factor_name == stock.factor_name
             and item.option_name == stock.option_name
         ]
-        if len(identity_matches) != 1:
+        if len(identity_matches) not in (1, 2):
             raise RuntimeError(
-                "Two-stock execution calibration is not supported by this schema slice."
+                "The calibrated design option must map to one or two execution stocks."
             )
         stock_is_fill = bool(
             stock.factor_name == self.get_fill_reagent_name() and stock.units == "--"
@@ -14021,7 +15367,49 @@ class ExperimentModel(QObject):
             self.set_execution_plan_sync_error(None)
             return {"plan": plan, "record": record.to_dict(), "status": "reused"}
 
-        target_counts = self._calibrated_target_counts(plan, stock, float(new_effective_volume_nL))
+        requantized = None
+        if len(identity_matches) == 2:
+            if stock_is_fill:
+                raise RuntimeError(
+                    "A fill reagent cannot be represented as a two-stock calibration group."
+                )
+            requantized = self._requantize_fixed_two_stock_group(
+                (stock.factor_name, stock.option_name),
+                calibrated_stock_id=stock.stock_id,
+                new_effective_volume_nL=float(new_effective_volume_nL),
+                new_printing_mode=printing_mode,
+            )
+            if not requantized.get("ok"):
+                raise RuntimeError(
+                    str(
+                        requantized.get("reason")
+                        or "Two-stock execution calibration re-quantization failed."
+                    )
+                )
+            target_counts = self._calibrated_two_stock_target_counts(
+                plan,
+                requantized,
+            )
+        else:
+            target_counts = self._calibrated_target_counts(
+                plan, stock, float(new_effective_volume_nL)
+            )
+        required_unprinted_stock_ids: set[str] = {stock.stock_id}
+        if requantized is not None:
+            required_unprinted_stock_ids.update(
+                str(value) for value in requantized["stock_ids"]
+            )
+            required_unprinted_stock_ids.update(
+                item.stock_id
+                for item in plan.stocks
+                if item.factor_name == self.get_fill_reagent_name()
+                and item.units == "--"
+            )
+        self._validate_calibrated_target_counts_against_progress(
+            plan,
+            target_counts,
+            required_unprinted_stock_ids=required_unprinted_stock_ids,
+        )
         candidate = build_calibrated_revision(
             plan,
             stock_id=stock_id,
@@ -14032,6 +15420,18 @@ class ExperimentModel(QObject):
             target_counts_by_well=target_counts,
             timestamp_utc=record.recorded_at_utc,
         )
+        if requantized is not None:
+            original_by_id = {item.stock_id: item for item in plan.stocks}
+            candidate_by_id = {item.stock_id: item for item in candidate.stocks}
+            companion_id = str(requantized["companion_stock_id"])
+            if candidate_by_id.get(companion_id) != original_by_id.get(companion_id):
+                raise RuntimeError(
+                    "Two-stock calibration changed the companion stock metadata."
+                )
+            if set(candidate_by_id) != set(original_by_id):
+                raise RuntimeError(
+                    "Two-stock calibration changed the execution stock identities."
+                )
         cached_commit = bool(
             getattr(self, "_active_authoritative_execution_session", None)
             is not None
@@ -14103,7 +15503,27 @@ class ExperimentModel(QObject):
                 "new_effective_volume_nL": float(new_effective_volume_nL),
             },
         )
-        return {"plan": candidate, "record": record.to_dict(), "status": status}
+        response = {"plan": candidate, "record": record.to_dict(), "status": status}
+        if requantized is not None:
+            changed_rows = [
+                row
+                for row in requantized["rows"]
+                if tuple(row["old_drops"]) != tuple(row["drops"])
+            ]
+            response.update(
+                {
+                    "changed_target_count": len(changed_rows),
+                    "count_changes": [
+                        {
+                            "target_final": float(row["target_final"]),
+                            "old_drops": tuple(row["old_drops"]),
+                            "new_drops": tuple(row["drops"]),
+                        }
+                        for row in changed_rows
+                    ],
+                }
+            )
+        return response
 
     def _project_reconstructed_execution_plan(self, plan):
         fill_name = str(self.metadata.get("fill_reagent_name", "Water"))

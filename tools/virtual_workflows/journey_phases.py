@@ -1246,10 +1246,20 @@ def run_stock_calibration_only(
 
     def apply(_runtime: JourneyRuntime) -> Mapping[str, Any]:
         before = capture_count_snapshot(runtime.context)
+        before_plan = runtime.context.experiment_model.get_execution_plan_snapshot()
+        before_effective_volumes = {
+            row.stock_id: float(row.effective_volume_nL)
+            for row in before_plan.stocks
+        }
         preview = driver.inspect_preview()
         handled = driver.apply_selected(expected_title=spec.apply_success_title)
         driver.close()
         after = capture_count_snapshot(runtime.context)
+        after_plan = runtime.context.experiment_model.get_execution_plan_snapshot()
+        after_effective_volumes = {
+            row.stock_id: float(row.effective_volume_nL)
+            for row in after_plan.stocks
+        }
         transition.update(
             {
                 "stock_id": spec.stock_id,
@@ -1259,6 +1269,8 @@ def run_stock_calibration_only(
                 "handled_dialogs": handled,
                 "before": before,
                 "after": after,
+                "before_effective_volumes_nL": before_effective_volumes,
+                "after_effective_volumes_nL": after_effective_volumes,
             }
         )
         return dict(transition)
@@ -1322,6 +1334,146 @@ def run_stock_calibration_only(
         dict(transition)
     )
     runtime.observations["calibration_only"] = evidence
+    return evidence
+
+
+def run_progressed_paired_calibration_guard(
+    runtime: JourneyRuntime,
+    spec: CalibrationOnlySpec,
+) -> Mapping[str, Any]:
+    """Record a real diagnostic result and prove paired Apply is unavailable."""
+
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+    )
+
+    if spec.bind_identity:
+        runtime.run_steps((head_identity_step((spec,)),))
+    machine, _rack, _slot, staging = _stage_stock_head(
+        runtime,
+        spec,
+        index=0,
+        head_staging=[],
+        returned_head_ids=[],
+    )
+    dialog_state: dict[str, Any] = {}
+
+    def open_calibration(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        dialog_state["dialog"] = machine.open_calibration_dialog()
+        return {"window_title": dialog_state["dialog"].windowTitle()}
+
+    runtime.run_steps(
+        (
+            SemanticStep(
+                "calibration.open_via_ui",
+                InteractionSurface.UI,
+                open_calibration,
+            ),
+        )
+    )
+    driver = CalibrationDialogDriver(
+        runtime.context.app,
+        dialog_state["dialog"],
+        timeout_seconds=min(20.0, runtime.context.deadline.remaining_seconds()),
+    )
+    generated: dict[str, Any] = {}
+    before_bundle = capture_authoritative_bundle(runtime.context)
+    before_counts = capture_count_snapshot(runtime.context)
+    before_dispatch = {
+        "begins": len(runtime.context.instrumentation.intent_begins),
+        "attachments": len(runtime.context.instrumentation.intent_attachments),
+        "completions": len(runtime.context.instrumentation.intent_completions),
+    }
+    summary_rows_before = int(driver.dialog.summary_table_model.rowCount())
+
+    def generate(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        generated.update(
+            driver.generate_from_tab(
+                spec.calibration_mode,
+                print_profile_id=spec.calibration_print_profile_id,
+                diagnostic_confirmation="record",
+            )
+        )
+        return {
+            "result_fingerprint": generated.get("synthetic_result_fingerprint"),
+            "diagnostic_confirmation": "record",
+        }
+
+    def select(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        return driver.select_result(
+            str(generated["synthetic_result_fingerprint"])
+        )
+
+    runtime.run_steps(
+        (
+            SemanticStep(
+                "calibration.generate_via_ui",
+                InteractionSurface.UI,
+                generate,
+            ),
+            SemanticStep(
+                "calibration.select_via_ui",
+                InteractionSurface.UI,
+                select,
+            ),
+        )
+    )
+
+    boundary: dict[str, Any] = {}
+
+    def inspect_blocked_apply(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        from PySide6 import QtCore, QtTest
+
+        state = driver.inspect_apply_state()
+        before_click = capture_count_snapshot(runtime.context)
+        QtTest.QTest.mouseClick(
+            driver.dialog.bridge_apply_btn,
+            QtCore.Qt.MouseButton.LeftButton,
+        )
+        runtime.context.app.processEvents()
+        after_click = capture_count_snapshot(runtime.context)
+        boundary.update(
+            {
+                "apply_state": state,
+                "before_click": before_click,
+                "after_click": after_click,
+            }
+        )
+        return dict(boundary)
+
+    runtime.run_steps(
+        (
+            SemanticStep(
+                "calibration.apply_progressed_stock_via_ui",
+                InteractionSurface.UI,
+                inspect_blocked_apply,
+            ),
+        )
+    )
+    driver.close()
+    after_bundle = capture_authoritative_bundle(runtime.context)
+    after_counts = capture_count_snapshot(runtime.context)
+    after_dispatch = {
+        "begins": len(runtime.context.instrumentation.intent_begins),
+        "attachments": len(runtime.context.instrumentation.intent_attachments),
+        "completions": len(runtime.context.instrumentation.intent_completions),
+    }
+    evidence = {
+        "stock_id": spec.stock_id,
+        "printer_head_id": spec.printer_head_id,
+        "staging_actions": [dict(row) for row in staging],
+        "generated": generated,
+        "summary_rows_before": summary_rows_before,
+        "summary_rows_after": int(driver.dialog.summary_table_model.rowCount()),
+        "before_bundle": before_bundle,
+        "after_bundle": after_bundle,
+        "before_counts": before_counts,
+        "after_counts": after_counts,
+        "before_dispatch": before_dispatch,
+        "after_dispatch": after_dispatch,
+        **boundary,
+    }
+    runtime.observations["paired_progress_guard"] = evidence
     return evidence
 
 
@@ -2454,7 +2606,21 @@ def wait_for_execution_boundary(
 
     def visible_progress_settled() -> bool:
         guide = context.view.experiment_task_list
-        pass_well_count = len(runtime.observations.get("expected_wells", ()))
+        current_stock_id = str(
+            (runtime.observations.get("current_pass") or {}).get("stock_id") or ""
+        )
+        plan = context.experiment_model.get_execution_plan_snapshot()
+        pass_well_count = sum(
+            1
+            for well in plan.wells
+            if any(
+                dispense.stock_id == current_stock_id
+                and int(dispense.target_dispenses) > 0
+                for dispense in well.dispenses
+            )
+        )
+        if pass_well_count <= 0:
+            pass_well_count = len(runtime.observations.get("expected_wells", ()))
         expected_text = f"{pass_well_count}/{pass_well_count} wells"
         return any(
             expected_text in str(section.get("button").text())
@@ -2611,6 +2777,7 @@ __all__ = [
     "run_clean_authoritative_session_rotation_boundary",
     "run_stock_passes",
     "run_stock_calibration_only",
+    "run_progressed_paired_calibration_guard",
     "run_precalibrated_stock_passes",
     "run_soft_stop_resume",
     "validate_stock_pass_boundary",

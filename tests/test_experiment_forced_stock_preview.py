@@ -1,4 +1,5 @@
 import copy
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -323,6 +324,227 @@ def test_two_stock_resolution_search_can_rescue_a_colliding_feasible_single_plan
         row["achieved_final"]
         for row in two_model.get_target_preview_map()[("R", None)]
     }) == 4
+
+
+def _make_calibratable_two_stock_model():
+    em = _make_resolution_reproduction_model(
+        [0.5, 1.0, 5.0, 20.0],
+        printed_volume_nl=240.0,
+        include_other=False,
+    )
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=True,
+    )
+    assert result["best"] is True
+    plan = em._calibration_plan_with_stock_ids(("R", None))
+    assert plan["n_stocks"] == 2
+    return em, plan["stocks"][0]["stock_id"]
+
+
+def _two_stock_applied_calibration(stock_id):
+    return {
+        "stock_id": stock_id,
+        "printer_head": SimpleNamespace(printer_head_id="two-stock-head-1"),
+        "measured_volume_nL": 12.0,
+        "pw_us": 1200,
+        "pressure_psi": 0.8,
+        "run_id": "two-stock-calibration",
+        "phase": "synthetic_characterization",
+    }
+
+
+def test_two_stock_calibration_changes_only_selected_volume_and_joint_counts():
+    em, calibrated_stock_id = _make_calibratable_two_stock_model()
+
+    preview = em.preview_requantized_for_option(
+        ("R", None),
+        12.0,
+        calibrated_stock_id=calibrated_stock_id,
+        printing_mode="droplet",
+    )
+
+    assert preview["ok"] is True
+    assert preview["old_effective_volumes_nL"] == pytest.approx((10.0, 10.0))
+    assert preview["new_effective_volumes_nL"] == pytest.approx((12.0, 10.0))
+    assert preview["old_distinct_level_loss"] == 0
+    assert preview["new_distinct_level_loss"] == 0
+    by_target = {row["target_final"]: row for row in preview["rows"]}
+    assert by_target[5.0]["old_drops"] == (1, 20)
+    assert by_target[5.0]["drops"] == (1, 4)
+    assert by_target[20.0]["old_drops"] == (5, 0)
+    assert by_target[20.0]["drops"] == (4, 16)
+
+    applied = em.apply_droplet_volume_for_option(
+        "R",
+        None,
+        12.0,
+        write_keys_if_assigned=False,
+        applied_calibration=_two_stock_applied_calibration(calibrated_stock_id),
+        printing_mode="droplet",
+    )
+
+    assert applied["calibrated_stock_id"] == calibrated_stock_id
+    assert applied["companion_effective_volume_nL"] == pytest.approx(10.0)
+    assert applied["changed_target_count"] == 2
+    stocks = em.plans_per_option[("R", None)]["stocks"]
+    assert [stock["droplet_volume_nL"] for stock in stocks] == pytest.approx([12.0, 10.0])
+    assert stocks[1]["droplets_per_target"][5.0] == 4
+    assert em.calibrated_stock_allocation_status == {
+        "active": True,
+        "reason": "applied",
+    }
+    assert all(
+        float(row["nonfill_volume_nL"])
+        + int(row["fill_drops"])
+        * float(em.metadata["fill_droplet_volume_nL"])
+        <= float(em.metadata["target_reaction_volume_nL"])
+        + float(em.metadata["printed_volume_tolerance_nL"])
+        + 1e-9
+        for row in em._reactions_df.to_dict("records")
+    )
+
+
+def test_two_stock_calibration_can_select_the_companion_leg():
+    em, _calibrated_stock_id = _make_calibratable_two_stock_model()
+    plan = em._calibration_plan_with_stock_ids(("R", None))
+    companion_stock_id = plan["stocks"][1]["stock_id"]
+
+    applied = em.apply_droplet_volume_for_option(
+        "R",
+        None,
+        11.0,
+        write_keys_if_assigned=False,
+        applied_calibration=_two_stock_applied_calibration(companion_stock_id),
+        printing_mode="droplet",
+    )
+
+    assert applied["calibrated_stock_id"] == companion_stock_id
+    assert applied["companion_effective_volume_nL"] == pytest.approx(10.0)
+    assert [
+        stock["droplet_volume_nL"]
+        for stock in em.plans_per_option[("R", None)]["stocks"]
+    ] == pytest.approx([10.0, 11.0])
+
+
+def test_two_stock_calibrated_allocation_round_trips_without_reoptimization(monkeypatch):
+    em, calibrated_stock_id = _make_calibratable_two_stock_model()
+    em.apply_droplet_volume_for_option(
+        "R",
+        None,
+        12.0,
+        write_keys_if_assigned=False,
+        applied_calibration=_two_stock_applied_calibration(calibrated_stock_id),
+        printing_mode="droplet",
+    )
+    document = em.to_dict()
+
+    restored = ExperimentModel(prof=CURRENT_PROFILE)
+    restored.from_dict(document)
+    assert restored.calibrated_stock_allocation_status == {
+        "active": True,
+        "reason": "restored",
+    }
+    assert [
+        stock["droplet_volume_nL"]
+        for stock in restored.plans_per_option[("R", None)]["stocks"]
+    ] == pytest.approx([12.0, 10.0])
+    restored.set_metadata(start_row=2, randomize_assignments=True, random_seed=91)
+
+    monkeypatch.setattr(
+        restored,
+        "_enumerate_single_stock_candidates",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("calibrated allocation must be reused")
+        ),
+    )
+    result = restored.optimize_stock_solutions(allow_two=True)
+    assert result["best"] is True
+    assert result["calibrated_stock_allocation_reused"] is True
+
+
+def test_two_stock_calibrated_allocation_becomes_inactive_after_stock_input_change():
+    em, calibrated_stock_id = _make_calibratable_two_stock_model()
+    em.apply_droplet_volume_for_option(
+        "R",
+        None,
+        12.0,
+        write_keys_if_assigned=False,
+        applied_calibration=_two_stock_applied_calibration(calibrated_stock_id),
+        printing_mode="droplet",
+    )
+    record = next(iter(em.applied_imaging_calibrations["records"].values()))
+    lookup = {
+        "stock_id": record["stock_id"],
+        "printer_head_id": record["printer_head_id"],
+        "printing_mode": record["printing_mode"],
+        "factor_name": record["factor_name"],
+        "option_name": record["option_name"],
+        "is_fill": record["is_fill"],
+    }
+    assert em.get_applied_imaging_calibration(**lookup) is not None
+
+    em.factors[0].options[0].targets = [0.5, 1.0, 5.0, 10.0, 20.0]
+
+    assert em.get_applied_imaging_calibration(**lookup) is None
+    result = em.optimize_stock_solutions(allow_two=True)
+    assert result["best"] is True
+    assert em.calibrated_stock_allocation_status == {
+        "active": False,
+        "reason": "stock_input_fingerprint_mismatch",
+    }
+
+
+def test_two_stock_calibration_failure_restores_mutable_state(monkeypatch):
+    em, calibrated_stock_id = _make_calibratable_two_stock_model()
+    before_plan = copy.deepcopy(em.plans_per_option)
+    before_rows = copy.deepcopy(em._stock_rows_cache)
+    before_records = copy.deepcopy(em.applied_imaging_calibrations)
+    monkeypatch.setattr(
+        em,
+        "generate_experiment",
+        lambda: (_ for _ in ()).throw(RuntimeError("injected generation failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="injected generation failure"):
+        em.apply_droplet_volume_for_option(
+            "R",
+            None,
+            12.0,
+            write_keys_if_assigned=False,
+            applied_calibration=_two_stock_applied_calibration(calibrated_stock_id),
+            printing_mode="droplet",
+        )
+
+    assert em.plans_per_option == before_plan
+    assert em._stock_rows_cache == before_rows
+    assert em.applied_imaging_calibrations == before_records
+    assert em.calibrated_stock_allocation_status["active"] is False
+
+
+def test_two_stock_calibration_pair_cap_and_infeasible_volume_fail_closed():
+    em, calibrated_stock_id = _make_calibratable_two_stock_model()
+    before = copy.deepcopy(em.plans_per_option)
+
+    capped = em._requantize_fixed_two_stock_group(
+        ("R", None),
+        calibrated_stock_id=calibrated_stock_id,
+        new_effective_volume_nL=12.0,
+        pair_evaluation_cap=1,
+    )
+    infeasible = em.preview_requantized_for_option(
+        ("R", None),
+        8.0,
+        calibrated_stock_id=calibrated_stock_id,
+    )
+
+    assert capped["ok"] is False
+    assert capped["code"] == "pair_evaluation_cap"
+    assert infeasible["ok"] is False
+    assert infeasible["code"] == "unreachable_target"
+    assert em.plans_per_option == before
 
 
 def test_resolution_search_cap_is_deterministic_and_returns_best_validated_plan(monkeypatch):

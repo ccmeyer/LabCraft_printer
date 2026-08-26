@@ -73,6 +73,19 @@ def _prepared_plan():
     )
 
 
+def _prepared_two_stock_plan():
+    prepared = _prepared_plan()
+    primary = next(
+        stock for stock in prepared.stocks if stock.stock_id == "PURE MM_1.00_x"
+    )
+    companion = replace(
+        primary,
+        stock_id="PURE MM_0.50_x",
+        concentration=0.5,
+    )
+    return replace(prepared, stocks=(*prepared.stocks, companion))
+
+
 def test_lock_revision_changes_only_lifecycle_fields():
     prepared = _prepared_plan()
     active = build_locked_revision(
@@ -192,6 +205,83 @@ def test_calibration_revision_may_retain_identical_target_counts(tmp_path):
         latest_plan=calibrated,
         calibration_record_ids={record_id},
     ) == (prepared, active, calibrated)
+
+
+def test_two_stock_calibration_revision_may_change_related_targets(tmp_path):
+    prepared = _prepared_two_stock_plan()
+    active = build_locked_revision(
+        prepared,
+        reason="calibration_started",
+        timestamp_utc="2026-07-17T12:01:00Z",
+    )
+    targets = {
+        "A1": {
+            "PURE MM_1.00_x": 14,
+            "PURE MM_0.50_x": 4,
+            "UTP (dil)_95000.00_nM": 25,
+            "Water_1.00_--": 4,
+        }
+    }
+    record_id = "d99ef420-efdc-5c07-a30f-3af3330e610d"
+    calibrated = build_calibrated_revision(
+        active,
+        stock_id="PURE MM_1.00_x",
+        effective_volume_nL=143.0,
+        printing_mode="stream",
+        printer_head_id="head-1",
+        calibration_record_key=record_id,
+        target_counts_by_well=targets,
+        timestamp_utc="2026-07-17T12:02:00Z",
+    )
+
+    companion_before = next(
+        stock for stock in active.stocks if stock.stock_id == "PURE MM_0.50_x"
+    )
+    companion_after = next(
+        stock for stock in calibrated.stocks if stock.stock_id == "PURE MM_0.50_x"
+    )
+    assert companion_after == companion_before
+    persist_immutable_revision(tmp_path, prepared)
+    persist_immutable_revision(tmp_path, active)
+    persist_immutable_revision(tmp_path, calibrated)
+    assert validate_revision_history(
+        tmp_path,
+        latest_plan=calibrated,
+        calibration_record_ids={record_id},
+    ) == (prepared, active, calibrated)
+
+
+def test_two_stock_calibration_revision_rejects_unrelated_target_change(tmp_path):
+    prepared = _prepared_two_stock_plan()
+    active = build_locked_revision(
+        prepared,
+        reason="calibration_started",
+        timestamp_utc="2026-07-17T12:01:00Z",
+    )
+    targets = {
+        "A1": {
+            "PURE MM_1.00_x": 14,
+            "PURE MM_0.50_x": 4,
+            "UTP (dil)_95000.00_nM": 24,
+            "Water_1.00_--": 4,
+        }
+    }
+    calibrated = build_calibrated_revision(
+        active,
+        stock_id="PURE MM_1.00_x",
+        effective_volume_nL=143.0,
+        printing_mode="stream",
+        printer_head_id="head-1",
+        calibration_record_key="d99ef420-efdc-5c07-a30f-3af3330e610d",
+        target_counts_by_well=targets,
+        timestamp_utc="2026-07-17T12:02:00Z",
+    )
+    persist_immutable_revision(tmp_path, prepared)
+    persist_immutable_revision(tmp_path, active)
+    persist_immutable_revision(tmp_path, calibrated)
+
+    with pytest.raises(RuntimeError, match="unrelated stock target"):
+        validate_revision_history(tmp_path, latest_plan=calibrated)
 
 
 def test_revision_history_is_immutable_contiguous_and_latest_mirrored(tmp_path):

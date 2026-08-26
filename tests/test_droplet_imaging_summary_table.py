@@ -1058,6 +1058,123 @@ def test_apply_rechecks_eligibility_before_mutating_stale_preview(
     dialog.deleteLater()
 
 
+def test_two_stock_preview_and_apply_use_the_loaded_stock_identity(
+    monkeypatch,
+    qapp,
+    tmp_path,
+):
+    runs = [
+        _make_run(
+            "run_two_stock",
+            stock="Signal_high",
+            sweep_entries=[
+                {
+                    "timestamp": "2026-03-18T09:00:00Z",
+                    "pw_us": 1400,
+                    "pressure_psi": 1.20,
+                    "mean_nL": 12.0,
+                    "cv_pct": 4.0,
+                    "valid": True,
+                },
+            ],
+        )
+    ]
+    experiment_model = _build_experiment_model("Signal_high")
+    experiment_model.get_plan_for_key = lambda _key: {
+        "n_stocks": 2,
+        "stocks": [
+            {
+                "stock_id": "Signal_high",
+                "stock_concentration": 2000.0,
+                "units": "mM",
+                "droplet_volume_nL": 10.0,
+                "printing_mode": "droplet",
+            },
+            {
+                "stock_id": "Signal_low",
+                "stock_concentration": 25.0,
+                "units": "mM",
+                "droplet_volume_nL": 10.0,
+                "printing_mode": "droplet",
+            },
+        ],
+    }
+    preview = Mock(
+        return_value={
+            "ok": True,
+            "n_stocks": 2,
+            "new_droplet_nL": 12.0,
+            "rows": [
+                {
+                    "target_final": 5.0,
+                    "achieved_final": 5.0,
+                    "error": 0.0,
+                    "drops": (1, 4),
+                    "delta_per_drop_leg1": 4.8,
+                    "delta_per_drop_leg2": 0.05,
+                    "printed_nL_new": 52.0,
+                    "printed_nL_shift": -158.0,
+                    "units": "mM",
+                }
+            ],
+        }
+    )
+    apply = Mock(
+        return_value={
+            "n_stocks": 2,
+            "companion_stock_id": "Signal_low",
+            "changed_target_count": 2,
+        }
+    )
+    experiment_model.preview_requantized_for_option = preview
+    experiment_model.apply_droplet_volume_for_option = apply
+    information_calls = []
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "information",
+        lambda *args, **kwargs: information_calls.append((args, kwargs)),
+    )
+    dialog, _manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        current_stock="Signal_high",
+        active_run_id="run_two_stock",
+        experiment_model=experiment_model,
+    )
+
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+
+    assert dialog.bridge_apply_btn.isEnabled()
+    assert preview.call_args.kwargs["calibrated_stock_id"] == "Signal_high"
+    experiment_model.get_calibration_application_eligibility = lambda **_kwargs: {
+        "ok": True,
+        "code": "mutable_design",
+        "message": "",
+        "stock_id": "Signal_low",
+    }
+    dialog._apply_previewed_droplet_volume()
+    apply.assert_not_called()
+    assert "no longer matches the stock leg" in information_calls[-1][0][2]
+
+    experiment_model.get_calibration_application_eligibility = lambda **_kwargs: {
+        "ok": True,
+        "code": "mutable_design",
+        "message": "",
+        "stock_id": "Signal_high",
+    }
+    dialog._apply_previewed_droplet_volume()
+    assert apply.call_args.kwargs["applied_calibration"]["stock_id"] == "Signal_high"
+    assert "Jointly re-quantized both stock legs across 2 target level(s)" in (
+        information_calls[-1][0][2]
+    )
+    assert "Signal_low kept its existing ejection volume" in information_calls[-1][0][2]
+
+    dialog.deleteLater()
+
+
 def test_characterization_summary_rows_include_latest_stream_result_once_and_flag_invalid_streams(tmp_path):
     runs = [
         _make_run(

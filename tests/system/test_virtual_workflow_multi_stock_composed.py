@@ -97,7 +97,7 @@ def test_composed_multi_stock_lifecycle_report(qapp, tmp_path):
         "stock_1_completed": ("Array Complete", False),
         "stock_2_staged": ("Start Array", True),
         "stock_2_printing": ("Stop After Well", True),
-        "completed": ("Start Array", False),
+        "completed": ("Experiment Complete", False),
     }
     return_controls = [
         row["evidence"]["array_control_before_return"]

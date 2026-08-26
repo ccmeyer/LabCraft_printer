@@ -14311,7 +14311,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "Preview", str(e))
             return
 
-        preview = em.preview_requantized_for_option(key, float(mean_nL), quantum=0.1)
+        eligibility = self._get_bridge_apply_eligibility()
+        try:
+            preview = em.preview_requantized_for_option(
+                key,
+                float(mean_nL),
+                quantum=0.1,
+                calibrated_stock_id=eligibility.get("stock_id"),
+            )
+        except TypeError as exc:
+            if "calibrated_stock_id" not in str(exc):
+                raise
+            preview = em.preview_requantized_for_option(
+                key,
+                float(mean_nL),
+                quantum=0.1,
+            )
         if not preview.get("ok"):
             QtWidgets.QMessageBox.warning(self, "Preview", preview.get("reason", "Preview failed."))
             return
@@ -14322,10 +14337,19 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "option_name": key[1],
             "new_droplet_nL": float(preview.get("new_droplet_nL", mean_nL)),
             "n_stocks": int(preview.get("n_stocks", 1)),
+            "stock_id": eligibility.get("stock_id"),
         }
-        can_apply = self._bridge_preview_payload["n_stocks"] == 1
+        can_apply = bool(eligibility.get("ok")) and self._bridge_preview_payload["n_stocks"] in (1, 2)
         self.bridge_apply_btn.setEnabled(can_apply)
-        self.bridge_apply_btn.setToolTip("" if can_apply else "Apply supports single-stock reagents only right now.")
+        self.bridge_apply_btn.setToolTip(
+            ""
+            if can_apply
+            else str(
+                eligibility.get("message")
+                or preview.get("reason")
+                or "Calibration application is unavailable."
+            )
+        )
         self.stageLabel.setText(f"Status: Preview using {'selected row' if source=='selected' else 'latest'} ({mean_nL:.3f} nL)")
 
     def _apply_previewed_droplet_volume(self):
@@ -14382,6 +14406,22 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 reason,
             )
             return
+        if int(payload.get("n_stocks", 1) or 1) == 2:
+            preview_stock_id = str(payload.get("stock_id") or "")
+            current_stock_id = str(eligibility.get("stock_id") or "")
+            if not preview_stock_id or preview_stock_id != current_stock_id:
+                reason = (
+                    "The loaded printer head no longer matches the stock leg used for "
+                    "this preview. Select the calibration result again before applying it."
+                )
+                self._set_bridge_apply_button_state("unavailable", reason)
+                self.bridge_status_label.setText(reason)
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Apply unavailable",
+                    reason,
+                )
+                return
 
         mode_pair_getter = getattr(self, "_bridge_result_mode_pair", None)
         if callable(mode_pair_getter):
@@ -14508,23 +14548,37 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return
 
         # --- Normal reagents (existing logic) ---
-        if payload.get("n_stocks", 1) != 1:
+        if payload.get("n_stocks", 1) not in (1, 2):
             QtWidgets.QMessageBox.warning(self, "Apply", "Two-stock plans aren’t supported for auto-apply yet.")
             return
 
         key = (payload["factor_name"], payload["option_name"])
-        plan_getter = getattr(
-            em,
-            "get_calibration_application_plan_for_key",
-            em.get_plan_for_key,
-        )
+        plan_getter = getattr(em, "_calibration_plan_with_stock_ids", None)
+        if not callable(plan_getter):
+            plan_getter = getattr(
+                em,
+                "get_calibration_application_plan_for_key",
+                em.get_plan_for_key,
+            )
         plan = plan_getter(key)
         if not plan:
             QtWidgets.QMessageBox.warning(self, "Apply", "No stock plan found; optimize first.")
             return
 
         try:
-            cur_dv = float(plan["stocks"][0]["droplet_volume_nL"])
+            plan_stocks = list(plan.get("stocks") or [])
+            selected_stock_id = payload.get("stock_id") or eligibility.get("stock_id")
+            selected_stock = next(
+                (
+                    stock
+                    for stock in plan_stocks
+                    if str(stock.get("stock_id") or "") == str(selected_stock_id or "")
+                ),
+                plan_stocks[0] if len(plan_stocks) == 1 else None,
+            )
+            if selected_stock is None:
+                raise ValueError("The calibrated stock leg is unavailable.")
+            cur_dv = float(selected_stock["droplet_volume_nL"])
         except Exception:
             cur_dv = None
         new_dv = float(payload["new_droplet_nL"])
@@ -14547,8 +14601,11 @@ class DropletImagingDialog(QtWidgets.QDialog):
         applied_calibration["original_printing_mode"] = original_mode
         applied_calibration["applied_printing_mode"] = applied_mode
         applied_calibration["printing_mode"] = applied_mode
+        applied_calibration["stock_id"] = (
+            payload.get("stock_id") or eligibility.get("stock_id")
+        )
         try:
-            em.apply_droplet_volume_for_option(
+            apply_result = em.apply_droplet_volume_for_option(
                 payload["factor_name"],
                 payload["option_name"],
                 new_dv,
@@ -14595,6 +14652,20 @@ class DropletImagingDialog(QtWidgets.QDialog):
             message = f"Recorded applied imaging calibration for {reagent_label} at {new_dv:.3f} nL ejection volume."
         else:
             message = f"Updated {reagent_label} to {new_dv:.3f} nL ejection volume."
+        if int((apply_result or {}).get("n_stocks", 1) or 1) == 2:
+            companion_stock_id = str(
+                (apply_result or {}).get("companion_stock_id") or "the companion stock"
+            )
+            changed_target_count = (apply_result or {}).get("changed_target_count")
+            changed_text = (
+                f" across {int(changed_target_count)} target level(s)"
+                if changed_target_count is not None
+                else ""
+            )
+            message = (
+                f"{message}\nJointly re-quantized both stock legs{changed_text}; "
+                f"{companion_stock_id} kept its existing ejection volume."
+            )
         mode_switch_formatter = getattr(self, "_bridge_mode_switch_text", None)
         mode_switch_text = (
             mode_switch_formatter(original_mode, applied_mode)
@@ -15862,8 +15933,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._bridge_clear_preview_with_status(f"Bridge preview unavailable: {exc}")
             return
 
+        eligibility = self._get_bridge_apply_eligibility()
         try:
-            preview = em.preview_requantized_for_option(key, float(mean_nL), quantum=0.1)
+            try:
+                preview = em.preview_requantized_for_option(
+                    key,
+                    float(mean_nL),
+                    quantum=0.1,
+                    calibrated_stock_id=eligibility.get("stock_id"),
+                    printing_mode=applied_mode,
+                )
+            except TypeError as exc:
+                if "calibrated_stock_id" not in str(exc):
+                    raise
+                preview = em.preview_requantized_for_option(
+                    key,
+                    float(mean_nL),
+                    quantum=0.1,
+                )
         except Exception as exc:
             self._bridge_clear_preview_with_status(f"Bridge preview failed: {exc}")
             return
@@ -15882,9 +15969,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "source_row_fingerprint": selected_fingerprint,
             "original_printing_mode": original_mode,
             "applied_printing_mode": applied_mode,
+            "stock_id": eligibility.get("stock_id"),
         }
-        can_apply = self._bridge_preview_payload["n_stocks"] == 1
-        eligibility = self._get_bridge_apply_eligibility()
+        can_apply = self._bridge_preview_payload["n_stocks"] in (1, 2)
         if can_apply and not eligibility.get("ok"):
             self._set_bridge_apply_button_state(
                 "unavailable",
@@ -15897,7 +15984,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         else:
             self._set_bridge_apply_button_state(
                 "unavailable",
-                "Apply supports single-stock reagents only right now.",
+                "Calibration application requires one or two identified stock solutions.",
             )
         if can_apply:
             status = (
@@ -15909,7 +15996,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             )
         else:
             self.bridge_status_label.setText(
-                f"{status_prefix}Preview is shown, but apply currently supports single-stock reagents only."
+                f"{status_prefix}Preview is shown, but the stock plan cannot be applied safely."
             )
 
     def center_nozzle(self):

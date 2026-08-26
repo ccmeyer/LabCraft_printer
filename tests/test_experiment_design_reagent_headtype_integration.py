@@ -1705,7 +1705,7 @@ def test_optimization_guidance_does_not_replace_success_status(qapp):
     dialog.close()
 
 
-def test_two_stock_status_warns_before_execution_about_calibration_apply(qapp):
+def test_two_stock_status_explains_stock_specific_calibration_requirements(qapp):
     dialog = _build_real_dialog()
     dialog.model.plans_per_option = {("Reagent A", None): {"n_stocks": 2}}
     dialog.model.get_target_preview_map = lambda: {}
@@ -1716,8 +1716,8 @@ def test_two_stock_status_warns_before_execution_about_calibration_apply(qapp):
 
     assert "Two stock solutions are required for: Reagent A." in dialog.status_lbl.text()
     assert (
-        "Calibration preview is available, but applying a measured calibration is "
-        "currently supported only for single-stock reagents."
+        "Each stock leg requires its own identified printer head. A measured calibration "
+        "can be applied before either leg or the fill stock dispenses."
     ) in dialog.status_lbl.text()
     assert dialog.status_heading_lbl.text() == "Warning"
     dialog.close()

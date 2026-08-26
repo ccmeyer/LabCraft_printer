@@ -227,13 +227,26 @@ def _validate_active_revision_transition(previous: ExecutionPlan, current: Execu
     old_targets = _well_target_map(previous)
     new_targets = _well_target_map(current)
     fill_ids = {stock.stock_id for stock in current.stocks if stock.units == "--"}
-    allowed = {stock_id, *fill_ids}
+    related_stocks = {
+        stock.stock_id
+        for stock in current.stocks
+        if stock.factor_name == new_stock.factor_name
+        and stock.option_name == new_stock.option_name
+        and stock.units == new_stock.units
+    }
+    if len(related_stocks) > 2:
+        raise RuntimeError(
+            "A calibration revision cannot re-quantize more than two related stocks."
+        )
+    allowed = {*related_stocks, *fill_ids}
     for well_id in old_targets:
-        if set(old_targets[well_id]) != set(new_targets[well_id]):
-            raise RuntimeError("A calibration revision changes well stock identities.")
-        for target_stock_id in old_targets[well_id]:
+        changed_identities = set(old_targets[well_id]) ^ set(new_targets[well_id])
+        if changed_identities - allowed:
+            raise RuntimeError("A calibration revision changes unrelated well stock identities.")
+        for target_stock_id in set(old_targets[well_id]) | set(new_targets[well_id]):
             if target_stock_id not in allowed and (
-                old_targets[well_id][target_stock_id] != new_targets[well_id][target_stock_id]
+                old_targets[well_id].get(target_stock_id, 0)
+                != new_targets[well_id].get(target_stock_id, 0)
             ):
                 raise RuntimeError("A calibration revision changes an unrelated stock target.")
 

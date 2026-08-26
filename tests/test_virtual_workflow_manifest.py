@@ -70,6 +70,12 @@ from tools.virtual_workflows.optimizer_360_cases import (
     OPTIMIZER_360_CASE_ID,
     OPTIMIZER_360_FIXTURE_PATH,
 )
+from tools.virtual_workflows.resolution_stock_cases import (
+    IMPORT_CASE_ID as TWO_STOCK_IMPORT_CASE_ID,
+    PROGRESS_GUARD_CASE_ID as TWO_STOCK_PROGRESS_GUARD_CASE_ID,
+    SINGLE_CASE_ID as RESOLUTION_SINGLE_CASE_ID,
+    TWO_STOCK_CASE_ID as RESOLUTION_TWO_STOCK_CASE_ID,
+)
 from tools.virtual_workflows.matrices import get_matrix_definition
 
 
@@ -106,6 +112,10 @@ def test_registry_preserves_legacy_default_order_fixtures_and_counts():
         DISCONNECT_WORKLOAD_ID,
         JOINED_INTERACTION_CASE_ID,
         OPTIMIZER_360_CASE_ID,
+        RESOLUTION_SINGLE_CASE_ID,
+        RESOLUTION_TWO_STOCK_CASE_ID,
+        TWO_STOCK_PROGRESS_GUARD_CASE_ID,
+        TWO_STOCK_IMPORT_CASE_ID,
         CALIBRATION_STORAGE_CONTRACT_ID,
         CALIBRATION_STORAGE_PERFORMANCE_ID,
         CALIBRATION_STORAGE_SHADOW_CONTRACT_ID,
@@ -195,6 +205,10 @@ def test_tracked_manifest_validates_and_describes_current_truth():
             MIXED_MODE_WORKLOAD_ID,
             DISCONNECT_WORKLOAD_ID,
             JOINED_INTERACTION_CASE_ID,
+            RESOLUTION_SINGLE_CASE_ID,
+            RESOLUTION_TWO_STOCK_CASE_ID,
+            TWO_STOCK_PROGRESS_GUARD_CASE_ID,
+            TWO_STOCK_IMPORT_CASE_ID,
             CALIBRATION_STORAGE_CONTRACT_ID,
             CALIBRATION_STORAGE_SHADOW_CONTRACT_ID,
                 CALIBRATION_STORAGE_AUTHORITATIVE_CONTRACT_ID,

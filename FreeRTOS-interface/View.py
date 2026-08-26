@@ -17137,8 +17137,8 @@ class ExperimentDesignDialog(QDialog):
                 + "."
             )
             parts.append(
-                "Calibration preview is available, but applying a measured calibration "
-                "is currently supported only for single-stock reagents."
+                "Each stock leg requires its own identified printer head. A measured "
+                "calibration can be applied before either leg or the fill stock dispenses."
             )
         if bounded_search:
             parts.append(
