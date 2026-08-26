@@ -13,6 +13,18 @@ def test_reset_experiment_model_uses_current_profile_fill_default():
     assert em.metadata["fill_printing_mode"] == "droplet"
     assert em.metadata["target_reaction_volume_nL"] == 2000.0
     assert em.metadata["final_reaction_volume_nL"] == 2000.0
+    assert em.metadata["allow_avoidable_target_grouping"] is False
+
+
+def test_older_design_metadata_defaults_to_resolution_first():
+    source = ExperimentModel(prof=CURRENT_PROFILE)
+    payload = source.to_dict()
+    payload["metadata"].pop("allow_avoidable_target_grouping", None)
+
+    loaded = ExperimentModel(prof=CURRENT_PROFILE)
+    loaded.from_dict(payload)
+
+    assert loaded.metadata["allow_avoidable_target_grouping"] is False
 
 
 def test_reset_experiment_model_uses_legacy_profile_fill_default():

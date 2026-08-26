@@ -6,14 +6,13 @@ from dataclasses import dataclass, field, replace
 from math import gcd
 from numbers import Integral, Real
 from functools import reduce
-from typing import List, Dict, Tuple, Optional, Any, Set, Iterable
+from typing import List, Dict, Tuple, Optional, Any, Set, Iterable, Mapping, Callable
 
 from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
 from PySide6.QtStateMachine import QStateMachine, QState, QFinalState, QSignalTransition
 import json
 import tempfile
-import heapq
 import os
 import csv
 import cv2
@@ -498,6 +497,18 @@ class _PlanAccuracyScore:
     max_volume_nL: float
 
 
+@dataclass(frozen=True)
+class _PlanResolutionScore:
+    lost_levels: int
+    n_stocks: int
+    worst_abs_error: float
+    mean_abs_error: float
+    error_sum: float
+    target_count: int
+    concentration_burden: float
+    max_volume_nL: float
+
+
 # --------------------------
 # Experiment Model (v2)
 # --------------------------
@@ -506,6 +517,9 @@ class ExperimentModel(QObject):
     MAX_GENERATED_REACTIONS = 10_000
     MAX_SUBSET_SOURCE_COMBINATIONS = 10_000
     MAX_SUBSET_INTERMEDIATE_ROWS = 10_000
+    MAX_STOCK_ALLOCATION_STATES = 12_000
+    MAX_STOCK_ALLOCATION_SECONDS = 0.075
+    ZERO_LOSS_POLISH_SECONDS = 0.010
     STOCK_PREP_SCHEMA_NAME = "labcraft.stock_prep"
     STOCK_PREP_SCHEMA_VERSION = 1
 
@@ -543,6 +557,7 @@ class ExperimentModel(QObject):
             "replicates": 1,
             "use_subset_design": False,
             "allow_two_stock_solutions": False,
+            "allow_avoidable_target_grouping": False,
             "reduction_factor": 1,  # reserved; current generate is full factorial
             "target_reaction_volume_nL": 2000.0, # PRINTED volume budget
             "printed_volume_tolerance_nL": 50.0,
@@ -1422,11 +1437,118 @@ class ExperimentModel(QObject):
     def _allow_two_from_metadata(self) -> bool:
         return bool(self.metadata.get("allow_two_stock_solutions", False))
 
+    def _stock_optimizer_monotonic(self) -> float:
+        """Clock hook kept separate so deadline behavior can be tested deterministically."""
+        return time.perf_counter()
+
     def _normalize_target_key(self, value: float) -> float:
         value = float(value)
         if abs(value) <= 1e-12:
             return 0.0
         return float(f"{value:.12g}")
+
+    def _summarize_target_resolution_rows(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        requested_rows: Dict[float, Dict[str, Any]] = {}
+        for raw_row in rows or []:
+            row = dict(raw_row or {})
+            requested = self._normalize_target_key(
+                float(row.get("requested_final", 0.0) or 0.0)
+            )
+            requested_rows.setdefault(requested, row)
+
+        achieved_groups: Dict[float, List[Tuple[float, Dict[str, Any]]]] = {}
+        for requested, row in requested_rows.items():
+            achieved = self._normalize_target_key(
+                float(row.get("achieved_final", 0.0) or 0.0)
+            )
+            achieved_groups.setdefault(achieved, []).append((requested, row))
+
+        collapsed_groups: List[Dict[str, Any]] = []
+        for achieved, entries in sorted(achieved_groups.items()):
+            if len(entries) <= 1:
+                continue
+            ordered = sorted(entries, key=lambda item: item[0])
+            collapsed_groups.append({
+                "achieved_final": float(achieved),
+                "requested_targets": [float(requested) for requested, _row in ordered],
+                "droplet_assignments": [
+                    copy.deepcopy(row.get("droplets", 0))
+                    for _requested, row in ordered
+                ],
+            })
+
+        requested_count = len(requested_rows)
+        achieved_count = len(achieved_groups)
+        return {
+            "requested_level_count": int(requested_count),
+            "achieved_level_count": int(achieved_count),
+            "lost_level_count": int(max(0, requested_count - achieved_count)),
+            "collapsed_groups": collapsed_groups,
+        }
+
+    def _evaluate_plan_resolution(
+        self,
+        opt: OptionSpec,
+        plan: SingleStockPlan | TwoStockPlan,
+        *,
+        final_volume_nL: float,
+        targets_final: Iterable[float],
+    ) -> Tuple[_PlanResolutionScore, List[Dict[str, Any]], Dict[str, Any]]:
+        target_values = sorted({
+            self._normalize_target_key(float(value))
+            for value in (targets_final or [])
+        })
+        starting = float(getattr(opt, "starting_conc", 0.0) or 0.0)
+
+        if isinstance(plan, SingleStockPlan):
+            rows = [
+                self._evaluate_single_forced_target(
+                    t_final=float(target),
+                    starting_conc=starting,
+                    forced_stock_conc=float(plan.stock_concentration),
+                    droplet_nL=float(plan.droplet_nL),
+                    final_volume_nL=float(final_volume_nL),
+                    units=str(plan.units or getattr(opt, "units", "")),
+                )
+                for target in target_values
+            ]
+            concentration_burden = float(plan.stock_concentration)
+            n_stocks = 1
+        else:
+            rows = [
+                self._evaluate_two_stock_target(
+                    t_final=float(target),
+                    starting_conc=starting,
+                    stock_concentrations=(
+                        float(plan.stock_concs[0]),
+                        float(plan.stock_concs[1]),
+                    ),
+                    droplet_nL=float(plan.droplet_nL),
+                    final_volume_nL=float(final_volume_nL),
+                    units=str(plan.units or getattr(opt, "units", "")),
+                )
+                for target in target_values
+            ]
+            concentration_burden = float(plan.conc_sum)
+            n_stocks = 2
+
+        summary = self._summarize_target_resolution_rows(rows)
+        errors = [abs(float(row.get("abs_error", 0.0) or 0.0)) for row in rows]
+        error_sum = float(sum(errors))
+        score = _PlanResolutionScore(
+            lost_levels=int(summary["lost_level_count"]),
+            n_stocks=int(n_stocks),
+            worst_abs_error=float(max(errors, default=0.0)),
+            mean_abs_error=float(error_sum / len(errors)) if errors else 0.0,
+            error_sum=error_sum,
+            target_count=len(errors),
+            concentration_burden=concentration_burden,
+            max_volume_nL=float(plan.max_volume_nL),
+        )
+        return score, rows, summary
 
     def _evaluate_single_forced_target(
         self,
@@ -2137,6 +2259,9 @@ class ExperimentModel(QObject):
         kmax_multiples: int = 12,
         max_pairs: int = 12000,
         max_stock_conc: float | None = None,
+        resolution_first: bool = False,
+        deadline_reached: Optional[Callable[[], bool]] = None,
+        limit_reasons: Optional[Set[str]] = None,
     ) -> Tuple[List[TwoStockPlan], bool]:
         xs = sorted({self._normalize_target_key(max(0.0, float(t))) for t in targets})
         xs_pos = [t for t in xs if t > 1e-12]
@@ -2159,8 +2284,19 @@ class ExperimentModel(QObject):
         pair_limit_hit = False
         for i in range(len(deltas)):
             for j in range(i + 1, len(deltas)):
+                if (
+                    deadline_reached is not None
+                    and pairs_scanned % 32 == 0
+                    and deadline_reached()
+                ):
+                    pair_limit_hit = True
+                    if limit_reasons is not None:
+                        limit_reasons.add("time_budget")
+                    break
                 if max_pairs and pairs_scanned >= int(max_pairs):
                     pair_limit_hit = True
+                    if limit_reasons is not None:
+                        limit_reasons.add("state_cap")
                     break
                 pairs_scanned += 1
 
@@ -2223,6 +2359,11 @@ class ExperimentModel(QObject):
         if not pairs:
             return [], pair_limit_hit
 
+        if deadline_reached is not None and deadline_reached():
+            if limit_reasons is not None:
+                limit_reasons.add("time_budget")
+            return [], True
+
         # Preserve the historical concentration/volume frontier, plus the
         # most accurate candidate at every feasible printed-volume tier. The
         # latter is required because the final selection refines accuracy only
@@ -2230,26 +2371,76 @@ class ExperimentModel(QObject):
         pairs.sort(key=lambda p: (p.conc_sum, p.max_volume_nL))
         pruned: List[TwoStockPlan] = []
         best_vol = float("inf")
-        for p in pairs:
+        for pair_index, p in enumerate(pairs):
+            if (
+                deadline_reached is not None
+                and pair_index % 32 == 0
+                and deadline_reached()
+            ):
+                if limit_reasons is not None:
+                    limit_reasons.add("time_budget")
+                return pruned, True
             if p.max_volume_nL + 1e-12 < best_vol:
                 pruned.append(p)
                 best_vol = p.max_volume_nL
 
         accuracy_by_volume: Dict[float, Tuple[TwoStockPlan, _PlanAccuracyScore]] = {}
-        for p in pairs:
+        resolution_by_volume: Dict[float, Tuple[TwoStockPlan, Tuple[Any, ...]]] = {}
+        for pair_index, p in enumerate(pairs):
+            if (
+                deadline_reached is not None
+                and pair_index % 32 == 0
+                and deadline_reached()
+            ):
+                if limit_reasons is not None:
+                    limit_reasons.add("time_budget")
+                return pruned, True
             volume_key = round(float(p.max_volume_nL), 12)
-            score = self._score_two_stock_targets(
+            accuracy_score = self._score_two_stock_targets(
                 p,
                 target_values=xs,
                 starting_conc=0.0,
                 final_volume_nL=float(final_volume_nL),
                 units=str(units),
             )
-            incumbent = accuracy_by_volume.get(volume_key)
-            if incumbent is None or self._plan_accuracy_score_is_better(score, incumbent[1]):
-                accuracy_by_volume[volume_key] = (p, score)
+            accuracy_incumbent = accuracy_by_volume.get(volume_key)
+            if accuracy_incumbent is None or self._plan_accuracy_score_is_better(
+                accuracy_score, accuracy_incumbent[1]
+            ):
+                accuracy_by_volume[volume_key] = (p, accuracy_score)
+
+            if resolution_first:
+                rows = [
+                    self._evaluate_two_stock_target(
+                        t_final=float(target),
+                        starting_conc=0.0,
+                        stock_concentrations=(
+                            float(p.stock_concs[0]),
+                            float(p.stock_concs[1]),
+                        ),
+                        droplet_nL=float(p.droplet_nL),
+                        final_volume_nL=float(final_volume_nL),
+                        units=str(units),
+                    )
+                    for target in xs
+                ]
+                summary = self._summarize_target_resolution_rows(rows)
+                errors = [abs(float(row.get("abs_error", 0.0) or 0.0)) for row in rows]
+                score = (
+                    int(summary["lost_level_count"]),
+                    float(max(errors, default=0.0)),
+                    float(sum(errors) / len(errors)) if errors else 0.0,
+                    float(p.conc_sum),
+                    float(p.max_volume_nL),
+                )
+                resolution_incumbent = resolution_by_volume.get(volume_key)
+                if resolution_incumbent is None or score < resolution_incumbent[1]:
+                    resolution_by_volume[volume_key] = (p, score)
 
         for p, _score in accuracy_by_volume.values():
+            if p not in pruned:
+                pruned.append(p)
+        for p, _score in resolution_by_volume.values():
             if p not in pruned:
                 pruned.append(p)
 
@@ -2270,6 +2461,7 @@ class ExperimentModel(QObject):
         kmax_multiples: int = 12,
         max_pairs: int = 12000,
         max_stock_conc: float | None = None,
+        resolution_first: bool = False,
     ) -> List[TwoStockPlan]:
         pairs, _pair_limit_hit = self._enumerate_two_stock_candidates_with_meta(
             targets,
@@ -2282,6 +2474,7 @@ class ExperimentModel(QObject):
             kmax_multiples=kmax_multiples,
             max_pairs=max_pairs,
             max_stock_conc=max_stock_conc,
+            resolution_first=resolution_first,
         )
         return pairs
 
@@ -2304,7 +2497,17 @@ class ExperimentModel(QObject):
                 ),
                 "issues_by_key": {},
                 "read_only": True,
+                "optimizer_seed_distinct_level_loss": None,
+                "optimizer_seed_worst_level_loss": None,
+                "optimizer_seed_rank": None,
+                "optimizer_selected_rank": None,
+                "stock_allocation_improved_seed": False,
+                "stock_allocation_time_to_best_ms": None,
+                "stock_allocation_stop_reason": "not_run",
             }
+
+        optimizer_clock = self._stock_optimizer_monotonic
+        optimizer_started_at = optimizer_clock()
 
         def _adj_targets(opt) -> List[float]:
             s = float(getattr(opt, "starting_conc", 0.0) or 0.0)
@@ -2331,6 +2534,32 @@ class ExperimentModel(QObject):
             float(V_final) + float(V_tolerance),
             float(V_print) + float(V_tolerance),
         )
+        allow_avoidable_grouping = bool(
+            self.metadata.get("allow_avoidable_target_grouping", False)
+        )
+        optimizer_strategy_used = (
+            "concentration_first" if allow_avoidable_grouping else "resolution_first"
+        )
+        optimizer_fallback_reason: Optional[str] = None
+        stock_allocation_search_limited = False
+        stock_allocation_states_evaluated = 0
+        optimizer_seed_elapsed_ms = 0.0
+        stock_allocation_elapsed_ms = 0.0
+        stock_allocation_limit_reasons: Set[str] = set()
+        stock_allocation_candidates_generated = 0
+        stock_allocation_candidates_retained = 0
+        stock_allocation_candidates_pruned = 0
+        stock_allocation_candidates_deduplicated = 0
+        stock_allocation_candidates_dominated = 0
+        stock_allocation_branches_pruned = 0
+        stock_allocation_loss_tiers_evaluated = 0
+        optimizer_seed_distinct_level_loss: Optional[int] = None
+        optimizer_seed_worst_level_loss: Optional[int] = None
+        optimizer_seed_rank: Optional[Dict[str, Any]] = None
+        optimizer_selected_rank: Optional[Dict[str, Any]] = None
+        stock_allocation_improved_seed = False
+        stock_allocation_time_to_best_ms: Optional[float] = None
+        stock_allocation_stop_reason = "not_run"
 
         # Build candidate lists + handle forced stocks
         self._unreachable_preview_map = {}
@@ -2397,6 +2626,7 @@ class ExperimentModel(QObject):
             return issue
 
         def _failure(reason: str) -> Dict[str, Any]:
+            elapsed_ms = max(0.0, (optimizer_clock() - optimizer_started_at) * 1000.0)
             return {
                 "best": None,
                 "reason": reason,
@@ -2405,6 +2635,66 @@ class ExperimentModel(QObject):
                 "effective_printed_volume_limit_nL": float(V_accept),
                 "issues_by_key": _copy_issues(),
                 "two_stock_search_limited_keys": list(two_stock_search_limited_keys),
+                "distinct_level_loss": 0,
+                "collapsed_target_keys": [],
+                "optimizer_strategy_used": optimizer_strategy_used,
+                "optimizer_fallback_reason": optimizer_fallback_reason,
+                "stock_allocation_search_limited": bool(stock_allocation_search_limited),
+                "stock_allocation_states_evaluated": int(stock_allocation_states_evaluated),
+                "optimizer_seed_elapsed_ms": float(
+                    optimizer_seed_elapsed_ms or elapsed_ms
+                ),
+                "stock_allocation_elapsed_ms": float(stock_allocation_elapsed_ms),
+                "optimizer_total_elapsed_ms": float(elapsed_ms),
+                "stock_allocation_time_budget_ms": float(
+                    self.MAX_STOCK_ALLOCATION_SECONDS * 1000.0
+                ),
+                "stock_allocation_zero_loss_polish_budget_ms": float(
+                    self.ZERO_LOSS_POLISH_SECONDS * 1000.0
+                ),
+                "stock_allocation_limit_reasons": sorted(stock_allocation_limit_reasons),
+                "stock_allocation_candidates_generated": int(
+                    stock_allocation_candidates_generated
+                ),
+                "stock_allocation_candidates_retained": int(
+                    stock_allocation_candidates_retained
+                ),
+                "stock_allocation_candidates_pruned": int(
+                    stock_allocation_candidates_pruned
+                ),
+                "stock_allocation_candidates_deduplicated": int(
+                    stock_allocation_candidates_deduplicated
+                ),
+                "stock_allocation_candidates_dominated": int(
+                    stock_allocation_candidates_dominated
+                ),
+                "stock_allocation_branches_pruned": int(
+                    stock_allocation_branches_pruned
+                ),
+                "stock_allocation_loss_tiers_evaluated": int(
+                    stock_allocation_loss_tiers_evaluated
+                ),
+                "optimizer_seed_distinct_level_loss": (
+                    int(optimizer_seed_distinct_level_loss)
+                    if optimizer_seed_distinct_level_loss is not None
+                    else None
+                ),
+                "optimizer_seed_worst_level_loss": (
+                    int(optimizer_seed_worst_level_loss)
+                    if optimizer_seed_worst_level_loss is not None
+                    else None
+                ),
+                "optimizer_seed_rank": copy.deepcopy(optimizer_seed_rank),
+                "optimizer_selected_rank": copy.deepcopy(optimizer_selected_rank),
+                "stock_allocation_improved_seed": bool(
+                    stock_allocation_improved_seed
+                ),
+                "stock_allocation_time_to_best_ms": (
+                    float(stock_allocation_time_to_best_ms)
+                    if stock_allocation_time_to_best_ms is not None
+                    else None
+                ),
+                "stock_allocation_stop_reason": str(stock_allocation_stop_reason),
             }
 
         def _add_design_issue(
@@ -2616,6 +2906,7 @@ class ExperimentModel(QObject):
                             final_volume_nL=V_final, volume_budget_nL=V_print,
                             quantum=quantum, max_refine=two_max_refine,
                             max_stock_conc=max_stock,
+                            resolution_first=not allow_avoidable_grouping,
                         )
                         if search_limited:
                             _mark_two_stock_search_limited((f.name, None))
@@ -2702,6 +2993,7 @@ class ExperimentModel(QObject):
                                 final_volume_nL=V_final, volume_budget_nL=V_print,
                                 quantum=quantum, max_refine=two_max_refine,
                                 max_stock_conc=max_stock,
+                                resolution_first=not allow_avoidable_grouping,
                             )
                             if search_limited:
                                 _mark_two_stock_search_limited((f.name, opt.name))
@@ -2744,6 +3036,7 @@ class ExperimentModel(QObject):
                     quantum=quantum,
                     max_refine=two_max_refine,
                     max_stock_conc=getattr(opt, "max_stock_conc", None),
+                    resolution_first=not allow_avoidable_grouping,
                 )
                 if search_limited:
                     _mark_two_stock_search_limited((name, None))
@@ -2769,6 +3062,7 @@ class ExperimentModel(QObject):
                     quantum=quantum,
                     max_refine=two_max_refine,
                     max_stock_conc=getattr(opt, "max_stock_conc", None),
+                    resolution_first=not allow_avoidable_grouping,
                 )
                 if search_limited:
                     _mark_two_stock_search_limited((gname, oname))
@@ -3832,6 +4126,1167 @@ class ExperimentModel(QObject):
                     ch_idx[key] = _refine_single_selection(key, opt, singles, ch_idx[key])
         _invalidate_selected_volume_cache()
 
+        # The historical selector above is the immutable feasible seed for the
+        # resolution-first pass. Candidate enumeration is shared; the bounded
+        # pass only runs when that seed actually merges requested levels.
+        def _capture_selection_snapshot() -> Dict[str, Dict[Any, Any]]:
+            return {
+                "add_idx": dict(add_idx),
+                "add_two_idx": dict(add_two_idx),
+                "ch_idx": dict(ch_idx),
+                "ch_two_idx": dict(ch_two_idx),
+            }
+
+        def _restore_selection_snapshot(snapshot: Mapping[str, Mapping[Any, Any]]):
+            add_idx.clear()
+            add_idx.update(snapshot["add_idx"])
+            add_two_idx.clear()
+            add_two_idx.update(snapshot["add_two_idx"])
+            ch_idx.clear()
+            ch_idx.update(snapshot["ch_idx"])
+            ch_two_idx.clear()
+            ch_two_idx.update(snapshot["ch_two_idx"])
+            _invalidate_selected_volume_cache()
+
+        resolution_evaluation_cache: Dict[
+            Tuple[Tuple[str, Optional[str]], int],
+            Tuple[_PlanResolutionScore, List[Dict[str, Any]], Dict[str, Any]],
+        ] = {}
+
+        def _resolution_evaluation(
+            key: Tuple[str, Optional[str]],
+            plan: SingleStockPlan | TwoStockPlan,
+        ):
+            cache_key = (key, id(plan))
+            cached = resolution_evaluation_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            opt = option_by_key[key]
+            cached = self._evaluate_plan_resolution(
+                opt,
+                plan,
+                final_volume_nL=V_final,
+                targets_final=_effective_targets_for_opt(key, opt),
+            )
+            resolution_evaluation_cache[cache_key] = cached
+            return cached
+
+        def _selection_resolution_details() -> Dict[str, Any]:
+            evaluations: Dict[Tuple[str, Optional[str]], Dict[str, Any]] = {}
+            total_lost = 0
+            max_lost = 0
+            extra_stocks = 0
+            worst_error = 0.0
+            error_sum = 0.0
+            target_count = 0
+            concentration_burden = 0.0
+            for key in option_by_key:
+                plan = _selected_plan_for_key(key)
+                if plan is None:
+                    continue
+                plan_score, rows, summary = _resolution_evaluation(key, plan)
+                evaluations[key] = {
+                    "plan": plan,
+                    "score": plan_score,
+                    "rows": rows,
+                    "summary": summary,
+                }
+                total_lost += int(plan_score.lost_levels)
+                max_lost = max(max_lost, int(plan_score.lost_levels))
+                extra_stocks += max(0, int(plan_score.n_stocks) - 1)
+                worst_error = max(worst_error, float(plan_score.worst_abs_error))
+                error_sum += float(plan_score.error_sum)
+                target_count += int(plan_score.target_count)
+                concentration_burden += float(plan_score.concentration_burden)
+
+            worst_volume = float(worst_case_nonfill_volume())
+            mean_error = error_sum / target_count if target_count else 0.0
+            quality = (
+                int(total_lost),
+                int(max_lost),
+                int(extra_stocks),
+                float(worst_error),
+                float(mean_error),
+                float(concentration_burden),
+                float(worst_volume),
+            )
+            return {
+                "quality": quality,
+                "rank": quality,
+                "worst_volume_nL": worst_volume,
+                "evaluations": evaluations,
+            }
+
+        def _resolution_rank_payload(
+            details: Optional[Mapping[str, Any]],
+        ) -> Optional[Dict[str, Any]]:
+            if not details:
+                return None
+            quality = tuple(details.get("quality") or details.get("rank") or ())
+            if len(quality) != 7:
+                raise ValueError("Resolution rank must contain seven components.")
+            evaluation_count = len(details.get("evaluations", {}))
+            return {
+                "total_distinct_level_loss": int(quality[0]),
+                "worst_reagent_level_loss": int(quality[1]),
+                "stock_solution_count": int(evaluation_count + int(quality[2])),
+                "worst_abs_error": float(quality[3]),
+                "mean_abs_error": float(quality[4]),
+                "concentration_burden": float(quality[5]),
+                "printed_volume_nL": float(quality[6]),
+            }
+
+        def _validate_selected_resolution_allocation(details: Mapping[str, Any]):
+            worst_volume = float(details.get("worst_volume_nL", math.inf))
+            if not math.isfinite(worst_volume) or worst_volume > V_accept + 1e-6:
+                raise ValueError(
+                    "Resolution allocation exceeds the effective printed-volume limit."
+                )
+
+            for key, evaluation in details.get("evaluations", {}).items():
+                plan = evaluation["plan"]
+                opt = option_by_key[key]
+                if isinstance(plan, SingleStockPlan):
+                    concentrations = (float(plan.stock_concentration),)
+                    mapped_drops = {
+                        self._normalize_target_key(float(target)): int(drops)
+                        for target, drops in plan.droplets_per_target.items()
+                    }
+                else:
+                    concentrations = tuple(float(value) for value in plan.stock_concs)
+                    mapped_drops = {
+                        self._normalize_target_key(float(target)): (
+                            int(drops[0]),
+                            int(drops[1]),
+                        )
+                        for target, drops in plan.droplets_per_target.items()
+                    }
+
+                if any(not math.isfinite(value) or value <= 0.0 for value in concentrations):
+                    raise ValueError(f"Resolution allocation has an invalid stock for {key!r}.")
+                max_stock = getattr(opt, "max_stock_conc", None)
+                if max_stock is not None and any(
+                    value > float(max_stock) + 1e-9 for value in concentrations
+                ):
+                    raise ValueError(f"Resolution allocation exceeds the stock bound for {key!r}.")
+                forced_stock = getattr(opt, "forced_stock_conc", None)
+                if forced_stock not in (None, 0.0) and (
+                    len(concentrations) != 1
+                    or not math.isclose(
+                        concentrations[0],
+                        float(forced_stock),
+                        rel_tol=1e-9,
+                        abs_tol=1e-9,
+                    )
+                ):
+                    raise ValueError(f"Resolution allocation changed the fixed stock for {key!r}.")
+
+                exact_max_volume_nL = 0.0
+                for row in evaluation.get("rows", []):
+                    # A fixed user-provided stock can legitimately leave a target
+                    # unreachable; generated candidates may not introduce that state.
+                    if not bool(row.get("reachable")) and forced_stock in (None, 0.0):
+                        raise ValueError(
+                            f"Resolution allocation cannot reach a target for {key!r}."
+                        )
+                    adjusted = self._normalize_target_key(
+                        float(row.get("requested_adjusted", 0.0) or 0.0)
+                    )
+                    if adjusted not in mapped_drops:
+                        raise ValueError(
+                            f"Resolution allocation is missing a target mapping for {key!r}."
+                        )
+                    expected_drops = mapped_drops[adjusted]
+                    actual_drops = row.get("droplets", 0)
+                    if isinstance(expected_drops, tuple):
+                        actual_drops = tuple(int(value) for value in actual_drops)
+                        row_drop_count = sum(actual_drops)
+                    else:
+                        actual_drops = int(actual_drops)
+                        row_drop_count = actual_drops
+                    if actual_drops != expected_drops:
+                        raise ValueError(
+                            f"Resolution allocation has an inconsistent target mapping for {key!r}."
+                        )
+                    exact_max_volume_nL = max(
+                        exact_max_volume_nL,
+                        float(row_drop_count) * float(plan.droplet_nL),
+                    )
+                if not math.isclose(
+                    exact_max_volume_nL,
+                    float(plan.max_volume_nL),
+                    rel_tol=1e-9,
+                    abs_tol=1e-6,
+                ):
+                    raise ValueError(
+                        f"Resolution allocation has an inconsistent row volume for {key!r}."
+                    )
+
+        def _candidate_lists_for_key(key: Tuple[str, Optional[str]]):
+            factor_name, option_name = key
+            if option_name in (None, ""):
+                for idx, (name, singles, twos) in enumerate(additives):
+                    if name == factor_name:
+                        return "add", idx, singles, twos
+            else:
+                bucket = choice_groups.get(factor_name, [])
+                for idx, (name, singles, twos) in enumerate(bucket):
+                    if name == option_name:
+                        return "choice", idx, singles, twos
+            raise KeyError(key)
+
+        def _replace_twos_for_key(
+            key: Tuple[str, Optional[str]],
+            twos: List[TwoStockPlan],
+        ):
+            kind, idx, singles, _current_twos = _candidate_lists_for_key(key)
+            if kind == "add":
+                name = additives[idx][0]
+                additives[idx] = (name, singles, twos)
+            else:
+                factor_name, option_name = key
+                bucket = choice_groups[factor_name]
+                bucket[idx] = (option_name, singles, twos)
+                choice_groups[factor_name] = bucket
+
+        def _two_plan_signature(plan: TwoStockPlan) -> Tuple[Any, ...]:
+            return (
+                tuple(round(float(value), 12) for value in plan.deltas),
+                tuple(round(float(value), 12) for value in plan.stock_concs),
+                round(float(plan.max_volume_nL), 12),
+                tuple(
+                    sorted(
+                        (
+                            round(float(target), 12),
+                            int(drops[0]),
+                            int(drops[1]),
+                        )
+                        for target, drops in plan.droplets_per_target.items()
+                    )
+                ),
+            )
+
+        resolution_two_keys: Set[Tuple[str, Optional[str]]] = set()
+        resolution_started_at: Optional[float] = None
+        resolution_deadline_at: Optional[float] = None
+        zero_loss_polish_completed = False
+        resolution_search_exhausted = False
+        resolution_metrics_prepared = False
+        resolution_target_levels: Dict[Tuple[str, Optional[str]], Tuple[float, ...]] = {}
+        resolution_uploaded_level_indices: Dict[
+            Tuple[str, Optional[str]], np.ndarray
+        ] = {}
+        resolution_additional_level_indices: Dict[
+            Tuple[str, Optional[str]], np.ndarray
+        ] = {}
+        resolution_candidate_entry_cache: Dict[
+            Tuple[Tuple[str, Optional[str]], int], Dict[str, Any]
+        ] = {}
+
+        def _resolution_deadline_reached() -> bool:
+            if resolution_deadline_at is None:
+                return False
+            if optimizer_clock() < resolution_deadline_at:
+                return False
+            stock_allocation_limit_reasons.add("time_budget")
+            return True
+
+        def _ensure_resolution_twos_for_key(
+            key: Tuple[str, Optional[str]],
+        ) -> bool:
+            if key in resolution_two_keys or _resolution_deadline_reached():
+                return False
+            resolution_two_keys.add(key)
+            opt = option_by_key[key]
+            if getattr(opt, "forced_stock_conc", None) not in (None, 0.0):
+                return False
+            _kind, _idx, _singles, existing = _candidate_lists_for_key(key)
+            # Feasibility fallback candidates were already resolution-aware and
+            # can be reused without another pair scan.
+            if existing is not None:
+                return False
+            resolved, search_limited = self._enumerate_two_stock_candidates_with_meta(
+                _adj_targets_for_opt(key, opt),
+                opt.droplet_nL,
+                opt.units,
+                final_volume_nL=V_final,
+                volume_budget_nL=V_print,
+                quantum=quantum,
+                max_refine=two_max_refine,
+                max_stock_conc=getattr(opt, "max_stock_conc", None),
+                resolution_first=True,
+                deadline_reached=_resolution_deadline_reached,
+                limit_reasons=stock_allocation_limit_reasons,
+            )
+            if search_limited:
+                _mark_two_stock_search_limited(key)
+            _kind, _idx, _singles, existing = _candidate_lists_for_key(key)
+            merged = list(existing or [])
+            signatures = {_two_plan_signature(plan) for plan in merged}
+            for plan in resolved:
+                signature = _two_plan_signature(plan)
+                if signature not in signatures:
+                    signatures.add(signature)
+                    merged.append(plan)
+            merged.sort(key=lambda plan: (plan.conc_sum, plan.max_volume_nL, plan.deltas))
+            _replace_twos_for_key(key, merged)
+            return bool(merged)
+
+        def _prepare_resolution_volume_indices() -> bool:
+            nonlocal resolution_metrics_prepared
+            if resolution_metrics_prepared:
+                return True
+            for key, opt in option_by_key.items():
+                if _resolution_deadline_reached():
+                    return False
+                levels = tuple(_effective_targets_for_opt(key, opt))
+                level_lookup = {
+                    self._normalize_target_key(float(target)): index
+                    for index, target in enumerate(levels)
+                }
+                resolution_target_levels[key] = levels
+
+                uploaded_indices = np.full(
+                    len(uploaded_reactions), len(levels), dtype=np.int32
+                )
+                for row_index, target in uploaded_targets_by_key.get(key, []):
+                    target_key = self._normalize_target_key(float(target))
+                    if target_key not in level_lookup:
+                        raise ValueError(
+                            f"Uploaded target {target!r} is missing from metrics for {key!r}."
+                        )
+                    uploaded_indices[int(row_index)] = int(level_lookup[target_key])
+                resolution_uploaded_level_indices[key] = uploaded_indices
+
+                additional_indices = np.full(
+                    len(additional_condition_rows), len(levels), dtype=np.int32
+                )
+                for row_index, target in additional_row_targets_by_key.get(key, []):
+                    target_key = self._normalize_target_key(float(target))
+                    if target_key not in level_lookup:
+                        raise ValueError(
+                            f"Additional target {target!r} is missing from metrics for {key!r}."
+                        )
+                    additional_indices[int(row_index)] = int(level_lookup[target_key])
+                resolution_additional_level_indices[key] = additional_indices
+            resolution_metrics_prepared = True
+            return True
+
+        def _resolution_candidate_entry(
+            key: Tuple[str, Optional[str]],
+            plan: SingleStockPlan | TwoStockPlan,
+            *,
+            mode: str,
+            index: int,
+        ) -> Dict[str, Any]:
+            cache_key = (key, id(plan))
+            cached = resolution_candidate_entry_cache.get(cache_key)
+            if cached is None:
+                score, rows, summary = _resolution_evaluation(key, plan)
+                rows_by_target = {
+                    self._normalize_target_key(
+                        float(row.get("requested_final", 0.0) or 0.0)
+                    ): row
+                    for row in rows
+                }
+                droplet_signature: List[Any] = []
+                level_volumes: List[float] = []
+                for target in resolution_target_levels[key]:
+                    target_key = self._normalize_target_key(float(target))
+                    row = rows_by_target.get(target_key)
+                    if row is None:
+                        raise ValueError(
+                            f"Candidate is missing target metrics for {key!r} at {target!r}."
+                        )
+                    droplets = row.get("droplets", 0)
+                    if isinstance(droplets, (tuple, list)):
+                        frozen_drops = tuple(int(value) for value in droplets)
+                        drop_count = sum(frozen_drops)
+                    else:
+                        frozen_drops = int(droplets)
+                        drop_count = int(droplets)
+                    droplet_signature.append((target_key, frozen_drops))
+                    level_volumes.append(
+                        float(drop_count) * float(plan.droplet_nL)
+                    )
+                padded_volumes = np.asarray(
+                    level_volumes + [0.0], dtype=np.float64
+                )
+                cached = {
+                    "plan": plan,
+                    "score": score,
+                    "rows": rows,
+                    "summary": summary,
+                    "droplet_signature": tuple(droplet_signature),
+                    "level_volumes": tuple(float(value) for value in level_volumes),
+                    "level_volumes_padded": padded_volumes,
+                }
+                resolution_candidate_entry_cache[cache_key] = cached
+            entry = dict(cached)
+            entry["mode"] = str(mode)
+            entry["index"] = int(index)
+            score = entry["score"]
+            entry["local_rank"] = (
+                int(score.lost_levels),
+                int(score.n_stocks),
+                float(score.worst_abs_error),
+                float(score.error_sum),
+                float(score.concentration_burden),
+                float(score.max_volume_nL),
+                0 if mode == "single" else 1,
+                int(index),
+            )
+            return entry
+
+        def _candidate_dominates(
+            better: Mapping[str, Any],
+            worse: Mapping[str, Any],
+        ) -> bool:
+            better_score = better["score"]
+            worse_score = worse["score"]
+            scalar_pairs = (
+                (int(better_score.lost_levels), int(worse_score.lost_levels)),
+                (int(better_score.n_stocks), int(worse_score.n_stocks)),
+                (
+                    float(better_score.worst_abs_error),
+                    float(worse_score.worst_abs_error),
+                ),
+                (float(better_score.error_sum), float(worse_score.error_sum)),
+                (
+                    float(better_score.concentration_burden),
+                    float(worse_score.concentration_burden),
+                ),
+                (
+                    float(better_score.max_volume_nL),
+                    float(worse_score.max_volume_nL),
+                ),
+            )
+            if any(left > right + 1e-12 for left, right in scalar_pairs):
+                return False
+            better_volumes = better["level_volumes"]
+            worse_volumes = worse["level_volumes"]
+            if any(
+                left > right + 1e-12
+                for left, right in zip(better_volumes, worse_volumes)
+            ):
+                return False
+            return bool(
+                any(left < right - 1e-12 for left, right in scalar_pairs)
+                or any(
+                    left < right - 1e-12
+                    for left, right in zip(better_volumes, worse_volumes)
+                )
+            )
+
+        def _build_resolution_candidate_pools(
+            *,
+            include_twos: bool,
+            incumbent_details: Mapping[str, Any],
+        ):
+            nonlocal stock_allocation_candidates_generated
+            nonlocal stock_allocation_candidates_retained
+            nonlocal stock_allocation_candidates_pruned
+            nonlocal stock_allocation_candidates_deduplicated
+            nonlocal stock_allocation_candidates_dominated
+            if not _prepare_resolution_volume_indices():
+                return None, None
+
+            keys = list(option_by_key.keys())
+            incumbent_plan_ids = {
+                key: id(evaluation["plan"])
+                for key, evaluation in incumbent_details.get("evaluations", {}).items()
+            }
+            pools: Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
+            generated_total = 0
+            deduplicated_total = 0
+            dominated_total = 0
+
+            def _publish_counts(retained_total: int):
+                nonlocal stock_allocation_candidates_generated
+                nonlocal stock_allocation_candidates_retained
+                nonlocal stock_allocation_candidates_pruned
+                nonlocal stock_allocation_candidates_deduplicated
+                nonlocal stock_allocation_candidates_dominated
+                stock_allocation_candidates_generated = int(generated_total)
+                stock_allocation_candidates_retained = int(retained_total)
+                stock_allocation_candidates_deduplicated = int(deduplicated_total)
+                stock_allocation_candidates_dominated = int(dominated_total)
+                stock_allocation_candidates_pruned = max(
+                    0, int(generated_total - retained_total)
+                )
+
+            for key in keys:
+                if _resolution_deadline_reached():
+                    _publish_counts(sum(len(value) for value in pools.values()))
+                    return None, None
+                _kind, _idx, singles, twos = _candidate_lists_for_key(key)
+                entries: List[Dict[str, Any]] = []
+                for index, plan in enumerate(singles):
+                    if index % 32 == 0 and _resolution_deadline_reached():
+                        _publish_counts(sum(len(value) for value in pools.values()))
+                        return None, None
+                    entries.append(
+                        _resolution_candidate_entry(
+                            key, plan, mode="single", index=index
+                        )
+                    )
+                for index, plan in enumerate(twos or []):
+                    if not include_twos and id(plan) != incumbent_plan_ids.get(key):
+                        continue
+                    if index % 32 == 0 and _resolution_deadline_reached():
+                        _publish_counts(sum(len(value) for value in pools.values()))
+                        return None, None
+                    entries.append(
+                        _resolution_candidate_entry(
+                            key, plan, mode="two", index=index
+                        )
+                    )
+                generated_total += len(entries)
+                entries.sort(key=lambda entry: entry["local_rank"])
+
+                deduplicated: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+                for entry in entries:
+                    signature = entry["droplet_signature"]
+                    incumbent = deduplicated.get(signature)
+                    if incumbent is None or entry["local_rank"] < incumbent["local_rank"]:
+                        deduplicated[signature] = entry
+                unique_entries = sorted(
+                    deduplicated.values(), key=lambda entry: entry["local_rank"]
+                )
+                deduplicated_total += len(entries) - len(unique_entries)
+
+                opt = option_by_key[key]
+                forced = getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
+                retained: List[Dict[str, Any]] = []
+                for entry_index, entry in enumerate(unique_entries):
+                    if entry_index % 32 == 0 and _resolution_deadline_reached():
+                        _publish_counts(
+                            sum(len(value) for value in pools.values()) + len(retained)
+                        )
+                        return None, None
+                    dominated = False
+                    if not forced:
+                        dominated = any(
+                            _candidate_dominates(other, entry) for other in retained
+                        )
+                    if dominated:
+                        dominated_total += 1
+                    else:
+                        retained.append(entry)
+                retained.sort(key=lambda entry: (
+                    int(entry["score"].lost_levels),
+                    float(entry["score"].max_volume_nL),
+                    int(entry["score"].n_stocks),
+                    float(entry["score"].worst_abs_error),
+                    float(entry["score"].error_sum),
+                    float(entry["score"].concentration_burden),
+                    0 if entry["mode"] == "single" else 1,
+                    int(entry["index"]),
+                ))
+                pools[key] = retained
+
+            retained_total = sum(len(value) for value in pools.values())
+            _publish_counts(retained_total)
+            return keys, pools
+
+        def _apply_resolution_state(
+            state: Mapping[Tuple[str, Optional[str]], Mapping[str, Any]],
+        ):
+            for key, entry in state.items():
+                factor_name, option_name = key
+                if option_name in (None, ""):
+                    if entry["mode"] == "single":
+                        add_two_idx[factor_name] = None
+                        add_idx[factor_name] = int(entry["index"])
+                    else:
+                        add_two_idx[factor_name] = int(entry["index"])
+                else:
+                    choice_key = (factor_name, option_name)
+                    if entry["mode"] == "single":
+                        ch_two_idx[choice_key] = None
+                        ch_idx[choice_key] = int(entry["index"])
+                    else:
+                        ch_two_idx[choice_key] = int(entry["index"])
+            _invalidate_selected_volume_cache()
+
+        def _achievable_loss_tiers(keys, pools, seed_tier):
+            tiers: Set[Tuple[int, int]] = {(0, 0)}
+            for key_index, key in enumerate(keys):
+                if key_index % 4 == 0 and _resolution_deadline_reached():
+                    return None
+                losses = {
+                    int(entry["score"].lost_levels) for entry in pools[key]
+                }
+                next_tiers: Set[Tuple[int, int]] = set()
+                for total_loss, worst_loss in tiers:
+                    for local_loss in losses:
+                        tier = (
+                            int(total_loss + local_loss),
+                            int(max(worst_loss, local_loss)),
+                        )
+                        if tier < seed_tier or tier == seed_tier:
+                            next_tiers.add(tier)
+                tiers = next_tiers
+                if not tiers:
+                    return []
+            return sorted(tiers)
+
+        def _run_bounded_resolution_search(
+            *,
+            include_twos: bool,
+            incumbent_details: Mapping[str, Any],
+        ):
+            nonlocal stock_allocation_states_evaluated
+            nonlocal stock_allocation_branches_pruned
+            nonlocal stock_allocation_loss_tiers_evaluated
+            nonlocal zero_loss_polish_completed
+            nonlocal resolution_search_exhausted
+            if _resolution_deadline_reached():
+                return None, None
+            if stock_allocation_states_evaluated >= self.MAX_STOCK_ALLOCATION_STATES:
+                stock_allocation_limit_reasons.add("state_cap")
+                return None, None
+
+            keys, pools = _build_resolution_candidate_pools(
+                include_twos=include_twos,
+                incumbent_details=incumbent_details,
+            )
+            if keys is None or pools is None:
+                return None, None
+            if not keys or any(not pools[key] for key in keys):
+                raise ValueError("Resolution search has an empty candidate pool.")
+
+            collapsed_keys = [
+                key
+                for key, evaluation in incumbent_details["evaluations"].items()
+                if int(evaluation["score"].lost_levels) > 0
+            ]
+            collapsed_keys.sort(
+                key=lambda key: (
+                    -int(incumbent_details["evaluations"][key]["score"].lost_levels),
+                    str(key),
+                )
+            )
+            donor_reductions: List[Tuple[float, Tuple[str, Optional[str]]]] = []
+            for key in keys:
+                if key in collapsed_keys:
+                    continue
+                seed_volume = float(
+                    incumbent_details["evaluations"][key]["score"].max_volume_nL
+                )
+                minimum_volume = min(
+                    float(entry["score"].max_volume_nL) for entry in pools[key]
+                )
+                reduction = max(0.0, seed_volume - minimum_volume)
+                if reduction > 1e-12:
+                    donor_reductions.append((reduction, key))
+            donor_reductions.sort(key=lambda item: (-item[0], str(item[1])))
+            donor_keys = [key for _reduction, key in donor_reductions]
+            remaining_keys = sorted(
+                (
+                    key
+                    for key in keys
+                    if key not in collapsed_keys and key not in donor_keys
+                ),
+                key=str,
+            )
+            ordered_keys = collapsed_keys + donor_keys + remaining_keys
+
+            seed_tier = (
+                int(incumbent_details["quality"][0]),
+                int(incumbent_details["quality"][1]),
+            )
+            tiers = _achievable_loss_tiers(ordered_keys, pools, seed_tier)
+            if tiers is None:
+                return None, None
+
+            key_count = len(ordered_keys)
+            uploaded_count = len(uploaded_reactions)
+            additional_count = len(additional_condition_rows)
+            minimum_uploaded_by_key: Dict[Any, np.ndarray] = {}
+            minimum_additional_by_key: Dict[Any, np.ndarray] = {}
+            minimum_base_by_key: Dict[Any, float] = {}
+            for key in ordered_keys:
+                level_count = len(resolution_target_levels[key])
+                minimum_levels = [math.inf] * level_count
+                for entry in pools[key]:
+                    for level_index, volume in enumerate(entry["level_volumes"]):
+                        minimum_levels[level_index] = min(
+                            minimum_levels[level_index], float(volume)
+                        )
+                padded = np.asarray(
+                    [0.0 if not math.isfinite(value) else value for value in minimum_levels]
+                    + [0.0],
+                    dtype=np.float64,
+                )
+                minimum_uploaded_by_key[key] = np.take(
+                    padded, resolution_uploaded_level_indices[key]
+                )
+                minimum_additional_by_key[key] = np.take(
+                    padded, resolution_additional_level_indices[key]
+                )
+                minimum_base_by_key[key] = min(
+                    float(entry["score"].max_volume_nL) for entry in pools[key]
+                )
+
+            suffix_uploaded = [np.zeros(uploaded_count, dtype=np.float64) for _ in range(key_count + 1)]
+            suffix_additional = [np.zeros(additional_count, dtype=np.float64) for _ in range(key_count + 1)]
+            suffix_min_loss = [0] * (key_count + 1)
+            suffix_max_loss = [0] * (key_count + 1)
+            suffix_loss_values: List[Set[int]] = [set() for _ in range(key_count + 1)]
+            suffix_extra_stocks = [0] * (key_count + 1)
+            suffix_error_sum = [0.0] * (key_count + 1)
+            suffix_concentration = [0.0] * (key_count + 1)
+            suffix_worst_error = [0.0] * (key_count + 1)
+            for position in range(key_count - 1, -1, -1):
+                key = ordered_keys[position]
+                entries = pools[key]
+                suffix_uploaded[position] = (
+                    suffix_uploaded[position + 1] + minimum_uploaded_by_key[key]
+                )
+                suffix_additional[position] = (
+                    suffix_additional[position + 1] + minimum_additional_by_key[key]
+                )
+                losses = [int(entry["score"].lost_levels) for entry in entries]
+                suffix_min_loss[position] = suffix_min_loss[position + 1] + min(losses)
+                suffix_max_loss[position] = suffix_max_loss[position + 1] + max(losses)
+                suffix_loss_values[position] = set(suffix_loss_values[position + 1])
+                suffix_loss_values[position].update(losses)
+                suffix_extra_stocks[position] = suffix_extra_stocks[position + 1] + min(
+                    max(0, int(entry["score"].n_stocks) - 1) for entry in entries
+                )
+                suffix_error_sum[position] = suffix_error_sum[position + 1] + min(
+                    float(entry["score"].error_sum) for entry in entries
+                )
+                suffix_concentration[position] = suffix_concentration[position + 1] + min(
+                    float(entry["score"].concentration_burden) for entry in entries
+                )
+                suffix_worst_error[position] = max(
+                    suffix_worst_error[position + 1],
+                    min(float(entry["score"].worst_abs_error) for entry in entries),
+                )
+
+            total_target_count = sum(
+                int(pools[key][0]["score"].target_count) for key in ordered_keys
+            )
+            additive_keys = [
+                key for key in ordered_keys if key[1] in (None, "")
+            ]
+            choice_keys_by_group: Dict[str, List[Tuple[str, Optional[str]]]] = {}
+            for key in ordered_keys:
+                if key[1] not in (None, ""):
+                    choice_keys_by_group.setdefault(key[0], []).append(key)
+
+            selected_entries: Dict[Any, Mapping[str, Any]] = {}
+            uploaded_totals = np.zeros(uploaded_count, dtype=np.float64)
+            additional_totals = np.zeros(additional_count, dtype=np.float64)
+            incumbent_rank = tuple(incumbent_details["rank"])
+            best_rank = incumbent_rank
+            best_state = None
+            best_details = None
+            branch_iterations = 0
+            search_aborted = False
+            zero_loss_polish_deadline_at: Optional[float] = None
+
+            def _search_stop_reached() -> bool:
+                nonlocal zero_loss_polish_completed
+                if _resolution_deadline_reached():
+                    return True
+                if zero_loss_polish_deadline_at is None:
+                    return False
+                if optimizer_clock() < zero_loss_polish_deadline_at:
+                    return False
+                zero_loss_polish_completed = True
+                return True
+
+            def _manual_volume_lower_bound() -> float:
+                additive_total = sum(
+                    float(selected_entries[key]["score"].max_volume_nL)
+                    if key in selected_entries
+                    else float(minimum_base_by_key[key])
+                    for key in additive_keys
+                )
+                choice_total = 0.0
+                for group_keys in choice_keys_by_group.values():
+                    choice_total += max(
+                        (
+                            float(selected_entries[key]["score"].max_volume_nL)
+                            if key in selected_entries
+                            else float(minimum_base_by_key[key])
+                        )
+                        for key in group_keys
+                    )
+                return float(additive_total + choice_total)
+
+            def _volume_lower_bound(position: int) -> float:
+                if uploaded_count:
+                    uploaded_bound = float(
+                        np.max(uploaded_totals + suffix_uploaded[position], initial=0.0)
+                    )
+                else:
+                    uploaded_bound = _manual_volume_lower_bound()
+                additional_bound = float(
+                    np.max(
+                        additional_totals + suffix_additional[position], initial=0.0
+                    )
+                ) if additional_count else 0.0
+                return max(uploaded_bound, additional_bound)
+
+            for target_tier in tiers:
+                if search_aborted or _search_stop_reached():
+                    break
+                stock_allocation_loss_tiers_evaluated += 1
+                tier_feasible = False
+
+                def _search_tier(
+                    position: int,
+                    total_loss: int,
+                    worst_loss: int,
+                    extra_stocks: int,
+                    worst_error: float,
+                    error_sum: float,
+                    concentration_burden: float,
+                ):
+                    nonlocal best_rank, best_state, best_details
+                    nonlocal branch_iterations, search_aborted, tier_feasible
+                    nonlocal stock_allocation_states_evaluated
+                    nonlocal stock_allocation_branches_pruned
+                    nonlocal zero_loss_polish_deadline_at
+                    if search_aborted:
+                        return
+                    branch_iterations += 1
+                    if branch_iterations % 32 == 0 and _search_stop_reached():
+                        search_aborted = True
+                        return
+                    if stock_allocation_states_evaluated >= self.MAX_STOCK_ALLOCATION_STATES:
+                        stock_allocation_limit_reasons.add("state_cap")
+                        search_aborted = True
+                        return
+
+                    volume_bound = _volume_lower_bound(position)
+                    if volume_bound > V_accept + 1e-6:
+                        stock_allocation_branches_pruned += 1
+                        return
+                    secondary_bound = (
+                        int(target_tier[0]),
+                        int(target_tier[1]),
+                        int(extra_stocks + suffix_extra_stocks[position]),
+                        float(max(worst_error, suffix_worst_error[position])),
+                        float(
+                            (error_sum + suffix_error_sum[position])
+                            / total_target_count
+                        ) if total_target_count else 0.0,
+                        float(concentration_burden + suffix_concentration[position]),
+                        float(volume_bound),
+                    )
+                    if secondary_bound >= best_rank:
+                        stock_allocation_branches_pruned += 1
+                        return
+
+                    if position >= key_count:
+                        if (total_loss, worst_loss) != target_tier:
+                            stock_allocation_branches_pruned += 1
+                            return
+                        stock_allocation_states_evaluated += 1
+                        tier_feasible = True
+                        quality = (
+                            int(total_loss),
+                            int(worst_loss),
+                            int(extra_stocks),
+                            float(worst_error),
+                            float(error_sum / total_target_count)
+                            if total_target_count else 0.0,
+                            float(concentration_burden),
+                            float(volume_bound),
+                        )
+                        if quality < best_rank:
+                            found_at = optimizer_clock()
+                            if (
+                                resolution_deadline_at is not None
+                                and found_at >= resolution_deadline_at
+                            ):
+                                stock_allocation_limit_reasons.add("time_budget")
+                                search_aborted = True
+                                return
+                            best_rank = quality
+                            best_state = dict(selected_entries)
+                            best_details = {
+                                "quality": quality,
+                                "rank": quality,
+                                "worst_volume_nL": float(volume_bound),
+                                "evaluations": {
+                                    key: {
+                                        "plan": entry["plan"],
+                                        "score": entry["score"],
+                                        "rows": entry["rows"],
+                                        "summary": entry["summary"],
+                                    }
+                                    for key, entry in selected_entries.items()
+                                },
+                                "found_elapsed_ms": (
+                                    max(
+                                        0.0,
+                                        (found_at - resolution_started_at) * 1000.0,
+                                    )
+                                    if resolution_started_at is not None
+                                    else None
+                                ),
+                            }
+                            if (
+                                int(total_loss) == 0
+                                and zero_loss_polish_deadline_at is None
+                            ):
+                                _validate_selected_resolution_allocation(best_details)
+                                zero_loss_polish_deadline_at = min(
+                                    float(resolution_deadline_at),
+                                    found_at + float(self.ZERO_LOSS_POLISH_SECONDS),
+                                )
+                        return
+
+                    key = ordered_keys[position]
+                    for entry_index, entry in enumerate(pools[key]):
+                        if entry_index % 32 == 0 and _search_stop_reached():
+                            search_aborted = True
+                            return
+                        score = entry["score"]
+                        local_loss = int(score.lost_levels)
+                        next_total = total_loss + local_loss
+                        next_worst = max(worst_loss, local_loss)
+                        if next_total > target_tier[0] or next_worst > target_tier[1]:
+                            stock_allocation_branches_pruned += 1
+                            continue
+                        if (
+                            next_total + suffix_min_loss[position + 1] > target_tier[0]
+                            or next_total + suffix_max_loss[position + 1] < target_tier[0]
+                        ):
+                            stock_allocation_branches_pruned += 1
+                            continue
+                        if (
+                            next_worst < target_tier[1]
+                            and target_tier[1] not in suffix_loss_values[position + 1]
+                        ):
+                            stock_allocation_branches_pruned += 1
+                            continue
+
+                        selected_entries[key] = entry
+                        uploaded_vector = np.take(
+                            entry["level_volumes_padded"],
+                            resolution_uploaded_level_indices[key],
+                        )
+                        additional_vector = np.take(
+                            entry["level_volumes_padded"],
+                            resolution_additional_level_indices[key],
+                        )
+                        if uploaded_count:
+                            uploaded_totals[:] += uploaded_vector
+                        if additional_count:
+                            additional_totals[:] += additional_vector
+                        _search_tier(
+                            position + 1,
+                            next_total,
+                            next_worst,
+                            extra_stocks + max(0, int(score.n_stocks) - 1),
+                            max(worst_error, float(score.worst_abs_error)),
+                            error_sum + float(score.error_sum),
+                            concentration_burden + float(score.concentration_burden),
+                        )
+                        if uploaded_count:
+                            uploaded_totals[:] -= uploaded_vector
+                        if additional_count:
+                            additional_totals[:] -= additional_vector
+                        selected_entries.pop(key, None)
+                        if search_aborted:
+                            return
+
+                _search_tier(0, 0, 0, 0, 0.0, 0.0, 0.0)
+                if tier_feasible or search_aborted:
+                    break
+
+            if not search_aborted:
+                resolution_search_exhausted = True
+            return best_state, best_details
+
+        def _accept_resolution_state(
+            state,
+            candidate_details,
+            incumbent_snapshot,
+            incumbent_details,
+        ):
+            nonlocal stock_allocation_time_to_best_ms
+            if state is None or candidate_details is None:
+                _restore_selection_snapshot(incumbent_snapshot)
+                return incumbent_snapshot, incumbent_details
+            # Validate the compact candidate result before changing the live
+            # selection. The second validation below independently checks the
+            # exact model-backed row totals after application.
+            _validate_selected_resolution_allocation(candidate_details)
+            _apply_resolution_state(state)
+            exact_details = _selection_resolution_details()
+            if exact_details["rank"] >= incumbent_details["rank"]:
+                _restore_selection_snapshot(incumbent_snapshot)
+                return incumbent_snapshot, incumbent_details
+            _validate_selected_resolution_allocation(exact_details)
+            found_elapsed_ms = candidate_details.get("found_elapsed_ms")
+            stock_allocation_time_to_best_ms = (
+                float(found_elapsed_ms) if found_elapsed_ms is not None else None
+            )
+            return _capture_selection_snapshot(), exact_details
+
+        seed_snapshot = _capture_selection_snapshot()
+        seed_details = _selection_resolution_details()
+        seed_finished_at = optimizer_clock()
+        optimizer_seed_elapsed_ms = max(
+            0.0, (seed_finished_at - optimizer_started_at) * 1000.0
+        )
+        optimizer_seed_distinct_level_loss = int(seed_details["quality"][0])
+        optimizer_seed_worst_level_loss = int(seed_details["quality"][1])
+        optimizer_seed_rank = _resolution_rank_payload(seed_details)
+        best_snapshot = seed_snapshot
+        best_details = seed_details
+
+        if allow_avoidable_grouping:
+            stock_allocation_stop_reason = "grouping_allowed"
+        elif optimizer_seed_distinct_level_loss == 0:
+            stock_allocation_stop_reason = "seed_zero_loss"
+
+        if not allow_avoidable_grouping and int(seed_details["quality"][0]) > 0:
+            resolution_started_at = optimizer_clock()
+            resolution_deadline_at = (
+                resolution_started_at + float(self.MAX_STOCK_ALLOCATION_SECONDS)
+            )
+            try:
+                state, candidate_details = _run_bounded_resolution_search(
+                    include_twos=False,
+                    incumbent_details=best_details,
+                )
+                best_snapshot, best_details = _accept_resolution_state(
+                    state,
+                    candidate_details,
+                    best_snapshot,
+                    best_details,
+                )
+
+                if (
+                    allow_two
+                    and int(best_details["quality"][0]) > 0
+                    and not _resolution_deadline_reached()
+                    and stock_allocation_states_evaluated
+                    < self.MAX_STOCK_ALLOCATION_STATES
+                ):
+                    collapsed_keys = [
+                        key
+                        for key, evaluation in best_details["evaluations"].items()
+                        if int(evaluation["score"].lost_levels) > 0
+                    ]
+                    collapsed_keys.sort(
+                        key=lambda key: (
+                            -int(best_details["evaluations"][key]["score"].lost_levels),
+                            str(key),
+                        )
+                    )
+                    for key in collapsed_keys:
+                        if _resolution_deadline_reached():
+                            break
+                        _ensure_resolution_twos_for_key(key)
+
+                    if not _resolution_deadline_reached():
+                        state, candidate_details = _run_bounded_resolution_search(
+                            include_twos=True,
+                            incumbent_details=best_details,
+                        )
+                        best_snapshot, best_details = _accept_resolution_state(
+                            state,
+                            candidate_details,
+                            best_snapshot,
+                            best_details,
+                        )
+
+                    donor_keys = [
+                        key
+                        for key, evaluation in best_details["evaluations"].items()
+                        if key not in collapsed_keys
+                        and float(evaluation["score"].max_volume_nL) > 0.0
+                    ]
+                    donor_keys.sort(
+                        key=lambda key: (
+                            -float(
+                                best_details["evaluations"][key]["score"].max_volume_nL
+                            ),
+                            str(key),
+                        )
+                    )
+                    for key in donor_keys:
+                        if (
+                            int(best_details["quality"][0]) == 0
+                            or _resolution_deadline_reached()
+                            or stock_allocation_states_evaluated
+                            >= self.MAX_STOCK_ALLOCATION_STATES
+                        ):
+                            break
+                        if not _ensure_resolution_twos_for_key(key):
+                            continue
+                        if _resolution_deadline_reached():
+                            break
+                        state, candidate_details = _run_bounded_resolution_search(
+                            include_twos=True,
+                            incumbent_details=best_details,
+                        )
+                        best_snapshot, best_details = _accept_resolution_state(
+                            state,
+                            candidate_details,
+                            best_snapshot,
+                            best_details,
+                        )
+            except Exception as exc:
+                _restore_selection_snapshot(seed_snapshot)
+                best_snapshot = seed_snapshot
+                best_details = seed_details
+                optimizer_strategy_used = "legacy_fallback"
+                optimizer_fallback_reason = f"{type(exc).__name__}: {exc}"
+                stock_allocation_time_to_best_ms = None
+            finally:
+                resolution_finished_at = optimizer_clock()
+                if (
+                    resolution_deadline_at is not None
+                    and resolution_finished_at >= resolution_deadline_at
+                ):
+                    stock_allocation_limit_reasons.add("time_budget")
+                stock_allocation_elapsed_ms = max(
+                    0.0, (resolution_finished_at - resolution_started_at) * 1000.0
+                )
+                stock_allocation_search_limited = bool(
+                    stock_allocation_limit_reasons
+                )
+                if optimizer_strategy_used == "legacy_fallback":
+                    stock_allocation_stop_reason = "legacy_fallback"
+                elif stock_allocation_limit_reasons == {
+                    "time_budget",
+                    "state_cap",
+                }:
+                    stock_allocation_stop_reason = "time_and_state_cap"
+                elif "time_budget" in stock_allocation_limit_reasons:
+                    stock_allocation_stop_reason = "time_budget"
+                elif "state_cap" in stock_allocation_limit_reasons:
+                    stock_allocation_stop_reason = "state_cap"
+                elif (
+                    zero_loss_polish_completed
+                    and int(best_details["quality"][0]) == 0
+                ):
+                    stock_allocation_stop_reason = "zero_loss_polish_complete"
+                elif resolution_search_exhausted:
+                    stock_allocation_stop_reason = "search_exhausted"
+                else:
+                    stock_allocation_stop_reason = "search_exhausted"
+
+        _restore_selection_snapshot(best_snapshot)
+        optimizer_selected_rank = _resolution_rank_payload(best_details)
+        stock_allocation_improved_seed = bool(
+            optimizer_strategy_used != "legacy_fallback"
+            and tuple(best_details["rank"]) < tuple(seed_details["rank"])
+        )
+        if not stock_allocation_improved_seed:
+            stock_allocation_time_to_best_ms = None
+
         final_worst = worst_case_nonfill_volume()
         if final_worst > V_accept + 1e-6:
             aggregate_issue = _record_uploaded_selected_volume_budget_issue(
@@ -4022,6 +5477,129 @@ class ExperimentModel(QObject):
         self._fill_row_cache = None
         self._refresh_plan_preview_maps()
         self._last_worst_nonfill_volume_nL = worst_case_nonfill_volume()
+        distinct_level_loss = 0
+        collapsed_target_keys: List[Tuple[str, Optional[str]]] = []
+        for key, rows in self._target_preview_map.items():
+            resolution_summary = self._summarize_target_resolution_rows(rows)
+            lost_level_count = int(resolution_summary["lost_level_count"])
+            if lost_level_count <= 0:
+                continue
+            distinct_level_loss += lost_level_count
+            collapsed_target_keys.append(key)
+            opt = self._get_option_for_key(key)
+            units = str(getattr(opt, "units", "") or "") if opt is not None else ""
+            label = key[0] if key[1] in (None, "") else f"{key[0]}/{key[1]}"
+            requested_targets = sorted({
+                float(target)
+                for group in resolution_summary["collapsed_groups"]
+                for target in group["requested_targets"]
+            })
+            _add_issue(
+                key,
+                field="target_resolution",
+                severity="warning",
+                code="collapsed_target_levels",
+                message=(
+                    f"{label} loses {lost_level_count} requested concentration "
+                    f"level{'s' if lost_level_count != 1 else ''} because multiple targets "
+                    "map to the same dispensed concentration."
+                ),
+                units=units,
+                requested_targets=requested_targets,
+                requested_level_count=int(resolution_summary["requested_level_count"]),
+                achieved_level_count=int(resolution_summary["achieved_level_count"]),
+                lost_level_count=lost_level_count,
+                collapsed_groups=copy.deepcopy(resolution_summary["collapsed_groups"]),
+            )
+
+        if stock_allocation_search_limited:
+            limit_reasons = sorted(stock_allocation_limit_reasons)
+            time_budget_ms = float(self.MAX_STOCK_ALLOCATION_SECONDS * 1000.0)
+            seed_loss = int(optimizer_seed_distinct_level_loss or 0)
+            selected_loss = int(best_details["quality"][0])
+            if selected_loss < seed_loss:
+                improvement_description = (
+                    f"reduced grouped levels from {seed_loss} to {selected_loss}"
+                )
+            else:
+                improvement_description = (
+                    "improved secondary stock criteria without changing the "
+                    f"{seed_loss} grouped levels"
+                )
+            if limit_reasons == ["time_budget"]:
+                if stock_allocation_improved_seed:
+                    bounded_message = (
+                        f"Resolution-first {improvement_description} before its "
+                        f"{time_budget_ms:.0f} ms limit; "
+                        "secondary optimality was not proven."
+                    )
+                else:
+                    bounded_message = (
+                        f"No better level resolution was found within "
+                        f"{time_budget_ms:.0f} ms; the concentration-first plan was "
+                        "retained."
+                    )
+            elif limit_reasons == ["state_cap"]:
+                if stock_allocation_improved_seed:
+                    bounded_message = (
+                        f"Resolution-first {improvement_description} before reaching "
+                        "its state limit; secondary "
+                        "optimality was not proven."
+                    )
+                else:
+                    bounded_message = (
+                        "Resolution-first reached its state limit without finding "
+                        "better level resolution; the concentration-first plan was "
+                        "retained."
+                    )
+            else:
+                if stock_allocation_improved_seed:
+                    bounded_message = (
+                        f"Resolution-first {improvement_description} before reaching "
+                        "its time and state limits; "
+                        "secondary optimality was not proven."
+                    )
+                else:
+                    bounded_message = (
+                        "Resolution-first reached its time and state limits without "
+                        "finding better level resolution; the concentration-first "
+                        "plan was retained."
+                    )
+            _add_issue(
+                ("__stock_allocation__", None),
+                field="stock_allocation",
+                severity="warning",
+                code="bounded_stock_allocation_search",
+                message=bounded_message,
+                states_evaluated=int(stock_allocation_states_evaluated),
+                state_limit=int(self.MAX_STOCK_ALLOCATION_STATES),
+                elapsed_ms=float(stock_allocation_elapsed_ms),
+                time_budget_ms=time_budget_ms,
+                limit_reasons=limit_reasons,
+                seed_distinct_level_loss=seed_loss,
+                selected_distinct_level_loss=selected_loss,
+                improved_seed=bool(stock_allocation_improved_seed),
+                time_to_best_ms=(
+                    float(stock_allocation_time_to_best_ms)
+                    if stock_allocation_time_to_best_ms is not None
+                    else None
+                ),
+                stop_reason=str(stock_allocation_stop_reason),
+            )
+
+        if optimizer_fallback_reason:
+            _add_issue(
+                ("__stock_allocation__", None),
+                field="stock_allocation",
+                severity="warning",
+                code="legacy_optimizer_fallback",
+                message=(
+                    "Resolution-first stock allocation could not be validated; "
+                    "the feasible concentration-first plan was retained."
+                ),
+                fallback_reason=str(optimizer_fallback_reason),
+            )
+
         _record_uploaded_selected_volume_budget_issue(
             "selected_plan_volume_budget_within_tolerance",
             severity="warning",
@@ -4073,6 +5651,9 @@ class ExperimentModel(QObject):
             )
 
         self.stock_updated.emit()
+        optimizer_total_elapsed_ms = max(
+            0.0, (optimizer_clock() - optimizer_started_at) * 1000.0
+        )
         preview_rows = [row for rows in self._target_preview_map.values() for row in rows]
         two_stock_keys = [
             key for key, plan in self.plans_per_option.items()
@@ -4089,6 +5670,64 @@ class ExperimentModel(QObject):
             "two_stock_keys": list(two_stock_keys),
             "two_stock_search_limited_keys": list(two_stock_search_limited_keys),
             "issues_by_key": _copy_issues(),
+            "distinct_level_loss": int(distinct_level_loss),
+            "collapsed_target_keys": list(collapsed_target_keys),
+            "optimizer_strategy_used": optimizer_strategy_used,
+            "optimizer_fallback_reason": optimizer_fallback_reason,
+            "stock_allocation_search_limited": bool(stock_allocation_search_limited),
+            "stock_allocation_states_evaluated": int(stock_allocation_states_evaluated),
+            "optimizer_seed_elapsed_ms": float(optimizer_seed_elapsed_ms),
+            "stock_allocation_elapsed_ms": float(stock_allocation_elapsed_ms),
+            "optimizer_total_elapsed_ms": float(optimizer_total_elapsed_ms),
+            "stock_allocation_time_budget_ms": float(
+                self.MAX_STOCK_ALLOCATION_SECONDS * 1000.0
+            ),
+            "stock_allocation_zero_loss_polish_budget_ms": float(
+                self.ZERO_LOSS_POLISH_SECONDS * 1000.0
+            ),
+            "stock_allocation_limit_reasons": sorted(stock_allocation_limit_reasons),
+            "stock_allocation_candidates_generated": int(
+                stock_allocation_candidates_generated
+            ),
+            "stock_allocation_candidates_retained": int(
+                stock_allocation_candidates_retained
+            ),
+            "stock_allocation_candidates_pruned": int(
+                stock_allocation_candidates_pruned
+            ),
+            "stock_allocation_candidates_deduplicated": int(
+                stock_allocation_candidates_deduplicated
+            ),
+            "stock_allocation_candidates_dominated": int(
+                stock_allocation_candidates_dominated
+            ),
+            "stock_allocation_branches_pruned": int(
+                stock_allocation_branches_pruned
+            ),
+            "stock_allocation_loss_tiers_evaluated": int(
+                stock_allocation_loss_tiers_evaluated
+            ),
+            "optimizer_seed_distinct_level_loss": (
+                int(optimizer_seed_distinct_level_loss)
+                if optimizer_seed_distinct_level_loss is not None
+                else None
+            ),
+            "optimizer_seed_worst_level_loss": (
+                int(optimizer_seed_worst_level_loss)
+                if optimizer_seed_worst_level_loss is not None
+                else None
+            ),
+            "optimizer_seed_rank": copy.deepcopy(optimizer_seed_rank),
+            "optimizer_selected_rank": copy.deepcopy(optimizer_selected_rank),
+            "stock_allocation_improved_seed": bool(
+                stock_allocation_improved_seed
+            ),
+            "stock_allocation_time_to_best_ms": (
+                float(stock_allocation_time_to_best_ms)
+                if stock_allocation_time_to_best_ms is not None
+                else None
+            ),
+            "stock_allocation_stop_reason": str(stock_allocation_stop_reason),
             "approximate_targets": sum(
                 1
                 for row in preview_rows
@@ -7614,6 +9253,7 @@ class ExperimentModel(QObject):
         # owned by this model so callers can continue using the exact persisted
         # payload for authoritative design-hash validation.
         self.metadata = copy.deepcopy(d.get("metadata", self.metadata))
+        self.metadata.setdefault("allow_avoidable_target_grouping", False)
         self.calibration_storage_policy = load_calibration_storage_policy(
             d.get("calibration_storage")
         )
@@ -13228,6 +14868,7 @@ class ExperimentModel(QObject):
             "replicates": 1,
             "use_subset_design": False,   # <-- keep key consistent
             "allow_two_stock_solutions": False,
+            "allow_avoidable_target_grouping": False,
             "reduction_factor": 1,
             "target_reaction_volume_nL": 2000.0,
             "printed_volume_tolerance_nL": 50.0,

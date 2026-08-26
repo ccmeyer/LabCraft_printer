@@ -77,6 +77,7 @@ def _write_source_artifacts(model: ExperimentModel, source_dir: Path):
 def test_duplicate_design_from_source_creates_fresh_run_state(tmp_path):
     source_model = ExperimentModel(prof=CURRENT_PROFILE)
     _configure_factor_design(source_model)
+    source_model.metadata["allow_avoidable_target_grouping"] = True
     source_dir = tmp_path / "source"
     _write_source_artifacts(source_model, source_dir)
     stock_rows = source_model.get_stock_prep_rows()
@@ -117,6 +118,7 @@ def test_duplicate_design_from_source_creates_fresh_run_state(tmp_path):
     duplicate_design = json.loads((duplicate_dir / "experiment_design.json").read_text(encoding="utf-8"))
     assert duplicate_design["metadata"]["name"] == "SourceExp_replicate"
     assert duplicate_design["metadata"]["replicates"] == 2
+    assert duplicate_design["metadata"]["allow_avoidable_target_grouping"] is True
     assert duplicate_design["applied_imaging_calibrations"] == {
         "schema_version": 1,
         "records": {},
@@ -148,6 +150,7 @@ def test_duplicate_design_from_source_creates_fresh_run_state(tmp_path):
     assert status["total_added_droplets"] == 0
     assert duplicate_model.experiment_dir_path == str(duplicate_dir.resolve())
     assert duplicate_model.metadata["name"] == "SourceExp_replicate"
+    assert duplicate_model.metadata["allow_avoidable_target_grouping"] is True
     assert len(duplicate_model.factors) == len(source_model.factors)
 
 

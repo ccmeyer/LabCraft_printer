@@ -14126,6 +14126,19 @@ class ExperimentDesignDialog(QDialog):
             QLabel("Allowed Printed-Volume Overage (nL)"),
             self.volume_tolerance_spin,
         )
+        self.allow_avoidable_grouping_chk = QCheckBox()
+        self.allow_avoidable_grouping_chk.setChecked(bool(
+            self.model.metadata.get("allow_avoidable_target_grouping", False)
+        ))
+        self.allow_avoidable_grouping_chk.setToolTip(
+            "Permit the optimizer to merge requested concentration levels when doing so "
+            "reduces required stock concentrations or printed volume. Unavoidable grouping "
+            "is always allowed and reported."
+        )
+        advanced_settings_form.addRow(
+            QLabel("Allow avoidable target-level grouping"),
+            self.allow_avoidable_grouping_chk,
+        )
         self.advanced_settings_panel.setVisible(False)
         self.advanced_settings_toggle.toggled.connect(
             self._on_advanced_settings_toggled
@@ -14324,6 +14337,7 @@ class ExperimentDesignDialog(QDialog):
         self.start_col_spin.valueChanged.connect(_auto_update)
         self.start_row_spin.valueChanged.connect(_auto_update)
         self.allow_two_chk.stateChanged.connect(_auto_update)
+        self.allow_avoidable_grouping_chk.stateChanged.connect(_auto_update)
 
         self.exp_name_edit.textChanged.connect(self._schedule_auto_update)
         self.rep_spin.valueChanged.connect(self._schedule_auto_update)
@@ -16333,6 +16347,7 @@ class ExperimentDesignDialog(QDialog):
             "fill_mode_combo",
             "fill_dv_spin",
             "allow_two_chk",
+            "allow_avoidable_grouping_chk",
             "randomize_chk",
             "random_seed_spin",
             "subset_chk",
@@ -16420,6 +16435,7 @@ class ExperimentDesignDialog(QDialog):
             "fill_mode_combo",
             "fill_dv_spin",
             "allow_two_chk",
+            "allow_avoidable_grouping_chk",
             "randomize_chk",
             "random_seed_spin",
             "subset_chk",
@@ -16470,6 +16486,7 @@ class ExperimentDesignDialog(QDialog):
             "fill_mode_combo",
             "fill_dv_spin",
             "allow_two_chk",
+            "allow_avoidable_grouping_chk",
             "randomize_chk",
             "random_seed_spin",
             "subset_chk",
@@ -16550,6 +16567,7 @@ class ExperimentDesignDialog(QDialog):
             "fill_mode_combo",
             "fill_dv_spin",
             "allow_two_chk",
+            "allow_avoidable_grouping_chk",
             "randomize_chk",
             "random_seed_spin",
             "subset_chk",
@@ -16897,6 +16915,14 @@ class ExperimentDesignDialog(QDialog):
             if hasattr(self, "volume_tolerance_spin") and self.volume_tolerance_spin is not None
             else float(getattr(self.model, "metadata", {}).get("printed_volume_tolerance_nL", 50.0))
         )
+        grouping_widget = getattr(self, "allow_avoidable_grouping_chk", None)
+        allow_avoidable_grouping = (
+            bool(grouping_widget.isChecked())
+            if grouping_widget is not None
+            else bool(getattr(self.model, "metadata", {}).get(
+                "allow_avoidable_target_grouping", False
+            ))
+        )
 
         # Keep plate metadata coherent at save-time, before finish handoff mutates runtime state.
         try:
@@ -16922,6 +16948,7 @@ class ExperimentDesignDialog(QDialog):
             ),
             final_reaction_volume_nL=float(self.final_v_spin.value()),
             allow_two_stock_solutions=bool(self.allow_two_chk.isChecked()),
+            allow_avoidable_target_grouping=allow_avoidable_grouping,
             randomize_assignments=randomize,
             random_seed=(seed if randomize else None),
             use_subset_design=bool(self.subset_chk.isChecked()),
@@ -16982,6 +17009,10 @@ class ExperimentDesignDialog(QDialog):
             self._key_label(key)
             for key in (res.get("two_stock_search_limited_keys") or [])
         ]
+        collapsed = [
+            self._key_label(key)
+            for key in (res.get("collapsed_target_keys") or [])
+        ]
         unreachable = []
         approximate = []
         for key, rows in preview.items():
@@ -17012,7 +17043,93 @@ class ExperimentDesignDialog(QDialog):
                 + ("..." if len(bounded_search) > 4 else "")
                 + "."
             )
-        severity = "warning" if unreachable or bounded_search else "success"
+        if collapsed:
+            parts.append(
+                "Requested concentration levels are grouped for: "
+                + ", ".join(collapsed[:4])
+                + ("..." if len(collapsed) > 4 else "")
+                + "."
+            )
+        seed_loss = res.get("optimizer_seed_distinct_level_loss")
+        selected_rank = res.get("optimizer_selected_rank") or {}
+        selected_loss = selected_rank.get(
+            "total_distinct_level_loss", res.get("distinct_level_loss")
+        )
+        improved_seed = bool(res.get("stock_allocation_improved_seed"))
+        time_to_best_ms = res.get("stock_allocation_time_to_best_ms")
+        time_budget_ms = float(res.get("stock_allocation_time_budget_ms", 75.0))
+        search_limited = bool(res.get("stock_allocation_search_limited"))
+        if search_limited:
+            allocation_limit_reasons = set(
+                res.get("stock_allocation_limit_reasons") or []
+            )
+            if allocation_limit_reasons == {"time_budget"}:
+                if improved_seed:
+                    parts.append(
+                        f"Resolution-first reduced grouped levels from {int(seed_loss)} "
+                        f"to {int(selected_loss)} before its {time_budget_ms:.0f} ms "
+                        "limit; secondary optimality was not proven."
+                    )
+                else:
+                    parts.append(
+                        f"No better level resolution was found within "
+                        f"{time_budget_ms:.0f} ms; the concentration-first plan was "
+                        "retained."
+                    )
+            elif allocation_limit_reasons == {"state_cap"}:
+                if improved_seed:
+                    parts.append(
+                        f"Resolution-first reduced grouped levels from {int(seed_loss)} "
+                        f"to {int(selected_loss)} before its allocation-state limit; "
+                        "secondary optimality was not proven."
+                    )
+                else:
+                    parts.append(
+                        "Resolution-first reached its allocation-state limit without "
+                        "finding better level resolution; the concentration-first plan "
+                        "was retained."
+                    )
+            elif allocation_limit_reasons == {"time_budget", "state_cap"}:
+                if improved_seed:
+                    parts.append(
+                        f"Resolution-first reduced grouped levels from {int(seed_loss)} "
+                        f"to {int(selected_loss)} before its time and state limits; "
+                        "secondary optimality was not proven."
+                    )
+                else:
+                    parts.append(
+                        "Resolution-first reached its time and state limits without "
+                        "finding better level resolution; the concentration-first plan "
+                        "was retained."
+                    )
+            else:
+                parts.append(
+                    "Resolution-first stock allocation reached its bounded search limit."
+                )
+        elif improved_seed:
+            if time_to_best_ms is not None and int(selected_loss) < int(seed_loss):
+                parts.append(
+                    f"Resolution-first reduced grouped levels from {int(seed_loss)} "
+                    f"to {int(selected_loss)} in {float(time_to_best_ms):.1f} ms."
+                )
+            elif time_to_best_ms is not None:
+                parts.append(
+                    "Resolution-first improved the stock allocation's secondary rank "
+                    f"in {float(time_to_best_ms):.1f} ms without changing the "
+                    f"{int(seed_loss)} grouped levels."
+                )
+        if res.get("optimizer_strategy_used") == "legacy_fallback":
+            parts.append(
+                "The feasible concentration-first stock allocation was retained after "
+                "resolution-first validation failed."
+            )
+        severity = "warning" if (
+            unreachable
+            or bounded_search
+            or collapsed
+            or search_limited
+            or res.get("optimizer_strategy_used") == "legacy_fallback"
+        ) else "success"
         self._set_status(" ".join(parts), severity=severity)
         self._set_tip(
             "Hover a Targets field to inspect the actual achieved concentrations."
@@ -17606,8 +17723,8 @@ class ExperimentDesignDialog(QDialog):
 
     def _apply_target_color_state(self):
         """
-        Colors each Targets cell red if a forced stock exists and at least one target is unreachable
-        for that reagent (based on the model's preview map). Also sets a helpful tooltip.
+        Colors grouped target levels orange and unreachable targets red. Unreachable
+        styling takes precedence. Also sets a detailed achieved-concentration tooltip.
         """
         preview = {}
         try:
@@ -17634,9 +17751,13 @@ class ExperimentDesignDialog(QDialog):
 
             tooltip = self._build_target_preview_tooltip(rows)
             has_unreachable = any(not bool(r.get("reachable")) for r in rows)
+            has_collapsed = bool(self._collapsed_target_preview_groups(rows))
 
             if has_unreachable:
                 tgt_edit.setStyleSheet("color: %s;" % self.color_dict.get("dark_red", "#8a0303"))
+                tgt_edit.setToolTip(tooltip)
+            elif has_collapsed:
+                tgt_edit.setStyleSheet("color: %s;" % self.color_dict.get("orange", "#f4743b"))
                 tgt_edit.setToolTip(tooltip)
             else:
                 tgt_edit.setStyleSheet("")
@@ -17673,6 +17794,39 @@ class ExperimentDesignDialog(QDialog):
         }.get(str(reason or ""), "")
 
     @classmethod
+    def _collapsed_target_preview_groups(
+        cls,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        requested_rows: dict[float, Mapping[str, Any]] = {}
+        for row in rows or []:
+            try:
+                requested = float(f"{float(row.get('requested_final', 0.0)):.12g}")
+            except Exception:
+                continue
+            requested_rows.setdefault(requested, row)
+
+        achieved_groups: dict[float, list[tuple[float, Mapping[str, Any]]]] = {}
+        for requested, row in requested_rows.items():
+            try:
+                achieved = float(f"{float(row.get('achieved_final', 0.0)):.12g}")
+            except Exception:
+                continue
+            achieved_groups.setdefault(achieved, []).append((requested, row))
+
+        collapsed = []
+        for achieved, entries in sorted(achieved_groups.items()):
+            if len(entries) <= 1:
+                continue
+            ordered = sorted(entries, key=lambda item: item[0])
+            collapsed.append({
+                "achieved_final": achieved,
+                "requested_targets": [requested for requested, _row in ordered],
+                "droplets": [row.get("droplets", 0) for _requested, row in ordered],
+            })
+        return collapsed
+
+    @classmethod
     def _build_target_preview_tooltip(cls, rows: Sequence[Mapping[str, Any]]) -> str:
         if not rows:
             return ""
@@ -17697,6 +17851,18 @@ class ExperimentDesignDialog(QDialog):
                 header = f"{header[:-1]} {stock_label}:"
 
         lines = [header]
+        collapsed_groups = cls._collapsed_target_preview_groups(rows)
+        if collapsed_groups:
+            lines.append("Collapsed requested levels:")
+            for group in collapsed_groups:
+                requested = ", ".join(
+                    cls._fmt_target_preview_num(value)
+                    for value in group["requested_targets"]
+                )
+                achieved = cls._fmt_target_preview_num(group["achieved_final"])
+                achieved_label = f"{achieved} {units}".strip()
+                lines.append(f"{requested} → {achieved_label}")
+            lines.append("")
         for row in rows:
             requested = cls._fmt_target_preview_num(row.get("requested_final", 0.0))
             achieved = cls._fmt_target_preview_num(row.get("achieved_final", 0.0))
@@ -17795,6 +17961,7 @@ class ExperimentDesignDialog(QDialog):
         blk(self.volume_tolerance_spin)
         blk(self.fill_name_edit); blk(getattr(self, "fill_mode_combo", None)); blk(self.fill_dv_spin)
         blk(self.allow_two_chk)
+        blk(self.allow_avoidable_grouping_chk)
         blk(self.randomize_chk); blk(self.random_seed_spin)
         blk(self.subset_chk); blk(self.reduction_spin)
         blk(self.start_col_spin); blk(self.start_row_spin)
@@ -17828,6 +17995,9 @@ class ExperimentDesignDialog(QDialog):
         )))
         self.volume_tolerance_spin.setValue(float(md.get("printed_volume_tolerance_nL", 50.0)))
         self.allow_two_chk.setChecked(bool(md.get("allow_two_stock_solutions", False)))
+        self.allow_avoidable_grouping_chk.setChecked(bool(
+            md.get("allow_avoidable_target_grouping", False)
+        ))
 
         if hasattr(self, "randomize_chk"):
             self.randomize_chk.setChecked(bool(md.get("randomize_assignments", False)))
@@ -17956,6 +18126,7 @@ class ExperimentDesignDialog(QDialog):
                     "fill_printing_mode": PRINTING_MODE_DROPLET,
                     "fill_droplet_volume_nL": printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET),
                     "allow_two_stock_solutions": False,
+                    "allow_avoidable_target_grouping": False,
                     "randomize_assignments": False,
                     "random_seed": None,
                     "use_subset_design": False,
@@ -18007,6 +18178,9 @@ class ExperimentDesignDialog(QDialog):
             QSignalBlocker(self.reduction_spin), QSignalBlocker(self.start_col_spin),
             QSignalBlocker(self.start_row_spin)
         ]
+        grouping_widget = getattr(self, "allow_avoidable_grouping_chk", None)
+        if grouping_widget is not None:
+            blockers.append(QSignalBlocker(grouping_widget))
 
         self.choice_groups = set()
         self._load_factors_into_table()

@@ -89,6 +89,7 @@ def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None
     dialog.stock_table_status_lbl = QLabel("")
     dialog.stock_table = QTableWidget(0, 9)
     dialog.allow_two_chk = QCheckBox()
+    dialog.allow_avoidable_grouping_chk = QCheckBox()
     dialog.v_spin = QDoubleSpinBox()
     dialog.v_spin.setRange(1.0, 1_000_000.0)
     dialog.v_spin.setValue(2000.0)
@@ -129,6 +130,65 @@ def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None
     dialog.stock_table.insertRow(0)
     dialog.stock_table.setItem(0, 0, QTableWidgetItem("AddA"))
     return dialog, fixed_edit, max_edit
+
+
+def _collapsed_preview_rows(*, unreachable=False):
+    return [
+        {
+            "requested_final": 0.5,
+            "achieved_final": 0.952,
+            "droplets": 1,
+            "reachable": not unreachable,
+            "reason": "outside_half_step" if unreachable else "nearest_achievable",
+            "abs_error": 0.452,
+            "signed_error": 0.452,
+            "units": "mM",
+            "plan_mode": "auto",
+            "stock_concentration": 476.0,
+        },
+        {
+            "requested_final": 1.0,
+            "achieved_final": 0.952,
+            "droplets": 1,
+            "reachable": True,
+            "reason": "nearest_achievable",
+            "abs_error": 0.048,
+            "signed_error": -0.048,
+            "units": "mM",
+            "plan_mode": "auto",
+            "stock_concentration": 476.0,
+        },
+    ]
+
+
+def test_collapsed_target_tooltip_has_explicit_grouping():
+    tooltip = ExperimentDesignDialog._build_target_preview_tooltip(
+        _collapsed_preview_rows()
+    )
+
+    assert "Collapsed requested levels:" in tooltip
+    assert "0.5, 1 → 0.952 mM" in tooltip
+
+
+def test_collapsed_target_styling_is_orange_with_red_precedence(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog()
+    target_edit = dialog._reagent_cell_widget(0, dialog.COL_TARGETS)
+    dialog.model.get_target_preview_map = lambda: {
+        ("AddA", None): _collapsed_preview_rows()
+    }
+
+    ExperimentDesignDialog._apply_target_color_state(dialog)
+
+    assert "#f4743b" in target_edit.styleSheet()
+    assert "0.5, 1 → 0.952 mM" in target_edit.toolTip()
+
+    dialog.model.get_target_preview_map = lambda: {
+        ("AddA", None): _collapsed_preview_rows(unreachable=True)
+    }
+    ExperimentDesignDialog._apply_target_color_state(dialog)
+
+    assert "#8a0303" in target_edit.styleSheet()
+    assert "#f4743b" not in target_edit.styleSheet()
 
 
 def test_invalid_fixed_stock_text_is_styled_and_skips_optimize(qapp):

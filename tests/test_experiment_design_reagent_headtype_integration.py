@@ -1501,6 +1501,55 @@ def test_sync_controls_from_model_can_skip_recompute(qapp):
     dialog.close()
 
 
+def test_advanced_grouping_control_persists_resets_and_marks_design_dirty(qapp):
+    dialog = _build_real_dialog()
+    checkbox = dialog.allow_avoidable_grouping_chk
+
+    assert checkbox.isChecked() is False
+    assert "Unavoidable grouping is always allowed and reported" in checkbox.toolTip()
+    assert any(
+        label.text() == "Allow avoidable target-level grouping"
+        for label in dialog.advanced_settings_panel.findChildren(QLabel)
+    )
+
+    dialog._design_optimization_dirty = False
+    dialog._last_optimization_result = {"best": True}
+    checkbox.setChecked(True)
+    assert dialog._design_optimization_dirty is True
+    assert dialog._auto_timer.isActive() is True
+    dialog._auto_timer.stop()
+
+    dialog._update_metadata_from_controls()
+    assert dialog.model.metadata["allow_avoidable_target_grouping"] is True
+
+    checkbox.setChecked(False)
+    dialog.model.metadata["allow_avoidable_target_grouping"] = True
+    dialog._sync_controls_from_model(recompute=False)
+    assert checkbox.isChecked() is True
+
+    dialog.model.reset_experiment_model()
+    dialog._sync_controls_from_model(recompute=False)
+    assert checkbox.isChecked() is False
+
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
+def test_advanced_grouping_control_obeys_execution_design_lock(qapp):
+    dialog = _build_real_dialog()
+    assert dialog.allow_avoidable_grouping_chk.isEnabled() is True
+
+    dialog.model._execution_plan_snapshot = SimpleNamespace(
+        state=ExecutionPlanState.PREPARED
+    )
+    dialog.model._execution_plan_reload_read_only = True
+    dialog._apply_execution_edit_lock_state()
+
+    assert dialog.allow_avoidable_grouping_chk.isEnabled() is False
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
 @pytest.mark.parametrize("dialog_size", [(1760, 900), (1560, 840)])
 def test_long_design_message_scrolls_without_resizing_editor_sections(qapp, dialog_size):
     dialog = _build_real_dialog()
@@ -1653,6 +1702,77 @@ def test_optimization_guidance_does_not_replace_success_status(qapp):
     assert dialog.status_lbl.text() == "Reactions and stock solutions updated."
     assert dialog.tip_lbl.text().startswith("Hover a Targets field")
     assert dialog.status_heading_lbl.text() == "Ready"
+    dialog.close()
+
+
+def test_optimization_status_distinguishes_time_and_state_limits(qapp):
+    dialog = _build_real_dialog()
+    dialog.model.plans_per_option = {}
+    dialog.model.get_target_preview_map = lambda: {}
+
+    dialog._update_optimization_status(
+        {
+            "best": True,
+            "two_stock_search_limited_keys": [],
+            "stock_allocation_search_limited": True,
+            "stock_allocation_limit_reasons": ["time_budget"],
+            "stock_allocation_time_budget_ms": 75.0,
+            "optimizer_seed_distinct_level_loss": 4,
+            "optimizer_selected_rank": {"total_distinct_level_loss": 4},
+            "stock_allocation_improved_seed": False,
+        }
+    )
+    assert (
+        "No better level resolution was found within 75 ms; the "
+        "concentration-first plan was retained."
+    ) in dialog.status_lbl.text()
+
+    dialog._update_optimization_status(
+        {
+            "best": True,
+            "two_stock_search_limited_keys": [],
+            "stock_allocation_search_limited": True,
+            "stock_allocation_limit_reasons": ["state_cap"],
+            "optimizer_seed_distinct_level_loss": 4,
+            "optimizer_selected_rank": {"total_distinct_level_loss": 4},
+            "stock_allocation_improved_seed": False,
+        }
+    )
+    assert "allocation-state limit without finding better" in dialog.status_lbl.text()
+
+    dialog._update_optimization_status(
+        {
+            "best": True,
+            "two_stock_search_limited_keys": [],
+            "stock_allocation_search_limited": True,
+            "stock_allocation_limit_reasons": ["time_budget"],
+            "stock_allocation_time_budget_ms": 75.0,
+            "optimizer_seed_distinct_level_loss": 4,
+            "optimizer_selected_rank": {"total_distinct_level_loss": 1},
+            "stock_allocation_improved_seed": True,
+            "stock_allocation_time_to_best_ms": 42.0,
+        }
+    )
+    assert "reduced grouped levels from 4 to 1 before its 75 ms limit" in (
+        dialog.status_lbl.text()
+    )
+    assert "secondary optimality was not proven" in dialog.status_lbl.text()
+
+    dialog._update_optimization_status(
+        {
+            "best": True,
+            "two_stock_search_limited_keys": [],
+            "stock_allocation_search_limited": False,
+            "optimizer_seed_distinct_level_loss": 1,
+            "optimizer_selected_rank": {"total_distinct_level_loss": 0},
+            "stock_allocation_improved_seed": True,
+            "stock_allocation_time_to_best_ms": 11.25,
+            "stock_allocation_stop_reason": "search_exhausted",
+        }
+    )
+    assert "reduced grouped levels from 1 to 0 in 11.2 ms" in (
+        dialog.status_lbl.text()
+    )
     dialog.close()
 
 

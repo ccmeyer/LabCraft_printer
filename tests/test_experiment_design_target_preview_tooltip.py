@@ -86,8 +86,9 @@ def test_apply_target_color_state_shows_tooltip_for_reachable_forced_stock(qapp)
     ExperimentDesignDialog._apply_target_color_state(dialog)
 
     tip = target_edit.toolTip()
-    assert target_edit.styleSheet() == ""
+    assert "#f4743b" in target_edit.styleSheet()
     assert "Achievable with fixed stock 35 mM:" in tip
+    assert "0.149, 0.192 → 0.168 mM" in tip
     assert "0.149 -> 0.168 (2 drops, +0.019)" in tip
     assert "0.192 -> 0.168 (2 drops, -0.024)" in tip
 
