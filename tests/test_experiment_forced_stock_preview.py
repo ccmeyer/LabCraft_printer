@@ -1,3 +1,5 @@
+import copy
+
 import pandas as pd
 import pytest
 
@@ -1544,6 +1546,142 @@ def test_import_feasibility_report_flags_missing_max_stock():
     assert any(issue["code"] == "missing_max_stock" and issue["reagent"] == "Reagent B" for issue in report["issues"])
     assert report["stock_rows"][1]["status"] == "Missing max stock"
     assert report["composition_rows"][0]["status"] == "Missing max stock"
+
+
+def _two_stock_import_report():
+    model = _make_model(target_volume_nl=9.0, final_volume_nl=450.0)
+    design = pd.DataFrame({"R mM": [0.1, 0.2]})
+    stocks = pd.DataFrame(
+        {"reagent": ["R"], "stock_conc": [10.0], "units": ["mM"]}
+    )
+    report = model.build_import_feasibility_report(
+        design,
+        max_stock_df=stocks,
+        printed_volume_nL=9.0,
+        printed_volume_tolerance_nL=0.0,
+        final_volume_nL=450.0,
+        allow_two=True,
+    )
+    return design, report
+
+
+def _build_two_stock_import_target(design):
+    model = _make_model(target_volume_nl=9.0, final_volume_nl=450.0)
+    model.set_metadata(allow_two_stock_solutions=True)
+    model.set_uploaded_design_from_dataframe(
+        design,
+        units_default="",
+        droplet_nL_default=9.0,
+        starting_conc_default=0.0,
+    )
+    model.factors[0].options[0].max_stock_conc = 10.0
+    return model
+
+
+def test_import_feasibility_report_exposes_both_two_stock_legs_and_mappings():
+    _design, report = _two_stock_import_report()
+
+    assert report["ok"] is True
+    assert [row["stock_leg_label"] for row in report["stock_rows"]] == [
+        "Stock 1 of 2",
+        "Stock 2 of 2",
+    ]
+    assert [row["ideal_stock_conc"] for row in report["stock_rows"]] == pytest.approx(
+        [10.0, 5.0]
+    )
+    assert report["stock_rows"][0]["droplets_per_target"] == {0.1: 0, 0.2: 1}
+    assert report["stock_rows"][1]["droplets_per_target"] == {0.1: 1, 0.2: 0}
+    payload = report["stock_allocation_reuse_payload"]
+    plan = payload["plans_per_option"][("R", None)]
+    assert plan["n_stocks"] == 2
+    assert plan["stocks"][0]["droplets_per_target"] == {0.1: 0, 0.2: 1}
+    assert plan["stocks"][1]["droplets_per_target"] == {0.1: 1, 0.2: 0}
+
+
+def test_unchanged_import_reuses_exactly_validated_two_stock_plan(monkeypatch):
+    design, report = _two_stock_import_report()
+    target = _build_two_stock_import_target(design)
+
+    reused = target.install_stock_allocation_reuse_payload(
+        report["stock_allocation_reuse_payload"]
+    )
+    monkeypatch.setattr(
+        target,
+        "optimize_stock_solutions",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("an unchanged import must not run the optimizer again")
+        ),
+    )
+    target.generate_experiment()
+
+    assert reused["reused"] is True
+    assert reused["result"]["stock_allocation_reused_import_plan"] is True
+    assert target.plans_per_option[("R", None)]["n_stocks"] == 2
+    assert target.get_reactions_dataframe()["nonfill_volume_nL"].tolist() == pytest.approx(
+        [9.0, 9.0]
+    )
+
+
+def test_import_reuse_fingerprint_excludes_layout_and_counts_but_covers_stock_inputs():
+    design, report = _two_stock_import_report()
+    target = _build_two_stock_import_target(design)
+    baseline = report["stock_allocation_input_fingerprint"]
+
+    target.set_metadata(
+        name="Renamed",
+        replicates=7,
+        randomize_assignments=True,
+        random_seed=1234,
+        start_col=4,
+        start_row=3,
+        fill_reagent_name="Buffer",
+        fill_droplet_volume_nL=60.0,
+    )
+    assert target.stock_allocation_input_fingerprint() == baseline
+
+    target.factors[0].options[0].max_stock_conc = 9.0
+    assert target.stock_allocation_input_fingerprint() != baseline
+
+
+def test_import_reuse_fingerprint_mismatch_preserves_existing_plan():
+    design, report = _two_stock_import_report()
+    target = _build_two_stock_import_target(design)
+    target.plans_per_option[("sentinel", None)] = {"n_stocks": 1, "stocks": []}
+    target.factors[0].options[0].max_stock_conc = 9.0
+
+    reused = target.install_stock_allocation_reuse_payload(
+        report["stock_allocation_reuse_payload"]
+    )
+
+    assert reused == {
+        "reused": False,
+        "reason": "stock_input_fingerprint_mismatch",
+    }
+    assert ("sentinel", None) in target.plans_per_option
+
+
+def test_import_reuse_exact_validation_rejects_missing_mapping_and_restores_state():
+    design, report = _two_stock_import_report()
+    target = _build_two_stock_import_target(design)
+    target.plans_per_option[("sentinel", None)] = {"n_stocks": 1, "stocks": []}
+    payload = copy.deepcopy(report["stock_allocation_reuse_payload"])
+    del payload["plans_per_option"][("R", None)]["stocks"][1][
+        "droplets_per_target"
+    ][0.1]
+    payload["plan_fingerprint"] = target._canonical_payload_sha256(
+        target._stock_allocation_plan_document(
+            payload["plans_per_option"], payload["stock_rows"]
+        )
+    )
+
+    reused = target.install_stock_allocation_reuse_payload(payload)
+
+    assert reused["reused"] is False
+    assert reused["reason"] == "stock_plan_validation_failed"
+    assert "cannot reach every target" in reused["detail"]
+    assert target.plans_per_option == {
+        ("sentinel", None): {"n_stocks": 1, "stocks": []}
+    }
 
 
 def test_import_feasibility_report_marks_selected_overage_as_near_budget():

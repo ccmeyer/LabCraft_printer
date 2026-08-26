@@ -1705,6 +1705,78 @@ def test_optimization_guidance_does_not_replace_success_status(qapp):
     dialog.close()
 
 
+def test_two_stock_status_warns_before_execution_about_calibration_apply(qapp):
+    dialog = _build_real_dialog()
+    dialog.model.plans_per_option = {("Reagent A", None): {"n_stocks": 2}}
+    dialog.model.get_target_preview_map = lambda: {}
+
+    dialog._update_optimization_status(
+        {"best": True, "two_stock_search_limited_keys": []}
+    )
+
+    assert "Two stock solutions are required for: Reagent A." in dialog.status_lbl.text()
+    assert (
+        "Calibration preview is available, but applying a measured calibration is "
+        "currently supported only for single-stock reagents."
+    ) in dialog.status_lbl.text()
+    assert dialog.status_heading_lbl.text() == "Warning"
+    dialog.close()
+
+
+@pytest.mark.parametrize(("change_stock_input", "expected_optimize_calls"), [(False, 0), (True, 1)])
+def test_import_apply_reuses_validated_plan_or_reoptimizes_on_fingerprint_mismatch(
+    qapp, monkeypatch, change_stock_input, expected_optimize_calls
+):
+    dialog = _build_real_dialog()
+    monkeypatch.setattr(view_module.QMessageBox, "warning", lambda *_args: None)
+    design = pd.DataFrame({"R mM": [0.1, 0.2]})
+    stocks = pd.DataFrame(
+        {"reagent": ["R"], "stock_conc": [10.0], "units": ["mM"]}
+    )
+    report = dialog.model.build_import_feasibility_report(
+        design,
+        max_stock_df=stocks,
+        printed_volume_nL=9.0,
+        printed_volume_tolerance_nL=0.0,
+        final_volume_nL=450.0,
+        allow_two=True,
+    )
+    max_stock = 11.0 if change_stock_input else 10.0
+    payload = {
+        "design_df": design,
+        "source_path": "two-stock.csv",
+        "max_stock_by_reagent": {"R": max_stock},
+        "stock_settings_by_reagent": {
+            "R": {
+                "max_stock_conc": max_stock,
+                "printing_mode": "droplet",
+                "droplet_nL": 9.0,
+            }
+        },
+        "printed_volume_nL": 9.0,
+        "printed_volume_tolerance_nL": 0.0,
+        "final_volume_nL": 450.0,
+        "allow_two": True,
+        "stock_allocation_reuse_payload": report["stock_allocation_reuse_payload"],
+    }
+    optimize_calls = []
+    original_optimize = dialog.model.optimize_stock_solutions
+
+    def counted_optimize(**kwargs):
+        optimize_calls.append(dict(kwargs))
+        return original_optimize(**kwargs)
+
+    dialog.model.optimize_stock_solutions = counted_optimize
+
+    dialog._apply_uploaded_design_payload(payload)
+
+    assert len(optimize_calls) == expected_optimize_calls
+    assert dialog.model.plans_per_option[("R", None)]["n_stocks"] == 2
+    assert dialog.model.get_number_of_reactions() == 2
+    assert dialog._stock_allocation_dirty is False
+    dialog.close()
+
+
 def test_optimization_status_distinguishes_time_and_state_limits(qapp):
     dialog = _build_real_dialog()
     dialog.model.plans_per_option = {}

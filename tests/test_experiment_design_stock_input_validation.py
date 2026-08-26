@@ -309,6 +309,85 @@ def test_successful_optimization_marks_design_clean(qapp):
     assert dialog._auto_timer.stops == 1
 
 
+@pytest.mark.parametrize(
+    ("dirty_domain", "expected_optimizer_calls"),
+    [("layout", 0), ("count", 0), ("stock", 1)],
+)
+def test_dirty_domains_control_optimizer_calls_and_coalesce_stock_refresh(
+    qapp, dirty_domain, expected_optimizer_calls
+):
+    dialog, _fixed_edit, _max_edit = _build_dialog(
+        responses=[
+            {"best": True, "issues_by_key": {}, "two_stock_search_limited_keys": []}
+        ]
+    )
+    dialog.model.plans_per_option = {("AddA", None): {"n_stocks": 1}}
+    dialog._last_optimization_result = {
+        "best": True,
+        "issues_by_key": {},
+        "two_stock_search_limited_keys": [],
+    }
+    dialog._stock_allocation_dirty = False
+    dialog._reaction_layout_dirty = False
+    dialog._stock_amounts_dirty = False
+    dialog._design_optimization_dirty = False
+    refresh_calls = []
+    dialog._refresh_stock_table = lambda: refresh_calls.append(True)
+
+    ExperimentDesignDialog._schedule_auto_update(
+        dialog, dirty_domain=dirty_domain
+    )
+    assert dialog._auto_timer.starts == 1
+    ok, result = ExperimentDesignDialog._run_design_optimization_flow(
+        dialog, show_failure_dialog=False
+    )
+
+    assert ok is True
+    assert result["best"] is True
+    assert dialog.model.optimize_calls == expected_optimizer_calls
+    assert dialog.model.generated == 1
+    assert len(refresh_calls) == 1
+    assert result.get("stock_allocation_reused", False) is (
+        expected_optimizer_calls == 0
+    )
+
+
+def test_experiment_name_change_updates_metadata_without_scheduling_optimizer(qapp):
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    metadata_calls = []
+    dialog.model = type(
+        "Model",
+        (),
+        {"set_metadata": lambda _self, **kwargs: metadata_calls.append(kwargs)},
+    )()
+    dialog._draft_dirty = False
+    dialog._refresh_draft_dirty_indicator = lambda: None
+
+    ExperimentDesignDialog._on_experiment_name_changed(dialog, " Renamed ")
+
+    assert metadata_calls == [{"name": "Renamed"}]
+    assert dialog._draft_dirty is True
+    assert not hasattr(dialog, "_stock_allocation_dirty")
+
+
+def test_model_stock_updates_are_coalesced_into_one_table_refresh(qapp):
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    dialog._stock_table_refresh_scheduled = False
+    refresh_calls = []
+
+    def refresh():
+        dialog._stock_table_refresh_scheduled = False
+        refresh_calls.append(True)
+
+    dialog._refresh_stock_table = refresh
+
+    ExperimentDesignDialog._on_model_stock_updated(dialog)
+    ExperimentDesignDialog._on_model_stock_updated(dialog)
+    qapp.processEvents()
+
+    assert refresh_calls == [True]
+
+
 def _install_design_busy_buttons(dialog):
     for name in (
         "run_btn",
@@ -532,6 +611,85 @@ class _ImportFeasibilityModel:
             "max_stock_by_reagent": {},
             "stock_settings_by_reagent": {},
         }
+
+
+def test_import_wizard_displays_both_two_stock_legs_as_one_reagent(qapp):
+    class _TwoStockPreviewModel:
+        def build_import_feasibility_report(self, *_args, **kwargs):
+            base = {
+                "reagent": "R",
+                "units": "mM",
+                "printing_mode": "droplet",
+                "droplet_nL": 9.0,
+                "max_stock_conc": 10.0,
+                "target_min": 0.1,
+                "target_max": 0.2,
+                "target_span": 0.1,
+                "smallest_nonzero_target": 0.1,
+                "worst_max_stock_volume_nL": 9.0,
+                "smallest_useful_target_step": 0.1,
+                "status": "OK",
+                "recommendation": "Feasible.",
+                "stock_leg_count": 2,
+            }
+            return {
+                "ok": True,
+                "printed_volume_nL": kwargs["printed_volume_nL"],
+                "final_volume_nL": kwargs["final_volume_nL"],
+                "reagent_specs": [{"name": "R", "units": "mM"}],
+                "composition_rows": [],
+                "stock_rows": [
+                    {
+                        **base,
+                        "ideal_stock_conc": 10.0,
+                        "delta_per_drop": 0.2,
+                        "droplets_per_target": {0.1: 0, 0.2: 1},
+                        "stock_leg_index": 0,
+                        "stock_leg_label": "Stock 1 of 2",
+                    },
+                    {
+                        **base,
+                        "ideal_stock_conc": 5.0,
+                        "delta_per_drop": 0.1,
+                        "droplets_per_target": {0.1: 1, 0.2: 0},
+                        "stock_leg_index": 1,
+                        "stock_leg_label": "Stock 2 of 2",
+                    },
+                ],
+                "issues": [],
+                "missing_stock_rows": [],
+                "unmatched_stock_rows": [],
+                "status_counts": {},
+                "max_stock_by_reagent": {"R": 10.0},
+                "stock_settings_by_reagent": {},
+            }
+
+    wizard = View.ExperimentImportWizard(
+        _TwoStockPreviewModel(),
+        printed_volume_nL=9.0,
+        final_volume_nL=450.0,
+        allow_two=True,
+    )
+    wizard.load_design_dataframe(pd.DataFrame({"R mM": [0.1, 0.2]}))
+
+    _calculate_import_wizard(wizard)
+
+    assert wizard.stock_table.rowCount() == 2
+    assert wizard.stock_table.item(0, wizard.STOCK_COL_REAGENT).text() == (
+        "R\nStock 1 of 2"
+    )
+    assert wizard.stock_table.item(1, wizard.STOCK_COL_REAGENT).text() == (
+        "R\nStock 2 of 2"
+    )
+    assert wizard.stock_table.item(0, wizard.STOCK_COL_IDEAL).text() == "10"
+    assert wizard.stock_table.item(1, wizard.STOCK_COL_IDEAL).text() == "5"
+    assert "0.2 mM: 1 droplet" in wizard.stock_table.item(
+        0, wizard.STOCK_COL_IDEAL
+    ).toolTip()
+    assert "0.1 mM: 1 droplet" in wizard.stock_table.item(
+        1, wizard.STOCK_COL_IDEAL
+    ).toolTip()
+    assert "1 reagent(s)" in wizard.status_lbl.text()
 
 
 def test_import_wizard_invalid_volume_skips_feasibility_until_corrected(qapp):
@@ -1244,7 +1402,16 @@ def test_import_wizard_composition_table_layout_and_formatting(qapp):
     assert wizard.composition_table.item(0, 6).text() == "7440"
 
 
-def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
+@pytest.mark.parametrize(
+    ("reuse_payload", "expected_stock_dirty"),
+    [
+        ({"fingerprint": "unchanged"}, False),
+        ({"fingerprint": "changed"}, True),
+    ],
+)
+def test_upload_design_wizard_apply_reuses_only_unchanged_allocation(
+    qapp, monkeypatch, reuse_payload, expected_stock_dirty
+):
     design_df = pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]})
     constructed = {}
 
@@ -1272,6 +1439,7 @@ def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
                 "printed_volume_tolerance_nL": 35.0,
                 "final_volume_nL": 1000.0,
                 "allow_two": True,
+                "stock_allocation_reuse_payload": reuse_payload,
             }
 
     class _ModelStub:
@@ -1280,6 +1448,7 @@ def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
             self.factors = []
             self.upload_calls = 0
             self.metadata_calls = []
+            self.reuse_calls = []
 
         def set_metadata(self, **kwargs):
             self.metadata.update(kwargs)
@@ -1303,6 +1472,13 @@ def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
         def extract_uploaded_design_well_ids_from_dataframe(self, _df):
             return None
 
+        def install_stock_allocation_reuse_payload(self, payload):
+            self.reuse_calls.append(payload)
+            return {
+                "reused": payload == {"fingerprint": "unchanged"},
+                "result": {"best": True, "stock_allocation_reused_import_plan": True},
+            }
+
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
     dialog.model = _ModelStub()
     dialog.choice_groups = set()
@@ -1322,11 +1498,13 @@ def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
     dialog._load_factors_into_table = lambda: None
     dialog._update_metadata_from_controls = lambda: None
     run_calls = []
+    stock_dirty_before_run = []
     dialog._design_optimization_dirty = True
     dialog._auto_timer = _FakeTimer()
 
     def fake_run_design_optimization_flow(**kwargs):
         run_calls.append(kwargs)
+        stock_dirty_before_run.append(dialog._stock_allocation_dirty)
         ExperimentDesignDialog._mark_design_optimization_clean(dialog, {"best": True})
         return True, {"best": True}
 
@@ -1352,6 +1530,8 @@ def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
     assert dialog.model.metadata["printed_volume_tolerance_nL"] == 35.0
     assert dialog.model.metadata["final_reaction_volume_nL"] == 1000.0
     assert dialog.model.metadata["allow_two_stock_solutions"] is True
+    assert dialog.model.reuse_calls == [reuse_payload]
+    assert stock_dirty_before_run == [expected_stock_dirty]
     assert len(run_calls) == 1
     assert dialog._design_optimization_dirty is False
 

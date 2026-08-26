@@ -3,6 +3,7 @@ import numpy as np
 
 import copy
 import gc
+import hashlib
 from dataclasses import dataclass, field, replace
 from math import gcd
 from numbers import Integral, Real
@@ -6331,7 +6332,7 @@ class ExperimentModel(QObject):
                         )
 
         if materialized_mappings_valid:
-            for run_spec in self._iter_reaction_run_specs():
+            for run_spec in self._iter_unique_reaction_constraint_specs():
                 row_volume_nL = 0.0
                 for key, target in run_spec["reaction"].items():
                     opt = expected_options.get(key)
@@ -7328,6 +7329,390 @@ class ExperimentModel(QObject):
 
         return {"stocks": rows, "issues": issues}
 
+    @staticmethod
+    def _stock_fingerprint_number(value: Any) -> Any:
+        if value is None:
+            return None
+        number = float(value)
+        if not math.isfinite(number):
+            return str(number)
+        return number
+
+    @staticmethod
+    def _canonical_payload_sha256(payload: Mapping[str, Any]) -> str:
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _stock_allocation_input_document(self) -> Dict[str, Any]:
+        number = self._stock_fingerprint_number
+        factors: List[Dict[str, Any]] = []
+        for factor in self.factors:
+            options = []
+            for option in factor.options:
+                key = (
+                    str(factor.name),
+                    None if factor.kind == "additive" else str(option.name),
+                )
+                options.append({
+                    "key": [key[0], key[1]],
+                    "targets": [
+                        number(target)
+                        for target in self._effective_targets_for_key(key, option)
+                    ],
+                    "units": str(getattr(option, "units", "") or ""),
+                    "droplet_nL": number(getattr(option, "droplet_nL", 0.0)),
+                    "printing_mode": normalize_printing_mode(
+                        getattr(option, "printing_mode", None)
+                    ),
+                    "starting_conc": number(
+                        getattr(option, "starting_conc", 0.0) or 0.0
+                    ),
+                    "forced_stock_conc": number(
+                        getattr(option, "forced_stock_conc", None)
+                    ),
+                    "max_stock_conc": number(
+                        getattr(option, "max_stock_conc", None)
+                    ),
+                })
+            factors.append({
+                "name": str(factor.name),
+                "kind": str(factor.kind),
+                "options": options,
+            })
+
+        def _reaction_document(reaction: Mapping[Any, Any]) -> List[Dict[str, Any]]:
+            return [
+                {
+                    "key": [str(key[0]), key[1]],
+                    "target": number(target),
+                }
+                for key, target in sorted(
+                    (reaction or {}).items(), key=lambda item: str(item[0])
+                )
+            ]
+
+        return {
+            "schema": "labcraft.stock_allocation_inputs.v1",
+            "metadata": {
+                "target_reaction_volume_nL": number(
+                    self.metadata.get("target_reaction_volume_nL", 2000.0)
+                ),
+                "printed_volume_tolerance_nL": number(
+                    self.metadata.get("printed_volume_tolerance_nL", 50.0)
+                ),
+                "final_reaction_volume_nL": number(
+                    self.metadata.get(
+                        "final_reaction_volume_nL",
+                        self.metadata.get("target_reaction_volume_nL", 2000.0),
+                    )
+                ),
+                "allow_two_stock_solutions": bool(
+                    self.metadata.get("allow_two_stock_solutions", False)
+                ),
+                "allow_avoidable_target_grouping": bool(
+                    self.metadata.get("allow_avoidable_target_grouping", False)
+                ),
+            },
+            "factors": factors,
+            "uploaded_reactions": [
+                _reaction_document(reaction)
+                for reaction in (self._uploaded_reactions or [])
+            ],
+            "additional_condition_rows": [
+                _reaction_document(condition.targets)
+                for condition in self.additional_conditions
+            ],
+        }
+
+    def stock_allocation_input_fingerprint(self) -> str:
+        return self._canonical_payload_sha256(
+            self._stock_allocation_input_document()
+        )
+
+    def _stock_allocation_plan_document(
+        self,
+        plans: Mapping[Tuple[str, Optional[str]], Mapping[str, Any]],
+        stock_rows: Iterable[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        number = self._stock_fingerprint_number
+        plan_rows = []
+        for key, plan in sorted(plans.items(), key=lambda item: str(item[0])):
+            stocks = []
+            for stock in plan.get("stocks") or []:
+                stocks.append({
+                    "stock_concentration": number(stock.get("stock_concentration")),
+                    "delta_per_drop": number(stock.get("delta_per_drop")),
+                    "droplet_volume_nL": number(stock.get("droplet_volume_nL")),
+                    "units": str(stock.get("units", "") or ""),
+                    "quantum": number(stock.get("quantum", 0.1)),
+                    "droplets_per_target": [
+                        [number(target), int(drops)]
+                        for target, drops in sorted(
+                            (stock.get("droplets_per_target") or {}).items()
+                        )
+                    ],
+                })
+            plan_rows.append({
+                "key": [str(key[0]), key[1]],
+                "n_stocks": int(plan.get("n_stocks", len(stocks))),
+                "stocks": stocks,
+            })
+        identity_rows = [
+            {
+                "factor_name": str(row.get("factor_name", "")),
+                "option_name": str(row.get("option_name", "") or ""),
+                "stock_concentration": number(row.get("stock_concentration")),
+                "delta_per_drop": number(row.get("delta_per_drop")),
+                "units": str(row.get("units", "") or ""),
+                "droplet_volume_nL": number(row.get("droplet_volume_nL")),
+                "printing_mode": str(row.get("printing_mode", "") or ""),
+            }
+            for row in stock_rows
+        ]
+        return {
+            "schema": "labcraft.stock_allocation_plan.v1",
+            "plans": plan_rows,
+            "stock_rows": identity_rows,
+        }
+
+    def export_stock_allocation_reuse_payload(
+        self, optimization_result: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        if not optimization_result.get("best") or not self.plans_per_option:
+            raise ValueError("Only a validated successful stock allocation can be reused.")
+        plans = copy.deepcopy(self.plans_per_option)
+        stock_rows = copy.deepcopy(self._stock_rows_cache)
+        plan_document = self._stock_allocation_plan_document(plans, stock_rows)
+        return {
+            "schema": "labcraft.import_stock_allocation_reuse.v1",
+            "input_fingerprint": self.stock_allocation_input_fingerprint(),
+            "plan_fingerprint": self._canonical_payload_sha256(plan_document),
+            "plans_per_option": plans,
+            "stock_rows": stock_rows,
+            "optimization_result": copy.deepcopy(dict(optimization_result)),
+        }
+
+    def install_stock_allocation_reuse_payload(
+        self, payload: Mapping[str, Any] | None
+    ) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            return {"reused": False, "reason": "missing_reuse_payload"}
+        if payload.get("schema") != "labcraft.import_stock_allocation_reuse.v1":
+            return {"reused": False, "reason": "unsupported_reuse_schema"}
+        expected_fingerprint = self.stock_allocation_input_fingerprint()
+        if str(payload.get("input_fingerprint") or "") != expected_fingerprint:
+            return {"reused": False, "reason": "stock_input_fingerprint_mismatch"}
+
+        plans = copy.deepcopy(payload.get("plans_per_option") or {})
+        stock_rows = copy.deepcopy(payload.get("stock_rows") or [])
+        plan_fingerprint = self._canonical_payload_sha256(
+            self._stock_allocation_plan_document(plans, stock_rows)
+        )
+        if str(payload.get("plan_fingerprint") or "") != plan_fingerprint:
+            return {"reused": False, "reason": "stock_plan_fingerprint_mismatch"}
+
+        expected_options = {
+            (
+                str(factor.name),
+                None if factor.kind == "additive" else str(option.name),
+            ): option
+            for factor in self.factors
+            for option in factor.options
+        }
+        if set(plans) != set(expected_options):
+            return {"reused": False, "reason": "stock_plan_key_mismatch"}
+
+        previous = {
+            "plans": copy.deepcopy(self.plans_per_option),
+            "stock_rows": copy.deepcopy(self._stock_rows_cache),
+            "fill_row": copy.deepcopy(self._fill_row_cache),
+            "preview": copy.deepcopy(self._target_preview_map),
+            "unreachable": copy.deepcopy(self._unreachable_preview_map),
+        }
+
+        def _restore() -> None:
+            self.plans_per_option.clear()
+            self.plans_per_option.update(previous["plans"])
+            self._stock_rows_cache = previous["stock_rows"]
+            self._fill_row_cache = previous["fill_row"]
+            self._target_preview_map = previous["preview"]
+            self._unreachable_preview_map = previous["unreachable"]
+
+        try:
+            validated_stock_rows: List[Dict[str, Any]] = []
+            final_volume = float(
+                self.metadata.get(
+                    "final_reaction_volume_nL",
+                    self.metadata.get("target_reaction_volume_nL", 2000.0),
+                )
+            )
+            for key, option in expected_options.items():
+                plan = plans[key]
+                stocks = list(plan.get("stocks") or [])
+                n_stocks = int(plan.get("n_stocks", len(stocks)))
+                if n_stocks not in (1, 2) or len(stocks) != n_stocks:
+                    raise ValueError(f"Invalid reusable stock count for {key!r}.")
+                forced = getattr(option, "forced_stock_conc", None)
+                maximum = getattr(option, "max_stock_conc", None)
+                if forced not in (None, 0.0) and (
+                    n_stocks != 1
+                    or not math.isclose(
+                        float(stocks[0]["stock_concentration"]),
+                        float(forced),
+                        rel_tol=1e-9,
+                        abs_tol=1e-9,
+                    )
+                ):
+                    raise ValueError(f"Reusable plan violates fixed stock for {key!r}.")
+                for stock in stocks:
+                    concentration = float(stock["stock_concentration"])
+                    droplet_volume = float(stock["droplet_volume_nL"])
+                    delta_per_drop = float(stock["delta_per_drop"])
+                    if (
+                        not math.isfinite(concentration)
+                        or concentration <= 0.0
+                        or not math.isfinite(droplet_volume)
+                        or droplet_volume <= 0.0
+                        or not math.isclose(
+                            droplet_volume,
+                            float(getattr(option, "droplet_nL", 0.0)),
+                            rel_tol=1e-12,
+                            abs_tol=1e-12,
+                        )
+                        or str(stock.get("units", "") or "")
+                        != str(getattr(option, "units", "") or "")
+                        or not math.isclose(
+                            delta_per_drop,
+                            concentration * droplet_volume / final_volume,
+                            rel_tol=1e-9,
+                            abs_tol=1e-12,
+                        )
+                    ):
+                        raise ValueError(f"Reusable plan has invalid stock for {key!r}.")
+                    if maximum is not None and concentration > float(maximum) + 1e-9:
+                        raise ValueError(f"Reusable plan exceeds max stock for {key!r}.")
+                    for raw_drops in (stock.get("droplets_per_target") or {}).values():
+                        drops = int(raw_drops)
+                        if drops < 0 or float(raw_drops) != float(drops):
+                            raise ValueError(
+                                f"Reusable plan has invalid droplets for {key!r}."
+                            )
+                    validated_stock_rows.append(self._build_stock_row(
+                        factor_name=key[0],
+                        option_name=key[1] or "",
+                        stock_concentration=concentration,
+                        delta_per_drop=delta_per_drop,
+                        units=str(stock.get("units", "") or ""),
+                        droplet_volume_nL=droplet_volume,
+                    ))
+
+            self.plans_per_option.clear()
+            self.plans_per_option.update(plans)
+            self._stock_rows_cache = validated_stock_rows
+            self._fill_row_cache = None
+            self._refresh_plan_preview_maps()
+            for key, option in expected_options.items():
+                rows = self._target_preview_map.get(key) or []
+                targets = self._effective_targets_for_key(key, option)
+                if len(rows) != len(targets) or any(
+                    not bool(row.get("reachable")) for row in rows
+                ):
+                    raise ValueError(f"Reusable plan cannot reach every target for {key!r}.")
+                plan = self.plans_per_option[key]
+                starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+                for target in targets:
+                    adjusted = self._normalize_target_key(
+                        max(0.0, float(target) - starting)
+                    )
+                    for stock in plan.get("stocks") or []:
+                        matches = [
+                            int(drops)
+                            for stored_target, drops in (
+                                stock.get("droplets_per_target") or {}
+                            ).items()
+                            if self._normalize_target_key(float(stored_target))
+                            == adjusted
+                        ]
+                        if len(matches) != 1 or (
+                            adjusted > 1e-12
+                            and sum(
+                                int(value)
+                                for leg in plan.get("stocks") or []
+                                for stored_target, value in (
+                                    leg.get("droplets_per_target") or {}
+                                ).items()
+                                if self._normalize_target_key(float(stored_target))
+                                == adjusted
+                            )
+                            <= 0
+                        ):
+                            raise ValueError(
+                                f"Reusable plan is missing an explicit mapping for {key!r}."
+                            )
+
+            printed = float(self.metadata.get("target_reaction_volume_nL", 2000.0))
+            final = float(self.metadata.get("final_reaction_volume_nL", printed))
+            tolerance = max(
+                0.0,
+                float(self.metadata.get("printed_volume_tolerance_nL", 50.0)),
+            )
+            allowed = min(final + tolerance, min(printed, final) + tolerance)
+            for run_spec in self._iter_unique_reaction_constraint_specs():
+                row_volume = 0.0
+                for key, target in run_spec["reaction"].items():
+                    option = expected_options[key]
+                    adjusted = self._normalize_target_key(
+                        max(
+                            0.0,
+                            float(target)
+                            - float(getattr(option, "starting_conc", 0.0) or 0.0),
+                        )
+                    )
+                    for stock in self.plans_per_option[key].get("stocks") or []:
+                        drops = next(
+                            int(value)
+                            for stored_target, value in (
+                                stock.get("droplets_per_target") or {}
+                            ).items()
+                            if self._normalize_target_key(float(stored_target))
+                            == adjusted
+                        )
+                        row_volume += drops * float(stock["droplet_volume_nL"])
+                if row_volume > allowed + 1e-6:
+                    raise ValueError("Reusable stock plan exceeds the exact row-volume limit.")
+
+            runtime_rows = list(validated_stock_rows) + [{
+                "factor_name": str(
+                    self.metadata.get("fill_reagent_name", "Water") or "Water"
+                ),
+                "option_name": "",
+                "stock_concentration": 1.0,
+                "units": "--",
+            }]
+            runtime_ids = [stock_id_for_row(row) for row in runtime_rows]
+            if len(runtime_ids) != len(set(runtime_ids)):
+                raise ValueError("Reusable stock plan contains duplicate runtime stock IDs.")
+        except Exception as exc:
+            _restore()
+            return {
+                "reused": False,
+                "reason": "stock_plan_validation_failed",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+
+        result = copy.deepcopy(dict(payload.get("optimization_result") or {}))
+        result.update({
+            "best": True,
+            "stock_allocation_reused_import_plan": True,
+            "stock_allocation_reuse_fingerprint": expected_fingerprint,
+        })
+        return {"reused": True, "result": result}
+
     def build_import_feasibility_report(
         self,
         df: "pd.DataFrame",
@@ -7551,8 +7936,9 @@ class ExperimentModel(QObject):
                 row["status"] = "Near budget"
                 row["issue_codes"].append("max_stock_volume_budget_within_tolerance")
 
-        draft_stock_rows_by_name: Dict[str, Dict[str, Any]] = {}
+        draft_stock_rows_by_name: Dict[str, List[Dict[str, Any]]] = {}
         draft_optimizer_issues_by_reagent: Dict[str, List[Dict[str, Any]]] = {}
+        stock_allocation_reuse_payload: Optional[Dict[str, Any]] = None
 
         def _record_draft_optimizer_issue(key, issue: Dict[str, Any]):
             issue_copy = dict(issue or {})
@@ -7617,8 +8003,24 @@ class ExperimentModel(QObject):
                     for issue in issue_list:
                         _record_draft_optimizer_issue(key, issue)
             if res.get("best"):
+                stock_leg_indices: Dict[str, int] = {}
                 for row in draft.get_stock_table_rows(include_fill=False):
-                    draft_stock_rows_by_name.setdefault(str(row.get("factor_name")), dict(row))
+                    factor_name = str(row.get("factor_name"))
+                    plan = draft.plans_per_option.get((factor_name, None)) or {}
+                    leg_index = stock_leg_indices.get(factor_name, 0)
+                    plan_stocks = list(plan.get("stocks") or [])
+                    if leg_index < len(plan_stocks):
+                        row = dict(row)
+                        row["droplets_per_target"] = copy.deepcopy(
+                            plan_stocks[leg_index].get("droplets_per_target") or {}
+                        )
+                    stock_leg_indices[factor_name] = leg_index + 1
+                    draft_stock_rows_by_name.setdefault(
+                        factor_name, []
+                    ).append(dict(row))
+                stock_allocation_reuse_payload = (
+                    draft.export_stock_allocation_reuse_payload(res)
+                )
             else:
                 if not issues_by_key and res.get("reason"):
                     issues.append({
@@ -7629,6 +8031,7 @@ class ExperimentModel(QObject):
                     })
         except Exception:
             draft_stock_rows_by_name = {}
+            stock_allocation_reuse_payload = None
 
         for issue in issues:
             if issue.get("field") != "volume_budget":
@@ -7686,7 +8089,8 @@ class ExperimentModel(QObject):
                 if stock is not None and stock.get("droplet_nL") is not None
                 else float(spec.get("droplet_nL", droplet_nL_default))
             )
-            ideal_row = draft_stock_rows_by_name.get(spec["name"], {})
+            ideal_rows = list(draft_stock_rows_by_name.get(spec["name"], []))
+            ideal_row = ideal_rows[0] if ideal_rows else {}
             ideal_stock = ideal_row.get("stock_concentration")
             if ideal_stock is None and max_stock is not None:
                 ideal_stock = max_stock
@@ -7745,7 +8149,7 @@ class ExperimentModel(QObject):
                 status = "Resolution warning"
                 recommendation = "Use a lower stock concentration or accept rounding error."
 
-            stock_rows.append({
+            base_stock_row = {
                 "reagent": spec["name"],
                 "units": spec["units"],
                 "max_stock_conc": max_stock,
@@ -7763,7 +8167,31 @@ class ExperimentModel(QObject):
                 "smallest_useful_target_step": smallest_step,
                 "status": status,
                 "recommendation": recommendation,
-            })
+            }
+            preview_legs = ideal_rows or [ideal_row]
+            for leg_index, leg_row in enumerate(preview_legs):
+                stock_row = dict(base_stock_row)
+                leg_stock = leg_row.get("stock_concentration", ideal_stock)
+                leg_delta = leg_row.get("delta_per_drop")
+                if leg_delta is None and leg_stock is not None:
+                    leg_delta = (
+                        float(leg_stock) * float(droplet_nL) / final_volume
+                    )
+                stock_row.update({
+                    "ideal_stock_conc": leg_stock,
+                    "delta_per_drop": leg_delta,
+                    "droplets_per_target": copy.deepcopy(
+                        leg_row.get("droplets_per_target") or {}
+                    ),
+                    "stock_leg_index": int(leg_index),
+                    "stock_leg_count": int(len(preview_legs)),
+                    "stock_leg_label": (
+                        f"Stock {leg_index + 1} of {len(preview_legs)}"
+                        if len(preview_legs) > 1
+                        else "Stock 1 of 1"
+                    ),
+                })
+                stock_rows.append(stock_row)
 
         return {
             "ok": not any(issue.get("severity") == "error" for issue in issues),
@@ -7774,6 +8202,12 @@ class ExperimentModel(QObject):
             "reagent_specs": reagent_specs,
             "composition_rows": list(composition_lookup.values()),
             "stock_rows": stock_rows,
+            "stock_allocation_input_fingerprint": (
+                stock_allocation_reuse_payload.get("input_fingerprint")
+                if stock_allocation_reuse_payload is not None
+                else None
+            ),
+            "stock_allocation_reuse_payload": stock_allocation_reuse_payload,
             "issues": issues,
             "missing_stock_rows": [row for row in stock_rows if row["status"] == "Missing max stock"],
             "unmatched_stock_rows": unmatched_stock_rows,
@@ -7986,6 +8420,21 @@ class ExperimentModel(QObject):
                 legacy_reps = 1
             return max(1, legacy_reps)
         return max(0, reps)
+
+    def _iter_unique_reaction_constraint_specs(self):
+        """Yield each distinct volume constraint once, independent of replicates."""
+        for reaction_index, reaction in enumerate(self._enumerate_reactions()):
+            yield {
+                "reaction": reaction,
+                "design_source": "base",
+                "reaction_index": reaction_index,
+            }
+        for condition_index, condition in enumerate(self.additional_conditions):
+            yield {
+                "reaction": condition.targets,
+                "design_source": "additional_condition",
+                "reaction_index": condition_index,
+            }
 
     def _iter_reaction_run_specs(self):
         base_reactions = self._enumerate_reactions()

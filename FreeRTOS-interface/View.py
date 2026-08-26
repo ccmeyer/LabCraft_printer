@@ -13014,8 +13014,30 @@ class ExperimentImportWizard(QDialog):
             rows = list((report or {}).get("stock_rows", []))
             self.stock_table.setRowCount(len(rows))
             for row_idx, row in enumerate(rows):
+                reagent_text = str(row.get("reagent", ""))
+                if int(row.get("stock_leg_count", 1) or 1) > 1:
+                    reagent_text = (
+                        f"{reagent_text}\n{row.get('stock_leg_label', '')}"
+                    )
+                droplet_mappings = dict(row.get("droplets_per_target") or {})
+                mapping_tooltip = ""
+                if droplet_mappings:
+                    units = str(row.get("units", "") or "")
+                    mapping_lines = [
+                        (
+                            f"{self._fmt_value(target)} {units}: "
+                            f"{int(drops)} droplet{'s' if int(drops) != 1 else ''}"
+                        ).strip()
+                        for target, drops in sorted(
+                            droplet_mappings.items(), key=lambda item: float(item[0])
+                        )
+                    ]
+                    mapping_tooltip = (
+                        "Target mappings for this stock leg:\n"
+                        + "\n".join(mapping_lines)
+                    )
                 values = [
-                    row.get("reagent", ""),
+                    reagent_text,
                     row.get("units", ""),
                     self._fmt_printing_mode(row.get("printing_mode")),
                     self._fmt_value(row.get("droplet_nL")),
@@ -13035,11 +13057,16 @@ class ExperimentImportWizard(QDialog):
                 ]
                 for col_idx, value in enumerate(values):
                     item = QTableWidgetItem(str(value))
-                    if col_idx == self.STOCK_COL_MAX:
+                    if (
+                        col_idx == self.STOCK_COL_MAX
+                        and int(row.get("stock_leg_index", 0) or 0) == 0
+                    ):
                         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
                         item.setData(Qt.ItemDataRole.UserRole, row.get("reagent", ""))
                     else:
                         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    if mapping_tooltip:
+                        item.setToolTip(mapping_tooltip)
                     self.stock_table.setItem(row_idx, col_idx, item)
                 self._set_row_status_background(self.stock_table, row_idx, row.get("status", ""))
             self.stock_table.resizeColumnsToContents()
@@ -13075,10 +13102,15 @@ class ExperimentImportWizard(QDialog):
         report = self.report or {}
         rows = report.get("composition_rows", [])
         stock_rows = report.get("stock_rows", [])
+        reagent_count = len({
+            str(row.get("reagent", ""))
+            for row in stock_rows
+            if str(row.get("reagent", ""))
+        })
         status_counts = report.get("status_counts", {})
         parts = [
             f"{len(rows)} imported formulation(s)",
-            f"{len(stock_rows)} reagent(s)",
+            f"{reagent_count} reagent(s)",
         ]
         if status_counts:
             parts.append(", ".join(f"{key}: {value}" for key, value in status_counts.items()))
@@ -13111,6 +13143,12 @@ class ExperimentImportWizard(QDialog):
             "printed_volume_tolerance_nL": float(self.printed_volume_tolerance_spin.value()),
             "final_volume_nL": float(self.final_volume_spin.value()),
             "allow_two": bool(self.allow_two_chk.isChecked()),
+            "stock_allocation_input_fingerprint": report.get(
+                "stock_allocation_input_fingerprint"
+            ),
+            "stock_allocation_reuse_payload": copy.deepcopy(
+                report.get("stock_allocation_reuse_payload")
+            ),
         }
 
 
@@ -13812,6 +13850,10 @@ class ExperimentDesignDialog(QDialog):
         self._gripper_lock_connection = None
         self._auto_update_suspended: bool = False
         self._design_optimization_dirty: bool = True
+        self._stock_allocation_dirty: bool = True
+        self._reaction_layout_dirty: bool = True
+        self._stock_amounts_dirty: bool = True
+        self._stock_table_refresh_scheduled: bool = False
         self._last_optimization_result: dict | None = None
         self._status_severity: str = "info"
         self._status_tip_text: str = ""
@@ -14328,29 +14370,39 @@ class ExperimentDesignDialog(QDialog):
         controls_col.addStretch(1)
 
         # ---- Auto-update bindings ----
-        def _auto_update():
-            self._schedule_auto_update()
-        self.randomize_chk.stateChanged.connect(_auto_update)
-        self.random_seed_spin.valueChanged.connect(_auto_update)
-        self.subset_chk.stateChanged.connect(_auto_update)
-        self.reduction_spin.valueChanged.connect(_auto_update)
-        self.start_col_spin.valueChanged.connect(_auto_update)
-        self.start_row_spin.valueChanged.connect(_auto_update)
-        self.allow_two_chk.stateChanged.connect(_auto_update)
-        self.allow_avoidable_grouping_chk.stateChanged.connect(_auto_update)
+        def _stock_update():
+            self._schedule_auto_update(dirty_domain="stock")
 
-        self.exp_name_edit.textChanged.connect(self._schedule_auto_update)
-        self.rep_spin.valueChanged.connect(self._schedule_auto_update)
+        def _layout_update():
+            self._schedule_auto_update(dirty_domain="layout")
+
+        self.randomize_chk.stateChanged.connect(_layout_update)
+        self.random_seed_spin.valueChanged.connect(_layout_update)
+        self.subset_chk.stateChanged.connect(_stock_update)
+        self.reduction_spin.valueChanged.connect(_stock_update)
+        self.start_col_spin.valueChanged.connect(_layout_update)
+        self.start_row_spin.valueChanged.connect(_layout_update)
+        self.allow_two_chk.stateChanged.connect(_stock_update)
+        self.allow_avoidable_grouping_chk.stateChanged.connect(_stock_update)
+
+        self.exp_name_edit.textChanged.connect(self._on_experiment_name_changed)
+        self.rep_spin.valueChanged.connect(
+            lambda _value: self._schedule_auto_update(dirty_domain="count")
+        )
         self.v_spin.valueChanged.connect(self._schedule_auto_update)
         self.final_v_spin.valueChanged.connect(self._schedule_auto_update)
         self.volume_tolerance_spin.valueChanged.connect(self._schedule_auto_update)
-        self.fill_name_edit.textChanged.connect(self._schedule_auto_update)
-        self.fill_dv_spin.valueChanged.connect(self._schedule_auto_update)
+        self.fill_name_edit.textChanged.connect(
+            lambda _text: self._schedule_auto_update(dirty_domain="count")
+        )
+        self.fill_dv_spin.valueChanged.connect(
+            lambda _value: self._schedule_auto_update(dirty_domain="count")
+        )
         self.fill_mode_combo.currentIndexChanged.connect(self._on_fill_printing_mode_changed)
         self.plate_format_combo.currentIndexChanged.connect(self._on_plate_format_changed)
 
         # ---- Model hooks & initial render ----
-        self.model.stock_updated.connect(self._refresh_stock_table)
+        self.model.stock_updated.connect(self._on_model_stock_updated)
         self.model.experiment_generated.connect(self._on_experiment_generated)
 
         self._load_factors_into_table()
@@ -14943,7 +14995,11 @@ class ExperimentDesignDialog(QDialog):
             mode,
             preferred_value=printing_mode_default_ejection_volume_nl(mode),
         )
-        self._schedule_auto_update()
+        self._schedule_auto_update(dirty_domain="count")
+
+    def _on_experiment_name_changed(self, text: str):
+        self.model.set_metadata(name=str(text).strip() or "Untitled")
+        self._mark_draft_dirty()
 
     def _make_group_combo(self) -> QComboBox:
         combo = QComboBox()
@@ -15312,8 +15368,21 @@ class ExperimentDesignDialog(QDialog):
             if timer is not None:
                 timer.start()
 
-    def _mark_design_optimization_dirty(self):
-        self._design_optimization_dirty = True
+    def _mark_design_optimization_dirty(self, domain: str = "stock"):
+        domain = str(domain or "stock").strip().casefold()
+        if domain == "layout":
+            self._reaction_layout_dirty = True
+        elif domain == "count":
+            self._stock_amounts_dirty = True
+        else:
+            self._stock_allocation_dirty = True
+            self._reaction_layout_dirty = True
+            self._stock_amounts_dirty = True
+        self._design_optimization_dirty = bool(
+            getattr(self, "_stock_allocation_dirty", False)
+            or getattr(self, "_reaction_layout_dirty", False)
+            or getattr(self, "_stock_amounts_dirty", False)
+        )
         self._update_run_button_dirty_state()
 
     def _draft_is_dirty(self) -> bool:
@@ -15357,6 +15426,9 @@ class ExperimentDesignDialog(QDialog):
 
     def _mark_design_optimization_clean(self, result: dict | None = None):
         self._design_optimization_dirty = False
+        self._stock_allocation_dirty = False
+        self._reaction_layout_dirty = False
+        self._stock_amounts_dirty = False
         self._last_optimization_result = result
         timer = getattr(self, "_auto_timer", None)
         if timer is not None:
@@ -15390,7 +15462,12 @@ class ExperimentDesignDialog(QDialog):
             and self._has_current_generated_design()
         )
 
-    def _schedule_auto_update(self, *_args, mark_dirty: bool = True):
+    def _schedule_auto_update(
+        self,
+        *_args,
+        mark_dirty: bool = True,
+        dirty_domain: str = "stock",
+    ):
         if getattr(self, "_auto_update_suspended", False):
             return
 
@@ -15401,7 +15478,7 @@ class ExperimentDesignDialog(QDialog):
             return
 
         if mark_dirty:
-            self._mark_design_optimization_dirty()
+            self._mark_design_optimization_dirty(dirty_domain)
             self._mark_draft_dirty()
 
         if (
@@ -16088,7 +16165,27 @@ class ExperimentDesignDialog(QDialog):
         self._update_metadata_from_controls()
         self._mark_draft_dirty()
 
-        # Immediately optimize & generate using the uploaded design
+        reuse_attempt = {"reused": False, "reason": "reuse_not_supported"}
+        installer = getattr(
+            self.model, "install_stock_allocation_reuse_payload", None
+        )
+        if callable(installer):
+            reuse_attempt = installer(
+                payload.get("stock_allocation_reuse_payload")
+            )
+        if reuse_attempt.get("reused"):
+            self._stock_allocation_dirty = False
+            self._reaction_layout_dirty = True
+            self._stock_amounts_dirty = True
+            self._design_optimization_dirty = True
+            self._last_optimization_result = copy.deepcopy(
+                reuse_attempt.get("result") or {"best": True}
+            )
+        else:
+            self._mark_design_optimization_dirty("stock")
+
+        # Generate immediately. An unchanged, exactly validated wizard plan is
+        # reused; any mismatch follows the normal full optimization path.
         self._run_design_optimization_flow(
             show_failure_dialog=True,
             failure_title="Could not update reactions and stock solutions",
@@ -16165,6 +16262,9 @@ class ExperimentDesignDialog(QDialog):
             self._clear_target_color_state()
             self._set_stock_table_stale(False, "")
             self._design_optimization_dirty = False
+            self._stock_allocation_dirty = False
+            self._reaction_layout_dirty = False
+            self._stock_amounts_dirty = False
             self._last_optimization_result = None
             self._update_run_button_dirty_state()
         finally:
@@ -17036,6 +17136,10 @@ class ExperimentDesignDialog(QDialog):
                 + ("..." if len(two_stock) > 4 else "")
                 + "."
             )
+            parts.append(
+                "Calibration preview is available, but applying a measured calibration "
+                "is currently supported only for single-stock reagents."
+            )
         if bounded_search:
             parts.append(
                 "Two-stock search was capped for: "
@@ -17125,6 +17229,7 @@ class ExperimentDesignDialog(QDialog):
             )
         severity = "warning" if (
             unreachable
+            or two_stock
             or bounded_search
             or collapsed
             or search_limited
@@ -17291,7 +17396,19 @@ class ExperimentDesignDialog(QDialog):
         )
         if duplicate_failure is not None:
             return duplicate_failure
-        self._rebuild_model_from_table()
+        stock_allocation_dirty = bool(
+            getattr(
+                self,
+                "_stock_allocation_dirty",
+                getattr(self, "_design_optimization_dirty", True),
+            )
+        )
+        reuse_stock_allocation = bool(
+            not stock_allocation_dirty
+            and getattr(self.model, "plans_per_option", None)
+        )
+        if stock_allocation_dirty:
+            self._rebuild_model_from_table()
         self._update_metadata_from_controls()
 
         size_ok, size_estimate, size_message = self._preflight_design_size(
@@ -17355,12 +17472,21 @@ class ExperimentDesignDialog(QDialog):
                 failure_message="Reactions and stock solutions could not be updated.",
                 show_dialog=show_busy_dialog,
             ):
-                res = self.model.optimize_stock_solutions(
-                    quantum=0.1,
-                    max_refine=60,
-                    two_max_refine=40,
-                    allow_two=self._allow_two_setting(),
-                )
+                if reuse_stock_allocation:
+                    res = copy.deepcopy(
+                        getattr(self, "_last_optimization_result", None) or {}
+                    )
+                    res.update({
+                        "best": True,
+                        "stock_allocation_reused": True,
+                    })
+                else:
+                    res = self.model.optimize_stock_solutions(
+                        quantum=0.1,
+                        max_refine=60,
+                        two_max_refine=40,
+                        allow_two=self._allow_two_setting(),
+                    )
                 if res.get("best"):
                     self.model.generate_experiment()
         except DesignSizeLimitError as exc:
@@ -17580,7 +17706,7 @@ class ExperimentDesignDialog(QDialog):
 
     def _on_plate_format_changed(self):
         self._update_well_selection_summary()
-        self._schedule_auto_update()
+        self._schedule_auto_update(dirty_domain="layout")
 
     def _on_choose_printable_wells(self):
         if self._manual_assignments_active():
@@ -17626,7 +17752,7 @@ class ExperimentDesignDialog(QDialog):
             }
         self._update_well_selection_summary()
         self._update_summary_labels()
-        self._schedule_auto_update()
+        self._schedule_auto_update(dirty_domain="layout")
         self._refresh_all_lock_states()
 
     def _available_wells_for_selected_plate(self) -> tuple[int, str]:
@@ -17895,6 +18021,7 @@ class ExperimentDesignDialog(QDialog):
         return item
 
     def _refresh_stock_table(self):
+        self._stock_table_refresh_scheduled = False
         rows = self.model.get_stock_table_rows(include_fill=True)
         self.stock_table.setRowCount(0)
         for r in rows:
@@ -17911,6 +18038,17 @@ class ExperimentDesignDialog(QDialog):
             self.stock_table.setItem(rr, 6, self._stock_output_item(self._fmt_num(max_nL) if max_nL != "" else ""))
             self.stock_table.setItem(rr, 7, self._stock_output_item(r.get("total_droplets", "")))
             self.stock_table.setItem(rr, 8, self._stock_output_item(self._fmt_num(r.get("total_volume_uL", ""))))
+
+    def _on_model_stock_updated(self):
+        if getattr(self, "_stock_table_refresh_scheduled", False):
+            return
+        self._stock_table_refresh_scheduled = True
+        QTimer.singleShot(0, self._flush_scheduled_stock_table_refresh)
+
+    def _flush_scheduled_stock_table_refresh(self):
+        if not getattr(self, "_stock_table_refresh_scheduled", False):
+            return
+        self._refresh_stock_table()
     
     def _on_experiment_generated(self, total_reactions: int, worst_nonfill_nL: float):
         # Update summary when model emits
@@ -18166,6 +18304,9 @@ class ExperimentDesignDialog(QDialog):
         self._set_progress_protection(False)
         self._apply_requested = False
         self._design_optimization_dirty = True
+        self._stock_allocation_dirty = True
+        self._reaction_layout_dirty = True
+        self._stock_amounts_dirty = True
         self._last_optimization_result = None
 
         # Repaint UI from the fresh model (avoid auto-update churn while setting)
