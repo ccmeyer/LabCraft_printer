@@ -305,7 +305,22 @@ def test_two_stock_resolution_search_can_rescue_a_colliding_feasible_single_plan
     assert two_result["stock_allocation_improved_seed"] is True
     assert two_result["stock_allocation_time_to_best_ms"] < 75.0
     assert two_result["stock_allocation_elapsed_ms"] < 75.0
+    assert (
+        two_result["stock_allocation_time_to_first_improvement_ms"]
+        <= two_result["stock_allocation_time_to_best_ms"]
+    )
+    assert two_result["stock_allocation_deadline_overshoot_ms"] == pytest.approx(
+        0.0
+    )
+    assert 0 < two_result["two_stock_pairs_evaluated"] < 1000
+    assert two_result["two_stock_candidates_generated"] > 0
+    assert two_result["two_stock_candidates_retained"] > 0
+    assert two_result["two_stock_target_row_cache_reuses"] > 0
     assert two_model.plans_per_option[("R", None)]["n_stocks"] == 2
+    assert len({
+        row["achieved_final"]
+        for row in two_model.get_target_preview_map()[("R", None)]
+    }) == 4
 
 
 def test_resolution_search_cap_is_deterministic_and_returns_best_validated_plan(monkeypatch):
@@ -398,7 +413,7 @@ def test_resolution_timeout_during_candidate_pruning_returns_seed(monkeypatch):
     def fake_clock():
         nonlocal calls
         calls += 1
-        return 0.0 if calls < 16 else 1.0
+        return 0.0 if calls < 24 else 1.0
 
     monkeypatch.setattr(em, "_stock_optimizer_monotonic", fake_clock)
 
@@ -426,7 +441,7 @@ def test_resolution_timeout_during_branching_returns_best_found(monkeypatch):
     def fake_clock():
         nonlocal calls
         calls += 1
-        return 0.0 if calls < 32 else 1.0
+        return 0.0 if calls < 260 else 1.0
 
     monkeypatch.setattr(em, "_stock_optimizer_monotonic", fake_clock)
 
@@ -466,7 +481,7 @@ def test_two_stock_enumeration_uses_shared_resolution_deadline(monkeypatch):
     def fake_clock():
         nonlocal calls
         calls += 1
-        return 0.0 if calls < 30 else 1.0
+        return 0.0 if calls < 80 else 1.0
 
     monkeypatch.setattr(em, "_stock_optimizer_monotonic", fake_clock)
 
@@ -484,6 +499,44 @@ def test_two_stock_enumeration_uses_shared_resolution_deadline(monkeypatch):
     assert em.plans_per_option[("R", None)]["n_stocks"] == 1
     assert result["stock_allocation_stop_reason"] == "time_budget"
     assert result["stock_allocation_improved_seed"] is False
+
+
+def test_two_stock_enumeration_returns_partial_candidates_at_deadline():
+    em = _make_resolution_reproduction_model(
+        [0.5, 1.0, 5.0, 20.0],
+        printed_volume_nl=240.0,
+        include_other=False,
+    )
+    deadline_checks = 0
+    diagnostics = {}
+
+    def deadline_reached():
+        nonlocal deadline_checks
+        deadline_checks += 1
+        return deadline_checks >= 200
+
+    candidates, search_limited = em._enumerate_two_stock_candidates_with_meta(
+        [0.5, 1.0, 5.0, 20.0],
+        10.0,
+        "mM",
+        final_volume_nL=5000.0,
+        volume_budget_nL=240.0,
+        nominal_volume_budget_nL=240.0,
+        max_refine=20,
+        resolution_first=True,
+        deadline_reached=deadline_reached,
+        diagnostics=diagnostics,
+    )
+
+    assert search_limited is True
+    assert deadline_checks == 200
+    assert candidates
+    assert diagnostics["two_stock_pairs_evaluated"] > 0
+    assert diagnostics["two_stock_target_evaluations"] > 0
+    assert diagnostics["two_stock_solver_iterations"] > 0
+    assert diagnostics["two_stock_candidates_generated"] >= len(candidates)
+    assert diagnostics["two_stock_candidates_retained"] == len(candidates)
+    assert all(candidate.target_rows for candidate in candidates)
 
 
 def test_resolution_search_exception_returns_untouched_seed(monkeypatch):
@@ -531,7 +584,7 @@ def test_resolution_reports_combined_time_and_state_limits(monkeypatch):
     def fake_clock():
         nonlocal calls
         calls += 1
-        return 0.0 if calls < 30 else 1.0
+        return 0.0 if calls < 254 else 1.0
 
     monkeypatch.setattr(em, "_stock_optimizer_monotonic", fake_clock)
 

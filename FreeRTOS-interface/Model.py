@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 
 import copy
+import gc
 from dataclasses import dataclass, field, replace
 from math import gcd
 from numbers import Integral, Real
@@ -490,6 +491,15 @@ class TwoStockPlan:
     n_stocks: int = 2
     target_rows: Dict[float, Dict[str, Any]] = field(default_factory=dict)
     fits_nominal_volume: bool = True
+    lost_levels: int = 0
+    worst_abs_error: float = 0.0
+    mean_abs_error: float = 0.0
+    error_sum: float = 0.0
+    target_count: int = 0
+
+
+class _StockAllocationDeadlineReached(RuntimeError):
+    """Internal control flow used to retain bounded two-stock work."""
 
 
 @dataclass(frozen=True)
@@ -1618,7 +1628,13 @@ class ExperimentModel(QObject):
         units: str,
         max_total_drops: Optional[int] = None,
         droplets_override: Optional[Tuple[int, int]] = None,
+        deadline_reached: Optional[Callable[[], bool]] = None,
+        diagnostics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        if diagnostics is not None:
+            diagnostics["two_stock_target_evaluations"] = int(
+                diagnostics.get("two_stock_target_evaluations", 0)
+            ) + 1
         requested_final = float(t_final)
         starting = float(starting_conc or 0.0)
         requested_adjusted = max(0.0, requested_final - starting)
@@ -1647,6 +1663,8 @@ class ExperimentModel(QObject):
                     d1,
                     d2,
                     max_total_drops=max_total_drops,
+                    deadline_reached=deadline_reached,
+                    diagnostics=diagnostics,
                 )
             else:
                 a = max(0, int(droplets_override[0]))
@@ -2326,12 +2344,14 @@ class ExperimentModel(QObject):
         nominal_volume_budget_nL: Optional[float] = None,
         quantum: float = 0.1,
         max_refine: int = 30,
-        kmax_multiples: int = 12,
         max_pairs: int = 12000,
         max_stock_conc: float | None = None,
         resolution_first: bool = False,
         deadline_reached: Optional[Callable[[], bool]] = None,
         limit_reasons: Optional[Set[str]] = None,
+        diagnostics: Optional[Dict[str, Any]] = None,
+        candidate_callback: Optional[Callable[[TwoStockPlan], bool]] = None,
+        stop_requested: Optional[Callable[[], bool]] = None,
     ) -> Tuple[List[TwoStockPlan], bool]:
         xs = sorted({self._normalize_target_key(max(0.0, float(t))) for t in targets})
         xs_pos = [t for t in xs if t > 1e-12]
@@ -2366,96 +2386,182 @@ class ExperimentModel(QObject):
         # when single-stock planning cannot meet the printed-volume budget.
         deltas = sorted((float(d) for d in deltas), reverse=True)
 
-        pairs: List[TwoStockPlan] = []
+        # Deduplicate mappings as they are generated. This keeps partial work
+        # useful when the shared resolution deadline interrupts a pair scan.
+        pairs_by_mapping: Dict[Tuple[Any, ...], TwoStockPlan] = {}
         pairs_scanned = 0
         pair_limit_hit = False
-        for i in range(len(deltas)):
-            for j in range(i + 1, len(deltas)):
-                if (
-                    deadline_reached is not None
-                    and pairs_scanned % 32 == 0
-                    and deadline_reached()
-                ):
-                    pair_limit_hit = True
-                    if limit_reasons is not None:
-                        limit_reasons.add("time_budget")
-                    break
-                if max_pairs and pairs_scanned >= int(max_pairs):
-                    pair_limit_hit = True
-                    if limit_reasons is not None:
-                        limit_reasons.add("state_cap")
-                    break
-                pairs_scanned += 1
+        callback_stop = False
 
-                d1 = float(deltas[i])
-                d2 = float(deltas[j])
-                if d1 <= 0.0 or d2 <= 0.0:
-                    continue
+        def _candidate_rank(plan: TwoStockPlan) -> Tuple[Any, ...]:
+            common = (
+                not bool(plan.fits_nominal_volume),
+                float(plan.worst_abs_error),
+                float(plan.mean_abs_error),
+                float(plan.conc_sum),
+                float(plan.max_volume_nL),
+                tuple(float(value) for value in plan.deltas),
+            )
+            if not resolution_first:
+                return common
+            return (
+                not bool(plan.fits_nominal_volume),
+                int(plan.lost_levels),
+                float(plan.worst_abs_error),
+                float(plan.mean_abs_error),
+                float(plan.conc_sum),
+                float(plan.max_volume_nL),
+                tuple(float(value) for value in plan.deltas),
+            )
 
-                c1 = (d1 * final_volume_nL) / droplet_nL
-                c2 = (d2 * final_volume_nL) / droplet_nL
-                if max_stock_conc is not None and (c1 > float(max_stock_conc) + 1e-12 or c2 > float(max_stock_conc) + 1e-12):
-                    continue
-
-                drops_map: Dict[float, Tuple[int, int]] = {}
-                target_rows: Dict[float, Dict[str, Any]] = {}
-                max_drops = 0
-                feasible = True
-                for t_real in xs:
-                    row = self._evaluate_two_stock_target(
-                        t_final=float(t_real),
-                        starting_conc=0.0,
-                        stock_concentrations=(c1, c2),
-                        droplet_nL=droplet_nL,
-                        final_volume_nL=final_volume_nL,
-                        units=units,
-                        max_total_drops=maximum_total_drops,
-                    )
-                    if not row["reachable"]:
-                        feasible = False
+        try:
+            for i in range(len(deltas)):
+                for j in range(i + 1, len(deltas)):
+                    if stop_requested is not None and stop_requested():
+                        callback_stop = True
                         break
-                    a, b = row["droplets"]
-                    target_key = self._normalize_target_key(float(t_real))
-                    drops_map[target_key] = (int(a), int(b))
-                    target_rows[target_key] = dict(row)
-                    max_drops = max(max_drops, int(a) + int(b))
+                    if deadline_reached is not None and deadline_reached():
+                        raise _StockAllocationDeadlineReached
+                    if max_pairs and pairs_scanned >= int(max_pairs):
+                        pair_limit_hit = True
+                        if limit_reasons is not None:
+                            limit_reasons.add("state_cap")
+                        break
+                    pairs_scanned += 1
+                    if diagnostics is not None:
+                        diagnostics["two_stock_pairs_evaluated"] = int(
+                            diagnostics.get("two_stock_pairs_evaluated", 0)
+                        ) + 1
 
-                if not feasible:
-                    continue
+                    d1 = float(deltas[i])
+                    d2 = float(deltas[j])
+                    if d1 <= 0.0 or d2 <= 0.0:
+                        continue
 
-                if max_drops * float(droplet_nL) > float(volume_budget_nL) + 1e-6:
-                    continue
+                    c1 = (d1 * final_volume_nL) / droplet_nL
+                    c2 = (d2 * final_volume_nL) / droplet_nL
+                    if max_stock_conc is not None and (
+                        c1 > float(max_stock_conc) + 1e-12
+                        or c2 > float(max_stock_conc) + 1e-12
+                    ):
+                        continue
 
-                all_a_zero = all(ab[0] == 0 for ab in drops_map.values())
-                all_b_zero = all(ab[1] == 0 for ab in drops_map.values())
-                if all_a_zero or all_b_zero:
-                    continue
+                    drops_map: Dict[float, Tuple[int, int]] = {}
+                    target_rows: Dict[float, Dict[str, Any]] = {}
+                    max_drops = 0
+                    feasible = True
+                    for t_real in xs:
+                        row = self._evaluate_two_stock_target(
+                            t_final=float(t_real),
+                            starting_conc=0.0,
+                            stock_concentrations=(c1, c2),
+                            droplet_nL=droplet_nL,
+                            final_volume_nL=final_volume_nL,
+                            units=units,
+                            max_total_drops=maximum_total_drops,
+                            deadline_reached=deadline_reached,
+                            diagnostics=diagnostics,
+                        )
+                        if not row["reachable"]:
+                            feasible = False
+                            break
+                        a, b = row["droplets"]
+                        target_key = self._normalize_target_key(float(t_real))
+                        drops_map[target_key] = (int(a), int(b))
+                        target_rows[target_key] = dict(row)
+                        max_drops = max(max_drops, int(a) + int(b))
 
-                conc_sum = c1 + c2
-                max_vol = max_drops * droplet_nL
+                    if not feasible:
+                        continue
 
-                pairs.append(TwoStockPlan(
-                    deltas=(d1, d2),
-                    stock_concs=(c1, c2),
-                    droplet_nL=droplet_nL,
-                    units=units,
-                    droplets_per_target=drops_map,
-                    max_volume_nL=max_vol,
-                    conc_sum=conc_sum,
-                    n_stocks=2,
-                    target_rows=target_rows,
-                    fits_nominal_volume=(max_vol <= nominal_budget + 1e-6),
-                ))
-            if pair_limit_hit:
-                break
+                    max_vol = max_drops * float(droplet_nL)
+                    if max_vol > float(volume_budget_nL) + 1e-6:
+                        continue
+                    if all(ab[0] == 0 for ab in drops_map.values()) or all(
+                        ab[1] == 0 for ab in drops_map.values()
+                    ):
+                        continue
 
+                    summary = self._summarize_target_resolution_rows(
+                        target_rows.values()
+                    )
+                    errors = [
+                        abs(float(row.get("abs_error", 0.0) or 0.0))
+                        for row in target_rows.values()
+                    ]
+                    error_sum = float(sum(errors))
+                    plan = TwoStockPlan(
+                        deltas=(d1, d2),
+                        stock_concs=(c1, c2),
+                        droplet_nL=droplet_nL,
+                        units=units,
+                        droplets_per_target=drops_map,
+                        max_volume_nL=max_vol,
+                        conc_sum=c1 + c2,
+                        n_stocks=2,
+                        target_rows=target_rows,
+                        fits_nominal_volume=(max_vol <= nominal_budget + 1e-6),
+                        lost_levels=int(summary["lost_level_count"]),
+                        worst_abs_error=float(max(errors, default=0.0)),
+                        mean_abs_error=(
+                            float(error_sum / len(errors)) if errors else 0.0
+                        ),
+                        error_sum=error_sum,
+                        target_count=len(errors),
+                    )
+                    if diagnostics is not None:
+                        diagnostics["two_stock_candidates_generated"] = int(
+                            diagnostics.get("two_stock_candidates_generated", 0)
+                        ) + 1
+                    mapping_signature = tuple(
+                        sorted(
+                            (
+                                round(float(target), 12),
+                                int(drops[0]),
+                                int(drops[1]),
+                            )
+                            for target, drops in drops_map.items()
+                        )
+                    )
+                    incumbent = pairs_by_mapping.get(mapping_signature)
+                    if incumbent is not None and _candidate_rank(incumbent) <= _candidate_rank(plan):
+                        if diagnostics is not None:
+                            diagnostics["two_stock_candidates_deduplicated"] = int(
+                                diagnostics.get("two_stock_candidates_deduplicated", 0)
+                            ) + 1
+                        continue
+                    if incumbent is not None and diagnostics is not None:
+                        diagnostics["two_stock_candidates_deduplicated"] = int(
+                            diagnostics.get("two_stock_candidates_deduplicated", 0)
+                        ) + 1
+                    pairs_by_mapping[mapping_signature] = plan
+                    if candidate_callback is not None and candidate_callback(plan):
+                        callback_stop = True
+                        break
+                if pair_limit_hit or callback_stop:
+                    break
+        except _StockAllocationDeadlineReached:
+            pair_limit_hit = True
+            if limit_reasons is not None:
+                limit_reasons.add("time_budget")
+
+        pairs = list(pairs_by_mapping.values())
+        if diagnostics is not None:
+            diagnostics["two_stock_candidates_retained"] = int(
+                diagnostics.get("two_stock_candidates_retained", 0)
+            ) + len(pairs)
         if not pairs:
             return [], pair_limit_hit
 
-        if deadline_reached is not None and deadline_reached():
-            if limit_reasons is not None:
-                limit_reasons.add("time_budget")
-            return [], True
+        # At a hard bound, return every retained mapping immediately. The
+        # optimizer may already have validated an incremental improvement via
+        # candidate_callback, and must never lose that work to post-processing.
+        if pair_limit_hit:
+            pairs.sort(key=_candidate_rank)
+            return pairs[:max_pairs], True
+        if callback_stop:
+            pairs.sort(key=_candidate_rank)
+            return pairs[:max_pairs], False
 
         # Preserve the historical concentration/volume frontier, plus the
         # most accurate candidate at every feasible printed-volume tier. The
@@ -2495,12 +2601,11 @@ class ExperimentModel(QObject):
                     limit_reasons.add("time_budget")
                 return pruned, True
             volume_key = round(float(p.max_volume_nL), 12)
-            accuracy_score = self._score_two_stock_targets(
-                p,
-                target_values=xs,
-                starting_conc=0.0,
-                final_volume_nL=float(final_volume_nL),
-                units=str(units),
+            accuracy_score = _PlanAccuracyScore(
+                worst_abs_error=float(p.worst_abs_error),
+                mean_abs_error=float(p.mean_abs_error),
+                concentration_burden=float(p.conc_sum),
+                max_volume_nL=float(p.max_volume_nL),
             )
             accuracy_incumbent = accuracy_by_volume.get(volume_key)
             if accuracy_incumbent is None or self._plan_accuracy_score_is_better(
@@ -2509,19 +2614,10 @@ class ExperimentModel(QObject):
                 accuracy_by_volume[volume_key] = (p, accuracy_score)
 
             if resolution_first:
-                rows = self._evaluate_two_stock_plan_rows(
-                    p,
-                    target_values=xs,
-                    starting_conc=0.0,
-                    final_volume_nL=float(final_volume_nL),
-                    units=str(units),
-                )
-                summary = self._summarize_target_resolution_rows(rows)
-                errors = [abs(float(row.get("abs_error", 0.0) or 0.0)) for row in rows]
                 score = (
-                    int(summary["lost_level_count"]),
-                    float(max(errors, default=0.0)),
-                    float(sum(errors) / len(errors)) if errors else 0.0,
+                    int(p.lost_levels),
+                    float(p.worst_abs_error),
+                    float(p.mean_abs_error),
                     float(p.conc_sum),
                     float(p.max_volume_nL),
                 )
@@ -2557,7 +2653,6 @@ class ExperimentModel(QObject):
         nominal_volume_budget_nL: Optional[float] = None,
         quantum: float = 0.1,
         max_refine: int = 30,
-        kmax_multiples: int = 12,
         max_pairs: int = 12000,
         max_stock_conc: float | None = None,
         resolution_first: bool = False,
@@ -2571,7 +2666,6 @@ class ExperimentModel(QObject):
             nominal_volume_budget_nL=nominal_volume_budget_nL,
             quantum=quantum,
             max_refine=max_refine,
-            kmax_multiples=kmax_multiples,
             max_pairs=max_pairs,
             max_stock_conc=max_stock_conc,
             resolution_first=resolution_first,
@@ -2602,7 +2696,16 @@ class ExperimentModel(QObject):
                 "optimizer_seed_rank": None,
                 "optimizer_selected_rank": None,
                 "stock_allocation_improved_seed": False,
+                "stock_allocation_time_to_first_improvement_ms": None,
                 "stock_allocation_time_to_best_ms": None,
+                "stock_allocation_deadline_overshoot_ms": 0.0,
+                "two_stock_pairs_evaluated": 0,
+                "two_stock_target_evaluations": 0,
+                "two_stock_solver_iterations": 0,
+                "two_stock_candidates_generated": 0,
+                "two_stock_candidates_retained": 0,
+                "two_stock_candidates_deduplicated": 0,
+                "two_stock_target_row_cache_reuses": 0,
                 "stock_allocation_stop_reason": "not_run",
             }
 
@@ -2689,8 +2792,19 @@ class ExperimentModel(QObject):
         optimizer_seed_rank: Optional[Dict[str, Any]] = None
         optimizer_selected_rank: Optional[Dict[str, Any]] = None
         stock_allocation_improved_seed = False
+        stock_allocation_time_to_first_improvement_ms: Optional[float] = None
         stock_allocation_time_to_best_ms: Optional[float] = None
+        stock_allocation_deadline_overshoot_ms = 0.0
         stock_allocation_stop_reason = "not_run"
+        two_stock_diagnostics: Dict[str, Any] = {
+            "two_stock_pairs_evaluated": 0,
+            "two_stock_target_evaluations": 0,
+            "two_stock_solver_iterations": 0,
+            "two_stock_candidates_generated": 0,
+            "two_stock_candidates_retained": 0,
+            "two_stock_candidates_deduplicated": 0,
+            "two_stock_target_row_cache_reuses": 0,
+        }
 
         # Build candidate lists + handle forced stocks
         self._unreachable_preview_map = {}
@@ -2821,11 +2935,20 @@ class ExperimentModel(QObject):
                 "stock_allocation_improved_seed": bool(
                     stock_allocation_improved_seed
                 ),
+                "stock_allocation_time_to_first_improvement_ms": (
+                    float(stock_allocation_time_to_first_improvement_ms)
+                    if stock_allocation_time_to_first_improvement_ms is not None
+                    else None
+                ),
                 "stock_allocation_time_to_best_ms": (
                     float(stock_allocation_time_to_best_ms)
                     if stock_allocation_time_to_best_ms is not None
                     else None
                 ),
+                "stock_allocation_deadline_overshoot_ms": float(
+                    stock_allocation_deadline_overshoot_ms
+                ),
+                **copy.deepcopy(two_stock_diagnostics),
                 "stock_allocation_stop_reason": str(stock_allocation_stop_reason),
             }
 
@@ -3040,6 +3163,7 @@ class ExperimentModel(QObject):
                             quantum=quantum, max_refine=two_max_refine,
                             max_stock_conc=max_stock,
                             resolution_first=not allow_avoidable_grouping,
+                            diagnostics=two_stock_diagnostics,
                         )
                         if search_limited:
                             _mark_two_stock_search_limited((f.name, None))
@@ -3128,6 +3252,7 @@ class ExperimentModel(QObject):
                                 quantum=quantum, max_refine=two_max_refine,
                                 max_stock_conc=max_stock,
                                 resolution_first=not allow_avoidable_grouping,
+                                diagnostics=two_stock_diagnostics,
                             )
                             if search_limited:
                                 _mark_two_stock_search_limited((f.name, opt.name))
@@ -3172,6 +3297,7 @@ class ExperimentModel(QObject):
                     max_refine=two_max_refine,
                     max_stock_conc=getattr(opt, "max_stock_conc", None),
                     resolution_first=not allow_avoidable_grouping,
+                    diagnostics=two_stock_diagnostics,
                 )
                 if search_limited:
                     _mark_two_stock_search_limited((name, None))
@@ -3199,6 +3325,7 @@ class ExperimentModel(QObject):
                     max_refine=two_max_refine,
                     max_stock_conc=getattr(opt, "max_stock_conc", None),
                     resolution_first=not allow_avoidable_grouping,
+                    diagnostics=two_stock_diagnostics,
                 )
                 if search_limited:
                     _mark_two_stock_search_limited((gname, oname))
@@ -4609,6 +4736,11 @@ class ExperimentModel(QObject):
         def _ensure_resolution_twos_for_key(
             key: Tuple[str, Optional[str]],
         ) -> bool:
+            nonlocal best_snapshot
+            nonlocal best_details
+            nonlocal stock_allocation_time_to_first_improvement_ms
+            nonlocal stock_allocation_time_to_best_ms
+            nonlocal zero_loss_polish_completed
             if key in resolution_two_keys or _resolution_deadline_reached():
                 return False
             resolution_two_keys.add(key)
@@ -4620,6 +4752,91 @@ class ExperimentModel(QObject):
             # can be reused without another pair scan.
             if existing is not None:
                 return False
+            incremental_twos: List[TwoStockPlan] = []
+            incremental_signatures: Set[Tuple[Any, ...]] = set()
+            incremental_zero_loss_polish_deadline_at: Optional[float] = None
+
+            def _incremental_stop_requested() -> bool:
+                nonlocal zero_loss_polish_completed
+                if incremental_zero_loss_polish_deadline_at is None:
+                    return False
+                if optimizer_clock() < incremental_zero_loss_polish_deadline_at:
+                    return False
+                zero_loss_polish_completed = True
+                return True
+
+            def _consider_generated_plan(plan: TwoStockPlan) -> bool:
+                """Validate a useful partial candidate before more pair scanning."""
+                nonlocal best_snapshot
+                nonlocal best_details
+                nonlocal stock_allocation_time_to_first_improvement_ms
+                nonlocal stock_allocation_time_to_best_ms
+                nonlocal incremental_zero_loss_polish_deadline_at
+                signature = _two_plan_signature(plan)
+                if signature not in incremental_signatures:
+                    incremental_signatures.add(signature)
+                    incremental_twos.append(plan)
+                    _replace_twos_for_key(key, incremental_twos)
+                incumbent_score = best_details["evaluations"][key]["score"]
+                if int(plan.lost_levels) > int(incumbent_score.lost_levels) or (
+                    int(plan.lost_levels) == int(incumbent_score.lost_levels)
+                    and incremental_zero_loss_polish_deadline_at is None
+                ):
+                    return False
+                two_stock_diagnostics["two_stock_target_row_cache_reuses"] = int(
+                    two_stock_diagnostics.get(
+                        "two_stock_target_row_cache_reuses", 0
+                    )
+                ) + len(plan.target_rows)
+
+                _restore_selection_snapshot(best_snapshot)
+                kind, _idx, _singles, current_twos = _candidate_lists_for_key(key)
+                plan_index = next(
+                    index
+                    for index, candidate in enumerate(current_twos or [])
+                    if candidate is plan
+                )
+                if kind == "add":
+                    add_two_idx[key[0]] = int(plan_index)
+                else:
+                    ch_two_idx[(key[0], key[1])] = int(plan_index)
+                _invalidate_selected_volume_cache()
+                try:
+                    candidate_details = _selection_resolution_details()
+                    if tuple(candidate_details["rank"]) >= tuple(best_details["rank"]):
+                        _restore_selection_snapshot(best_snapshot)
+                        return False
+                    _validate_selected_resolution_allocation(candidate_details)
+                    found_at = optimizer_clock()
+                    if (
+                        resolution_deadline_at is not None
+                        and found_at >= resolution_deadline_at
+                    ):
+                        stock_allocation_limit_reasons.add("time_budget")
+                        _restore_selection_snapshot(best_snapshot)
+                        return True
+                    found_elapsed_ms = max(
+                        0.0, (found_at - float(resolution_started_at)) * 1000.0
+                    )
+                    candidate_details["found_elapsed_ms"] = found_elapsed_ms
+                    if stock_allocation_time_to_first_improvement_ms is None:
+                        stock_allocation_time_to_first_improvement_ms = found_elapsed_ms
+                    stock_allocation_time_to_best_ms = found_elapsed_ms
+                    best_details = candidate_details
+                    best_snapshot = _capture_selection_snapshot()
+                    if (
+                        int(best_details["quality"][0]) == 0
+                        and incremental_zero_loss_polish_deadline_at is None
+                    ):
+                        incremental_zero_loss_polish_deadline_at = min(
+                            float(resolution_deadline_at),
+                            found_at + float(self.ZERO_LOSS_POLISH_SECONDS),
+                        )
+                    return False
+                except ValueError:
+                    _restore_selection_snapshot(best_snapshot)
+                    return False
+
             resolved, search_limited = self._enumerate_two_stock_candidates_with_meta(
                 _adj_targets_for_opt(key, opt),
                 opt.droplet_nL,
@@ -4633,6 +4850,9 @@ class ExperimentModel(QObject):
                 resolution_first=True,
                 deadline_reached=_resolution_deadline_reached,
                 limit_reasons=stock_allocation_limit_reasons,
+                diagnostics=two_stock_diagnostics,
+                candidate_callback=_consider_generated_plan,
+                stop_requested=_incremental_stop_requested,
             )
             if search_limited:
                 _mark_two_stock_search_limited(key)
@@ -4644,14 +4864,8 @@ class ExperimentModel(QObject):
                 if signature not in signatures:
                     signatures.add(signature)
                     merged.append(plan)
-            merged.sort(
-                key=lambda plan: (
-                    not bool(plan.fits_nominal_volume),
-                    plan.conc_sum,
-                    plan.max_volume_nL,
-                    plan.deltas,
-                )
-            )
+            # Do not reorder this list after an incremental candidate has been
+            # validated: selection snapshots intentionally store stable indices.
             _replace_twos_for_key(key, merged)
             return bool(merged)
 
@@ -4705,6 +4919,26 @@ class ExperimentModel(QObject):
             cache_key = (key, id(plan))
             cached = resolution_candidate_entry_cache.get(cache_key)
             if cached is None:
+                if isinstance(plan, TwoStockPlan):
+                    two_stock_diagnostics["two_stock_target_row_cache_reuses"] = int(
+                        two_stock_diagnostics.get(
+                            "two_stock_target_row_cache_reuses", 0
+                        )
+                    ) + sum(
+                        1
+                        for target in resolution_target_levels.get(key, ())
+                        if self._normalize_target_key(
+                            max(
+                                0.0,
+                                float(target)
+                                - float(
+                                    getattr(option_by_key[key], "starting_conc", 0.0)
+                                    or 0.0
+                                ),
+                            )
+                        )
+                        in plan.target_rows
+                    )
                 score, rows, summary = _resolution_evaluation(key, plan)
                 rows_by_target = {
                     self._normalize_target_key(
@@ -4868,7 +5102,10 @@ class ExperimentModel(QObject):
                 entries.sort(key=lambda entry: entry["local_rank"])
 
                 deduplicated: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
-                for entry in entries:
+                for entry_index, entry in enumerate(entries):
+                    if entry_index % 128 == 0 and _resolution_deadline_reached():
+                        _publish_counts(sum(len(value) for value in pools.values()))
+                        return None, None
                     signature = entry["droplet_signature"]
                     incumbent = deduplicated.get(signature)
                     if incumbent is None or entry["local_rank"] < incumbent["local_rank"]:
@@ -4889,9 +5126,19 @@ class ExperimentModel(QObject):
                         return None, None
                     dominated = False
                     if not forced:
-                        dominated = any(
-                            _candidate_dominates(other, entry) for other in retained
-                        )
+                        for other_index, other in enumerate(retained):
+                            if (
+                                other_index % 256 == 0
+                                and _resolution_deadline_reached()
+                            ):
+                                _publish_counts(
+                                    sum(len(value) for value in pools.values())
+                                    + len(retained)
+                                )
+                                return None, None
+                            if _candidate_dominates(other, entry):
+                                dominated = True
+                                break
                     if dominated:
                         dominated_total += 1
                     else:
@@ -5335,6 +5582,7 @@ class ExperimentModel(QObject):
             incumbent_snapshot,
             incumbent_details,
         ):
+            nonlocal stock_allocation_time_to_first_improvement_ms
             nonlocal stock_allocation_time_to_best_ms
             if state is None or candidate_details is None:
                 _restore_selection_snapshot(incumbent_snapshot)
@@ -5350,6 +5598,13 @@ class ExperimentModel(QObject):
                 return incumbent_snapshot, incumbent_details
             _validate_selected_resolution_allocation(exact_details)
             found_elapsed_ms = candidate_details.get("found_elapsed_ms")
+            if (
+                stock_allocation_time_to_first_improvement_ms is None
+                and found_elapsed_ms is not None
+            ):
+                stock_allocation_time_to_first_improvement_ms = float(
+                    found_elapsed_ms
+                )
             stock_allocation_time_to_best_ms = (
                 float(found_elapsed_ms) if found_elapsed_ms is not None else None
             )
@@ -5377,6 +5632,13 @@ class ExperimentModel(QObject):
             resolution_deadline_at = (
                 resolution_started_at + float(self.MAX_STOCK_ALLOCATION_SECONDS)
             )
+            resolution_gc_was_enabled = gc.isenabled()
+            if resolution_gc_was_enabled:
+                # A cyclic-GC pause can consume most of this short UI budget.
+                # Candidate objects are acyclic and become collectible by
+                # reference counting, so defer cyclic collection until after
+                # the bounded phase.
+                gc.disable()
             try:
                 state, candidate_details = _run_bounded_resolution_search(
                     include_twos=False,
@@ -5412,7 +5674,10 @@ class ExperimentModel(QObject):
                             break
                         _ensure_resolution_twos_for_key(key)
 
-                    if not _resolution_deadline_reached():
+                    if (
+                        not zero_loss_polish_completed
+                        and not _resolution_deadline_reached()
+                    ):
                         state, candidate_details = _run_bounded_resolution_search(
                             include_twos=True,
                             incumbent_details=best_details,
@@ -5466,14 +5731,21 @@ class ExperimentModel(QObject):
                 best_details = seed_details
                 optimizer_strategy_used = "legacy_fallback"
                 optimizer_fallback_reason = f"{type(exc).__name__}: {exc}"
+                stock_allocation_time_to_first_improvement_ms = None
                 stock_allocation_time_to_best_ms = None
             finally:
+                if resolution_gc_was_enabled:
+                    gc.enable()
                 resolution_finished_at = optimizer_clock()
                 if (
                     resolution_deadline_at is not None
                     and resolution_finished_at >= resolution_deadline_at
                 ):
                     stock_allocation_limit_reasons.add("time_budget")
+                    stock_allocation_deadline_overshoot_ms = max(
+                        0.0,
+                        (resolution_finished_at - resolution_deadline_at) * 1000.0,
+                    )
                 stock_allocation_elapsed_ms = max(
                     0.0, (resolution_finished_at - resolution_started_at) * 1000.0
                 )
@@ -5508,6 +5780,7 @@ class ExperimentModel(QObject):
             and tuple(best_details["rank"]) < tuple(seed_details["rank"])
         )
         if not stock_allocation_improved_seed:
+            stock_allocation_time_to_first_improvement_ms = None
             stock_allocation_time_to_best_ms = None
 
         final_worst = worst_case_nonfill_volume()
@@ -6231,11 +6504,20 @@ class ExperimentModel(QObject):
             "stock_allocation_improved_seed": bool(
                 stock_allocation_improved_seed
             ),
+            "stock_allocation_time_to_first_improvement_ms": (
+                float(stock_allocation_time_to_first_improvement_ms)
+                if stock_allocation_time_to_first_improvement_ms is not None
+                else None
+            ),
             "stock_allocation_time_to_best_ms": (
                 float(stock_allocation_time_to_best_ms)
                 if stock_allocation_time_to_best_ms is not None
                 else None
             ),
+            "stock_allocation_deadline_overshoot_ms": float(
+                stock_allocation_deadline_overshoot_ms
+            ),
+            **copy.deepcopy(two_stock_diagnostics),
             "stock_allocation_stop_reason": str(stock_allocation_stop_reason),
             "approximate_targets": sum(
                 1
@@ -8032,6 +8314,8 @@ class ExperimentModel(QObject):
         d2: float,
         *,
         max_total_drops: Optional[int] = None,
+        deadline_reached: Optional[Callable[[], bool]] = None,
+        diagnostics: Optional[Dict[str, Any]] = None,
     ) -> tuple[int, int, float]:
         """
         Solve min |a*d1 + b*d2 - t_add| over nonnegative ints (a,b) with a simple bounded search.
@@ -8046,6 +8330,12 @@ class ExperimentModel(QObject):
             a_max = min(a_max, total_limit)
         best = (0, 0, float("inf"))
         for a in range(max(0, a_max + 1)):
+            if deadline_reached is not None and deadline_reached():
+                raise _StockAllocationDeadlineReached
+            if diagnostics is not None:
+                diagnostics["two_stock_solver_iterations"] = int(
+                    diagnostics.get("two_stock_solver_iterations", 0)
+                ) + 1
             rem = t_add - a * d1
             raw_b = 0.0 if rem <= 0 else rem / d2
             b_limit = total_limit - a if total_limit is not None else None
