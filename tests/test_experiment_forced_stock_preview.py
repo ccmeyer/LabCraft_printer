@@ -1,7 +1,13 @@
 import pandas as pd
 import pytest
 
-from Model import CURRENT_PROFILE, ExperimentModel, SingleStockPlan, TwoStockPlan
+from Model import (
+    CURRENT_PROFILE,
+    ExperimentModel,
+    SingleStockPlan,
+    StockSolutionManager,
+    TwoStockPlan,
+)
 
 
 def _make_model(*, target_volume_nl=5000.0, final_volume_nl=5000.0, printed_volume_tolerance_nl=0.0):
@@ -557,7 +563,7 @@ def test_locked_optimizer_result_reports_not_run_diagnostics(monkeypatch):
 
 def test_forced_stock_preview_accepts_nearest_achievable_targets():
     targets = [
-        0.001, 0.149, 0.192, 0.366, 0.553, 0.641, 0.737, 0.928, 1.122, 1.237,
+        0.149, 0.192, 0.366, 0.553, 0.641, 0.737, 0.928, 1.122, 1.237,
         1.345, 1.447, 1.63, 1.713, 1.902, 2.029, 2.153, 2.271, 2.403, 2.51,
     ]
     em = _make_model()
@@ -568,11 +574,9 @@ def test_forced_stock_preview_accepts_nearest_achievable_targets():
 
     preview = em.get_target_preview_map()[("AddA", None)]
     assert len(preview) == len(targets)
-    assert em.get_unreachable_preview_map() == {("AddA", None): [0.001]}
+    assert em.get_unreachable_preview_map() == {}
 
     by_target = {row["requested_final"]: row for row in preview}
-    assert by_target[0.001]["reachable"] is False
-    assert by_target[0.001]["reason"] == "rounds_to_zero_drops"
     assert by_target[0.149]["reachable"] is True
     assert by_target[0.149]["droplets"] == 2
     assert by_target[0.149]["achieved_final"] == pytest.approx(0.168)
@@ -584,9 +588,9 @@ def test_forced_stock_preview_accepts_nearest_achievable_targets():
     assert plan["stocks"][0]["quantum"] == pytest.approx(1e-6)
 
 
-def test_forced_stock_preview_respects_starting_concentration_and_zero_drop_guard():
+def test_forced_stock_preview_respects_starting_concentration():
     em = _make_model(target_volume_nl=1000.0, final_volume_nl=1000.0)
-    em.add_additive("AddA", [0.5, 0.54, 0.7], "mM", 10.0, starting_conc=0.5, forced_stock_conc=10.0)
+    em.add_additive("AddA", [0.5, 0.7], "mM", 10.0, starting_conc=0.5, forced_stock_conc=10.0)
 
     result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=True)
     assert result["best"]
@@ -597,10 +601,6 @@ def test_forced_stock_preview_respects_starting_concentration_and_zero_drop_guar
     assert by_target[0.5]["reachable"] is True
     assert by_target[0.5]["droplets"] == 0
     assert by_target[0.5]["achieved_final"] == pytest.approx(0.5)
-
-    assert by_target[0.54]["reachable"] is False
-    assert by_target[0.54]["reason"] == "rounds_to_zero_drops"
-    assert by_target[0.54]["achieved_final"] == pytest.approx(0.5)
 
     assert by_target[0.7]["reachable"] is True
     assert by_target[0.7]["requested_adjusted"] == pytest.approx(0.2)
@@ -844,7 +844,7 @@ def test_two_stock_accuracy_refinement_prefers_lower_error_pair_at_same_volume(m
 
 def test_accuracy_refinement_skips_fixed_stock_plans(monkeypatch):
     em = _make_model(target_volume_nl=1000.0, final_volume_nl=1000.0)
-    em.add_additive("AddA", [0.001, 0.149], "mM", 12.0, forced_stock_conc=35.0)
+    em.add_additive("AddA", [0.42, 0.84], "mM", 12.0, forced_stock_conc=35.0)
 
     def fail_if_called(*args, **kwargs):
         raise AssertionError("Fixed-stock plans should skip accuracy refinement scoring")
@@ -856,8 +856,7 @@ def test_accuracy_refinement_skips_fixed_stock_plans(monkeypatch):
     assert result["best"]
     plan = em.plans_per_option[("AddA", None)]
     assert plan["stocks"][0]["stock_concentration"] == pytest.approx(35.0)
-    issues = result["issues_by_key"][("AddA", None)]
-    assert any(issue["field"] == "fixed_stock" and issue["code"] == "fixed_unreachable_targets" for issue in issues)
+    assert result["issues_by_key"] == {}
 
 
 def test_accuracy_refinement_does_not_increase_single_stock_volume_demand():
@@ -971,9 +970,91 @@ def test_fixed_stock_issue_payload_reports_unreachable_targets():
 
     result = em.optimize_stock_solutions(quantum=0.1, max_refine=20, two_max_refine=20, allow_two=False)
 
-    assert result["best"]
+    assert not result.get("best")
     issues = result["issues_by_key"][("AddA", None)]
     assert any(issue["field"] == "fixed_stock" and issue["code"] == "fixed_unreachable_targets" for issue in issues)
+    assert em.plans_per_option == {}
+    assert em.get_stock_table_rows(include_fill=False) == []
+
+
+def test_unreachable_fixed_stock_fails_closed_before_reaction_generation():
+    em = _make_model(target_volume_nl=500.0, final_volume_nl=500.0)
+    em.add_additive(
+        "Tiny",
+        [0.01, 0.2],
+        "mM",
+        10.0,
+        forced_stock_conc=10.0,
+    )
+
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=True,
+    )
+
+    assert not result.get("best")
+    issue = next(
+        issue
+        for issue in result["issues_by_key"][("Tiny", None)]
+        if issue["code"] == "fixed_unreachable_targets"
+    )
+    assert issue["unreachable_targets"] == [0.01]
+    assert em.plans_per_option == {}
+    with pytest.raises(ValueError, match="No stock plan exists"):
+        em.generate_experiment()
+
+
+def test_generation_and_runtime_iteration_reject_missing_target_mapping():
+    em = _make_model(target_volume_nl=500.0, final_volume_nl=500.0)
+    em.add_additive("Signal", [0.2], "mM", 10.0, forced_stock_conc=10.0)
+    assert em.optimize_stock_solutions(allow_two=False)["best"]
+    em.plans_per_option[("Signal", None)]["stocks"][0][
+        "droplets_per_target"
+    ] = {}
+
+    with pytest.raises(ValueError, match="No reachable droplet mapping"):
+        em.generate_experiment()
+    with pytest.raises(ValueError, match="No reachable droplet mapping"):
+        list(em.iter_reaction_stock_droplets())
+
+
+def test_optimizer_rejects_two_stocks_with_colliding_runtime_ids():
+    em = _make_model(target_volume_nl=10.0, final_volume_nl=500.0)
+    em.set_metadata(allow_avoidable_target_grouping=True)
+    em.add_additive(
+        "Tiny",
+        [0.0001, 0.0002],
+        "mM",
+        10.0,
+        max_stock_conc=0.01,
+    )
+
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=True,
+    )
+
+    assert not result.get("best")
+    issue = result["issues_by_key"][("__stock_identity__", None)][0]
+    assert issue["code"] == "duplicate_runtime_stock_id"
+    assert issue["stock_id"] == "Tiny_0.01_mM"
+    assert em.plans_per_option == {}
+
+
+def test_stock_solution_manager_rejects_duplicate_runtime_id():
+    manager = StockSolutionManager()
+    manager.add_stock_solution("Tiny", 0.01, "mM")
+
+    with pytest.raises(ValueError, match="Duplicate runtime stock ID"):
+        manager.add_stock_solution("Tiny", 0.005, "mM")
+
+    stocks = list(manager.get_all_stock_solutions())
+    assert len(stocks) == 1
+    assert float(stocks[0].concentration) == pytest.approx(0.01)
 
 
 def test_fixed_stock_issue_payload_reports_volume_budget_context():

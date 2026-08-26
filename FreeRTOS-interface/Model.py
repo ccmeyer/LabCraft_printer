@@ -63,6 +63,7 @@ from InitialExecutionPlan import (
     build_initial_execution_plan,
     initial_execution_content_matches,
 )
+from StockIdentity import stock_id_for_parts, stock_id_for_row
 from ExecutionPlanRevision import (
     REVISION_DIRECTORY_NAME,
     build_calibrated_revision,
@@ -2508,6 +2509,37 @@ class ExperimentModel(QObject):
 
         optimizer_clock = self._stock_optimizer_monotonic
         optimizer_started_at = optimizer_clock()
+        published_optimizer_state = {
+            "plans_per_option": copy.deepcopy(self.plans_per_option),
+            "stock_rows_cache": copy.deepcopy(self._stock_rows_cache),
+            "fill_row_cache": copy.deepcopy(self._fill_row_cache),
+            "target_preview_map": copy.deepcopy(self._target_preview_map),
+            "unreachable_preview_map": copy.deepcopy(
+                self._unreachable_preview_map
+            ),
+            "last_worst_nonfill_volume_nL": self._last_worst_nonfill_volume_nL,
+        }
+
+        def _restore_published_optimizer_state() -> None:
+            self.plans_per_option.clear()
+            self.plans_per_option.update(
+                copy.deepcopy(published_optimizer_state["plans_per_option"])
+            )
+            self._stock_rows_cache = copy.deepcopy(
+                published_optimizer_state["stock_rows_cache"]
+            )
+            self._fill_row_cache = copy.deepcopy(
+                published_optimizer_state["fill_row_cache"]
+            )
+            self._target_preview_map = copy.deepcopy(
+                published_optimizer_state["target_preview_map"]
+            )
+            self._unreachable_preview_map = copy.deepcopy(
+                published_optimizer_state["unreachable_preview_map"]
+            )
+            self._last_worst_nonfill_volume_nL = published_optimizer_state[
+                "last_worst_nonfill_volume_nL"
+            ]
 
         def _adj_targets(opt) -> List[float]:
             s = float(getattr(opt, "starting_conc", 0.0) or 0.0)
@@ -2627,6 +2659,7 @@ class ExperimentModel(QObject):
 
         def _failure(reason: str) -> Dict[str, Any]:
             elapsed_ms = max(0.0, (optimizer_clock() - optimizer_started_at) * 1000.0)
+            _restore_published_optimizer_state()
             return {
                 "best": None,
                 "reason": reason,
@@ -5650,6 +5683,292 @@ class ExperimentModel(QObject):
                 unreachable_targets=[float(row.get("requested_final", 0.0)) for row in unreachable_rows],
             )
 
+        # Independently validate the materialized result before publishing it.
+        # Candidate generation and allocation are deliberately separate from this
+        # fail-closed gate so an optimizer defect cannot become a zero-drop plan.
+        expected_options: Dict[Tuple[str, Optional[str]], OptionSpec] = {
+            (name, None): opt for name, opt in additive_option_map.items()
+        }
+        expected_options.update(choice_option_map)
+        materialized_mappings_valid = True
+
+        def _explicit_mapping_value(
+            stock: Mapping[str, Any], target_adjusted: float
+        ) -> Optional[int]:
+            normalized_target = self._normalize_target_key(target_adjusted)
+            if abs(normalized_target) <= 1e-12:
+                return 0
+            matches = [
+                value
+                for raw_target, value in (
+                    stock.get("droplets_per_target", {}) or {}
+                ).items()
+                if self._normalize_target_key(float(raw_target))
+                == normalized_target
+            ]
+            if len(matches) != 1:
+                return None
+            try:
+                value = int(matches[0])
+            except (TypeError, ValueError):
+                return None
+            return value if value >= 0 else None
+
+        for key, opt in expected_options.items():
+            plan = self.plans_per_option.get(key)
+            label = self._design_key_label(key)
+            if not isinstance(plan, Mapping):
+                materialized_mappings_valid = False
+                _add_issue(
+                    key,
+                    field="stock_plan",
+                    severity="error",
+                    code="missing_materialized_stock_plan",
+                    message=f"No materialized stock plan exists for {label}.",
+                )
+                continue
+
+            stocks = list(plan.get("stocks") or [])
+            try:
+                n_stocks = int(plan.get("n_stocks", len(stocks)))
+            except (TypeError, ValueError):
+                n_stocks = 0
+            if n_stocks not in (1, 2) or len(stocks) != n_stocks:
+                materialized_mappings_valid = False
+                _add_issue(
+                    key,
+                    field="stock_plan",
+                    severity="error",
+                    code="invalid_materialized_stock_count",
+                    message=(
+                        f"The materialized stock plan for {label} has an invalid "
+                        "number of stock solutions."
+                    ),
+                    n_stocks=n_stocks,
+                    stock_rows=len(stocks),
+                )
+                continue
+
+            forced_stock = getattr(opt, "forced_stock_conc", None)
+            if forced_stock not in (None, 0.0) and (
+                n_stocks != 1
+                or not math.isclose(
+                    float(stocks[0].get("stock_concentration", float("nan"))),
+                    float(forced_stock),
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ):
+                materialized_mappings_valid = False
+                _add_issue(
+                    key,
+                    field="fixed_stock",
+                    severity="error",
+                    code="fixed_stock_not_preserved",
+                    message=(
+                        f"The materialized plan for {label} does not preserve its "
+                        "fixed stock concentration."
+                    ),
+                    fixed_stock_conc=float(forced_stock),
+                )
+
+            max_stock = getattr(opt, "max_stock_conc", None)
+            for stock_index, stock in enumerate(stocks):
+                try:
+                    concentration = float(stock.get("stock_concentration"))
+                    droplet_volume = float(stock.get("droplet_volume_nL"))
+                except (TypeError, ValueError):
+                    concentration = float("nan")
+                    droplet_volume = float("nan")
+                if (
+                    not math.isfinite(concentration)
+                    or concentration <= 0.0
+                    or not math.isfinite(droplet_volume)
+                    or droplet_volume <= 0.0
+                    or (
+                        max_stock is not None
+                        and concentration > float(max_stock) + 1e-12
+                    )
+                ):
+                    materialized_mappings_valid = False
+                    _add_issue(
+                        key,
+                        field="stock_plan",
+                        severity="error",
+                        code="materialized_stock_out_of_bounds",
+                        message=(
+                            f"Stock leg {stock_index + 1} for {label} violates its "
+                            "concentration or droplet-volume bounds."
+                        ),
+                        stock_index=stock_index,
+                        stock_concentration=concentration,
+                        droplet_volume_nL=droplet_volume,
+                        max_stock_conc=(
+                            float(max_stock) if max_stock is not None else None
+                        ),
+                    )
+
+            starting = float(getattr(opt, "starting_conc", 0.0) or 0.0)
+            preview_by_target = {
+                self._normalize_target_key(float(row["requested_final"])): row
+                for row in self._target_preview_map.get(key, [])
+            }
+            for requested_final in _effective_targets_for_opt(key, opt):
+                requested_key = self._normalize_target_key(requested_final)
+                target_adjusted = max(0.0, float(requested_final) - starting)
+                stored_drops = [
+                    _explicit_mapping_value(stock, target_adjusted)
+                    for stock in stocks
+                ]
+                preview_row = preview_by_target.get(requested_key)
+                expected_drops = (
+                    preview_row.get("droplets")
+                    if isinstance(preview_row, Mapping)
+                    else None
+                )
+                if (
+                    preview_row is None
+                    or not bool(preview_row.get("reachable"))
+                    or any(value is None for value in stored_drops)
+                    or (
+                        target_adjusted > 1e-12
+                        and sum(int(value or 0) for value in stored_drops) <= 0
+                    )
+                    or (
+                        n_stocks == 1
+                        and expected_drops is not None
+                        and int(stored_drops[0] or 0) != int(expected_drops)
+                    )
+                    or (
+                        n_stocks == 2
+                        and expected_drops is not None
+                        and tuple(int(value or 0) for value in stored_drops)
+                        != tuple(int(value) for value in expected_drops)
+                    )
+                ):
+                    materialized_mappings_valid = False
+                    if not (
+                        forced_stock not in (None, 0.0)
+                        and preview_row is not None
+                        and not bool(preview_row.get("reachable"))
+                    ):
+                        _add_issue(
+                            key,
+                            field="stock_plan",
+                            severity="error",
+                            code="unreachable_materialized_target",
+                            message=(
+                                f"The materialized stock plan for {label} has no "
+                                f"reachable explicit mapping for target "
+                                f"{float(requested_final):.6g} {opt.units}."
+                            ),
+                            requested_target=float(requested_final),
+                            requested_adjusted=float(target_adjusted),
+                            stored_droplets=stored_drops,
+                        )
+
+        if materialized_mappings_valid:
+            for run_spec in self._iter_reaction_run_specs():
+                row_volume_nL = 0.0
+                for key, target in run_spec["reaction"].items():
+                    opt = expected_options.get(key)
+                    plan = self.plans_per_option.get(key)
+                    if opt is None or not isinstance(plan, Mapping):
+                        materialized_mappings_valid = False
+                        break
+                    target_adjusted = max(
+                        0.0,
+                        float(target)
+                        - float(getattr(opt, "starting_conc", 0.0) or 0.0),
+                    )
+                    for stock in plan.get("stocks") or []:
+                        drops = _explicit_mapping_value(stock, target_adjusted)
+                        if drops is None:
+                            materialized_mappings_valid = False
+                            break
+                        row_volume_nL += int(drops) * float(
+                            stock["droplet_volume_nL"]
+                        )
+                    if not materialized_mappings_valid:
+                        break
+                if not materialized_mappings_valid:
+                    break
+                if row_volume_nL > V_accept + 1e-6:
+                    materialized_mappings_valid = False
+                    _add_issue(
+                        ("__stock_allocation__", None),
+                        field="volume_budget",
+                        severity="error",
+                        code="materialized_row_volume_budget_exceeded",
+                        message=(
+                            "The independently validated stock plan exceeds the "
+                            f"effective printed-volume limit: {row_volume_nL:.6g} nL "
+                            f"is required but only {V_accept:.6g} nL is allowed."
+                        ),
+                        design_source=str(run_spec.get("design_source", "base")),
+                        reaction_index=int(run_spec.get("reaction_index", 0)),
+                        replicate=int(run_spec.get("replicate", 1)),
+                        required_volume_nL=float(row_volume_nL),
+                        effective_allowed_volume_nL=float(V_accept),
+                    )
+                    break
+
+        runtime_identity_rows = list(stock_rows) + [
+            {
+                "factor_name": str(
+                    self.metadata.get("fill_reagent_name", "Water") or "Water"
+                ),
+                "option_name": "",
+                "stock_concentration": 1.0,
+                "units": "--",
+            }
+        ]
+        rows_by_runtime_id: Dict[str, Dict[str, Any]] = {}
+        for row in runtime_identity_rows:
+            try:
+                runtime_stock_id = stock_id_for_row(row)
+            except ValueError as exc:
+                _add_issue(
+                    ("__stock_identity__", None),
+                    field="stock_plan",
+                    severity="error",
+                    code="invalid_runtime_stock_identity",
+                    message=str(exc),
+                    stock_row=dict(row),
+                )
+                continue
+            previous = rows_by_runtime_id.get(runtime_stock_id)
+            if previous is None:
+                rows_by_runtime_id[runtime_stock_id] = dict(row)
+                continue
+            _add_issue(
+                ("__stock_identity__", None),
+                field="stock_plan",
+                severity="error",
+                code="duplicate_runtime_stock_id",
+                message=(
+                    f"Two calculated stock solutions map to runtime stock ID "
+                    f"{runtime_stock_id!r}. Adjust the stock constraints so their "
+                    "display concentrations remain distinct."
+                ),
+                stock_id=runtime_stock_id,
+                stock_rows=[previous, dict(row)],
+            )
+
+        error_issues = [
+            issue
+            for issue_list in issues_by_key.values()
+            for issue in issue_list
+            if str(issue.get("severity", "")).lower() == "error"
+        ]
+        if error_issues:
+            return _failure(
+                str(
+                    error_issues[0].get("message")
+                    or "The calculated stock plan failed final validation."
+                )
+            )
+
         self.stock_updated.emit()
         optimizer_total_elapsed_ms = max(
             0.0, (optimizer_clock() - optimizer_started_at) * 1000.0
@@ -7240,7 +7559,6 @@ class ExperimentModel(QObject):
             return
 
         rows = []
-        issues = []
         worst_nonfill = 0.0
 
         # Map (factor, option_or_None) -> starting_conc and units
@@ -7270,7 +7588,10 @@ class ExperimentModel(QObject):
             for key, target in rxn.items():
                 plan = self.plans_per_option.get(key)
                 if plan is None:
-                    continue
+                    raise ValueError(
+                        f"No stock plan exists for {self._design_key_label(key)} "
+                        f"at target {float(target):.6g}."
+                    )
 
                 n_stocks = plan["n_stocks"]
                 if n_stocks == 1:
@@ -7278,26 +7599,30 @@ class ExperimentModel(QObject):
                     # k = int(st["droplets_per_target"].get(float(target), 0))
                     s, _u = start_lookup.get(key, (0.0, ""))   # key is (factor, option_or_None)
                     t_add = max(0.0, float(target) - float(s))
-                    k, mk, unreachable, nearest = self._resolve_drops_for_target(st, t_add)
+                    k, _, unreachable, _ = self._resolve_drops_for_target(st, t_add)
+                    if unreachable:
+                        raise ValueError(
+                            f"No reachable droplet mapping exists for "
+                            f"{self._design_key_label(key)} at target "
+                            f"{float(target):.6g}."
+                        )
                     used_nL += k * st["droplet_volume_nL"]
                     tot_key = (key[0], key[1] or "", st["stock_concentration"])
                     stock_totals[tot_key] = stock_totals.get(tot_key, 0) + k
                     per_rxn_drops[tot_key] = per_rxn_drops.get(tot_key, 0) + k
                     stock_drop_vol_nL[tot_key] = float(st["droplet_volume_nL"])
-                    if unreachable:
-                        issues.append({
-                            "where": key,  # (factor, option or None)
-                            "target": float(target),
-                            "stock_concentration": float(st["stock_concentration"]),
-                            "units": st.get("units", ""),
-                            "suggested_nearest": float(nearest) if nearest is not None else None,
-                        })
                 else:
                     st1, st2 = plan["stocks"]
                     s, _u = start_lookup.get(key, (0.0, ""))   # key is (factor, option_or_None)
                     t_add = max(0.0, float(target) - float(s))
-                    k1, mk1, un1, nearest1 = self._resolve_drops_for_target(st1, t_add)
-                    k2, mk2, un2, nearest2 = self._resolve_drops_for_target(st2, t_add)
+                    k1, _, un1, _ = self._resolve_drops_for_target(st1, t_add)
+                    k2, _, un2, _ = self._resolve_drops_for_target(st2, t_add)
+                    if un1 or un2:
+                        raise ValueError(
+                            f"No reachable two-stock droplet mapping exists for "
+                            f"{self._design_key_label(key)} at target "
+                            f"{float(target):.6g}."
+                        )
 
                     used_nL += (k1 + k2) * st1["droplet_volume_nL"]  # same dv for both legs
                     tot_key1 = (key[0], key[1] or "", st1["stock_concentration"])
@@ -7308,15 +7633,6 @@ class ExperimentModel(QObject):
                     per_rxn_drops[tot_key2] = per_rxn_drops.get(tot_key2, 0) + k2
                     stock_drop_vol_nL[tot_key1] = float(st1["droplet_volume_nL"])
                     stock_drop_vol_nL[tot_key2] = float(st2["droplet_volume_nL"])
-                    if (un1 and abs(float(target)) > 1e-12) or (un2 and abs(float(target)) > 1e-12):
-                        issues.append({
-                            "where": key,
-                            "target": float(target),
-                            "stock_concentration": (float(st1["stock_concentration"]), float(st2["stock_concentration"])),
-                            "units": st1.get("units", ""),
-                            "suggested_nearest": (float(nearest1) if nearest1 is not None else None,
-                                                float(nearest2) if nearest2 is not None else None),
-                        })
 
             # update per-stock per-reaction maxima
             for k, drops in per_rxn_drops.items():
@@ -7378,9 +7694,6 @@ class ExperimentModel(QObject):
         }
         self._reactions_df = pd.DataFrame(rows)
         self._last_worst_nonfill_volume_nL = worst_nonfill
-        if issues:
-            # Fire a signal so the UI can pop a warning dialog/banner.
-            self.targets_unreachable.emit(issues)
         self.experiment_generated.emit(len(run_specs), float(worst_nonfill))
 
     def find_option_by_reagent_name(self, reagent_name: str) -> tuple[tuple[str, Optional[str]], OptionSpec] | None:
@@ -9093,12 +9406,21 @@ class ExperimentModel(QObject):
             for key, target in run_spec["reaction"].items():
                 plan = self.plans_per_option.get(key)
                 if not plan:
-                    continue
+                    raise ValueError(
+                        f"No stock plan exists for {self._design_key_label(key)} "
+                        f"at target {float(target):.6g}."
+                    )
                 s = start_lookup.get(key, 0.0)
                 t_add = max(0.0, float(target) - float(s))
                 if plan["n_stocks"] == 1:
                     st = plan["stocks"][0]
-                    drops, _, _, _ = self._resolve_drops_for_target(st, t_add)
+                    drops, _, unreachable, _ = self._resolve_drops_for_target(st, t_add)
+                    if unreachable:
+                        raise ValueError(
+                            f"No reachable droplet mapping exists for "
+                            f"{self._design_key_label(key)} at target "
+                            f"{float(target):.6g}."
+                        )
                     if drops > 0:
                         items.append((_reagent_name_from_key(key),
                                     float(st["stock_concentration"]),
@@ -9106,8 +9428,14 @@ class ExperimentModel(QObject):
                                     drops))
                 else:
                     st1, st2 = plan["stocks"]
-                    k1, _, _, _ = self._resolve_drops_for_target(st1, t_add)
-                    k2, _, _, _ = self._resolve_drops_for_target(st2, t_add)
+                    k1, _, un1, _ = self._resolve_drops_for_target(st1, t_add)
+                    k2, _, un2, _ = self._resolve_drops_for_target(st2, t_add)
+                    if un1 or un2:
+                        raise ValueError(
+                            f"No reachable two-stock droplet mapping exists for "
+                            f"{self._design_key_label(key)} at target "
+                            f"{float(target):.6g}."
+                        )
                     if k1 > 0:
                         items.append((_reagent_name_from_key(key),
                                     float(st1["stock_concentration"]),
@@ -15109,12 +15437,13 @@ class StockSolutionManager(QObject):
             reagent_name, concentration_str, units = stock_id.split('_')
             concentration = float(concentration_str[:])  # Remove 'M' and convert to float
             if stock_id in self.stock_solutions.keys():
-                print('Duplicate stock solution found:',stock_id)
-            else:
-                self.stock_solutions.update({stock_id:StockSolution(stock_id,reagent_name,concentration,units)})
+                raise ValueError(f"Duplicate runtime stock ID {stock_id!r}.")
+            self.stock_solutions.update({stock_id:StockSolution(stock_id,reagent_name,concentration,units)})
 
     def add_stock_solution(self, reagent_name, concentration, units, required_volume=None):
         stock_id = self._make_stock_id(reagent_name, concentration, units)
+        if stock_id in self.stock_solutions:
+            raise ValueError(f"Duplicate runtime stock ID {stock_id!r}.")
         print('Adding stock solution:',stock_id)
         self.stock_solutions.update({
             stock_id: StockSolution(stock_id, reagent_name, float(concentration), units, required_volume=required_volume)
@@ -15151,8 +15480,7 @@ class StockSolutionManager(QObject):
         self.stock_solutions = {}
 
     def _make_stock_id(self, reagent_name, concentration, units):
-        conc_str = f"{float(concentration):.2f}"   # <-- 2 decimals, zero-padded
-        return "_".join([reagent_name, conc_str, units])
+        return stock_id_for_parts(reagent_name, concentration, units)
 
 
 class ReactionComposition(QObject):
@@ -15284,9 +15612,7 @@ class ReactionCollection(QObject):
     # ---- helpers -------------------------------------------------
     @staticmethod
     def _stock_id_from_tuple(reagent_name: str, concentration: float, units: str) -> str:
-        # Must match StockSolutionManager._make_stock_id format exactly
-        conc_str = f"{float(concentration):.2f}"
-        return "_".join([reagent_name, conc_str, units])
+        return stock_id_for_parts(reagent_name, concentration, units)
 
     def _reaction_by_index(self, index: int) -> ReactionComposition | None:
         rxns = list(self.reactions.values())
@@ -18810,13 +19136,11 @@ class Model(QObject):
 
         def _stock_lookup_key(reagent_name, concentration, units):
             try:
-                return (
-                    str(reagent_name),
-                    f"{float(concentration):.2f}",
-                    str(units),
-                )
+                return stock_id_for_parts(reagent_name, concentration, units)
             except Exception:
-                return (str(reagent_name), str(concentration), str(units))
+                return "_".join(
+                    (str(reagent_name), str(concentration), str(units))
+                )
 
         # ---------- 1) STOCKS (include fill) ----------
         stock_rows = self.experiment_model.get_stock_table_rows(include_fill=True)
@@ -18825,7 +19149,10 @@ class Model(QObject):
             reagent_name = row.get("option_name") or row.get("factor_name") or ""
             conc = float(row.get("stock_concentration", 0.0))
             units = row.get("units", "mM")
-            stock_row_lookup[_stock_lookup_key(reagent_name, conc, units)] = dict(row)
+            lookup_key = _stock_lookup_key(reagent_name, conc, units)
+            if lookup_key in stock_row_lookup:
+                raise ValueError(f"Duplicate runtime stock ID {lookup_key!r}.")
+            stock_row_lookup[lookup_key] = dict(row)
 
             total_uL = row.get("total_volume_uL", None)
             if total_uL is None:

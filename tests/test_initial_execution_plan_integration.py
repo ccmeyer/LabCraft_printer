@@ -235,6 +235,64 @@ def test_fresh_finalization_writes_prepared_plan_before_linked_progress(
     assert details["execution_plan_status"] == "created"
 
 
+def test_valid_two_stock_editor_result_survives_runtime_projection_and_finalization(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    em.factors = []
+    em.set_metadata(
+        name="two-stock-finalization",
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=1,
+        target_reaction_volume_nL=10.0,
+        final_reaction_volume_nL=500.0,
+        printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+        allow_two_stock_solutions=True,
+        allow_avoidable_target_grouping=True,
+    )
+    em.add_additive("Signal", [0.1, 0.2], "mM", 10.0)
+
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=True,
+    )
+    assert result["best"] is True
+    assert result["two_stock_keys"] == [("Signal", None)]
+    em.generate_experiment()
+    em.save_experiment()
+
+    Model.load_experiment_from_model(
+        model,
+        load_progress=False,
+        finalize_execution_plan=True,
+    )
+
+    plan = load_execution_plan(em.execution_plan_file_path)
+    signal_stocks = [stock for stock in plan.stocks if stock.factor_name == "Signal"]
+    assert len(signal_stocks) == 2
+    assert len({stock.stock_id for stock in signal_stocks}) == 2
+    assert {
+        stock.stock_id
+        for stock in model.stock_solutions.get_all_stock_solutions()
+        if stock.reagent_name == "Signal"
+    } == {stock.stock_id for stock in signal_stocks}
+    assert all(
+        any(
+            dispense.stock_id == stock.stock_id
+            for well in plan.wells
+            for dispense in well.dispenses
+        )
+        for stock in signal_stocks
+    )
+
+
 @pytest.mark.parametrize("activate", [False, True])
 def test_stock_prep_sidecar_does_not_change_authoritative_execution(
     experiment_model_factory,
