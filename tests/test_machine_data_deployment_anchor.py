@@ -3,12 +3,25 @@ import json
 import pytest
 
 from MachineDataBootstrap import BootstrapError, MachineDataBootstrap
-from MachineDataUpdate import MachineDataUpdateError, validate_or_enroll_deployment
+from MachineDataUpdate import (
+    MachineDataUpdateError,
+    UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+    parse_release_update_compatibility,
+    validate_or_enroll_deployment,
+)
+from tests.machine_data_migration_helpers import machine_data_paths
 from tests.test_machine_data_update_preservation import (
     CONTRACT,
     SOURCE_COMMIT,
     _active_context,
 )
+
+
+BRIDGE_SOURCES = ("v1.2.0-rc.6", "v1.2.0", "v1.3.0-rc.1")
+BRIDGE_COMPATIBILITY = {
+    "schema_version": UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+    "direct_legacy_sources": list(BRIDGE_SOURCES),
+}
 
 
 def test_authorized_deployment_anchor_reopens_same_external_machine(tmp_path):
@@ -141,6 +154,89 @@ def test_rc8_direct_first_start_creates_exact_legacy_genesis_anchor(
         assert context.deployment_anchor["app_commit"] == commit
     finally:
         context.close()
+
+
+@pytest.mark.parametrize("cohort", BRIDGE_SOURCES)
+def test_rc11_direct_first_start_requires_and_records_declared_legacy_source(
+    tmp_path, cohort
+):
+    commit = "b" * 40
+    fixture_cohort = "v1.2.0-rc.6" if cohort == "v1.2.0" else cohort
+    context = _active_context(
+        tmp_path,
+        app_version="v1.3.0-rc.11",
+        app_commit=commit,
+        cohort=fixture_cohort,
+        source_version=cohort,
+        release_contract=CONTRACT,
+        update_compatibility=BRIDGE_COMPATIBILITY,
+    )
+    try:
+        assert context.deployment_anchor["authorization_kind"] == "genesis"
+        assert context.deployment_anchor["app_version"] == "v1.3.0-rc.11"
+        assert context.deployment_anchor["app_commit"] == commit
+    finally:
+        context.close()
+
+
+def test_rc11_without_bridge_declaration_fails_before_anchor_or_active_pointer(tmp_path):
+    with pytest.raises(BootstrapError, match="not explicitly authorized"):
+        _active_context(
+            tmp_path,
+            app_version="v1.3.0-rc.11",
+            app_commit="b" * 40,
+            cohort="v1.2.0-rc.6",
+            release_contract=CONTRACT,
+        )
+
+    base, paths = machine_data_paths(tmp_path)
+    assert not paths.deployment_anchor_path.exists()
+    assert not base.active_machine_path.exists()
+
+
+def test_rc11_undeclared_source_fails_before_anchor_or_active_pointer(tmp_path):
+    compatibility = {
+        "schema_version": UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+        "direct_legacy_sources": ["v1.3.0-rc.1"],
+    }
+    with pytest.raises(BootstrapError, match="not authorized for a direct migration"):
+        _active_context(
+            tmp_path,
+            app_version="v1.3.0-rc.11",
+            app_commit="b" * 40,
+            cohort="v1.2.0-rc.6",
+            release_contract=CONTRACT,
+            update_compatibility=compatibility,
+        )
+
+    base, paths = machine_data_paths(tmp_path)
+    assert not paths.deployment_anchor_path.exists()
+    assert not base.active_machine_path.exists()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {
+            "schema_version": "unsupported",
+            "direct_legacy_sources": ["v1.2.0-rc.6"],
+        },
+        {
+            "schema_version": UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+            "direct_legacy_sources": [],
+        },
+        {
+            "schema_version": UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+            "direct_legacy_sources": ["v1.2.0-rc.6", "v1.2.0-rc.6"],
+        },
+    ],
+)
+def test_bridge_compatibility_parser_rejects_malformed_declarations(payload):
+    with pytest.raises(MachineDataUpdateError) as error:
+        parse_release_update_compatibility(payload, required=True)
+
+    assert error.value.code == "target_compatibility_invalid"
 
 
 def test_rc8_missing_anchor_cannot_be_reenrolled_during_ordinary_startup(tmp_path):

@@ -14,13 +14,19 @@ from typing import Callable, Sequence, TextIO
 
 
 RELEASE_INDEX_SCHEMA_VERSION = "labcraft_release_index_v1"
-RELEASE_MANIFEST_SCHEMA_VERSION = "labcraft_release_v1"
+RELEASE_MANIFEST_SCHEMA_VERSION_V1 = "labcraft_release_v1"
+RELEASE_MANIFEST_SCHEMA_VERSION_V2 = "labcraft_release_v2"
+RELEASE_MANIFEST_SCHEMA_VERSION = RELEASE_MANIFEST_SCHEMA_VERSION_V1
+SUPPORTED_RELEASE_MANIFEST_SCHEMA_VERSIONS = frozenset(
+    {RELEASE_MANIFEST_SCHEMA_VERSION_V1, RELEASE_MANIFEST_SCHEMA_VERSION_V2}
+)
 RELEASE_VERSION_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?")
 RELEASE_CANDIDATE_VERSION_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}-rc\.[0-9]+")
 RELEASE_CANDIDATE_PREFIX_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}-rc\.")
 RELEASE_CHANNELS = ("stable", "release_candidate")
 KNOWN_METADATA_INCOMPLETE_RELEASES = ("v1.1.15",)
 MACHINE_DATA_CONTRACT_NAME = "labcraft.machine_data_update.v1"
+UPDATE_COMPATIBILITY_SCHEMA_VERSION = "labcraft_update_compatibility_v1"
 
 STATUS_VALID = "valid"
 STATUS_INVALID = "invalid"
@@ -170,6 +176,48 @@ def _validate_requires_firmware(value: object, *, manifest_name: str, issues: li
         issues.append(f"{manifest_name} requires_firmware.artifact must be a non-empty string.")
 
 
+def _parse_update_compatibility(value: object) -> tuple[str, ...] | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("update_compatibility must be an object.")
+    expected = {"schema_version", "direct_legacy_sources"}
+    if set(value) != expected:
+        raise ValueError("update_compatibility fields are invalid.")
+    if value.get("schema_version") != UPDATE_COMPATIBILITY_SCHEMA_VERSION:
+        raise ValueError("update_compatibility schema_version is unsupported.")
+    raw_sources = value.get("direct_legacy_sources")
+    if not isinstance(raw_sources, list) or not raw_sources:
+        raise ValueError("direct_legacy_sources must be a nonempty list.")
+    sources: list[str] = []
+    for raw_source in raw_sources:
+        if not _is_valid_release_version(raw_source):
+            raise ValueError(
+                f"direct_legacy_sources contains an invalid version: {raw_source!r}."
+            )
+        source = str(raw_source).strip()
+        if source != raw_source:
+            raise ValueError(
+                "direct_legacy_sources versions cannot contain surrounding whitespace."
+            )
+        if source in sources:
+            raise ValueError(f"direct_legacy_sources lists {source} more than once.")
+        sources.append(source)
+    return tuple(sources)
+
+
+def _validate_update_compatibility(
+    value: object,
+    *,
+    manifest_name: str,
+    issues: list[str],
+) -> None:
+    try:
+        _parse_update_compatibility(value)
+    except ValueError as exc:
+        issues.append(f"{manifest_name} {exc}")
+
+
 def _requires_machine_data_contract(version: str) -> bool:
     match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?", str(version or ""))
     if match is None:
@@ -226,7 +274,8 @@ def _validate_manifest(path: Path, *, issues: list[str]) -> dict | None:
     if not _is_valid_release_version(expected_version):
         issues.append(f"{manifest_name} filename is not a supported LabCraft version.")
 
-    if payload.get("schema_version") != RELEASE_MANIFEST_SCHEMA_VERSION:
+    schema_version = payload.get("schema_version")
+    if schema_version not in SUPPORTED_RELEASE_MANIFEST_SCHEMA_VERSIONS:
         issues.append(f"{manifest_name} has unsupported schema_version.")
 
     version = payload.get("version")
@@ -244,6 +293,10 @@ def _validate_manifest(path: Path, *, issues: list[str]) -> dict | None:
     channel = payload.get("channel")
     if channel not in RELEASE_CHANNELS:
         issues.append(f"{manifest_name} channel must be stable or release_candidate.")
+    if schema_version == RELEASE_MANIFEST_SCHEMA_VERSION_V2 and channel != "release_candidate":
+        issues.append(
+            f"{manifest_name} schema v2 is reserved for release_candidate updates."
+        )
 
     previous = payload.get("previous_version")
     if previous not in (None, "") and not _is_valid_release_version(previous):
@@ -263,6 +316,11 @@ def _validate_manifest(path: Path, *, issues: list[str]) -> dict | None:
     _validate_machine_data_contract(
         payload.get("machine_data"),
         version=str(version or ""),
+        manifest_name=manifest_name,
+        issues=issues,
+    )
+    _validate_update_compatibility(
+        payload.get("update_compatibility"),
         manifest_name=manifest_name,
         issues=issues,
     )
@@ -302,6 +360,74 @@ def _validate_release_candidate_series(series: object, *, release_candidate: str
 
     if release_candidate and _release_candidate_number(release_candidate, prefix=prefix) is None:
         issues.append("latest.json release_candidate must match release_candidate_series.tag_prefix.")
+
+
+def _validate_legacy_release_candidate_sources(
+    value: object,
+    *,
+    release_candidate: str,
+    manifests: dict[str, dict],
+    issues: list[str],
+) -> None:
+    if value in (None, ""):
+        return
+    if not isinstance(value, list) or not value:
+        issues.append(
+            "latest.json legacy_release_candidate_sources must be a nonempty list when present."
+        )
+        return
+    sources: list[str] = []
+    for raw_source in value:
+        if not _is_valid_release_version(raw_source):
+            issues.append(
+                "latest.json legacy_release_candidate_sources contains an invalid version: "
+                f"{raw_source!r}"
+            )
+            continue
+        source = str(raw_source).strip()
+        if source != raw_source:
+            issues.append(
+                "latest.json legacy release source versions cannot contain surrounding whitespace."
+            )
+            continue
+        if source in sources:
+            issues.append(
+                f"latest.json legacy_release_candidate_sources lists {source} more than once."
+            )
+            continue
+        sources.append(source)
+    if not release_candidate:
+        issues.append(
+            "latest.json legacy_release_candidate_sources requires an exact release_candidate pointer."
+        )
+        return
+    manifest = manifests.get(release_candidate)
+    if manifest is None:
+        issues.append(
+            "latest.json legacy release_candidate manifest must be present for compatibility validation."
+        )
+        return
+    try:
+        declared = _parse_update_compatibility(manifest.get("update_compatibility"))
+    except ValueError:
+        declared = None
+    if declared is None:
+        issues.append(
+            f"{release_candidate}.json must declare update_compatibility for the pinned legacy pointer."
+        )
+        return
+    missing = sorted(set(sources) - set(declared))
+    if missing:
+        issues.append(
+            f"{release_candidate}.json direct_legacy_sources does not cover the pinned legacy cohorts: "
+            + ", ".join(missing)
+        )
+    unexpected = sorted(set(declared) - set(sources))
+    if unexpected:
+        issues.append(
+            f"{release_candidate}.json direct_legacy_sources authorizes cohorts absent from "
+            "latest.json legacy_release_candidate_sources: " + ", ".join(unexpected)
+        )
 
 
 def _validate_latest_index(
@@ -359,6 +485,12 @@ def _validate_latest_index(
     _validate_release_candidate_series(
         latest.get("release_candidate_series"),
         release_candidate=release_candidate,
+        issues=issues,
+    )
+    _validate_legacy_release_candidate_sources(
+        latest.get("legacy_release_candidate_sources"),
+        release_candidate=release_candidate,
+        manifests=manifests,
         issues=issues,
     )
 

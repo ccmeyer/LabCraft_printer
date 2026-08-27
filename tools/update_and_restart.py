@@ -60,7 +60,13 @@ RELEASE_CHANNELS = (RELEASE_CHANNEL_STABLE, RELEASE_CHANNEL_RELEASE_CANDIDATE)
 OFFLINE_BUNDLE_SCHEMA_VERSION = "labcraft_update_bundle_v1"
 OFFLINE_UPDATE_REF = "refs/labcraft/offline-update"
 RELEASE_INDEX_SCHEMA_VERSION = "labcraft_release_index_v1"
-RELEASE_MANIFEST_SCHEMA_VERSION = "labcraft_release_v1"
+RELEASE_MANIFEST_SCHEMA_VERSION_V1 = "labcraft_release_v1"
+RELEASE_MANIFEST_SCHEMA_VERSION_V2 = "labcraft_release_v2"
+RELEASE_MANIFEST_SCHEMA_VERSION = RELEASE_MANIFEST_SCHEMA_VERSION_V1
+SUPPORTED_RELEASE_MANIFEST_SCHEMA_VERSIONS = frozenset(
+    {RELEASE_MANIFEST_SCHEMA_VERSION_V1, RELEASE_MANIFEST_SCHEMA_VERSION_V2}
+)
+UPDATE_COMPATIBILITY_SCHEMA_VERSION = "labcraft_update_compatibility_v1"
 RELEASE_INDEX_PATH = "releases/latest.json"
 RELEASE_VERSION_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?")
 RELEASE_CANDIDATE_PREFIX_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}-rc\.")
@@ -262,6 +268,7 @@ class ReleaseTargetInfo:
     rollback_version: str = ""
     release_manifest_sha256: str = ""
     machine_data_contract: Mapping[str, object] | None = None
+    update_compatibility: Mapping[str, object] | None = None
     requires_firmware: object = None
 
 
@@ -581,13 +588,55 @@ def _release_channel_label(channel: str | None) -> str:
     return "stable"
 
 
+def _validate_update_compatibility(value: object) -> Mapping[str, object] | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, dict):
+        raise ReleaseMetadataError("Release manifest update_compatibility must be an object.")
+    expected = {"schema_version", "direct_legacy_sources"}
+    if set(value) != expected:
+        raise ReleaseMetadataError("Release manifest update_compatibility fields are invalid.")
+    if value.get("schema_version") != UPDATE_COMPATIBILITY_SCHEMA_VERSION:
+        raise ReleaseMetadataError(
+            "Release manifest update_compatibility schema_version is unsupported."
+        )
+    raw_sources = value.get("direct_legacy_sources")
+    if not isinstance(raw_sources, list) or not raw_sources:
+        raise ReleaseMetadataError(
+            "Release manifest direct_legacy_sources must be a nonempty list."
+        )
+    sources: list[str] = []
+    for raw_source in raw_sources:
+        try:
+            source = _normalize_release_version(
+                raw_source,
+                context="release manifest direct legacy source",
+            )
+        except ReleaseMetadataError as exc:
+            raise ReleaseMetadataError(exc.message) from exc
+        if source != raw_source:
+            raise ReleaseMetadataError(
+                "Release manifest direct legacy source versions cannot contain surrounding whitespace."
+            )
+        if source in sources:
+            raise ReleaseMetadataError(
+                f"Release manifest direct_legacy_sources lists {source} more than once."
+            )
+        sources.append(source)
+    return {
+        "schema_version": UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+        "direct_legacy_sources": tuple(sources),
+    }
+
+
 def _validate_release_manifest(
     manifest: dict,
     *,
     expected_version: str,
     expected_channel: str | None = None,
 ) -> ReleaseTargetInfo:
-    if manifest.get("schema_version") != RELEASE_MANIFEST_SCHEMA_VERSION:
+    schema_version = manifest.get("schema_version")
+    if schema_version not in SUPPORTED_RELEASE_MANIFEST_SCHEMA_VERSIONS:
         raise ReleaseMetadataError("Release manifest has an unsupported schema_version.")
     version = _normalize_release_version(manifest.get("version"), context="release manifest version")
     tag = _normalize_release_version(manifest.get("tag"), context="release manifest tag")
@@ -600,6 +649,10 @@ def _validate_release_manifest(
         raise ReleaseMetadataError("Release manifest channel must be stable or release_candidate.")
     if expected_channel is not None and channel != expected_channel:
         raise ReleaseMetadataError(f"Release manifest channel must be {expected_channel}.")
+    if schema_version == RELEASE_MANIFEST_SCHEMA_VERSION_V2 and channel != RELEASE_CHANNEL_RELEASE_CANDIDATE:
+        raise ReleaseMetadataError(
+            "Release manifest schema v2 is reserved for release_candidate updates."
+        )
     machine_data_contract = manifest.get("machine_data")
     if machine_data_contract is not None:
         if not isinstance(machine_data_contract, dict):
@@ -628,6 +681,9 @@ def _validate_release_manifest(
         else:
             raise ReleaseMetadataError("Release manifest machine-data transition is unsupported.")
         machine_data_contract = dict(machine_data_contract)
+    update_compatibility = _validate_update_compatibility(
+        manifest.get("update_compatibility")
+    )
     manifest_sha = hashlib.sha256(
         json.dumps(
             manifest,
@@ -646,6 +702,7 @@ def _validate_release_manifest(
         rollback_version=_rollback_version_from_manifest(manifest),
         release_manifest_sha256=manifest_sha,
         machine_data_contract=machine_data_contract,
+        update_compatibility=update_compatibility,
         requires_firmware=manifest.get("requires_firmware"),
     )
 
