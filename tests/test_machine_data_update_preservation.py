@@ -50,15 +50,21 @@ def _active_context(
     app_commit=SOURCE_COMMIT,
     cohort="v1.3.0-rc.1",
     release_contract=None,
+    source_version=None,
+    update_compatibility=None,
 ):
     wrapper, _ = write_wrapper(
         tmp_path / "source", cohort=cohort, custom_camera=True
     )
+    if source_version is not None:
+        (wrapper / "VERSION").write_text(source_version + "\n", encoding="utf-8")
     candidate = inspect_wrapper(wrapper)
     base, _ = machine_data_paths(tmp_path)
     bootstrap_kwargs = {}
     if release_contract is not None:
         bootstrap_kwargs["release_contract"] = release_contract
+    if update_compatibility is not None:
+        bootstrap_kwargs["update_compatibility"] = update_compatibility
     bootstrap = MachineDataBootstrap.MachineDataBootstrap(
         base,
         app_version=app_version,
@@ -140,6 +146,49 @@ def test_verified_backup_precedes_git_and_authorizes_exact_relaunch(tmp_path):
         anchor = json.loads(paths.deployment_anchor_path.read_text(encoding="utf-8"))
         assert anchor["app_commit"] == TARGET_COMMIT
         assert anchor["update_id"] == prepared.update_id
+    finally:
+        prepared.close()
+
+
+def test_m6_rc8_update_to_rc11_does_not_require_legacy_compatibility(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    context = _active_context(
+        tmp_path,
+        app_version="v1.3.0-rc.8",
+        app_commit=SOURCE_COMMIT,
+        release_contract=CONTRACT,
+    )
+    binding = build_update_launch_binding(
+        context,
+        source_app_version="v1.3.0-rc.8",
+        source_commit=SOURCE_COMMIT,
+        request_id="00000000-0000-0000-0000-000000000087",
+    )
+    paths = context.paths
+    context.close()
+    target = UpdateTarget(
+        operation="update",
+        version="v1.3.0-rc.11",
+        tag="v1.3.0-rc.11",
+        commit=TARGET_COMMIT,
+        update_source="online",
+        release_manifest_sha256="b" * 64,
+        machine_data_contract=CONTRACT,
+    )
+
+    prepared = begin_update_preservation(binding, target, repo_root=repo)
+    try:
+        prepared.record_git_result(
+            before_commit=SOURCE_COMMIT,
+            after_commit=TARGET_COMMIT,
+            command=("git", "merge", "--ff-only", target.tag),
+        )
+        prepared.verify_after()
+        prepared.authorize_relaunch()
+        anchor = json.loads(paths.deployment_anchor_path.read_text(encoding="utf-8"))
+        assert anchor["app_version"] == "v1.3.0-rc.11"
+        assert anchor["app_commit"] == TARGET_COMMIT
     finally:
         prepared.close()
 

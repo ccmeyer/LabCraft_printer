@@ -74,6 +74,34 @@ v1.2.0-rc.7
 Use `channel: "stable"` for stable releases and
 `channel: "release_candidate"` for RC releases.
 
+An intentional direct bridge from a pre-M6 release must also opt in with exact
+source versions:
+
+```json
+"update_compatibility": {
+  "schema_version": "labcraft_update_compatibility_v1",
+  "direct_legacy_sources": [
+    "v1.2.0-rc.6",
+    "v1.2.0",
+    "v1.3.0-rc.1"
+  ]
+}
+```
+
+This declaration is optional for ordinary releases and mandatory for a new
+direct legacy bridge. Its fields are exact: the source list must be nonempty,
+contain unique valid release versions, and must not contain patterns or
+wildcards. Authorization belongs to that one target release; a later RC is not
+authorized unless its own manifest repeats a reviewed declaration.
+
+`v1.3.0-rc.11` is the current pre-M6 bridge and must retain
+`schema_version: "labcraft_release_v1"` so immutable legacy clients can parse
+it. Post-bridge RCs use `schema_version: "labcraft_release_v2"`. Schema v2 is
+reserved for `release_candidate` manifests and is the updater capability
+barrier: pre-rc.11 series-aware clients skip v2 tags and fall back to the exact
+rc.11 pointer, while rc.11 and newer clients can continue through series
+discovery. Do not use schema v2 for stable releases.
+
 Use `requires_firmware: null` unless the release intentionally changes the
 firmware artifact. If firmware changed, use:
 
@@ -119,10 +147,35 @@ metadata may also include:
 }
 ```
 
-This lets machines that opt into release candidates discover future
-`v1.2.0-rc.N` tags without requiring a new stable metadata release for every RC.
-The updater still validates the selected tag and its release manifest before
-applying anything.
+When a legacy bridge is active, the index also declares the exact cohorts bound
+to the pinned pointer:
+
+```json
+{
+  "release_candidate": "v1.3.0-rc.11",
+  "release_candidate_series": {
+    "tag_prefix": "v1.3.0-rc.",
+    "minimum": "v1.3.0-rc.1"
+  },
+  "legacy_release_candidate_sources": [
+    "v1.2.0-rc.6",
+    "v1.2.0",
+    "v1.3.0-rc.1"
+  ]
+}
+```
+
+The exact `release_candidate` pointer is the legacy route. Metadata validation
+requires that pointer's manifest to declare every listed legacy source. The
+`release_candidate_series` remains the modern route and can discover later
+`v1.3.0-rc.N` tags, but post-rc.11 tags must use manifest schema v2 so immutable
+pre-rc.11 clients cannot select them. This distinction is required because the
+immutable `v1.3.0-rc.1` updater already understands series discovery.
+
+Moving the exact pointer to a newer RC is permitted only when that RC repeats
+the explicit compatibility declaration and passes the complete legacy bridge
+software suite. Never authorize all RCs with a wildcard. The updater always
+validates the selected tag and release manifest before applying anything.
 
 ## Branch Model
 

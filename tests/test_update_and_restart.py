@@ -544,6 +544,89 @@ def _m6_release_manifest(version="v1.1.2"):
     }
 
 
+def test_release_manifest_parses_explicit_legacy_bridge_compatibility():
+    manifest = _m6_release_manifest("v1.3.0-rc.11")
+    manifest["channel"] = updater.RELEASE_CHANNEL_RELEASE_CANDIDATE
+    manifest["update_compatibility"] = {
+        "schema_version": updater.UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+        "direct_legacy_sources": [
+            "v1.2.0-rc.6",
+            "v1.2.0",
+            "v1.3.0-rc.1",
+        ],
+    }
+
+    info = updater._validate_release_manifest(
+        manifest,
+        expected_version="v1.3.0-rc.11",
+        expected_channel=updater.RELEASE_CHANNEL_RELEASE_CANDIDATE,
+    )
+
+    assert info.update_compatibility == {
+        "schema_version": updater.UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+        "direct_legacy_sources": (
+            "v1.2.0-rc.6",
+            "v1.2.0",
+            "v1.3.0-rc.1",
+        ),
+    }
+
+
+def test_release_manifest_v2_is_accepted_for_future_release_candidates():
+    manifest = _m6_release_manifest("v1.3.0-rc.12")
+    manifest["schema_version"] = updater.RELEASE_MANIFEST_SCHEMA_VERSION_V2
+    manifest["channel"] = updater.RELEASE_CHANNEL_RELEASE_CANDIDATE
+
+    info = updater._validate_release_manifest(
+        manifest,
+        expected_version="v1.3.0-rc.12",
+        expected_channel=updater.RELEASE_CHANNEL_RELEASE_CANDIDATE,
+    )
+
+    assert info.version == "v1.3.0-rc.12"
+
+
+def test_release_manifest_v2_is_rejected_for_stable_channel():
+    manifest = _m6_release_manifest("v1.3.0")
+    manifest["schema_version"] = updater.RELEASE_MANIFEST_SCHEMA_VERSION_V2
+
+    with pytest.raises(
+        updater.ReleaseMetadataError,
+        match="schema v2 is reserved for release_candidate",
+    ):
+        updater._validate_release_manifest(
+            manifest,
+            expected_version="v1.3.0",
+            expected_channel=updater.RELEASE_CHANNEL_STABLE,
+        )
+
+
+@pytest.mark.parametrize(
+    "compatibility",
+    [
+        {},
+        {
+            "schema_version": "unsupported",
+            "direct_legacy_sources": ["v1.2.0-rc.6"],
+        },
+        {
+            "schema_version": updater.UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+            "direct_legacy_sources": [],
+        },
+        {
+            "schema_version": updater.UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+            "direct_legacy_sources": ["v1.2.0-rc.6", "v1.2.0-rc.6"],
+        },
+    ],
+)
+def test_release_manifest_rejects_malformed_bridge_compatibility(compatibility):
+    manifest = _m6_release_manifest("v1.3.0-rc.11")
+    manifest["update_compatibility"] = compatibility
+
+    with pytest.raises(updater.ReleaseMetadataError):
+        updater._validate_release_manifest(manifest, expected_version="v1.3.0-rc.11")
+
+
 class _PreparedUpdateDouble:
     def __init__(self, tmp_path, events, *, fail_verify=False):
         self.update_id = "00000000-0000-0000-0000-000000000099"
