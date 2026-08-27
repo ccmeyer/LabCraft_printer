@@ -1,0 +1,44 @@
+{
+  "channel": "release_candidate",
+  "machine_data": {
+    "data_schema_version": 1,
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "transition": "none",
+    "transition_id": null
+  },
+  "notes": [
+    "Pins direct release-candidate discovery from v1.2.0-rc.6, v1.2.0, and v1.3.0-rc.1 to this explicitly authorized bridge release.",
+    "Archives case-insensitive LabCraftUpdates/ remnants in the verified migration backup without adopting them into canonical machine configuration.",
+    "Rejects missing, malformed, undeclared, or overbroad legacy compatibility metadata before creating a deployment anchor or active machine pointer.",
+    "Keeps the exact legacy pointer on rc.11 while manifest-schema-v2 releases may advance through modern release-candidate series discovery.",
+    "The bundled firmware is byte-identical to v1.3.0-rc.10: 367968 bytes with SHA-256 1FEC7C6C8D3C0022844695CDF51A860539BCFBDA291BB18C12A99062C7A32577."
+  ],
+  "previous_version": "v1.3.0-rc.10",
+  "release_date": "2026-08-27",
+  "requires_firmware": {
+    "artifact": "firmware/artifacts/LabCraft_firmware.bin",
+    "note": "Firmware bytes are unchanged from rc.10. Legacy-source machines must deploy and verify this exact artifact; the application updater does not establish installed-firmware provenance."
+  },
+  "rollback_version": "v1.2.0",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Hardens the pinned direct-update bridge for pre-M6 machines and safely archives legacy offline-bundle remnants during migration.",
+  "tag": "v1.3.0-rc.11",
+  "update_compatibility": {
+    "schema_version": "labcraft_update_compatibility_v1",
+    "direct_legacy_sources": [
+      "v1.2.0-rc.6",
+      "v1.2.0",
+      "v1.3.0-rc.1"
+    ]
+  },
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q",
+    ".\\env\\Scripts\\python.exe tools\\validate_release_metadata.py",
+    "Focused machine-data ownership, bootstrap, deployment-anchor, update preservation, updater discovery, metadata, and isolated immutable-legacy-updater qualification tests",
+    "Isolated software campaign for v1.2.0-rc.6, v1.2.0, and v1.3.0-rc.1 with a synthetic post-bridge rc.12 present",
+    "Firmware tree and artifact byte identity, 367968-byte size, and SHA-256 comparison against v1.3.0-rc.10",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.3.0-rc.11"
+}

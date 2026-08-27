@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.3.0-rc.11 - 2026-08-27
+
+### Fixed
+
+- Classified case-insensitive `LabCraftUpdates/` content as archive-only migration data. Existing bundles, manifests, and nested content remain byte-for-byte represented in the verified backup but are never copied into canonical configuration.
+- Restored the checked-in 103-well sample concentration design used by sparse uploaded-design validation and made only that regression fixture visible through the runtime experiment-data ignore boundary.
+
+### Changed
+
+- Added an exact per-release `labcraft_update_compatibility_v1` declaration for reviewed direct legacy source versions. New bridge releases must explicitly repeat the declaration; wildcards and implicit authorization of later release candidates remain prohibited.
+- Pinned legacy release-candidate discovery to rc.11 for `v1.2.0-rc.6`, `v1.2.0`, and `v1.3.0-rc.1`, while retaining the existing modern rc-series discovery path behind manifest schema v2.
+- Loaded and validated the bridge declaration during target resolution and first-start bootstrap. Genesis enrollment now checks the migration receipt's exact source version before writing the deployment anchor or active machine pointer.
+
+### Safety and compatibility
+
+- Historical rc.2, rc.3, and rc.8 enrollment remains unchanged. Ordinary M6-capable releases continue through the normal preservation workflow without depending on legacy bridge metadata.
+- Unknown or prohibited machine-data paths still block activation. Only `LabCraftUpdates/` receives archive-only treatment; bundle generation, offline discovery, and operator workflow are unchanged.
+- Device protocol, canonical machine-data schema version 1, firmware source, hardware composition, and Pi rehearsal tooling are unchanged.
+- The bundled firmware is byte-identical to rc.10: 367,968 bytes with SHA-256 `1FEC7C6C8D3C0022844695CDF51A860539BCFBDA291BB18C12A99062C7A32577`.
+
+### Validation
+
+- Focused machine-data ownership, bootstrap, deployment-anchor, update-preservation, updater-discovery, metadata, and isolated immutable-legacy-updater qualification tests passed 216 tests.
+- The complete Windows Python suite passed 5,872 tests with 158 expected skips after restoration of the sample concentration fixture.
+- Release metadata validation, strict release-JSON parsing, firmware tree/artifact identity, and static diff checks passed on the release candidate.
+- Pi and physical-machine qualification remain pending. The first available machine must be used as an attended canary before broader rollout.
+
+### Rollback
+
+- The reviewed application rollback target remains stable `v1.2.0`. Because it predates external machine data, use only the support-guided compatibility export and restore its paired firmware.
+- Do not manually edit deployment anchors, active machine pointers, migration receipts, authoritative machine data, or firmware-state evidence during rollback.
+
 ## v1.3.0-rc.10 - 2026-08-25
 
 ### Fixed

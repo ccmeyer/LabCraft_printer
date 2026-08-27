@@ -179,7 +179,28 @@ def test_rc11_direct_first_start_requires_and_records_declared_legacy_source(
         context.close()
 
 
-def test_rc11_without_bridge_declaration_fails_before_anchor_or_active_pointer(tmp_path):
+def test_rc11_loads_checked_in_bridge_declaration_by_default(tmp_path):
+    context = _active_context(
+        tmp_path,
+        app_version="v1.3.0-rc.11",
+        app_commit="b" * 40,
+        cohort="v1.2.0-rc.6",
+        release_contract=CONTRACT,
+    )
+    try:
+        assert context.deployment_anchor["app_version"] == "v1.3.0-rc.11"
+        assert context.deployment_anchor["authorization_kind"] == "genesis"
+    finally:
+        context.close()
+
+
+def test_rc11_without_bridge_declaration_fails_before_anchor_or_active_pointer(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "MachineDataBootstrap.load_current_release_update_compatibility",
+        lambda _repo_root, _app_version: None,
+    )
     with pytest.raises(BootstrapError, match="not explicitly authorized"):
         _active_context(
             tmp_path,
