@@ -2433,9 +2433,127 @@ class ExperimentModel(QObject):
                 tuple(float(value) for value in plan.deltas),
             )
 
+        def _resolution_probe_indices(primary_index: int) -> List[int]:
+            primary_delta = float(deltas[primary_index])
+            minimum_companion_delta = 0.0
+            for target_index, target in enumerate(xs_pos):
+                if (
+                    deadline_reached is not None
+                    and target_index % 32 == 0
+                    and deadline_reached()
+                ):
+                    raise _StockAllocationDeadlineReached
+                primary_drops = min(
+                    maximum_total_drops,
+                    max(
+                        0,
+                        int(math.floor(float(target) / primary_delta + 1e-12)),
+                    ),
+                )
+                residual = max(
+                    0.0,
+                    float(target) - primary_drops * primary_delta,
+                )
+                if residual <= 1e-12:
+                    continue
+                remaining_drops = maximum_total_drops - primary_drops
+                if remaining_drops > 0:
+                    minimum_companion_delta = max(
+                        minimum_companion_delta,
+                        residual / remaining_drops,
+                    )
+
+            def _companion_probe_rank(index: int) -> Tuple[Any, ...]:
+                companion_delta = float(deltas[index])
+                errors: List[float] = []
+                feasible = True
+                for target_index, target in enumerate(xs_pos):
+                    if (
+                        deadline_reached is not None
+                        and target_index % 32 == 0
+                        and deadline_reached()
+                    ):
+                        raise _StockAllocationDeadlineReached
+                    primary_drops = min(
+                        maximum_total_drops,
+                        max(
+                            0,
+                            int(
+                                math.floor(
+                                    float(target) / primary_delta + 1e-12
+                                )
+                            ),
+                        ),
+                    )
+                    residual = max(
+                        0.0,
+                        float(target) - primary_drops * primary_delta,
+                    )
+                    companion_drops = max(
+                        0,
+                        int(math.floor(residual / companion_delta + 0.5)),
+                    )
+                    if companion_drops > maximum_total_drops - primary_drops:
+                        feasible = False
+                        break
+                    achieved = (
+                        primary_drops * primary_delta
+                        + companion_drops * companion_delta
+                    )
+                    errors.append(abs(float(target) - achieved))
+                return (
+                    not feasible,
+                    max(errors, default=math.inf),
+                    sum(errors) / len(errors) if errors else math.inf,
+                    companion_delta < minimum_companion_delta - 1e-12,
+                    abs(companion_delta - minimum_companion_delta),
+                    companion_delta,
+                )
+
+            # Keep only the best two companions while scanning so the rescue
+            # prelude stays deterministic without an unchecked full sort.
+            ranked: List[Tuple[Tuple[Any, ...], int]] = []
+            for secondary_index in range(primary_index + 1, len(deltas)):
+                if deadline_reached is not None and deadline_reached():
+                    raise _StockAllocationDeadlineReached
+                ranked.append(
+                    (_companion_probe_rank(secondary_index), secondary_index)
+                )
+                ranked.sort(key=lambda item: (item[0], item[1]))
+                if len(ranked) > 2:
+                    ranked.pop()
+            return [secondary_index for _rank, secondary_index in ranked]
+
+        def _pair_groups():
+            probed: Set[Tuple[int, int]] = set()
+            if resolution_first:
+                # Give several concentrated primary legs a small deterministic
+                # rescue probe before any one primary consumes the polish
+                # window. The historical full traversal follows unchanged.
+                if max_stock_conc is not None:
+                    primary_probe_count = min(1, max(0, len(deltas) - 1))
+                else:
+                    primary_probe_count = min(
+                        len(xs_pos) + 1,
+                        max(0, len(deltas) - 1),
+                    )
+                for primary_index in range(primary_probe_count):
+                    probe_indices = _resolution_probe_indices(primary_index)
+                    probed.update(
+                        (primary_index, secondary_index)
+                        for secondary_index in probe_indices
+                    )
+                    yield primary_index, probe_indices
+            for primary_index in range(len(deltas)):
+                yield primary_index, (
+                    secondary_index
+                    for secondary_index in range(primary_index + 1, len(deltas))
+                    if (primary_index, secondary_index) not in probed
+                )
+
         try:
-            for i in range(len(deltas)):
-                for j in range(i + 1, len(deltas)):
+            for i, secondary_indices in _pair_groups():
+                for j in secondary_indices:
                     if stop_requested is not None and stop_requested():
                         callback_stop = True
                         break
@@ -4820,9 +4938,18 @@ class ExperimentModel(QObject):
                 nonlocal zero_loss_polish_completed
                 if incremental_zero_loss_polish_deadline_at is None:
                     return False
-                if optimizer_clock() < incremental_zero_loss_polish_deadline_at:
+                checked_at = optimizer_clock()
+                if checked_at < incremental_zero_loss_polish_deadline_at:
                     return False
                 zero_loss_polish_completed = True
+                if (
+                    resolution_deadline_at is not None
+                    and checked_at >= resolution_deadline_at
+                ):
+                    # The polish window may end at the shared deadline. Record
+                    # that hard bound even though stop_requested runs before
+                    # the enumerator's explicit deadline callback.
+                    stock_allocation_limit_reasons.add("time_budget")
                 return True
 
             def _consider_generated_plan(plan: TwoStockPlan) -> bool:
@@ -4914,7 +5041,9 @@ class ExperimentModel(QObject):
                 candidate_callback=_consider_generated_plan,
                 stop_requested=_incremental_stop_requested,
             )
-            if search_limited:
+            # A deadline can be observed by incremental candidate validation
+            # before the enumerator's next explicit deadline check.
+            if search_limited or "time_budget" in stock_allocation_limit_reasons:
                 _mark_two_stock_search_limited(key)
             _kind, _idx, _singles, existing = _candidate_lists_for_key(key)
             merged = list(existing or [])
@@ -5700,24 +5829,9 @@ class ExperimentModel(QObject):
                 # the bounded phase.
                 gc.disable()
             try:
-                state, candidate_details = _run_bounded_resolution_search(
-                    include_twos=False,
-                    incumbent_details=best_details,
-                )
-                best_snapshot, best_details = _accept_resolution_state(
-                    state,
-                    candidate_details,
-                    best_snapshot,
-                    best_details,
-                )
-
-                if (
-                    allow_two
-                    and int(best_details["quality"][0]) > 0
-                    and not _resolution_deadline_reached()
-                    and stock_allocation_states_evaluated
-                    < self.MAX_STOCK_ALLOCATION_STATES
-                ):
+                if allow_two:
+                    # Prioritize two-stock rescue before global single-stock
+                    # preprocessing can consume the shared UI deadline.
                     collapsed_keys = [
                         key
                         for key, evaluation in best_details["evaluations"].items()
@@ -5737,6 +5851,8 @@ class ExperimentModel(QObject):
                     if (
                         not zero_loss_polish_completed
                         and not _resolution_deadline_reached()
+                        and stock_allocation_states_evaluated
+                        < self.MAX_STOCK_ALLOCATION_STATES
                     ):
                         state, candidate_details = _run_bounded_resolution_search(
                             include_twos=True,
@@ -5749,20 +5865,27 @@ class ExperimentModel(QObject):
                             best_details,
                         )
 
-                    donor_keys = [
-                        key
-                        for key, evaluation in best_details["evaluations"].items()
-                        if key not in collapsed_keys
-                        and float(evaluation["score"].max_volume_nL) > 0.0
-                    ]
-                    donor_keys.sort(
-                        key=lambda key: (
-                            -float(
-                                best_details["evaluations"][key]["score"].max_volume_nL
-                            ),
-                            str(key),
+                    donor_keys = []
+                    if (
+                        int(best_details["quality"][0]) > 0
+                        and not _resolution_deadline_reached()
+                        and stock_allocation_states_evaluated
+                        < self.MAX_STOCK_ALLOCATION_STATES
+                    ):
+                        donor_keys = [
+                            key
+                            for key, evaluation in best_details["evaluations"].items()
+                            if key not in collapsed_keys
+                            and float(evaluation["score"].max_volume_nL) > 0.0
+                        ]
+                        donor_keys.sort(
+                            key=lambda key: (
+                                -float(
+                                    best_details["evaluations"][key]["score"].max_volume_nL
+                                ),
+                                str(key),
+                            )
                         )
-                    )
                     for key in donor_keys:
                         if (
                             int(best_details["quality"][0]) == 0
@@ -5785,6 +5908,17 @@ class ExperimentModel(QObject):
                             best_snapshot,
                             best_details,
                         )
+                else:
+                    state, candidate_details = _run_bounded_resolution_search(
+                        include_twos=False,
+                        incumbent_details=best_details,
+                    )
+                    best_snapshot, best_details = _accept_resolution_state(
+                        state,
+                        candidate_details,
+                        best_snapshot,
+                        best_details,
+                    )
             except Exception as exc:
                 _restore_selection_snapshot(seed_snapshot)
                 best_snapshot = seed_snapshot

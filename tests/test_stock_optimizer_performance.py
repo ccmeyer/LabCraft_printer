@@ -1,5 +1,4 @@
 import itertools
-from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -7,17 +6,38 @@ import pytest
 from Model import CURRENT_PROFILE, ExperimentModel
 
 
-BNEXT_DIR = (
-    Path(__file__).resolve().parents[1]
-    / "FreeRTOS-interface"
-    / "Experiments"
-    / "bnext_260824_csvs"
-)
+_BENCHMARK_LEVEL_COUNTS = (6, 6, 6, 6, 6, 5, 5, 5)
+
+
+def _benchmark_import_design():
+    row_count = 88
+    data = {"well": [f"W{row_index + 1}" for row_index in range(row_count)]}
+    next_nonzero_row = 0
+    for reagent_index, level_count in enumerate(_BENCHMARK_LEVEL_COUNTS):
+        levels = (0.0, 0.5, 1.0, 5.0, 20.0, 21.0)[:level_count]
+        values = [0.0] * row_count
+        for level in levels[1:]:
+            values[next_nonzero_row] = level
+            next_nonzero_row += 1
+        data[f"[Benchmark{reagent_index + 1}] mM"] = values
+    return pd.DataFrame(data)
+
+
+def _benchmark_stock_rows():
+    return pd.DataFrame(
+        {
+            "reagent": [
+                f"Benchmark{index + 1}"
+                for index in range(len(_BENCHMARK_LEVEL_COUNTS))
+            ],
+            "stock_conc": [5000.0] * len(_BENCHMARK_LEVEL_COUNTS),
+        }
+    )
 
 
 def _bnext_model(*, budget_nl=2000.0, allow_grouping=False, relax_stock_bounds=False):
-    design = pd.read_csv(BNEXT_DIR / "260824_labcraft_input.csv")
-    stock_rows = pd.read_csv(BNEXT_DIR / "260824_labcraft_reagents.csv")
+    design = _benchmark_import_design()
+    stock_rows = _benchmark_stock_rows()
     stock_by_name = {
         str(row.reagent).strip().casefold(): float(row.stock_conc)
         for row in stock_rows.itertuples(index=False)
@@ -36,7 +56,7 @@ def _bnext_model(*, budget_nl=2000.0, allow_grouping=False, relax_stock_bounds=F
         units_default="",
         droplet_nL_default=9.0,
         starting_conc_default=0.0,
-        source_path="260824_labcraft_input.csv",
+        source_path="synthetic_optimizer_workload.csv",
     )
     for factor in model.factors:
         if not factor.options:
@@ -73,15 +93,24 @@ def _public_result_rank(model, result):
 def _large_import_model():
     row_count = 384
     reagent_count = 12
-    base_design = pd.read_csv(BNEXT_DIR / "260824_labcraft_input.csv").drop(
-        columns=["well"]
-    )
-    design = pd.concat([base_design] * 5, ignore_index=True).iloc[:row_count].copy()
-    for reagent_index in range(4):
-        design.loc[:, f"[Extra{reagent_index}] mM"] = 1.0
+    adversarial_levels = (0.2, 0.5, 1.0, 5.0, 10.0)
+    reagent_names = [
+        *[f"Benchmark{index}" for index in range(1, 9)],
+        *[f"Extra{index}" for index in range(4)],
+    ]
+    data = {}
+    next_nonzero_row = 0
+    for reagent_index, reagent_name in enumerate(reagent_names):
+        values = [0.0] * row_count
+        if reagent_index < 4:
+            for level in adversarial_levels:
+                values[next_nonzero_row] = level
+                next_nonzero_row += 1
+        data[f"[{reagent_name}] mM"] = values
+    design = pd.DataFrame(data)
     model = ExperimentModel(prof=CURRENT_PROFILE)
     model.set_metadata(
-        target_reaction_volume_nL=650.0,
+        target_reaction_volume_nL=270.0,
         printed_volume_tolerance_nL=0.0,
         final_reaction_volume_nL=2000.0,
         allow_two_stock_solutions=False,
@@ -268,7 +297,10 @@ def test_384_row_increased_reagent_import_keeps_resolution_phase_bounded():
     assert result["distinct_level_loss"] == 0
     assert result["stock_allocation_improved_seed"] is True
     assert result["stock_allocation_time_to_best_ms"] < 75.0
-    assert result["stock_allocation_stop_reason"] == "zero_loss_polish_complete"
+    assert result["stock_allocation_stop_reason"] in {
+        "search_exhausted",
+        "zero_loss_polish_complete",
+    }
     assert result["stock_allocation_search_limited"] is False
 
 

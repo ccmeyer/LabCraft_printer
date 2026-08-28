@@ -157,6 +157,7 @@ def _make_resolution_reproduction_model(
     allow_avoidable_grouping=False,
     printed_volume_nl=320.0,
     include_other=True,
+    max_stock_conc=None,
 ):
     em = _make_model(
         target_volume_nl=printed_volume_nl,
@@ -166,7 +167,13 @@ def _make_resolution_reproduction_model(
     em.set_metadata(
         allow_avoidable_target_grouping=bool(allow_avoidable_grouping)
     )
-    em.add_additive("R", list(targets), "mM", 10.0)
+    em.add_additive(
+        "R",
+        list(targets),
+        "mM",
+        10.0,
+        max_stock_conc=max_stock_conc,
+    )
     if include_other:
         em.add_additive("Other", [100.0], "mM", 10.0)
     return em
@@ -281,6 +288,7 @@ def test_two_stock_resolution_search_can_rescue_a_colliding_feasible_single_plan
         [0.5, 1.0, 5.0, 20.0],
         printed_volume_nl=240.0,
         include_other=False,
+        max_stock_conc=2000.0,
     )
     single_result = single_model.optimize_stock_solutions(
         quantum=0.1,
@@ -296,6 +304,7 @@ def test_two_stock_resolution_search_can_rescue_a_colliding_feasible_single_plan
         [0.5, 1.0, 5.0, 20.0],
         printed_volume_nl=240.0,
         include_other=False,
+        max_stock_conc=2000.0,
     )
     two_result = two_model.optimize_stock_solutions(
         quantum=0.1,
@@ -319,11 +328,103 @@ def test_two_stock_resolution_search_can_rescue_a_colliding_feasible_single_plan
     assert two_result["two_stock_candidates_generated"] > 0
     assert two_result["two_stock_candidates_retained"] > 0
     assert two_result["two_stock_target_row_cache_reuses"] > 0
-    assert two_model.plans_per_option[("R", None)]["n_stocks"] == 2
+    plan = two_model.plans_per_option[("R", None)]
+    assert plan["n_stocks"] == 2
+    assert sorted(
+        stock["stock_concentration"] for stock in plan["stocks"]
+    ) == pytest.approx([25.0, 2000.0])
     assert len({
         row["achieved_final"]
         for row in two_model.get_target_preview_map()[("R", None)]
     }) == 4
+
+
+def test_two_stock_rescue_precedes_single_candidate_preprocessing(monkeypatch):
+    em = _make_resolution_reproduction_model(
+        [0.5, 1.0, 5.0, 20.0],
+        printed_volume_nl=240.0,
+        include_other=False,
+        max_stock_conc=2000.0,
+    )
+    original_two = em._enumerate_two_stock_candidates_with_meta
+    phase = {"two_started": False, "pre_two_clock_checks": 0}
+
+    def fake_clock():
+        if phase["two_started"]:
+            return 0.0
+        phase["pre_two_clock_checks"] += 1
+        # The former single-stock pre-pass needed more checks than this and
+        # therefore exhausted the deadline before entering pair generation.
+        return 0.0 if phase["pre_two_clock_checks"] <= 12 else 1.0
+
+    def track_two_stock_generation(*args, **kwargs):
+        phase["two_started"] = True
+        return original_two(*args, **kwargs)
+
+    monkeypatch.setattr(em, "_stock_optimizer_monotonic", fake_clock)
+    monkeypatch.setattr(
+        em,
+        "_enumerate_two_stock_candidates_with_meta",
+        track_two_stock_generation,
+    )
+
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=True,
+    )
+
+    assert phase["two_started"] is True
+    assert phase["pre_two_clock_checks"] <= 12
+    assert result["two_stock_pairs_evaluated"] > 0
+    assert result["distinct_level_loss"] == 0
+    assert result["stock_allocation_improved_seed"] is True
+    assert result["stock_allocation_elapsed_ms"] == pytest.approx(0.0)
+    assert em.plans_per_option[("R", None)]["n_stocks"] == 2
+
+
+def test_two_stock_probe_timeout_returns_untouched_seed(monkeypatch):
+    em = _make_resolution_reproduction_model(
+        [0.5, 1.0, 5.0, 20.0],
+        printed_volume_nl=240.0,
+        include_other=False,
+        max_stock_conc=2000.0,
+    )
+    original_two = em._enumerate_two_stock_candidates_with_meta
+    phase = {"two_started": False}
+
+    def fake_clock():
+        return 1.0 if phase["two_started"] else 0.0
+
+    def track_two_stock_generation(*args, **kwargs):
+        phase["two_started"] = True
+        return original_two(*args, **kwargs)
+
+    monkeypatch.setattr(em, "_stock_optimizer_monotonic", fake_clock)
+    monkeypatch.setattr(
+        em,
+        "_enumerate_two_stock_candidates_with_meta",
+        track_two_stock_generation,
+    )
+
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=True,
+    )
+
+    assert phase["two_started"] is True
+    assert result["best"] is True
+    assert result["two_stock_pairs_evaluated"] == 0
+    assert result["stock_allocation_limit_reasons"] == ["time_budget"]
+    assert result["two_stock_search_limited_keys"] == [("R", None)]
+    assert result["stock_allocation_stop_reason"] == "time_budget"
+    assert result["stock_allocation_improved_seed"] is False
+    assert result["stock_allocation_time_to_best_ms"] is None
+    assert result["optimizer_selected_rank"] == result["optimizer_seed_rank"]
+    assert em.plans_per_option[("R", None)]["n_stocks"] == 1
 
 
 def _make_calibratable_two_stock_model():
@@ -331,6 +432,7 @@ def _make_calibratable_two_stock_model():
         [0.5, 1.0, 5.0, 20.0],
         printed_volume_nl=240.0,
         include_other=False,
+        max_stock_conc=2000.0,
     )
     result = em.optimize_stock_solutions(
         quantum=0.1,
@@ -700,14 +802,30 @@ def test_two_stock_enumeration_uses_shared_resolution_deadline(monkeypatch):
         printed_volume_nl=240.0,
         include_other=False,
     )
-    calls = 0
+    original_two = em._enumerate_two_stock_candidates_with_meta
+    phase = {"zero_loss_candidate_validated": False}
 
     def fake_clock():
-        nonlocal calls
-        calls += 1
-        return 0.0 if calls < 80 else 1.0
+        return 1.0 if phase["zero_loss_candidate_validated"] else 0.0
+
+    def stop_after_validated_improvement(*args, **kwargs):
+        original_callback = kwargs["candidate_callback"]
+
+        def tracked_callback(plan):
+            stop_requested = original_callback(plan)
+            if int(plan.lost_levels) == 0:
+                phase["zero_loss_candidate_validated"] = True
+            return stop_requested
+
+        kwargs["candidate_callback"] = tracked_callback
+        return original_two(*args, **kwargs)
 
     monkeypatch.setattr(em, "_stock_optimizer_monotonic", fake_clock)
+    monkeypatch.setattr(
+        em,
+        "_enumerate_two_stock_candidates_with_meta",
+        stop_after_validated_improvement,
+    )
 
     result = em.optimize_stock_solutions(
         quantum=0.1,
@@ -717,12 +835,19 @@ def test_two_stock_enumeration_uses_shared_resolution_deadline(monkeypatch):
     )
 
     assert result["best"] is True
-    assert result["distinct_level_loss"] == 1
+    assert phase["zero_loss_candidate_validated"] is True
+    assert result["distinct_level_loss"] == 0
+    assert result["two_stock_pairs_evaluated"] > 0
     assert result["stock_allocation_limit_reasons"] == ["time_budget"]
     assert result["two_stock_search_limited_keys"] == [("R", None)]
-    assert em.plans_per_option[("R", None)]["n_stocks"] == 1
+    assert em.plans_per_option[("R", None)]["n_stocks"] == 2
     assert result["stock_allocation_stop_reason"] == "time_budget"
-    assert result["stock_allocation_improved_seed"] is False
+    assert result["stock_allocation_improved_seed"] is True
+    assert result["stock_allocation_time_to_best_ms"] is not None
+    assert (
+        result["optimizer_selected_rank"]["total_distinct_level_loss"]
+        < result["optimizer_seed_rank"]["total_distinct_level_loss"]
+    )
 
 
 def test_two_stock_enumeration_returns_partial_candidates_at_deadline():
@@ -1462,17 +1587,17 @@ def test_design_round_trips_allow_two_and_max_stock_settings():
     assert restored.factors[0].options[0].max_stock_conc == pytest.approx(12.5)
 
 
-def test_uploaded_design_with_allow_two_skips_two_stock_search_when_single_stock_suffices(monkeypatch):
-    em = _make_model(target_volume_nl=500.0, final_volume_nl=500.0)
+def test_uploaded_design_with_allow_two_skips_two_stock_search_when_seed_suffices(monkeypatch):
     df = pd.DataFrame(
         {
             "well_id": [f"A{i + 1}" for i in range(20)],
-            "pmix mg/ml": [round(0.05 * (i + 1), 3) for i in range(20)],
-            "ribosome uM": [round(0.07 * (i + 1), 3) for i in range(20)],
-            "trna ug/ul": [round(0.09 * (i + 1), 3) for i in range(20)],
-            "magnesium_acetate mM": [round(0.11 * (i + 1), 3) for i in range(20)],
+            "pmix mg/ml": [0.05] * 20,
+            "ribosome uM": [0.07] * 20,
+            "trna ug/ul": [0.09] * 20,
+            "magnesium_acetate mM": [0.11] * 20,
         }
     )
+    em = _make_model(target_volume_nl=500.0, final_volume_nl=500.0)
     em.set_uploaded_design_from_dataframe(
         df,
         units_default="",
@@ -1491,6 +1616,8 @@ def test_uploaded_design_with_allow_two_skips_two_stock_search_when_single_stock
     result = em.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
 
     assert result["best"]
+    assert result["optimizer_seed_distinct_level_loss"] == 0
+    assert result["distinct_level_loss"] == 0
     assert calls == []
     assert result["two_stock_keys"] == []
     assert result["two_stock_search_limited_keys"] == []

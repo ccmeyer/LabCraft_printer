@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -1850,15 +1849,15 @@ def test_optimization_status_distinguishes_time_and_state_limits(qapp):
 
 def test_clear_imported_design_returns_to_an_empty_manual_editor(monkeypatch, qapp):
     dialog = _build_real_dialog()
-    sample_design = (
-        Path(__file__).resolve().parents[1]
-        / "FreeRTOS-interface"
-        / "Experiments"
-        / "CSV_upload_examples"
-        / "sample_target_concentrations.csv"
+    sample_design = pd.DataFrame(
+        {
+            "well": ["A1", "A2"],
+            "[tRNA] mM": [0.0, 1.0],
+        }
     )
     dialog.model.set_uploaded_design_from_dataframe(
-        pd.read_csv(sample_design), source_path=str(sample_design)
+        sample_design,
+        source_path="synthetic_clear_import.csv",
     )
     dialog.model.set_additional_conditions(
         [{"label": "Control", "replicates": 2, "targets": {("tRNA", None): 0.0}}]
