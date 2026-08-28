@@ -8809,20 +8809,27 @@ class ExperimentModel(QObject):
             worst_nonfill = max(worst_nonfill, used_nL)
 
             # fill reagent for this reaction
-            printed_tolerance = float(
-                self.metadata.get("printed_volume_tolerance_nL", 0.0) or 0.0
-            )
-            accepted_volume = min(
-                float(self.metadata.get("final_reaction_volume_nL", V))
-                + printed_tolerance,
-                V + printed_tolerance,
-            )
-            fill_drops = self._bounded_fill_count(
-                target_printed_volume_nL=V,
-                accepted_volume_nL=accepted_volume,
-                nonfill_volume_nL=used_nL,
-                fill_volume_nL=fill_dv,
-            )
+            if "intended_fill_droplet_volume_nL" in self.metadata:
+                # An applied fill calibration is authoritative measured-volume
+                # evidence. Preserve ordinary nearest-drop quantization across
+                # regeneration and reload; its volume threshold is warning-only.
+                remaining_fill_volume = max(0.0, V - used_nL)
+                fill_drops = max(0, int(round(remaining_fill_volume / fill_dv)))
+            else:
+                printed_tolerance = float(
+                    self.metadata.get("printed_volume_tolerance_nL", 0.0) or 0.0
+                )
+                accepted_volume = min(
+                    float(self.metadata.get("final_reaction_volume_nL", V))
+                    + printed_tolerance,
+                    V + printed_tolerance,
+                )
+                fill_drops = self._bounded_fill_count(
+                    target_printed_volume_nL=V,
+                    accepted_volume_nL=accepted_volume,
+                    nonfill_volume_nL=used_nL,
+                    fill_volume_nL=fill_dv,
+                )
             fill_total_drops += fill_drops
 
             rows.append({
@@ -9138,9 +9145,190 @@ class ExperimentModel(QObject):
             tolerance = 0.0
         if not math.isfinite(tolerance) or tolerance < 0.0:
             tolerance = 0.0
-        printed = min(printed, final)
-        accepted = min(final + tolerance, printed + tolerance)
-        return printed, final, accepted
+        warning_threshold = printed + tolerance
+        return printed, final, warning_threshold
+
+
+    def _build_calibration_volume_warning(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        target_printed_volume_nL: float,
+        design_optimization_tolerance_nL: float,
+        final_reaction_volume_nL: float,
+    ) -> dict | None:
+        """Build deterministic, non-blocking evidence for calibrated volume excess."""
+        target = float(target_printed_volume_nL)
+        tolerance = max(0.0, float(design_optimization_tolerance_nL))
+        final = float(final_reaction_volume_nL)
+        warning_threshold = target + tolerance
+        if any(
+            not math.isfinite(value)
+            for value in (target, tolerance, final, warning_threshold)
+        ):
+            raise RuntimeError("Calibration volume-warning inputs must be finite.")
+
+        affected_rows: list[dict[str, Any]] = []
+        for index, raw_row in enumerate(rows):
+            row = dict(raw_row)
+            total = float(row.get("total_volume_nL"))
+            if not math.isfinite(total) or total < 0.0:
+                raise RuntimeError(
+                    "Calibrated reaction totals must be finite and nonnegative."
+                )
+            if total <= warning_threshold + 1e-9:
+                continue
+            excess = total - warning_threshold
+            well_id = row.get("well_id")
+            reaction_id = row.get("reaction_id")
+            row_id = (
+                row.get("row_id")
+                or well_id
+                or reaction_id
+                or f"reaction-{index + 1}"
+            )
+            affected_rows.append(
+                {
+                    "row_id": str(row_id),
+                    "well_id": None if well_id in (None, "") else str(well_id),
+                    "reaction_id": (
+                        None if reaction_id in (None, "") else str(reaction_id)
+                    ),
+                    "total_volume_nL": total,
+                    "excess_nL": excess,
+                    "exceeds_final_reaction_volume": bool(total > final + 1e-9),
+                }
+            )
+
+        if not affected_rows:
+            return None
+        return {
+            "code": "calibration_volume_tolerance_exceeded",
+            "target_printed_volume_nL": target,
+            "design_optimization_tolerance_nL": tolerance,
+            "warning_threshold_nL": warning_threshold,
+            "final_reaction_volume_nL": final,
+            "affected_row_count": len(affected_rows),
+            "max_total_volume_nL": max(
+                row["total_volume_nL"] for row in affected_rows
+            ),
+            "max_excess_nL": max(row["excess_nL"] for row in affected_rows),
+            "affected_rows": affected_rows,
+        }
+
+
+    def _calibration_volume_warning_for_execution_counts(
+        self,
+        plan,
+        target_counts_by_well: Mapping[str, Mapping[str, int]],
+        *,
+        effective_volume_overrides_nL: Mapping[str, float] | None = None,
+    ) -> dict | None:
+        volumes = {
+            stock.stock_id: float(stock.effective_volume_nL)
+            for stock in plan.stocks
+        }
+        for stock_id, value in dict(effective_volume_overrides_nL or {}).items():
+            stock_id = str(stock_id)
+            if stock_id not in volumes:
+                raise RuntimeError(
+                    f"Calibration volume override references unknown stock {stock_id!r}."
+                )
+            volumes[stock_id] = float(value)
+
+        rows = []
+        for well in plan.wells:
+            counts = target_counts_by_well.get(well.well_id)
+            if not isinstance(counts, Mapping):
+                raise RuntimeError(
+                    f"Calibration target counts are missing well {well.well_id!r}."
+                )
+            total = 0.0
+            for stock_id, raw_count in counts.items():
+                if stock_id not in volumes:
+                    raise RuntimeError(
+                        f"Calibration target counts reference unknown stock {stock_id!r}."
+                    )
+                if (
+                    isinstance(raw_count, bool)
+                    or int(raw_count) != raw_count
+                    or int(raw_count) < 0
+                ):
+                    raise RuntimeError(
+                        "Calibrated target counts must be nonnegative integers."
+                    )
+                total += int(raw_count) * volumes[stock_id]
+            rows.append(
+                {
+                    "row_id": well.well_id,
+                    "well_id": well.well_id,
+                    "reaction_id": well.reaction_id,
+                    "total_volume_nL": total,
+                }
+            )
+        return self._build_calibration_volume_warning(
+            rows,
+            target_printed_volume_nL=plan.volume_basis.target_printed_volume_nL,
+            design_optimization_tolerance_nL=(
+                plan.volume_basis.design_optimization_tolerance_nL
+            ),
+            final_reaction_volume_nL=plan.volume_basis.final_reaction_volume_nL,
+        )
+
+
+    def _calibration_volume_warning_for_execution_plan(self, plan) -> dict | None:
+        target_counts = {
+            well.well_id: {
+                dispense.stock_id: int(dispense.target_dispenses)
+                for dispense in well.dispenses
+            }
+            for well in plan.wells
+        }
+        return self._calibration_volume_warning_for_execution_counts(
+            plan,
+            target_counts,
+        )
+
+
+    def _calibration_volume_warning_for_generated_reactions(self) -> dict | None:
+        frame = self._reactions_df
+        if frame is None or frame.empty:
+            return None
+        if (
+            "nonfill_volume_nL" not in frame.columns
+            or "fill_drops" not in frame.columns
+        ):
+            raise RuntimeError(
+                "Generated reactions do not expose calibrated volume totals."
+            )
+        printed, final, warning_threshold = self._calibration_volume_basis()
+        tolerance = warning_threshold - printed
+        fill_volume = float(
+            self.metadata.get(
+                "fill_droplet_volume_nL",
+                self._default_fill_droplet_volume_nl(),
+            )
+        )
+        rows = []
+        for index, record in enumerate(frame.to_dict("records")):
+            reaction_id = f"R{index + 1}"
+            rows.append(
+                {
+                    "row_id": reaction_id,
+                    "well_id": None,
+                    "reaction_id": reaction_id,
+                    "total_volume_nL": (
+                        float(record["nonfill_volume_nL"])
+                        + int(record["fill_drops"]) * fill_volume
+                    ),
+                }
+            )
+        return self._build_calibration_volume_warning(
+            rows,
+            target_printed_volume_nL=printed,
+            design_optimization_tolerance_nL=tolerance,
+            final_reaction_volume_nL=final,
+        )
 
 
     def _counts_for_plan_target(
@@ -9305,6 +9493,28 @@ class ExperimentModel(QObject):
         )
         return min(desired_count, maximum_count)
 
+    def _calibration_fill_count(
+        self,
+        *,
+        target_printed_volume_nL: float,
+        warning_threshold_nL: float,
+        nonfill_volume_nL: float,
+        fill_volume_nL: float,
+        fill_is_calibrated: bool,
+    ) -> int:
+        if fill_is_calibrated:
+            remaining = max(
+                0.0,
+                float(target_printed_volume_nL) - float(nonfill_volume_nL),
+            )
+            return max(0, int(round(remaining / float(fill_volume_nL))))
+        return self._bounded_fill_count(
+            target_printed_volume_nL=target_printed_volume_nL,
+            accepted_volume_nL=warning_threshold_nL,
+            nonfill_volume_nL=nonfill_volume_nL,
+            fill_volume_nL=fill_volume_nL,
+        )
+
 
     def _requantize_fixed_two_stock_group(
         self,
@@ -9358,7 +9568,7 @@ class ExperimentModel(QObject):
         except Exception as exc:
             return {"ok": False, "code": "invalid_ejection_volume", "reason": str(exc)}
 
-        printed_volume, final_volume, accepted_volume = self._calibration_volume_basis()
+        printed_volume, final_volume, warning_threshold = self._calibration_volume_basis()
         if final_volume <= 0.0:
             return {"ok": False, "code": "invalid_final_volume", "reason": "The final reaction volume must be positive."}
         volumes = [float(stock.get("droplet_volume_nL")) for stock in stocks]
@@ -9384,9 +9594,9 @@ class ExperimentModel(QObject):
             return {"ok": False, "code": "missing_targets", "reason": "The reagent has no requested targets."}
 
         try:
-            target_limits, run_rows = self._calibration_target_volume_limits(
+            _target_limits, run_rows = self._calibration_target_volume_limits(
                 key,
-                accepted_volume_nL=accepted_volume,
+                accepted_volume_nL=warning_threshold,
                 excluded_stock_ids=stock_ids,
             )
         except Exception as exc:
@@ -9415,6 +9625,9 @@ class ExperimentModel(QObject):
                 if fill_candidates
                 else float(self._default_fill_droplet_volume_nl())
             )
+            fill_is_calibrated = bool(
+                fill_candidates and fill_candidates[0].calibration_record_key
+            )
         else:
             fill_available = True
             fill_volume = float(
@@ -9422,6 +9635,9 @@ class ExperimentModel(QObject):
                     "fill_droplet_volume_nL",
                     self._default_fill_droplet_volume_nl(),
                 )
+            )
+            fill_is_calibrated = bool(
+                "intended_fill_droplet_volume_nL" in self.metadata
             )
         if not math.isfinite(fill_volume) or fill_volume <= 0.0:
             return {
@@ -9434,21 +9650,17 @@ class ExperimentModel(QObject):
         for run_row in run_rows:
             rows_by_target.setdefault(run_row["target_key"], []).append(run_row)
 
-        def _pair_fits_rows(target_key: float, pair_volume: float) -> bool:
+        def _pair_has_available_fill(target_key: float, pair_volume: float) -> bool:
             for run_row in rows_by_target.get(target_key, []):
                 nonfill = float(run_row["other_nonfill_volume_nL"]) + pair_volume
-                if nonfill > accepted_volume + 1e-9:
-                    return False
-                fill_count = self._bounded_fill_count(
+                fill_count = self._calibration_fill_count(
                     target_printed_volume_nL=printed_volume,
-                    accepted_volume_nL=accepted_volume,
+                    warning_threshold_nL=warning_threshold,
                     nonfill_volume_nL=nonfill,
                     fill_volume_nL=fill_volume,
+                    fill_is_calibrated=fill_is_calibrated,
                 )
                 if not fill_available and fill_count > 0:
-                    return False
-                total = nonfill + fill_count * fill_volume
-                if total > accepted_volume + 1e-9:
                     return False
             return True
 
@@ -9459,12 +9671,6 @@ class ExperimentModel(QObject):
         for target_final in ordered_targets:
             target_key = self._normalize_target_key(target_final)
             target_add = max(0.0, float(target_final) - starting)
-            volume_limit = min(
-                accepted_volume,
-                target_limits.get(target_key, accepted_volume),
-            )
-            if volume_limit < -1e-9:
-                return {"ok": False, "code": "row_volume_budget_exceeded", "reason": f"Other reagents already exceed the printed-volume limit for target {target_final:.6g}."}
             current_counts = self._counts_for_plan_target(key, target_final, plan)
             current_achieved = sum(
                 int(count) * concentrations[index] * old_volumes[index] / final_volume
@@ -9491,14 +9697,25 @@ class ExperimentModel(QObject):
                 ])
                 continue
 
-            a_max = max(0, int(math.floor((volume_limit + 1e-12) / volumes[0])))
+            concentration_limit = target_add + tolerance
+            a_max = max(
+                0,
+                int(math.floor((concentration_limit + 1e-12) / deltas[0])),
+            )
             by_achieved: dict[float, dict[str, Any]] = {}
             capped = False
             for a in range(a_max + 1):
-                remaining_volume = volume_limit - a * volumes[0]
-                if remaining_volume < -1e-9:
+                remaining_concentration = concentration_limit - a * deltas[0]
+                if remaining_concentration < -1e-9:
                     continue
-                b_max = max(0, int(math.floor((remaining_volume + 1e-12) / volumes[1])))
+                b_max = max(
+                    0,
+                    int(
+                        math.floor(
+                            (remaining_concentration + 1e-12) / deltas[1]
+                        )
+                    ),
+                )
                 raw_b = (target_add - a * deltas[0]) / deltas[1]
                 b_values = {
                     0,
@@ -9522,7 +9739,7 @@ class ExperimentModel(QObject):
                     if error > tolerance:
                         continue
                     pair_volume = a * volumes[0] + b * volumes[1]
-                    if not _pair_fits_rows(target_key, pair_volume):
+                    if not _pair_has_available_fill(target_key, pair_volume):
                         continue
                     candidate = {
                         "counts": (int(a), int(b)),
@@ -9676,17 +9893,45 @@ class ExperimentModel(QObject):
             })
 
         worst_nonfill = 0.0
+        volume_rows: list[dict[str, Any]] = []
         for run_row in run_rows:
             counts = mapping_by_target[run_row["target_key"]]
             pair_volume = counts[0] * volumes[0] + counts[1] * volumes[1]
             nonfill = float(run_row["other_nonfill_volume_nL"]) + pair_volume
-            if nonfill > accepted_volume + 1e-9:
+            fill_count = self._calibration_fill_count(
+                target_printed_volume_nL=printed_volume,
+                warning_threshold_nL=warning_threshold,
+                nonfill_volume_nL=nonfill,
+                fill_volume_nL=fill_volume,
+                fill_is_calibrated=fill_is_calibrated,
+            )
+            if not fill_available and fill_count > 0:
                 return {
                     "ok": False,
-                    "code": "row_volume_budget_exceeded",
-                    "reason": f"Reaction row {run_row['index'] + 1} would require {nonfill:.3f} nL, above the accepted {accepted_volume:.3f} nL limit.",
+                    "code": "missing_fill_stock",
+                    "reason": "The calibrated mapping would require a fill stock that is unavailable.",
                 }
+            total = nonfill + fill_count * fill_volume
+            reaction_id = (
+                run_row.get("reaction_id")
+                or f"R{int(run_row['index']) + 1}"
+            )
+            volume_rows.append(
+                {
+                    "row_id": run_row.get("well_id") or reaction_id,
+                    "well_id": run_row.get("well_id"),
+                    "reaction_id": reaction_id,
+                    "total_volume_nL": total,
+                }
+            )
             worst_nonfill = max(worst_nonfill, nonfill)
+
+        volume_warning = self._build_calibration_volume_warning(
+            volume_rows,
+            target_printed_volume_nL=printed_volume,
+            design_optimization_tolerance_nL=warning_threshold - printed_volume,
+            final_reaction_volume_nL=final_volume,
+        )
 
         return {
             "ok": True,
@@ -9714,9 +9959,10 @@ class ExperimentModel(QObject):
             ),
             "worst_nonfill_volume_nL": float(worst_nonfill),
             "printed_volume_nL": float(printed_volume),
-            "accepted_volume_nL": float(accepted_volume),
+            "warning_threshold_nL": float(warning_threshold),
             "final_volume_nL": float(final_volume),
             "pair_evaluations": int(pair_evaluations),
+            "volume_warning": volume_warning,
             "source_plan": plan,
         }
 
@@ -9797,7 +10043,90 @@ class ExperimentModel(QObject):
                     "units": units,
                 })
                 max_printed_nL_new = max(max_printed_nL_new, printed_nL_new)
-            return {"ok": True, "n_stocks": 1, "rows": rows, "max_printed_nL_new": max_printed_nL_new, "units": units, "new_droplet_nL": float(new_droplet_nL)}
+            execution_plan = self.get_execution_plan_snapshot()
+            if (
+                execution_plan is not None
+                and self.get_execution_plan_source() != "legacy_reconstruction"
+            ):
+                matching = [
+                    stock
+                    for stock in execution_plan.stocks
+                    if stock.factor_name == key[0] and stock.option_name == key[1]
+                ]
+                if len(matching) != 1:
+                    return {
+                        "ok": False,
+                        "reason": "The calibrated reagent does not map to exactly one execution stock.",
+                    }
+                target_counts = self._calibrated_target_counts(
+                    execution_plan,
+                    matching[0],
+                    float(new_droplet_nL),
+                )
+                volume_warning = self._calibration_volume_warning_for_execution_counts(
+                    execution_plan,
+                    target_counts,
+                    effective_volume_overrides_nL={
+                        matching[0].stock_id: float(new_droplet_nL),
+                    },
+                )
+            else:
+                printed, final, warning_threshold = self._calibration_volume_basis()
+                _limits, run_rows = self._calibration_target_volume_limits(
+                    key,
+                    accepted_volume_nL=warning_threshold,
+                )
+                rows_by_target = {
+                    self._normalize_target_key(row["target_final"]): row
+                    for row in rows
+                }
+                fill_volume = float(
+                    self.metadata.get(
+                        "fill_droplet_volume_nL",
+                        self._default_fill_droplet_volume_nl(),
+                    )
+                )
+                fill_is_calibrated = bool(
+                    "intended_fill_droplet_volume_nL" in self.metadata
+                )
+                volume_rows = []
+                for run_row in run_rows:
+                    preview_row = rows_by_target[run_row["target_key"]]
+                    nonfill = (
+                        float(run_row["other_nonfill_volume_nL"])
+                        + int(preview_row["drops"]) * float(new_droplet_nL)
+                    )
+                    fill_count = self._calibration_fill_count(
+                        target_printed_volume_nL=printed,
+                        warning_threshold_nL=warning_threshold,
+                        nonfill_volume_nL=nonfill,
+                        fill_volume_nL=fill_volume,
+                        fill_is_calibrated=fill_is_calibrated,
+                    )
+                    reaction_id = f"R{int(run_row['index']) + 1}"
+                    volume_rows.append(
+                        {
+                            "row_id": reaction_id,
+                            "well_id": None,
+                            "reaction_id": reaction_id,
+                            "total_volume_nL": nonfill + fill_count * fill_volume,
+                        }
+                    )
+                volume_warning = self._build_calibration_volume_warning(
+                    volume_rows,
+                    target_printed_volume_nL=printed,
+                    design_optimization_tolerance_nL=warning_threshold - printed,
+                    final_reaction_volume_nL=final,
+                )
+            return {
+                "ok": True,
+                "n_stocks": 1,
+                "rows": rows,
+                "max_printed_nL_new": max_printed_nL_new,
+                "units": units,
+                "new_droplet_nL": float(new_droplet_nL),
+                "volume_warning": volume_warning,
+            }
 
         # Two stock legs correspond to separate physical stocks/heads.  A
         # measured volume applies to exactly one leg; the companion's volume is
@@ -11077,6 +11406,13 @@ class ExperimentModel(QObject):
             _restore()
             raise
 
+        volume_warning = self._calibration_volume_warning_for_generated_reactions()
+        self._audit_calibration_volume_warning(
+            volume_warning,
+            stock_id=calibrated_stock_id,
+            calibration_record=record,
+        )
+
         calibrated_rows = [
             row for row in result["rows"]
             if tuple(row["old_drops"]) != tuple(row["drops"])
@@ -11110,6 +11446,7 @@ class ExperimentModel(QObject):
                 for row in calibrated_rows
             ],
             "saved_experiment": bool(saved_experiment),
+            "volume_warning": volume_warning,
             "applied_imaging_calibration_recorded": record is not None,
         }
 
@@ -11217,6 +11554,7 @@ class ExperimentModel(QObject):
                     else None
                 ),
                 "changed_target_count": result.get("changed_target_count"),
+                "volume_warning": copy.deepcopy(result.get("volume_warning")),
                 "count_changes": copy.deepcopy(result.get("count_changes") or []),
             }
         key = (factor_name, option_name)
@@ -11357,12 +11695,13 @@ class ExperimentModel(QObject):
         # mark unsaved since design object changed
         self.unsaved_changes = True
         applied_recorded = False
+        record = None
         if applied_calibration:
             record_kwargs = dict(applied_calibration)
             record_kwargs.setdefault("printing_mode", applied_printing_mode)
             record_kwargs.setdefault("original_printing_mode", original_printing_mode)
             record_kwargs.setdefault("applied_printing_mode", applied_printing_mode)
-            self.record_applied_imaging_calibration(
+            record = self.record_applied_imaging_calibration(
                 factor_name=factor_name,
                 option_name=option_name,
                 is_fill=False,
@@ -11375,6 +11714,20 @@ class ExperimentModel(QObject):
         if getattr(self, "experiment_file_path", None):
             self.save_experiment()
             saved_experiment = True
+
+        warning_getter = getattr(
+            self,
+            "_calibration_volume_warning_for_generated_reactions",
+            None,
+        )
+        volume_warning = warning_getter() if callable(warning_getter) else None
+        warning_auditor = getattr(self, "_audit_calibration_volume_warning", None)
+        if callable(warning_auditor):
+            warning_auditor(
+                volume_warning,
+                stock_id=(record or {}).get("stock_id"),
+                calibration_record=record,
+            )
 
         return {
             "factor": factor_name,
@@ -11390,6 +11743,7 @@ class ExperimentModel(QObject):
             "worst_nonfill_after_nL": float(self._last_worst_nonfill_volume_nL or 0.0),
             "saved_experiment": saved_experiment,
             "applied_imaging_calibration_recorded": applied_recorded,
+            "volume_warning": volume_warning,
         }
 
 
@@ -14440,6 +14794,51 @@ class ExperimentModel(QObject):
         if callable(recorder):
             recorder(event_type, summary, details=details)
 
+    def _audit_calibration_volume_warning(
+        self,
+        volume_warning: Mapping[str, Any] | None,
+        *,
+        stock_id: str | None,
+        calibration_record: Mapping[str, Any] | None = None,
+        plan=None,
+    ) -> None:
+        if not volume_warning:
+            return
+        manager = getattr(self, "_calibration_manager", None)
+        owner = getattr(manager, "model", None)
+        recorder = getattr(owner, "record_experiment_audit_event", None)
+        if not callable(recorder):
+            return
+        record = dict(calibration_record or {})
+        details = {
+            "stock_id": None if stock_id in (None, "") else str(stock_id),
+            "calibration_record_id": record.get("record_id"),
+            "result_id": record.get("result_id"),
+            "result_sha256": record.get("result_sha256"),
+            "process_run_id": record.get("process_run_id"),
+            "run_id": record.get("run_id"),
+            "volume_warning": copy.deepcopy(dict(volume_warning)),
+        }
+        if plan is not None:
+            details.update(
+                {
+                    "plan_id": plan.plan_id,
+                    "plan_revision": plan.plan_revision,
+                }
+            )
+        try:
+            recorder(
+                "calibration_volume_tolerance_exceeded",
+                "Calibration applied with volume warning",
+                details=details,
+                level="warning",
+            )
+        except Exception as exc:
+            print(
+                "[ExperimentAudit] Failed to record calibration volume warning: "
+                f"{exc}"
+            )
+
     def lock_execution_plan(
         self,
         reason: str,
@@ -15170,11 +15569,9 @@ class ExperimentModel(QObject):
             self._normalize_target_key(float(target)): tuple(int(value) for value in counts)
             for target, counts in requantized["mapping_by_target"].items()
         }
-        accepted = min(
-            float(plan.volume_basis.final_reaction_volume_nL)
-            + float(plan.volume_basis.design_optimization_tolerance_nL),
+        warning_threshold = (
             float(plan.volume_basis.target_printed_volume_nL)
-            + float(plan.volume_basis.design_optimization_tolerance_nL),
+            + float(plan.volume_basis.design_optimization_tolerance_nL)
         )
         results: dict[str, dict[str, int]] = {}
         for well in plan.wells:
@@ -15204,20 +15601,16 @@ class ExperimentModel(QObject):
                 for stock_id, count in counts.items()
                 if fill_stock is None or stock_id != fill_stock.stock_id
             )
-            if nonfill > accepted + 1e-9:
-                raise RuntimeError(
-                    f"Calibrating the two-stock reagent would require {nonfill:.3f} nL "
-                    f"in well {well.well_id}, above the accepted {accepted:.3f} nL limit."
-                )
             if fill_stock is None:
                 default_fill_volume = float(self._default_fill_droplet_volume_nl())
-                required_fill = self._bounded_fill_count(
+                required_fill = self._calibration_fill_count(
                     target_printed_volume_nL=float(
                         plan.volume_basis.target_printed_volume_nL
                     ),
-                    accepted_volume_nL=accepted,
+                    warning_threshold_nL=warning_threshold,
                     nonfill_volume_nL=nonfill,
                     fill_volume_nL=default_fill_volume,
+                    fill_is_calibrated=False,
                 )
                 if required_fill > 0:
                     raise RuntimeError(
@@ -15226,24 +15619,19 @@ class ExperimentModel(QObject):
                     )
             else:
                 fill_volume = volumes[fill_stock.stock_id]
-                fill_count = self._bounded_fill_count(
+                fill_count = self._calibration_fill_count(
                     target_printed_volume_nL=float(
                         plan.volume_basis.target_printed_volume_nL
                     ),
-                    accepted_volume_nL=accepted,
+                    warning_threshold_nL=warning_threshold,
                     nonfill_volume_nL=nonfill,
                     fill_volume_nL=fill_volume,
+                    fill_is_calibrated=bool(fill_stock.calibration_record_key),
                 )
                 if fill_count > 0 or fill_stock.stock_id in counts:
                     counts[fill_stock.stock_id] = fill_count
                 else:
                     counts.pop(fill_stock.stock_id, None)
-                total_volume = nonfill + fill_count * fill_volume
-                if total_volume > accepted + 1e-9:
-                    raise RuntimeError(
-                        f"Fill quantization would require {total_volume:.3f} nL in well "
-                        f"{well.well_id}, above the accepted {accepted:.3f} nL limit."
-                    )
             results[well.well_id] = counts
         return results
 
@@ -15499,7 +15887,12 @@ class ExperimentModel(QObject):
                 "full_validation_count": 1,
             }
             self.set_execution_plan_sync_error(None)
-            return {"plan": plan, "record": record.to_dict(), "status": "reused"}
+            return {
+                "plan": plan,
+                "record": record.to_dict(),
+                "status": "reused",
+                "volume_warning": self._calibration_volume_warning_for_execution_plan(plan),
+            }
 
         requantized = None
         if len(identity_matches) == 2:
@@ -15554,6 +15947,7 @@ class ExperimentModel(QObject):
             target_counts_by_well=target_counts,
             timestamp_utc=record.recorded_at_utc,
         )
+        volume_warning = self._calibration_volume_warning_for_execution_plan(candidate)
         if requantized is not None:
             original_by_id = {item.stock_id: item for item in plan.stocks}
             candidate_by_id = {item.stock_id: item for item in candidate.stocks}
@@ -15637,7 +16031,18 @@ class ExperimentModel(QObject):
                 "new_effective_volume_nL": float(new_effective_volume_nL),
             },
         )
-        response = {"plan": candidate, "record": record.to_dict(), "status": status}
+        self._audit_calibration_volume_warning(
+            volume_warning,
+            stock_id=stock_id,
+            calibration_record=record.to_dict(),
+            plan=candidate,
+        )
+        response = {
+            "plan": candidate,
+            "record": record.to_dict(),
+            "status": status,
+            "volume_warning": volume_warning,
+        }
         if requantized is not None:
             changed_rows = [
                 row
@@ -16527,6 +16932,13 @@ class ExperimentModel(QObject):
             total_new = sum(
                 counts.get(fill_stock.stock_id, 0) for counts in new_counts.values()
             )
+            volume_warning = self._calibration_volume_warning_for_execution_counts(
+                plan,
+                new_counts,
+                effective_volume_overrides_nL={
+                    fill_stock.stock_id: new_fill_droplet_nL,
+                },
+            )
             printed_nL_old = float(total_old * fill_stock.effective_volume_nL)
             printed_nL_new = float(total_new * new_fill_droplet_nL)
             return {
@@ -16551,6 +16963,7 @@ class ExperimentModel(QObject):
                 "target_counts_by_well": new_counts,
                 "plan_id": plan.plan_id,
                 "plan_revision": plan.plan_revision,
+                "volume_warning": volume_warning,
             }
 
         # Ensure we have a current reactions frame with nonfill volumes.
@@ -16569,6 +16982,25 @@ class ExperimentModel(QObject):
         remaining = (V_print - df["nonfill_volume_nL"]).clip(lower=0.0)
         drops_old = (remaining / old_fill_dv).round().astype(int)
         drops_new = (remaining / new_fill_droplet_nL).round().astype(int)
+        printed, final, warning_threshold = self._calibration_volume_basis()
+        volume_warning = self._build_calibration_volume_warning(
+            [
+                {
+                    "row_id": f"R{index + 1}",
+                    "well_id": None,
+                    "reaction_id": f"R{index + 1}",
+                    "total_volume_nL": (
+                        float(nonfill) + int(drop_count) * new_fill_droplet_nL
+                    ),
+                }
+                for index, (nonfill, drop_count) in enumerate(
+                    zip(df["nonfill_volume_nL"], drops_new)
+                )
+            ],
+            target_printed_volume_nL=printed,
+            design_optimization_tolerance_nL=warning_threshold - printed,
+            final_reaction_volume_nL=final,
+        )
 
         total_old = int(drops_old.sum())
         total_new = int(drops_new.sum())
@@ -16597,6 +17029,7 @@ class ExperimentModel(QObject):
             "total_drops_old": total_old,
             "total_drops_new": total_new,
             "total_drops_delta": total_new - total_old,
+            "volume_warning": volume_warning,
         }
 
     def apply_fill_droplet_volume(
@@ -16681,6 +17114,7 @@ class ExperimentModel(QObject):
                 "saved_experiment": False,
                 "applied_imaging_calibration_recorded": True,
                 "execution_plan_revision": result["plan"].plan_revision,
+                "volume_warning": copy.deepcopy(result.get("volume_warning")),
                 "execution_plan_status": result["status"],
             }
         metadata = getattr(self, "metadata", {}) or {}
@@ -16731,12 +17165,13 @@ class ExperimentModel(QObject):
 
         self.unsaved_changes = True
         applied_recorded = False
+        record = None
         if applied_calibration:
             record_kwargs = dict(applied_calibration)
             record_kwargs.setdefault("printing_mode", applied_fill_mode)
             record_kwargs.setdefault("original_printing_mode", original_fill_mode)
             record_kwargs.setdefault("applied_printing_mode", applied_fill_mode)
-            self.record_applied_imaging_calibration(
+            record = self.record_applied_imaging_calibration(
                 factor_name=str(self.metadata.get("fill_reagent_name", "Water")),
                 option_name=None,
                 is_fill=True,
@@ -16749,6 +17184,23 @@ class ExperimentModel(QObject):
         if getattr(self, "experiment_file_path", None):
             self.save_experiment()
             saved_experiment = True
+        warning_getter = getattr(
+            self,
+            "_calibration_volume_warning_for_generated_reactions",
+            None,
+        )
+        volume_warning = (
+            warning_getter()
+            if callable(warning_getter)
+            else copy.deepcopy(prev.get("volume_warning"))
+        )
+        warning_auditor = getattr(self, "_audit_calibration_volume_warning", None)
+        if callable(warning_auditor):
+            warning_auditor(
+                volume_warning,
+                stock_id=(record or {}).get("stock_id"),
+                calibration_record=record,
+            )
         return {
             "old_fill_nL": old,
             "new_fill_nL": new_fill_droplet_nL,
@@ -16759,6 +17211,7 @@ class ExperimentModel(QObject):
             "total_drops_delta": prev.get("total_drops_delta"),
             "saved_experiment": saved_experiment,
             "applied_imaging_calibration_recorded": applied_recorded,
+            "volume_warning": volume_warning,
         }
 
 

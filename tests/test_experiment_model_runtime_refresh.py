@@ -407,6 +407,138 @@ def test_apply_droplet_volume_for_option_persists_effective_and_intended_volume(
     assert result["saved_experiment"] is True
     assert em.unsaved_changes is False
 
+def test_mutable_single_stock_calibration_above_threshold_warns_and_applies(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    em.factors = []
+    em.add_additive(
+        "single-warning",
+        [1.0],
+        "mM",
+        10.0,
+        forced_stock_conc=2.5,
+        printing_mode="droplet",
+    )
+    em.set_metadata(
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=1,
+        target_reaction_volume_nL=200.0,
+        final_reaction_volume_nL=500.0,
+        printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+    )
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    em.save_experiment()
+    stock_id = _stock_id_for_design_row(em, "single-warning")
+    head = _printer_head(
+        stock_id,
+        printer_head_id="mutable-single-warning-head",
+        printing_mode="stream",
+    )
+
+    preview = em.preview_requantized_for_option(
+        ("single-warning", None),
+        250.0,
+        calibrated_stock_id=stock_id,
+        printing_mode="stream",
+    )
+
+    assert preview["ok"] is True
+    warning = preview["volume_warning"]
+    assert warning["affected_row_count"] == 1
+    assert warning["max_total_volume_nL"] == pytest.approx(250.0)
+
+    result = em.apply_droplet_volume_for_option(
+        "single-warning",
+        None,
+        250.0,
+        write_keys_if_assigned=False,
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 250.0,
+            "run_id": "mutable-single-warning",
+        },
+        printing_mode="stream",
+    )
+
+    assert result["volume_warning"] == warning
+    assert em._reactions_df.iloc[0]["fill_drops"] == 0
+    assert em._calibration_volume_warning_for_generated_reactions() == warning
+
+
+def test_mutable_fill_calibration_above_final_volume_warns_and_applies(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    em.set_metadata(printed_volume_tolerance_nL=0.0)
+    em.generate_experiment()
+    em.save_experiment()
+    fill_stock_id = _stock_id_for_design_row(em, "Water")
+    head = _printer_head(
+        fill_stock_id,
+        printer_head_id="mutable-fill-warning-head",
+        printing_mode="stream",
+    )
+
+    preview = em.preview_fill_requantized(250.0)
+
+    assert preview["ok"] is True
+    warning = preview["volume_warning"]
+    assert warning["affected_row_count"] == 1
+    assert warning["affected_rows"][0]["exceeds_final_reaction_volume"] is True
+
+    result = em.apply_fill_droplet_volume(
+        250.0,
+        write_keys_if_assigned=False,
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 250.0,
+            "run_id": "mutable-fill-warning",
+        },
+        printing_mode="stream",
+    )
+
+    assert result["volume_warning"] == warning
+    assert em.metadata["fill_droplet_volume_nL"] == pytest.approx(250.0)
+    assert em._calibration_volume_warning_for_generated_reactions() == warning
+
+    glycerol_stock_id = _stock_id_for_design_row(em, "glycerol")
+    glycerol_head = _printer_head(
+        glycerol_stock_id,
+        printer_head_id="mutable-stock-after-fill-warning-head",
+        printing_mode="droplet",
+    )
+    reagent_preview = em.preview_requantized_for_option(
+        ("glycerol", None),
+        30.0,
+        calibrated_stock_id=glycerol_stock_id,
+        printing_mode="droplet",
+    )
+    assert reagent_preview["volume_warning"] is not None
+
+    reagent_result = em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        30.0,
+        write_keys_if_assigned=False,
+        applied_calibration={
+            "printer_head": glycerol_head,
+            "measured_volume_nL": 30.0,
+            "run_id": "mutable-stock-after-fill-warning",
+        },
+        printing_mode="droplet",
+    )
+    assert reagent_result["volume_warning"] == reagent_preview["volume_warning"]
+
+
 
 def test_apply_droplet_volume_for_option_can_switch_printing_mode(
     experiment_model_factory,

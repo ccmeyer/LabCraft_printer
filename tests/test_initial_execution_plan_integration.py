@@ -16,6 +16,8 @@ from ExecutionProgressStore import (
     serialize_execution_progress,
 )
 from ExecutionCalibrationStore import load_execution_calibrations
+from ExperimentAuditLog import ExperimentAuditLog
+from ExperimentAuditReader import ExperimentAuditReader
 from ExecutionPlanRevision import validate_revision_history
 from Model import CURRENT_PROFILE, ExperimentModel, Model
 
@@ -394,6 +396,102 @@ def test_finalized_two_stock_calibration_requantizes_both_legs_atomically(
         + 1e-9
         for well in revised.wells
     )
+
+def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = _configure_calibratable_two_stock_execution(model)
+    audit_owner = SimpleNamespace(experiment_model=em)
+    audit_log = ExperimentAuditLog(model=audit_owner)
+    audit_owner.record_experiment_audit_event = audit_log.record
+    em.set_calibration_manager(SimpleNamespace(model=audit_owner))
+
+    design_before = Path(em.experiment_file_path).read_bytes()
+    before = load_execution_plan(em.execution_plan_file_path)
+    signal_stocks = sorted(
+        (stock for stock in before.stocks if stock.factor_name == "Signal"),
+        key=lambda stock: stock.concentration,
+        reverse=True,
+    )
+    calibrated, companion_before = signal_stocks
+
+    preview = em.preview_requantized_for_option(
+        ("Signal", None),
+        140.0,
+        calibrated_stock_id=calibrated.stock_id,
+        printing_mode="stream",
+    )
+
+    assert preview["ok"] is True
+    assert preview["pair_evaluations"] > 0
+    preview_warning = preview["volume_warning"]
+    assert preview_warning["code"] == "calibration_volume_tolerance_exceeded"
+    assert preview_warning["affected_row_count"] > 0
+
+    result = em.apply_droplet_volume_for_option(
+        "Signal",
+        None,
+        140.0,
+        applied_calibration={
+            "stock_id": calibrated.stock_id,
+            "printer_head": SimpleNamespace(
+                printer_head_id="two-stock-stream-warning-head"
+            ),
+            "measured_volume_nL": 140.0,
+            "pw_us": 1200,
+            "pressure_psi": 0.8,
+            "run_id": "two-stock-stream-warning",
+            "result_id": "two-stock-stream-warning-result",
+            "result_sha256": "a" * 64,
+            "process_run_id": "two-stock-stream-warning-process",
+            "phase": "synthetic_characterization",
+        },
+        printing_mode="stream",
+    )
+
+    revised = load_execution_plan(em.execution_plan_file_path)
+    revised_by_id = {stock.stock_id: stock for stock in revised.stocks}
+    warning = result["volume_warning"]
+    assert warning == preview_warning
+    assert Path(em.experiment_file_path).read_bytes() == design_before
+    assert revised_by_id[calibrated.stock_id].effective_volume_nL == pytest.approx(
+        140.0
+    )
+    assert revised_by_id[calibrated.stock_id].printing_mode == "stream"
+    assert revised_by_id[companion_before.stock_id] == companion_before
+    warned_by_well = {row["well_id"]: row for row in warning["affected_rows"]}
+    assert set(warned_by_well).issubset({well.well_id for well in revised.wells})
+    assert all(
+        next(
+            well.expected_printed_volume_nL
+            for well in revised.wells
+            if well.well_id == well_id
+        )
+        == pytest.approx(row["total_volume_nL"])
+        for well_id, row in warned_by_well.items()
+    )
+
+    audit_rows = ExperimentAuditReader(
+        audit_path=em.experiment_audit_file_path
+    ).read_rows()
+    warning_rows = [
+        row
+        for row in audit_rows
+        if row.event_type == "calibration_volume_tolerance_exceeded"
+    ]
+    assert len(warning_rows) == 1
+    audit_row = warning_rows[0]
+    assert audit_row.is_valid is True
+    assert audit_row.level == "warning"
+    details = audit_row.event["details"]
+    assert details["volume_warning"] == warning
+    assert details["stock_id"] == calibrated.stock_id
+    assert details["calibration_record_id"] is not None
+    assert details["result_id"] == "two-stock-stream-warning-result"
+    assert details["plan_id"] == revised.plan_id
+    assert details["plan_revision"] == revised.plan_revision
+
 
 
 @pytest.mark.parametrize("blocking_role", ["companion", "fill"])
@@ -870,6 +968,15 @@ def test_lock_and_calibration_revision_preserve_design_and_allow_tolerance_overr
         2559.9845212965747
     )
     assert max(well.expected_printed_volume_nL for well in calibrated.wells) > 2550.0
+    warning = result["volume_warning"]
+    assert warning["code"] == "calibration_volume_tolerance_exceeded"
+    assert warning["warning_threshold_nL"] == pytest.approx(2550.0)
+    assert warning["max_total_volume_nL"] == pytest.approx(2559.9845212965747)
+    assert warning["affected_row_count"] > 0
+    assert any(
+        row["exceeds_final_reaction_volume"]
+        for row in warning["affected_rows"]
+    )
     assert design_path.read_bytes() == design_bytes
     history = validate_revision_history(
         em.execution_plan_revisions_dir_path,
@@ -943,6 +1050,7 @@ def test_lock_and_calibration_revision_preserve_design_and_allow_tolerance_overr
     )
     assert retry["status"] == "reused"
     assert retry["plan"].plan_revision == 3
+    assert retry["volume_warning"] == warning
     assert revision_bytes == {
         path.name: path.read_bytes()
         for path in Path(em.execution_plan_revisions_dir_path).glob("revision_*.json")
@@ -1745,6 +1853,74 @@ def test_sparse_explicit_uploaded_design_fill_preview_matches_committed_revision
         em.experiment_dir_path,
     )
     assert reloaded.get_execution_plan_snapshot() == calibrated
+
+def test_fill_calibration_above_final_volume_warns_without_blocking_apply(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_explicit_uploaded_design(em)
+    em.set_metadata(printed_volume_tolerance_nL=0.0)
+    em.generate_experiment()
+    em.save_experiment()
+    design_before = Path(em.experiment_file_path).read_bytes()
+
+    Model.load_experiment_from_model(
+        model,
+        load_progress=False,
+        finalize_execution_plan=True,
+    )
+    prepared = load_execution_plan(em.execution_plan_file_path)
+    fill_stock = next(
+        stock
+        for stock in prepared.stocks
+        if stock.factor_name == em.get_fill_reagent_name() and stock.units == "--"
+    )
+
+    preview = em.preview_fill_requantized(250.0)
+
+    assert preview["ok"] is True
+    warning = preview["volume_warning"]
+    assert warning["code"] == "calibration_volume_tolerance_exceeded"
+    assert warning["warning_threshold_nL"] == pytest.approx(500.0)
+    assert warning["affected_row_count"] > 0
+    assert all(
+        row["exceeds_final_reaction_volume"]
+        for row in warning["affected_rows"]
+    )
+
+    result = em.apply_fill_droplet_volume(
+        250.0,
+        printing_mode="stream",
+        applied_calibration={
+            "printer_head": SimpleNamespace(
+                printer_head_id="fill-volume-warning-head"
+            ),
+            "measured_volume_nL": 250.0,
+            "pw_us": 1400,
+            "pressure_psi": 0.9,
+            "run_id": "fill-volume-warning",
+            "phase": "synthetic_characterization",
+            "source_row_fingerprint": ("fill-volume-warning", 250.0),
+            "original_printing_mode": "droplet",
+            "applied_printing_mode": "stream",
+        },
+    )
+
+    revised = load_execution_plan(em.execution_plan_file_path)
+    revised_fill = next(
+        stock for stock in revised.stocks if stock.stock_id == fill_stock.stock_id
+    )
+    assert result["volume_warning"] == warning
+    assert revised_fill.effective_volume_nL == pytest.approx(250.0)
+    assert revised_fill.printing_mode == "stream"
+    assert any(
+        well.expected_printed_volume_nL
+        > revised.volume_basis.final_reaction_volume_nL
+        for well in revised.wells
+    )
+    assert Path(em.experiment_file_path).read_bytes() == design_before
+
 
 
 def test_initialize_and_duplicate_do_not_create_execution_plan(

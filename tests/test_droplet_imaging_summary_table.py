@@ -338,6 +338,74 @@ def _build_experiment_model(current_stock, *, current_mode="droplet"):
         get_applied_imaging_calibration=_get_applied_imaging_calibration,
     )
 
+def _install_volume_warning_result(experiment_model, volume_warning):
+    normal_preview = experiment_model.preview_requantized_for_option
+    normal_apply = experiment_model.apply_droplet_volume_for_option
+    fill_preview = experiment_model.preview_fill_requantized
+    fill_apply = experiment_model.apply_fill_droplet_volume
+
+    def _normal_preview(key, new_volume_nL, **kwargs):
+        result = normal_preview(
+            key,
+            new_volume_nL,
+            quantum=kwargs.get("quantum", 0.1),
+        )
+        result["volume_warning"] = volume_warning
+        return result
+
+    def _normal_apply(*args, **kwargs):
+        result = normal_apply(*args, **kwargs)
+        result["volume_warning"] = volume_warning
+        return result
+
+    def _fill_preview(*args, **kwargs):
+        result = fill_preview(*args, **kwargs)
+        result["volume_warning"] = volume_warning
+        return result
+
+    def _fill_apply(*args, **kwargs):
+        result = fill_apply(*args, **kwargs)
+        result["volume_warning"] = volume_warning
+        return result
+
+    experiment_model.preview_requantized_for_option = _normal_preview
+    experiment_model.apply_droplet_volume_for_option = _normal_apply
+    experiment_model.preview_fill_requantized = _fill_preview
+    experiment_model.apply_fill_droplet_volume = _fill_apply
+    return experiment_model
+
+
+def _volume_warning_fixture():
+    return {
+        "code": "calibration_volume_tolerance_exceeded",
+        "target_printed_volume_nL": 240.0,
+        "design_optimization_tolerance_nL": 0.0,
+        "warning_threshold_nL": 240.0,
+        "final_reaction_volume_nL": 5000.0,
+        "affected_row_count": 2,
+        "max_total_volume_nL": 4000.0,
+        "max_excess_nL": 3760.0,
+        "affected_rows": [
+            {
+                "row_id": "A1",
+                "well_id": "A1",
+                "reaction_id": "R1",
+                "total_volume_nL": 1000.0,
+                "excess_nL": 760.0,
+                "exceeds_final_reaction_volume": False,
+            },
+            {
+                "row_id": "B2",
+                "well_id": "B2",
+                "reaction_id": "R2",
+                "total_volume_nL": 4000.0,
+                "excess_nL": 3760.0,
+                "exceeds_final_reaction_volume": False,
+            },
+        ],
+    }
+
+
 
 def _build_model_and_manager(
     tmp_path,
@@ -1910,6 +1978,93 @@ def test_stream_selection_enables_bridge_for_stream_mode(monkeypatch, qapp, tmp_
 
     dialog.deleteLater()
 
+@pytest.mark.parametrize("current_stock", ["Water", "Fill"])
+def test_volume_warning_preview_stays_applicable_and_apply_uses_warning_message(
+    monkeypatch,
+    qapp,
+    tmp_path,
+    current_stock,
+):
+    runs = [
+        _make_run(
+            "run_volume_warning",
+            stock=current_stock,
+            sweep_entries=[
+                {
+                    "timestamp": "2026-03-18T09:01:00Z",
+                    "pw_us": 1400,
+                    "pressure_psi": 1.20,
+                    "mean_nL": 140.0,
+                    "cv_pct": 4.0,
+                    "valid": True,
+                }
+            ],
+        )
+    ]
+    experiment_model = _install_volume_warning_result(
+        _build_experiment_model(current_stock, current_mode="droplet"),
+        _volume_warning_fixture(),
+    )
+    warning_calls = []
+    info_calls = []
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: warning_calls.append(args),
+    )
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "information",
+        lambda *args, **kwargs: info_calls.append(args),
+    )
+    monkeypatch.setattr(
+        calibration_view.QtWidgets.QMessageBox,
+        "critical",
+        lambda *args, **kwargs: None,
+    )
+    dialog, manager = _build_dialog(
+        monkeypatch,
+        qapp,
+        tmp_path,
+        runs,
+        current_stock=current_stock,
+        current_mode="droplet",
+        active_run_id="run_volume_warning",
+        experiment_model=experiment_model,
+    )
+    manager.changeSettingsRequested.connect(
+        lambda settings, callback: callback() if callable(callback) else None
+    )
+
+    _select_visible_row(dialog, 0)
+    qapp.processEvents()
+
+    assert dialog.bridge_apply_btn.isEnabled() is True
+    assert dialog._bridge_preview_payload["volume_warning"] == _volume_warning_fixture()
+    assert "Volume warning: 2 reaction rows exceed" in dialog.bridge_status_label.text()
+    assert "maximum excess is 3760.000 nL" in dialog.bridge_status_label.text()
+    assert "Affected: A1, B2" in dialog.bridge_status_label.text()
+    assert "font-weight: 600" in dialog.bridge_status_label.styleSheet()
+
+    dialog._apply_previewed_droplet_volume()
+    qapp.processEvents()
+
+    expected_title = "Applied (Fill)" if current_stock == "Fill" else "Applied"
+    applied_warnings = [
+        call for call in warning_calls
+        if len(call) >= 3 and call[1] == expected_title
+    ]
+    assert len(applied_warnings) == 1
+    assert applied_warnings[0][2].startswith("Applied with volume warning.")
+    assert "Affected: A1, B2" in applied_warnings[0][2]
+    assert not any(
+        len(call) >= 2 and call[1] in {"Applied", "Applied (Fill)"}
+        for call in info_calls
+    )
+
+    dialog.deleteLater()
+
+
 
 def test_stream_selection_previews_mode_switch_but_blocks_load_for_droplet_mode(monkeypatch, qapp, tmp_path):
     runs = [
@@ -2382,7 +2537,10 @@ def test_stream_apply_yes_schedules_manual_refuel_check_and_closes_imager(monkey
         "question",
         lambda *args, **kwargs: calibration_view.QtWidgets.QMessageBox.Yes,
     )
-    experiment_model = _build_experiment_model("Water", current_mode="droplet")
+    experiment_model = _install_volume_warning_result(
+        _build_experiment_model("Water", current_mode="droplet"),
+        _volume_warning_fixture(),
+    )
     dialog, manager = _build_dialog(
         monkeypatch,
         qapp,
@@ -2411,6 +2569,8 @@ def test_stream_apply_yes_schedules_manual_refuel_check_and_closes_imager(monkey
 
     main_window.popup_yes_no.assert_called_once()
     assert "Manual Refuel Check Required" in main_window.popup_yes_no.call_args.args[0]
+    assert "Volume warning: 2 reaction rows exceed" in main_window.popup_yes_no.call_args.args[1]
+    assert "Affected: A1, B2" in main_window.popup_yes_no.call_args.args[1]
     assert main_window.popup_yes_no.call_args.kwargs["parent"] is dialog
     launch.assert_called_once_with()
     assert close_calls == [True]

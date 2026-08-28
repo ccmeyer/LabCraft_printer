@@ -95,9 +95,11 @@ records must contain exactly the fields documented below.
 - Plate dimensions are positive integers. Every well ID must use uppercase plate
   notation and fall inside those dimensions.
 - The target and final reaction volumes are positive finite numbers.
-- The design optimization tolerance is a nonnegative finite number. It records
-  design-time optimization context; later execution stages will not treat it as
-  a calibrated-volume limit.
+- The design optimization tolerance is a nonnegative finite number. Initial
+  design optimization continues to enforce its volume policy. Later calibration
+  treats target printed volume plus this tolerance as a warning threshold, not
+  an Apply limit. The final reaction volume is retained as diagnostic context;
+  v1 does not define a separate physical well-capacity field.
 
 ### Stocks
 
@@ -271,14 +273,25 @@ Applying a distinct calibration creates the next immutable plan revision. It:
   reference, and calibration-record reference;
 - preserves every unrelated non-fill target and permits only the calibrated
   stock, its one related companion, and fill to change per-well counts;
-- recalculates fill from remaining target printed volume, choosing the nearest
-  nonnegative count that stays within the tolerance-inclusive hard limit; and
+- recalculates fill from remaining target printed volume, reducing it to zero
+  when calibrated non-fill volume already meets or exceeds that target; and
 - recomputes exact expected well volumes without re-running the design-time
   optimizer.
 
 Two-stock calibration never increases distinct target-level loss and fails
-closed when no reachable, volume-safe mapping exists. Progress preserves all
-added counts while targets and its
+closed when no concentration-reachable mapping exists, the bounded pair search
+is exhausted, required stock identities are missing, or execution integrity and
+progress constraints are violated. Neither the recorded design threshold nor
+the final reaction volume independently rejects an otherwise valid in-envelope
+calibration.
+
+After preview and again from the committed candidate, calibration recalculates
+every well's exact total. A total above target printed volume plus design
+tolerance produces a prominent, non-blocking
+`calibration_volume_tolerance_exceeded` warning with per-well evidence. A
+distinct successful warned application appends the same structured evidence at
+warning level to `experiment_audit.jsonl`; audit-write failure does not roll
+back the calibration. Progress preserves all added counts while targets and its
 `__execution__` revision reference are atomically replaced. `key.csv` and
 `concentration_key.csv` are regenerated from the committed plan, not by running
 stock optimization. `experiment_design.json` remains byte-identical throughout

@@ -508,6 +508,140 @@ def test_two_stock_calibration_changes_only_selected_volume_and_joint_counts():
         for row in em._reactions_df.to_dict("records")
     )
 
+def test_two_stock_stream_calibration_above_volume_threshold_warns_and_applies():
+    em, calibrated_stock_id = _make_calibratable_two_stock_model()
+    initial_calibration = _two_stock_applied_calibration(calibrated_stock_id)
+    initial_calibration.update(
+        measured_volume_nL=60.0,
+        run_id="two-stock-stream-60",
+    )
+    initial = em.apply_droplet_volume_for_option(
+        "R",
+        None,
+        60.0,
+        write_keys_if_assigned=False,
+        applied_calibration=initial_calibration,
+        printing_mode="stream",
+    )
+    assert initial["new_droplet_nL"] == pytest.approx(60.0)
+
+    preview = em.preview_requantized_for_option(
+        ("R", None),
+        140.0,
+        calibrated_stock_id=calibrated_stock_id,
+        printing_mode="stream",
+    )
+
+    assert preview["ok"] is True
+    assert preview["old_effective_volumes_nL"][0] == pytest.approx(60.0)
+    assert preview["pair_evaluations"] > 0
+    warning = preview["volume_warning"]
+    assert warning["code"] == "calibration_volume_tolerance_exceeded"
+    assert warning["warning_threshold_nL"] == pytest.approx(240.0)
+    assert warning["affected_row_count"] == len(warning["affected_rows"])
+    assert warning["affected_row_count"] > 0
+    assert warning["max_excess_nL"] > 0.0
+    assert [row["row_id"] for row in warning["affected_rows"]] == sorted(
+        row["row_id"] for row in warning["affected_rows"]
+    )
+
+    calibration = _two_stock_applied_calibration(calibrated_stock_id)
+    calibration.update(
+        measured_volume_nL=140.0,
+        run_id="two-stock-stream-140",
+    )
+    applied = em.apply_droplet_volume_for_option(
+        "R",
+        None,
+        140.0,
+        write_keys_if_assigned=False,
+        applied_calibration=calibration,
+        printing_mode="stream",
+    )
+
+    assert applied["volume_warning"] == warning
+    stocks = em.plans_per_option[("R", None)]["stocks"]
+    assert stocks[0]["droplet_volume_nL"] == pytest.approx(140.0)
+    assert stocks[1]["droplet_volume_nL"] == pytest.approx(10.0)
+    generated = em._reactions_df.to_dict("records")
+    assert any(
+        int(row["fill_drops"]) == 0
+        and float(row["nonfill_volume_nL"]) >= 240.0
+        for row in generated
+    )
+    assert em._calibration_volume_warning_for_generated_reactions() == warning
+
+def test_calibration_volume_warning_boundary_and_final_volume_context():
+    em = ExperimentModel(prof=CURRENT_PROFILE)
+
+    assert em._build_calibration_volume_warning(
+        [
+            {"row_id": "below", "total_volume_nL": 119.0},
+            {"row_id": "exact", "total_volume_nL": 120.0},
+            {"row_id": "epsilon", "total_volume_nL": 120.0 + 1e-9},
+        ],
+        target_printed_volume_nL=100.0,
+        design_optimization_tolerance_nL=20.0,
+        final_reaction_volume_nL=110.0,
+    ) is None
+
+    warning = em._build_calibration_volume_warning(
+        [
+            {
+                "row_id": "A1",
+                "well_id": "A1",
+                "reaction_id": "R1",
+                "total_volume_nL": 120.0 + 2e-9,
+            },
+            {
+                "row_id": "A2",
+                "well_id": "A2",
+                "reaction_id": "R2",
+                "total_volume_nL": 130.0,
+            },
+        ],
+        target_printed_volume_nL=100.0,
+        design_optimization_tolerance_nL=20.0,
+        final_reaction_volume_nL=125.0,
+    )
+
+    assert warning["affected_row_count"] == 2
+    assert warning["max_total_volume_nL"] == pytest.approx(130.0)
+    assert warning["max_excess_nL"] == pytest.approx(10.0)
+    assert [row["row_id"] for row in warning["affected_rows"]] == ["A1", "A2"]
+    assert warning["affected_rows"][0]["exceeds_final_reaction_volume"] is False
+    assert warning["affected_rows"][1]["exceeds_final_reaction_volume"] is True
+
+
+def test_calibration_volume_warning_audit_failure_does_not_undo_mutable_apply():
+    em, calibrated_stock_id = _make_calibratable_two_stock_model()
+
+    def _fail_audit(*_args, **_kwargs):
+        raise RuntimeError("audit unavailable")
+
+    em.set_calibration_manager(
+        SimpleNamespace(
+            model=SimpleNamespace(record_experiment_audit_event=_fail_audit)
+        )
+    )
+    calibration = _two_stock_applied_calibration(calibrated_stock_id)
+    calibration["measured_volume_nL"] = 140.0
+
+    applied = em.apply_droplet_volume_for_option(
+        "R",
+        None,
+        140.0,
+        write_keys_if_assigned=False,
+        applied_calibration=calibration,
+        printing_mode="stream",
+    )
+
+    assert applied["volume_warning"]["affected_row_count"] > 0
+    assert em.plans_per_option[("R", None)]["stocks"][0][
+        "droplet_volume_nL"
+    ] == pytest.approx(140.0)
+
+
 
 def test_two_stock_calibration_can_select_the_companion_leg():
     em, _calibrated_stock_id = _make_calibratable_two_stock_model()
@@ -626,7 +760,7 @@ def test_two_stock_calibration_failure_restores_mutable_state(monkeypatch):
     assert em.calibrated_stock_allocation_status["active"] is False
 
 
-def test_two_stock_calibration_pair_cap_and_infeasible_volume_fail_closed():
+def test_two_stock_calibration_pair_cap_fails_closed_without_mutating_preview():
     em, calibrated_stock_id = _make_calibratable_two_stock_model()
     before = copy.deepcopy(em.plans_per_option)
 
@@ -636,7 +770,7 @@ def test_two_stock_calibration_pair_cap_and_infeasible_volume_fail_closed():
         new_effective_volume_nL=12.0,
         pair_evaluation_cap=1,
     )
-    infeasible = em.preview_requantized_for_option(
+    low_volume = em.preview_requantized_for_option(
         ("R", None),
         8.0,
         calibrated_stock_id=calibrated_stock_id,
@@ -644,8 +778,7 @@ def test_two_stock_calibration_pair_cap_and_infeasible_volume_fail_closed():
 
     assert capped["ok"] is False
     assert capped["code"] == "pair_evaluation_cap"
-    assert infeasible["ok"] is False
-    assert infeasible["code"] == "unreachable_target"
+    assert low_volume["ok"] is True
     assert em.plans_per_option == before
 
 

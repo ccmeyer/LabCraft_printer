@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt, QTimer, QEventLoop, Signal, Slot
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
+import copy
 import numpy as np
 import json
 import math
@@ -10247,6 +10248,51 @@ class DropletImagingDialog(QtWidgets.QDialog):
             return text
         return f"{text} {reason}".strip()
 
+    @staticmethod
+    def _bridge_volume_warning_text(volume_warning):
+        warning = dict(volume_warning or {})
+        if not warning:
+            return ""
+        count = int(warning.get("affected_row_count", 0) or 0)
+        max_excess = float(warning.get("max_excess_nL", 0.0) or 0.0)
+        threshold = float(warning.get("warning_threshold_nL", 0.0) or 0.0)
+        row_ids = [
+            str(row.get("row_id") or "").strip()
+            for row in warning.get("affected_rows", [])
+            if isinstance(row, dict) and str(row.get("row_id") or "").strip()
+        ]
+        shown = row_ids[:12]
+        affected = ", ".join(shown)
+        if len(row_ids) > len(shown):
+            affected = f"{affected}, and {len(row_ids) - len(shown)} more"
+        row_label = "row exceeds" if count == 1 else "rows exceed"
+        text = (
+            f"Volume warning: {count} reaction {row_label} the "
+            f"{threshold:.3f} nL design threshold; maximum excess is "
+            f"{max_excess:.3f} nL."
+        )
+        if affected:
+            text = f"{text} Affected: {affected}."
+        return text
+
+    def _set_bridge_status_message(self, status, volume_warning=None):
+        label = getattr(self, "bridge_status_label", None)
+        if label is None:
+            return
+        warning_text = self._bridge_volume_warning_text(volume_warning)
+        text = str(status or "").strip()
+        if warning_text:
+            text = f"{text} {warning_text}".strip()
+            color = self.color_dict.get("orange", "#f59e0b")
+            label.setStyleSheet(f"color: {color}; font-weight: 600;")
+        else:
+            color = self.color_dict.get(
+                "muted_text",
+                self.color_dict.get("light_gray", "#9ca3af"),
+            )
+            label.setStyleSheet(f"color: {color};")
+        label.setText(text)
+
     def _has_applied_calibration_design_context(self):
         if bool(getattr(self, "service_mode", False)):
             return False
@@ -14531,19 +14577,31 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 f"\nTotal fill drops: {out['total_drops_old']} -> {out['total_drops_new']} "
                 f"({out['total_drops_delta']:+d})"
             )
+            volume_warning = (out or {}).get("volume_warning")
+            warning_text = DropletImagingDialog._bridge_volume_warning_text(volume_warning)
+            if warning_text:
+                fill_message = f"{fill_message}\n\n{warning_text}"
             if _prompt_manual_refuel_if_available(
                 applied_calibration,
                 fill_message,
                 settings_result,
             ):
                 return
-            QtWidgets.QMessageBox.information(
-                self, "Applied (Fill)",
+            message_box = (
+                QtWidgets.QMessageBox.warning
+                if volume_warning
+                else QtWidgets.QMessageBox.information
+            )
+            message_box(
+                self,
+                "Applied (Fill)",
                 (
-                    f"Updated fill ejection volume to {out['new_fill_nL']:.3f} nL."
+                    ("Applied with volume warning.\n\n" if volume_warning else "")
+                    + f"Updated fill ejection volume to {out['new_fill_nL']:.3f} nL."
                     f"\nTotal fill drops: {out['total_drops_old']} → {out['total_drops_new']} "
                     f"({out['total_drops_delta']:+d})"
                 )
+                    + (f"\n\n{warning_text}" if warning_text else "")
             )
             return
 
@@ -14674,14 +14732,27 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         if mode_switch_text:
             message = f"{message}\n{mode_switch_text}."
+        volume_warning = (apply_result or {}).get("volume_warning")
+        warning_text = DropletImagingDialog._bridge_volume_warning_text(volume_warning)
+        if warning_text:
+            message = (
+                f"Applied with volume warning.\n\n{message}"
+                f"\n\n{warning_text}"
+            )
         if _prompt_manual_refuel_if_available(
             applied_calibration,
             message,
             settings_result,
         ):
             return
-        QtWidgets.QMessageBox.information(
-            self, "Applied",
+        message_box = (
+            QtWidgets.QMessageBox.warning
+            if volume_warning
+            else QtWidgets.QMessageBox.information
+        )
+        message_box(
+            self,
+            "Applied",
             message
         )
         
@@ -15735,7 +15806,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self.bridge_table.clearContents()
         self.bridge_table.setRowCount(0)
         if hasattr(self, "bridge_status_label"):
-            self.bridge_status_label.setText(
+            self._set_bridge_status_message(
                 str(status_text or "Select a characterization result to preview design impact.")
             )
 
@@ -15907,6 +15978,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 "source_row_fingerprint": selected_fingerprint,
                 "original_printing_mode": original_mode,
                 "applied_printing_mode": applied_mode,
+                "volume_warning": copy.deepcopy(preview.get("volume_warning")),
             }
             eligibility = self._get_bridge_apply_eligibility()
             if not eligibility.get("ok"):
@@ -15922,8 +15994,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 f"{status_prefix}Preview uses the selected result ejection volume of {mean_nL:.3f} nL."
                 f"{mode_switch_suffix}"
             )
-            self.bridge_status_label.setText(
-                self._bridge_status_with_apply_eligibility(status, eligibility)
+            self._set_bridge_status_message(
+                self._bridge_status_with_apply_eligibility(status, eligibility),
+                preview.get("volume_warning"),
             )
             return
 
@@ -15970,6 +16043,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "original_printing_mode": original_mode,
             "applied_printing_mode": applied_mode,
             "stock_id": eligibility.get("stock_id"),
+            "volume_warning": copy.deepcopy(preview.get("volume_warning")),
         }
         can_apply = self._bridge_preview_payload["n_stocks"] in (1, 2)
         if can_apply and not eligibility.get("ok"):
@@ -15991,12 +16065,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 f"{status_prefix}Preview uses the selected result ejection volume of {mean_nL:.3f} nL."
                 f"{mode_switch_suffix}"
             )
-            self.bridge_status_label.setText(
-                self._bridge_status_with_apply_eligibility(status, eligibility)
+            self._set_bridge_status_message(
+                self._bridge_status_with_apply_eligibility(status, eligibility),
+                preview.get("volume_warning"),
             )
         else:
-            self.bridge_status_label.setText(
-                f"{status_prefix}Preview is shown, but the stock plan cannot be applied safely."
+            self._set_bridge_status_message(
+                f"{status_prefix}Preview is shown, but the stock plan cannot be applied safely.",
+                preview.get("volume_warning"),
             )
 
     def center_nozzle(self):
