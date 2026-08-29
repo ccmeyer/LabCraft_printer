@@ -1,4 +1,5 @@
 import copy
+import json
 from types import SimpleNamespace
 
 import pandas as pd
@@ -458,6 +459,48 @@ def _two_stock_applied_calibration(stock_id):
     }
 
 
+def _calibrated_payload_plans(payload):
+    plans = {}
+    for raw_key, plan in payload['plans_per_option'].items():
+        if isinstance(raw_key, tuple):
+            key = raw_key
+        else:
+            decoded = json.loads(raw_key)
+            key = (decoded[0], decoded[1])
+        plans[key] = plan
+    return plans
+
+
+def _refresh_calibrated_payload_plan_fingerprint(model, payload):
+    payload['plan_fingerprint'] = model._canonical_payload_sha256(
+        model._stock_allocation_plan_document(
+            _calibrated_payload_plans(payload),
+            payload['stock_rows'],
+        )
+    )
+
+
+def _make_over_threshold_calibrated_payload():
+    em, calibrated_stock_id = _make_calibratable_two_stock_model()
+    calibration = _two_stock_applied_calibration(calibrated_stock_id)
+    calibration.update(
+        measured_volume_nL=140.0,
+        run_id='two-stock-invalid-reuse-source',
+    )
+    em.apply_droplet_volume_for_option(
+        'R',
+        None,
+        140.0,
+        write_keys_if_assigned=False,
+        applied_calibration=calibration,
+        printing_mode='stream',
+    )
+    payload = copy.deepcopy(
+        em.calibrated_stock_allocation['allocation']
+    )
+    return em, calibrated_stock_id, payload
+
+
 def test_two_stock_calibration_changes_only_selected_volume_and_joint_counts():
     em, calibrated_stock_id = _make_calibratable_two_stock_model()
 
@@ -699,6 +742,368 @@ def test_two_stock_calibrated_allocation_round_trips_without_reoptimization(monk
     result = restored.optimize_stock_solutions(allow_two=True)
     assert result["best"] is True
     assert result["calibrated_stock_allocation_reused"] is True
+
+
+def test_over_threshold_calibrated_allocation_restores_complete_result_without_search(
+    monkeypatch,
+    tmp_path,
+):
+    baseline, _baseline_stock_id = _make_calibratable_two_stock_model()
+    normal_result_keys = set(baseline.optimize_stock_solutions(allow_two=True))
+
+    em, calibrated_stock_id = _make_calibratable_two_stock_model()
+    audit_events = []
+    em.set_calibration_manager(
+        SimpleNamespace(
+            model=SimpleNamespace(
+                record_experiment_audit_event=lambda *args, **kwargs: (
+                    audit_events.append((args, kwargs))
+                )
+            )
+        )
+    )
+    initial_calibration = _two_stock_applied_calibration(calibrated_stock_id)
+    initial_calibration.update(
+        measured_volume_nL=60.0,
+        run_id='two-stock-stream-60-round-trip',
+    )
+    em.apply_droplet_volume_for_option(
+        'R',
+        None,
+        60.0,
+        write_keys_if_assigned=False,
+        applied_calibration=initial_calibration,
+        printing_mode='stream',
+    )
+    calibration = _two_stock_applied_calibration(calibrated_stock_id)
+    calibration.update(
+        measured_volume_nL=140.0,
+        run_id='two-stock-stream-140-round-trip',
+    )
+    applied = em.apply_droplet_volume_for_option(
+        'R',
+        None,
+        140.0,
+        write_keys_if_assigned=False,
+        applied_calibration=calibration,
+        printing_mode='stream',
+    )
+    warning = copy.deepcopy(applied['volume_warning'])
+    assert warning is not None
+    audit_count_after_apply = len(audit_events)
+    assert audit_count_after_apply > 0
+
+    expected_plan = copy.deepcopy(em.plans_per_option)
+    expected_reactions = em._reactions_df.to_dict('records')
+    expected_records = copy.deepcopy(em.applied_imaging_calibrations)
+    design_path = tmp_path / 'experiment_design.json'
+    em._atomic_json_dump(str(design_path), em.to_dict())
+    document = json.loads(design_path.read_text(encoding='utf-8'))
+
+    restored = ExperimentModel(prof=CURRENT_PROFILE)
+    restored.from_dict(document)
+
+    assert restored.calibrated_stock_allocation_status == {
+        'active': True,
+        'reason': 'restored',
+    }
+    assert restored.plans_per_option == expected_plan
+    assert restored._reactions_df.to_dict('records') == expected_reactions
+    assert (
+        restored._calibration_volume_warning_for_generated_reactions()
+        == warning
+    )
+
+    def _unexpected_search(*_args, **_kwargs):
+        raise AssertionError('calibrated allocation must be reused without search')
+
+    monkeypatch.setattr(
+        restored,
+        '_enumerate_single_stock_candidates',
+        _unexpected_search,
+    )
+    monkeypatch.setattr(
+        restored,
+        '_enumerate_two_stock_candidates_with_meta',
+        _unexpected_search,
+    )
+    restored.set_calibration_manager(
+        SimpleNamespace(
+            model=SimpleNamespace(
+                record_experiment_audit_event=lambda *args, **kwargs: (
+                    audit_events.append((args, kwargs))
+                )
+            )
+        )
+    )
+    result = restored.optimize_stock_solutions(allow_two=True)
+
+    assert normal_result_keys <= set(result)
+    assert result['best'] is True
+    assert result['calibrated_stock_allocation_reused'] is True
+    assert result['optimizer_strategy_used'] == 'calibration_requantization'
+    assert result['stock_allocation_stop_reason'] == 'calibrated_plan_reused'
+    assert result['optimizer_seed_rank'] == result['optimizer_selected_rank']
+    assert result['distinct_level_loss'] == 0
+    assert result['stocks'] == 2
+    assert result['worst_nonfill_nL'] == pytest.approx(
+        max(row['nonfill_volume_nL'] for row in expected_reactions)
+    )
+    assert result['volume_warning'] == warning
+    assert result['stock_allocation_states_evaluated'] == 0
+    assert result['two_stock_pairs_evaluated'] == 0
+    assert result['stock_allocation_candidates_generated'] == 0
+    assert result['optimizer_total_elapsed_ms'] == 0.0
+    assert restored.plans_per_option == expected_plan
+    assert restored.applied_imaging_calibrations == expected_records
+    assert len(audit_events) == audit_count_after_apply
+    reused_design_path = tmp_path / 'reused_experiment_design.json'
+    restored._atomic_json_dump(str(reused_design_path), restored.to_dict())
+    reused_document = json.loads(
+        reused_design_path.read_text(encoding='utf-8')
+    )
+    assert (
+        reused_document['calibrated_stock_allocation']
+        == document['calibrated_stock_allocation']
+    )
+
+
+def test_calibrated_allocation_above_final_volume_restores_with_warning(tmp_path):
+    em = _make_model(
+        target_volume_nl=240.0,
+        final_volume_nl=239.0,
+        printed_volume_tolerance_nl=0.0,
+    )
+    em.add_additive(
+        'R',
+        [0.5, 1.0, 5.0, 20.0],
+        'mM',
+        10.0,
+        max_stock_conc=2000.0,
+    )
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=True,
+    )
+    assert result['best'] is True
+    plan = em._calibration_plan_with_stock_ids(('R', None))
+    calibrated_stock_id = plan['stocks'][0]['stock_id']
+    calibration = _two_stock_applied_calibration(calibrated_stock_id)
+    calibration.update(
+        measured_volume_nL=140.0,
+        run_id='two-stock-above-final',
+    )
+    applied = em.apply_droplet_volume_for_option(
+        'R',
+        None,
+        140.0,
+        write_keys_if_assigned=False,
+        applied_calibration=calibration,
+        printing_mode='stream',
+    )
+    warning = applied['volume_warning']
+    assert any(
+        row['exceeds_final_reaction_volume']
+        for row in warning['affected_rows']
+    )
+
+    design_path = tmp_path / 'above_final_design.json'
+    em._atomic_json_dump(str(design_path), em.to_dict())
+    restored = ExperimentModel(prof=CURRENT_PROFILE)
+    restored.from_dict(
+        json.loads(design_path.read_text(encoding='utf-8'))
+    )
+
+    assert restored.calibrated_stock_allocation_status == {
+        'active': True,
+        'reason': 'restored',
+    }
+    restored_warning = (
+        restored._calibration_volume_warning_for_generated_reactions()
+    )
+    assert restored_warning == warning
+    assert any(
+        row['exceeds_final_reaction_volume']
+        for row in restored_warning['affected_rows']
+    )
+
+
+def test_calibrated_reuse_requires_context_flag_and_matching_stock_identity():
+    em, calibrated_stock_id, payload = _make_over_threshold_calibrated_payload()
+    before_plan = copy.deepcopy(em.plans_per_option)
+
+    generic = em.install_stock_allocation_reuse_payload(payload)
+    missing_identity = em.install_stock_allocation_reuse_payload(
+        payload,
+        reuse_context='calibration',
+    )
+    mismatched_identity = em.install_stock_allocation_reuse_payload(
+        payload,
+        reuse_context='calibration',
+        expected_calibrated_stock_id='R_not_the_calibrated_stock_mM',
+    )
+    missing_flag = copy.deepcopy(payload)
+    missing_flag.pop('calibrated_independent_volumes')
+    unauthenticated = em.install_stock_allocation_reuse_payload(
+        missing_flag,
+        reuse_context='calibration',
+        expected_calibrated_stock_id=calibrated_stock_id,
+    )
+
+    assert generic == {
+        'reused': False,
+        'reason': 'calibrated_reuse_context_required',
+    }
+    assert missing_identity == {
+        'reused': False,
+        'reason': 'calibrated_stock_identity_required',
+    }
+    assert mismatched_identity['reused'] is False
+    assert mismatched_identity['reason'] == 'stock_plan_validation_failed'
+    assert 'identity does not match' in mismatched_identity['detail']
+    assert unauthenticated == {
+        'reused': False,
+        'reason': 'calibrated_independent_volumes_required',
+    }
+    assert em.plans_per_option == before_plan
+
+
+def test_calibrated_reuse_rejects_corruption_transactionally():
+    mutation_names = (
+        'out_of_envelope_volume',
+        'persisted_out_of_envelope_volume',
+        'nonfinite_volume',
+        'invalid_count',
+        'missing_mapping',
+        'input_fingerprint',
+        'plan_fingerprint',
+    )
+    for mutation_name in mutation_names:
+        em, calibrated_stock_id, payload = _make_over_threshold_calibrated_payload()
+        before_plan = copy.deepcopy(em.plans_per_option)
+        before_rows = copy.deepcopy(em._stock_rows_cache)
+        plan = next(iter(payload['plans_per_option'].values()))
+        stock = plan['stocks'][0]
+        concentration = float(stock['stock_concentration'])
+
+        if mutation_name == 'persisted_out_of_envelope_volume':
+            matching_row = next(
+                row
+                for row in payload['stock_rows']
+                if float(row['stock_concentration']) == concentration
+            )
+            matching_row['droplet_volume_nL'] = 251.0
+            _refresh_calibrated_payload_plan_fingerprint(em, payload)
+        elif mutation_name in {'out_of_envelope_volume', 'nonfinite_volume'}:
+            volume = (
+                251.0
+                if mutation_name == 'out_of_envelope_volume'
+                else float('nan')
+            )
+            stock['droplet_volume_nL'] = volume
+            stock['delta_per_drop'] = (
+                concentration
+                * volume
+                / float(em.metadata['final_reaction_volume_nL'])
+            )
+            matching_row = next(
+                row
+                for row in payload['stock_rows']
+                if float(row['stock_concentration']) == concentration
+            )
+            matching_row['droplet_volume_nL'] = volume
+            matching_row['delta_per_drop'] = stock['delta_per_drop']
+            _refresh_calibrated_payload_plan_fingerprint(em, payload)
+        elif mutation_name == 'invalid_count':
+            target = next(iter(stock['droplets_per_target']))
+            stock['droplets_per_target'][target] = True
+            _refresh_calibrated_payload_plan_fingerprint(em, payload)
+        elif mutation_name == 'missing_mapping':
+            target = next(iter(stock['droplets_per_target']))
+            del stock['droplets_per_target'][target]
+            _refresh_calibrated_payload_plan_fingerprint(em, payload)
+        elif mutation_name == 'input_fingerprint':
+            payload['input_fingerprint'] = 'invalid-input-fingerprint'
+        else:
+            payload['plan_fingerprint'] = 'invalid-plan-fingerprint'
+
+        reused = em.install_stock_allocation_reuse_payload(
+            payload,
+            reuse_context='calibration',
+            expected_calibrated_stock_id=calibrated_stock_id,
+        )
+
+        assert reused['reused'] is False, mutation_name
+        assert em.plans_per_option == before_plan, mutation_name
+        assert em._stock_rows_cache == before_rows, mutation_name
+
+
+def test_calibrated_reuse_rejects_duplicate_runtime_stock_ids_transactionally():
+    em, calibrated_stock_id, payload = _make_over_threshold_calibrated_payload()
+    before_plan = copy.deepcopy(em.plans_per_option)
+    before_rows = copy.deepcopy(em._stock_rows_cache)
+    plan = next(iter(payload['plans_per_option'].values()))
+    first, second = plan['stocks']
+    targets = sorted(float(target) for target in first['droplets_per_target'])
+    concentrations = (25.0, 25.001)
+    final_volume = float(em.metadata['final_reaction_volume_nL'])
+
+    for index, (stock, row, concentration) in enumerate(
+        zip(plan['stocks'], payload['stock_rows'], concentrations)
+    ):
+        volume = float(stock['droplet_volume_nL'])
+        delta = concentration * volume / final_volume
+        stock['stock_concentration'] = concentration
+        stock['delta_per_drop'] = delta
+        stock['droplets_per_target'] = {
+            target: (
+                0
+                if index == 0
+                else max(0, int(round(target / delta)))
+            )
+            for target in targets
+        }
+        row['stock_concentration'] = concentration
+        row['delta_per_drop'] = delta
+
+    _refresh_calibrated_payload_plan_fingerprint(em, payload)
+    reused = em.install_stock_allocation_reuse_payload(
+        payload,
+        reuse_context='calibration',
+        expected_calibrated_stock_id=calibrated_stock_id,
+    )
+
+    assert reused['reused'] is False
+    assert reused['reason'] == 'stock_plan_validation_failed'
+    assert 'duplicate runtime stock IDs' in reused['detail']
+    assert em.plans_per_option == before_plan
+    assert em._stock_rows_cache == before_rows
+
+
+def test_minimal_legacy_calibrated_result_is_normalized_to_complete_contract():
+    baseline, _baseline_stock_id = _make_calibratable_two_stock_model()
+    normal_result_keys = set(baseline.optimize_stock_solutions(allow_two=True))
+    em, calibrated_stock_id, payload = _make_over_threshold_calibrated_payload()
+    payload['plans_per_option'] = _calibrated_payload_plans(payload)
+    payload['optimization_result'] = {
+        'best': True,
+        'optimizer_strategy_used': 'calibration_requantization',
+    }
+
+    reused = em.install_stock_allocation_reuse_payload(
+        payload,
+        reuse_context='calibration',
+        expected_calibrated_stock_id=calibrated_stock_id,
+    )
+
+    assert reused['reused'] is True
+    result = reused['result']
+    assert normal_result_keys <= set(result)
+    assert result['optimizer_seed_rank'] == result['optimizer_selected_rank']
+    assert result['optimizer_total_elapsed_ms'] == 0.0
+    assert result['volume_warning'] == reused['volume_warning']
 
 
 def test_two_stock_calibrated_allocation_becomes_inactive_after_stock_input_change():
@@ -2102,6 +2507,24 @@ def test_unchanged_import_reuses_exactly_validated_two_stock_plan(monkeypatch):
     assert target.get_reactions_dataframe()["nonfill_volume_nL"].tolist() == pytest.approx(
         [9.0, 9.0]
     )
+
+
+def test_import_reuse_still_rejects_exact_row_volume_above_design_limit():
+    design, report = _two_stock_import_report()
+    target = _build_two_stock_import_target(design)
+    target.set_metadata(
+        target_reaction_volume_nL=8.0,
+        printed_volume_tolerance_nL=0.0,
+    )
+    payload = copy.deepcopy(report['stock_allocation_reuse_payload'])
+    payload['input_fingerprint'] = target.stock_allocation_input_fingerprint()
+
+    reused = target.install_stock_allocation_reuse_payload(payload)
+
+    assert reused['reused'] is False
+    assert reused['reason'] == 'stock_plan_validation_failed'
+    assert 'exact row-volume limit' in reused['detail']
+    assert target.plans_per_option == {}
 
 
 def test_import_reuse_fingerprint_excludes_layout_and_counts_but_covers_stock_inputs():

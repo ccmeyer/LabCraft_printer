@@ -2859,22 +2859,22 @@ class ExperimentModel(QObject):
             )
             if stored_fingerprint == expected_fingerprint:
                 restored = self.install_stock_allocation_reuse_payload(
-                    allocation_payload
+                    allocation_payload,
+                    reuse_context='calibration',
+                    expected_calibrated_stock_id=calibrated_allocation.get(
+                        'calibrated_stock_id'
+                    ),
                 )
                 if restored.get("reused"):
+                    calibrated_allocation['allocation']['optimization_result'] = (
+                        copy.deepcopy(restored.get('result') or {})
+                    )
                     self.calibrated_stock_allocation = calibrated_allocation
                     self.calibrated_stock_allocation_status = {
                         "active": True,
                         "reason": "reused",
                     }
-                    result = copy.deepcopy(restored.get("result") or {})
-                    result.update({
-                        "best": True,
-                        "calibrated_stock_allocation_reused": True,
-                        "optimizer_strategy_used": "calibration_requantization",
-                        "stock_allocation_stop_reason": "calibrated_plan_reused",
-                    })
-                    return result
+                    return copy.deepcopy(restored.get("result") or {})
             calibrated_allocation["active"] = False
             calibrated_allocation["stale_reason"] = (
                 "stock_input_fingerprint_mismatch"
@@ -7646,7 +7646,8 @@ class ExperimentModel(QObject):
                     "droplets_per_target": [
                         [number(target), int(drops)]
                         for target, drops in sorted(
-                            (stock.get("droplets_per_target") or {}).items()
+                            (stock.get("droplets_per_target") or {}).items(),
+                            key=lambda item: float(item[0]),
                         )
                     ],
                 })
@@ -7690,16 +7691,250 @@ class ExperimentModel(QObject):
             "optimization_result": copy.deepcopy(dict(optimization_result)),
         }
 
+    def _current_stock_allocation_volume_evidence(self) -> Dict[str, Any]:
+        '''Recalculate exact reaction volumes for the currently installed plan.'''
+        printed, final, warning_threshold = self._calibration_volume_basis()
+        tolerance = warning_threshold - printed
+        fill_volume = float(
+            self.metadata.get(
+                'fill_droplet_volume_nL',
+                self._default_fill_droplet_volume_nl(),
+            )
+        )
+        fill_mode = self._resolve_fill_printing_mode(
+            self.metadata.get('fill_printing_mode'),
+            fill_volume,
+        )
+        fill_volume = validate_ejection_volume_for_mode(
+            fill_volume,
+            fill_mode,
+            label='Fill ejection volume',
+        )
+        fill_is_calibrated = 'intended_fill_droplet_volume_nL' in self.metadata
+
+        rows: List[Dict[str, Any]] = []
+        worst_nonfill = 0.0
+        for index, run_spec in enumerate(self._iter_reaction_run_specs()):
+            nonfill = 0.0
+            for key, target in dict(run_spec.get('reaction') or {}).items():
+                plan = self.plans_per_option.get(key)
+                if plan is None:
+                    raise ValueError(
+                        f'Reusable plan is missing {self._design_key_label(key)}.'
+                    )
+                counts = self._counts_for_plan_target(key, float(target), plan)
+                stocks = list(plan.get('stocks') or [])
+                if len(counts) != len(stocks):
+                    raise ValueError(
+                        f'Reusable plan has inconsistent counts for {key!r}.'
+                    )
+                nonfill += sum(
+                    int(count) * float(stock['droplet_volume_nL'])
+                    for count, stock in zip(counts, stocks)
+                )
+            worst_nonfill = max(worst_nonfill, nonfill)
+            fill_count = self._calibration_fill_count(
+                target_printed_volume_nL=printed,
+                warning_threshold_nL=warning_threshold,
+                nonfill_volume_nL=nonfill,
+                fill_volume_nL=fill_volume,
+                fill_is_calibrated=fill_is_calibrated,
+            )
+            reaction_id = f'R{index + 1}'
+            rows.append({
+                'row_id': reaction_id,
+                'well_id': None,
+                'reaction_id': reaction_id,
+                'nonfill_volume_nL': float(nonfill),
+                'fill_drops': int(fill_count),
+                'total_volume_nL': float(nonfill + fill_count * fill_volume),
+            })
+
+        warning = self._build_calibration_volume_warning(
+            rows,
+            target_printed_volume_nL=printed,
+            design_optimization_tolerance_nL=tolerance,
+            final_reaction_volume_nL=final,
+        )
+        return {
+            'target_printed_volume_nL': float(printed),
+            'design_optimization_tolerance_nL': float(tolerance),
+            'warning_threshold_nL': float(warning_threshold),
+            'final_reaction_volume_nL': float(final),
+            'fill_volume_nL': float(fill_volume),
+            'fill_printing_mode': str(fill_mode),
+            'worst_nonfill_nL': float(worst_nonfill),
+            'rows': rows,
+            'volume_warning': warning,
+        }
+
+    def _current_stock_allocation_result(
+        self,
+        *,
+        reuse_context: str,
+        expected_fingerprint: str,
+        base_result: Mapping[str, Any] | None = None,
+        volume_evidence: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        '''Return a complete optimizer-result contract for the installed plan.'''
+        evidence = dict(
+            volume_evidence or self._current_stock_allocation_volume_evidence()
+        )
+        preview_rows = [
+            row
+            for rows in self._target_preview_map.values()
+            for row in rows
+        ]
+        losses_by_key: Dict[Tuple[str, Optional[str]], int] = {}
+        for key, rows in self._target_preview_map.items():
+            summary = self._summarize_target_resolution_rows(rows)
+            losses_by_key[key] = int(summary['lost_level_count'])
+
+        stock_count = sum(
+            len(list(plan.get('stocks') or []))
+            for plan in self.plans_per_option.values()
+        )
+        concentration_sum = sum(
+            float(stock['stock_concentration'])
+            for plan in self.plans_per_option.values()
+            for stock in list(plan.get('stocks') or [])
+        )
+        total_loss = sum(losses_by_key.values())
+        worst_loss = max(losses_by_key.values(), default=0)
+        errors = [
+            abs(float(row.get('abs_error', 0.0) or 0.0))
+            for row in preview_rows
+        ]
+        worst_error = max(errors, default=0.0)
+        mean_error = sum(errors) / len(errors) if errors else 0.0
+        worst_nonfill = float(evidence.get('worst_nonfill_nL', 0.0))
+        rank = {
+            'total_distinct_level_loss': int(total_loss),
+            'worst_reagent_level_loss': int(worst_loss),
+            'stock_solution_count': int(stock_count),
+            'worst_abs_error': float(worst_error),
+            'mean_abs_error': float(mean_error),
+            'concentration_burden': float(concentration_sum),
+            'printed_volume_nL': float(worst_nonfill),
+        }
+        two_stock_keys = [
+            key
+            for key, plan in self.plans_per_option.items()
+            if int(plan.get('n_stocks', 1)) == 2
+        ]
+        collapsed_target_keys = [
+            key for key in self.plans_per_option if losses_by_key.get(key, 0) > 0
+        ]
+        target = min(
+            float(evidence['target_printed_volume_nL']),
+            float(evidence['final_reaction_volume_nL']),
+        )
+        tolerance = float(evidence['design_optimization_tolerance_nL'])
+        effective_limit = min(
+            float(evidence['final_reaction_volume_nL']) + tolerance,
+            target + tolerance,
+        )
+
+        result = copy.deepcopy(dict(base_result or {}))
+        result.update({
+            'best': True,
+            'stocks': int(stock_count),
+            'sum_conc': float(concentration_sum),
+            'worst_nonfill_nL': float(worst_nonfill),
+            'printed_volume_nL': float(target),
+            'printed_volume_tolerance_nL': float(tolerance),
+            'effective_printed_volume_limit_nL': float(effective_limit),
+            'two_stock_keys': list(two_stock_keys),
+            'distinct_level_loss': int(total_loss),
+            'collapsed_target_keys': list(collapsed_target_keys),
+            'approximate_targets': sum(
+                1
+                for row in preview_rows
+                if bool(row.get('reachable'))
+                and abs(float(row.get('abs_error', 0.0) or 0.0)) > 1e-12
+            ),
+            'unreachable_targets': sum(
+                1 for row in preview_rows if not bool(row.get('reachable'))
+            ),
+            'stock_allocation_reused_import_plan': True,
+            'stock_allocation_reuse_fingerprint': expected_fingerprint,
+            'volume_warning': copy.deepcopy(evidence.get('volume_warning')),
+        })
+
+        standard_defaults = {
+            'two_stock_search_limited_keys': [],
+            'issues_by_key': {},
+            'optimizer_strategy_used': 'calibration_requantization',
+            'optimizer_fallback_reason': None,
+            'stock_allocation_search_limited': False,
+            'stock_allocation_states_evaluated': 0,
+            'optimizer_seed_elapsed_ms': 0.0,
+            'stock_allocation_elapsed_ms': 0.0,
+            'optimizer_total_elapsed_ms': 0.0,
+            'stock_allocation_time_budget_ms': float(
+                self.MAX_STOCK_ALLOCATION_SECONDS * 1000.0
+            ),
+            'stock_allocation_zero_loss_polish_budget_ms': float(
+                self.ZERO_LOSS_POLISH_SECONDS * 1000.0
+            ),
+            'stock_allocation_limit_reasons': [],
+            'stock_allocation_candidates_generated': 0,
+            'stock_allocation_candidates_retained': 0,
+            'stock_allocation_candidates_pruned': 0,
+            'stock_allocation_candidates_deduplicated': 0,
+            'stock_allocation_candidates_dominated': 0,
+            'stock_allocation_branches_pruned': 0,
+            'stock_allocation_loss_tiers_evaluated': 0,
+            'optimizer_seed_distinct_level_loss': int(total_loss),
+            'optimizer_seed_worst_level_loss': int(worst_loss),
+            'optimizer_seed_rank': copy.deepcopy(rank),
+            'optimizer_selected_rank': copy.deepcopy(rank),
+            'stock_allocation_improved_seed': False,
+            'stock_allocation_time_to_first_improvement_ms': None,
+            'stock_allocation_time_to_best_ms': None,
+            'stock_allocation_deadline_overshoot_ms': 0.0,
+            'two_stock_pairs_evaluated': 0,
+            'two_stock_target_evaluations': 0,
+            'two_stock_solver_iterations': 0,
+            'two_stock_candidates_generated': 0,
+            'two_stock_candidates_retained': 0,
+            'two_stock_candidates_deduplicated': 0,
+            'two_stock_target_row_cache_reuses': 0,
+            'stock_allocation_stop_reason': 'calibrated_plan_reused',
+        }
+        for field, value in standard_defaults.items():
+            result.setdefault(field, copy.deepcopy(value))
+
+        if reuse_context == 'calibration':
+            result.update(copy.deepcopy(standard_defaults))
+            result.update({
+                'calibrated_stock_allocation_reused': True,
+                'optimizer_strategy_used': 'calibration_requantization',
+                'stock_allocation_stop_reason': 'calibrated_plan_reused',
+            })
+        return result
+
     def _export_calibrated_stock_allocation_payload(
         self,
         *,
         calibrated_stock_id: str,
         calibration_record_key: str | None = None,
     ) -> Dict[str, Any]:
-        allocation = self.export_stock_allocation_reuse_payload({
-            "best": True,
-            "optimizer_strategy_used": "calibration_requantization",
-        })
+        fingerprint = self.stock_allocation_input_fingerprint()
+        allocation = self.export_stock_allocation_reuse_payload(
+            self._current_stock_allocation_result(
+                reuse_context='calibration',
+                expected_fingerprint=fingerprint,
+            )
+        )
+        allocation['plans_per_option'] = {
+            json.dumps(
+                [str(key[0]), key[1]],
+                separators=(',', ':'),
+                ensure_ascii=True,
+            ): copy.deepcopy(plan)
+            for key, plan in self.plans_per_option.items()
+        }
         allocation["calibrated_independent_volumes"] = True
         return {
             "schema_version": 1,
@@ -7712,8 +7947,14 @@ class ExperimentModel(QObject):
         }
 
     def install_stock_allocation_reuse_payload(
-        self, payload: Mapping[str, Any] | None
+        self,
+        payload: Mapping[str, Any] | None,
+        *,
+        reuse_context: str = "import",
+        expected_calibrated_stock_id: str | None = None,
     ) -> Dict[str, Any]:
+        if reuse_context not in {"import", "calibration"}:
+            return {"reused": False, "reason": "unsupported_reuse_context"}
         if not isinstance(payload, Mapping):
             return {"reused": False, "reason": "missing_reuse_payload"}
         if payload.get("schema") != "labcraft.import_stock_allocation_reuse.v1":
@@ -7722,11 +7963,55 @@ class ExperimentModel(QObject):
         if str(payload.get("input_fingerprint") or "") != expected_fingerprint:
             return {"reused": False, "reason": "stock_input_fingerprint_mismatch"}
 
-        plans = copy.deepcopy(payload.get("plans_per_option") or {})
+        raw_plans = payload.get("plans_per_option") or {}
+        plans: Dict[Tuple[str, Optional[str]], Dict[str, Any]] = {}
+        if isinstance(raw_plans, Mapping):
+            for raw_key, raw_plan in raw_plans.items():
+                if isinstance(raw_key, tuple) and len(raw_key) == 2:
+                    key = (str(raw_key[0]), raw_key[1])
+                elif isinstance(raw_key, str):
+                    try:
+                        decoded_key = json.loads(raw_key)
+                    except Exception:
+                        decoded_key = None
+                    if not isinstance(decoded_key, list) or len(decoded_key) != 2:
+                        return {
+                            'reused': False,
+                            'reason': 'stock_plan_key_mismatch',
+                        }
+                    key = (str(decoded_key[0]), decoded_key[1])
+                else:
+                    return {
+                        'reused': False,
+                        'reason': 'stock_plan_key_mismatch',
+                    }
+                if key in plans or not isinstance(raw_plan, Mapping):
+                    return {
+                        'reused': False,
+                        'reason': 'stock_plan_key_mismatch',
+                    }
+                plans[key] = copy.deepcopy(dict(raw_plan))
         stock_rows = copy.deepcopy(payload.get("stock_rows") or [])
         allow_independent_volumes = bool(
             payload.get("calibrated_independent_volumes", False)
         )
+        calibrated_stock_id = str(expected_calibrated_stock_id or '').strip()
+        if reuse_context == 'import' and allow_independent_volumes:
+            return {
+                'reused': False,
+                'reason': 'calibrated_reuse_context_required',
+            }
+        if reuse_context == 'calibration':
+            if not allow_independent_volumes:
+                return {
+                    'reused': False,
+                    'reason': 'calibrated_independent_volumes_required',
+                }
+            if not calibrated_stock_id:
+                return {
+                    'reused': False,
+                    'reason': 'calibrated_stock_identity_required',
+                }
         plan_fingerprint = self._canonical_payload_sha256(
             self._stock_allocation_plan_document(plans, stock_rows)
         )
@@ -7816,12 +8101,40 @@ class ExperimentModel(QObject):
                         raise ValueError(f"Reusable plan has invalid stock for {key!r}.")
                     if maximum is not None and concentration > float(maximum) + 1e-9:
                         raise ValueError(f"Reusable plan exceeds max stock for {key!r}.")
-                    for raw_drops in (stock.get("droplets_per_target") or {}).values():
+                    raw_mapping = stock.get("droplets_per_target") or {}
+                    if not isinstance(raw_mapping, Mapping):
+                        raise ValueError(
+                            f'Reusable plan has invalid target mappings for {key!r}.'
+                        )
+                    normalized_mapping: Dict[float, int] = {}
+                    for raw_target, raw_drops in raw_mapping.items():
+                        target = float(raw_target)
+                        if not math.isfinite(target):
+                            raise ValueError(
+                                f'Reusable plan has invalid target mappings for {key!r}.'
+                            )
+                        target = self._normalize_target_key(target)
+                        if target in normalized_mapping:
+                            raise ValueError(
+                                f'Reusable plan has duplicate target mappings for {key!r}.'
+                            )
+                        if isinstance(raw_drops, bool) or not isinstance(
+                            raw_drops, (int, float)
+                        ):
+                            raise ValueError(
+                                f'Reusable plan has invalid droplets for {key!r}.'
+                            )
                         drops = int(raw_drops)
-                        if drops < 0 or float(raw_drops) != float(drops):
+                        if (
+                            not math.isfinite(float(raw_drops))
+                            or drops < 0
+                            or float(raw_drops) != float(drops)
+                        ):
                             raise ValueError(
                                 f"Reusable plan has invalid droplets for {key!r}."
                             )
+                        normalized_mapping[target] = drops
+                    stock['droplets_per_target'] = normalized_mapping
                     validated_row = self._build_stock_row(
                         factor_name=key[0],
                         option_name=key[1] or "",
@@ -7852,9 +8165,45 @@ class ExperimentModel(QObject):
                         persisted_row.get("printing_mode"),
                         fallback=validated_row.get("printing_mode"),
                     )
+                    persisted_volume = validate_ejection_volume_for_mode(
+                        float(persisted_row.get('droplet_volume_nL')),
+                        validated_row['printing_mode'],
+                        label='Persisted stock ejection volume',
+                    )
+                    persisted_delta = float(persisted_row.get('delta_per_drop'))
+                    if (
+                        not math.isfinite(persisted_delta)
+                        or not math.isclose(
+                            persisted_volume,
+                            droplet_volume,
+                            rel_tol=1e-12,
+                            abs_tol=1e-12,
+                        )
+                        or not math.isclose(
+                            persisted_delta,
+                            delta_per_drop,
+                            rel_tol=1e-9,
+                            abs_tol=1e-12,
+                        )
+                    ):
+                        raise ValueError(
+                            f'Reusable stock identity row does not match its '
+                            f'plan for {key!r}.'
+                        )
+                    droplet_volume = validate_ejection_volume_for_mode(
+                        droplet_volume,
+                        validated_row['printing_mode'],
+                        label='Reusable stock ejection volume',
+                    )
+                    stock['droplet_volume_nL'] = droplet_volume
+                    validated_row['droplet_volume_nL'] = droplet_volume
                     stock["printing_mode"] = validated_row["printing_mode"]
                     validated_stock_rows.append(validated_row)
 
+            if len(validated_stock_rows) != len(stock_rows):
+                raise ValueError(
+                    'Reusable stock plan has unmatched stock identity rows.'
+                )
             self.plans_per_option.clear()
             self.plans_per_option.update(plans)
             self._stock_rows_cache = validated_stock_rows
@@ -7869,6 +8218,20 @@ class ExperimentModel(QObject):
                     raise ValueError(f"Reusable plan cannot reach every target for {key!r}.")
                 plan = self.plans_per_option[key]
                 starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+                expected_target_keys = {
+                    self._normalize_target_key(
+                        max(0.0, float(target) - starting)
+                    )
+                    for target in targets
+                }
+                for stock in plan.get("stocks") or []:
+                    if set(stock.get("droplets_per_target") or {}) != (
+                        expected_target_keys
+                    ):
+                        raise ValueError(
+                            f'Reusable plan does not have exact target mappings '
+                            f'for {key!r}.'
+                        )
                 for target in targets:
                     adjusted = self._normalize_target_key(
                         max(0.0, float(target) - starting)
@@ -7899,36 +8262,21 @@ class ExperimentModel(QObject):
                                 f"Reusable plan is missing an explicit mapping for {key!r}."
                             )
 
-            printed = float(self.metadata.get("target_reaction_volume_nL", 2000.0))
-            final = float(self.metadata.get("final_reaction_volume_nL", printed))
-            tolerance = max(
-                0.0,
-                float(self.metadata.get("printed_volume_tolerance_nL", 50.0)),
-            )
-            allowed = min(final + tolerance, min(printed, final) + tolerance)
-            for run_spec in self._iter_unique_reaction_constraint_specs():
-                row_volume = 0.0
-                for key, target in run_spec["reaction"].items():
-                    option = expected_options[key]
-                    adjusted = self._normalize_target_key(
-                        max(
-                            0.0,
-                            float(target)
-                            - float(getattr(option, "starting_conc", 0.0) or 0.0),
-                        )
+            volume_evidence = self._current_stock_allocation_volume_evidence()
+            if reuse_context == 'import':
+                allowed = min(
+                    float(volume_evidence['final_reaction_volume_nL'])
+                    + float(volume_evidence['design_optimization_tolerance_nL']),
+                    min(
+                        float(volume_evidence['target_printed_volume_nL']),
+                        float(volume_evidence['final_reaction_volume_nL']),
                     )
-                    for stock in self.plans_per_option[key].get("stocks") or []:
-                        drops = next(
-                            int(value)
-                            for stored_target, value in (
-                                stock.get("droplets_per_target") or {}
-                            ).items()
-                            if self._normalize_target_key(float(stored_target))
-                            == adjusted
-                        )
-                        row_volume += drops * float(stock["droplet_volume_nL"])
-                if row_volume > allowed + 1e-6:
-                    raise ValueError("Reusable stock plan exceeds the exact row-volume limit.")
+                    + float(volume_evidence['design_optimization_tolerance_nL']),
+                )
+                if float(volume_evidence['worst_nonfill_nL']) > allowed + 1e-6:
+                    raise ValueError(
+                        'Reusable stock plan exceeds the exact row-volume limit.'
+                    )
 
             runtime_rows = list(validated_stock_rows) + [{
                 "factor_name": str(
@@ -7941,6 +8289,13 @@ class ExperimentModel(QObject):
             runtime_ids = [stock_id_for_row(row) for row in runtime_rows]
             if len(runtime_ids) != len(set(runtime_ids)):
                 raise ValueError("Reusable stock plan contains duplicate runtime stock IDs.")
+            if (
+                reuse_context == 'calibration'
+                and calibrated_stock_id not in runtime_ids
+            ):
+                raise ValueError(
+                    'Reusable calibrated stock identity does not match the runtime plan.'
+                )
         except Exception as exc:
             _restore()
             return {
@@ -7949,13 +8304,17 @@ class ExperimentModel(QObject):
                 "detail": f"{type(exc).__name__}: {exc}",
             }
 
-        result = copy.deepcopy(dict(payload.get("optimization_result") or {}))
-        result.update({
-            "best": True,
-            "stock_allocation_reused_import_plan": True,
-            "stock_allocation_reuse_fingerprint": expected_fingerprint,
-        })
-        return {"reused": True, "result": result}
+        result = self._current_stock_allocation_result(
+            reuse_context=reuse_context,
+            expected_fingerprint=expected_fingerprint,
+            base_result=payload.get('optimization_result'),
+            volume_evidence=volume_evidence,
+        )
+        return {
+            'reused': True,
+            'result': result,
+            'volume_warning': copy.deepcopy(volume_evidence.get('volume_warning')),
+        }
 
     def build_import_feasibility_report(
         self,
@@ -12242,9 +12601,16 @@ class ExperimentModel(QObject):
 
         if bool(self.calibrated_stock_allocation.get("active")):
             restored = self.install_stock_allocation_reuse_payload(
-                self.calibrated_stock_allocation.get("allocation")
+                self.calibrated_stock_allocation.get("allocation"),
+                reuse_context='calibration',
+                expected_calibrated_stock_id=self.calibrated_stock_allocation.get(
+                    'calibrated_stock_id'
+                ),
             )
             if restored.get("reused"):
+                self.calibrated_stock_allocation['allocation'][
+                    'optimization_result'
+                ] = copy.deepcopy(restored.get('result') or {})
                 self.calibrated_stock_allocation_status = {
                     "active": True,
                     "reason": "restored",
@@ -12252,6 +12618,14 @@ class ExperimentModel(QObject):
                 try:
                     self.generate_experiment()
                     self._refresh_plan_preview_maps()
+                    regenerated_warning = (
+                        self._calibration_volume_warning_for_generated_reactions()
+                    )
+                    if regenerated_warning != restored.get('volume_warning'):
+                        raise RuntimeError(
+                            'Restored calibrated allocation volume warning did not '
+                            'match regenerated reactions.'
+                        )
                 except Exception as exc:
                     self.plans_per_option.clear()
                     self._stock_rows_cache.clear()
