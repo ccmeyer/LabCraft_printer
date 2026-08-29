@@ -669,6 +669,8 @@ class ExperimentModel(QObject):
         # runtime context provided by Model for progress/key creation
         self._runtime_well_plate = None
         self._runtime_reaction_collection = None
+        self._mutable_calibration_stage_active = False
+        self._mutable_calibration_runtime_strict = False
 
         # --- uploaded design support ---
         # If not None: a list of dicts representing explicit reactions
@@ -9079,7 +9081,8 @@ class ExperimentModel(QObject):
         if not run_specs:
             self._reactions_df = pd.DataFrame()
             self._last_worst_nonfill_volume_nL = 0.0
-            self.experiment_generated.emit(0, 0.0)
+            if not getattr(self, "_mutable_calibration_stage_active", False):
+                self.experiment_generated.emit(0, 0.0)
             return
 
         rows = []
@@ -9240,7 +9243,8 @@ class ExperimentModel(QObject):
         }
         self._reactions_df = pd.DataFrame(rows)
         self._last_worst_nonfill_volume_nL = worst_nonfill
-        self.experiment_generated.emit(len(run_specs), float(worst_nonfill))
+        if not getattr(self, "_mutable_calibration_stage_active", False):
+            self.experiment_generated.emit(len(run_specs), float(worst_nonfill))
 
     def find_option_by_reagent_name(self, reagent_name: str) -> tuple[tuple[str, Optional[str]], OptionSpec] | None:
         """
@@ -10983,7 +10987,8 @@ class ExperimentModel(QObject):
                 save=False,
             )
         self.unsaved_changes = True
-        self.applied_imaging_calibration_changed.emit(dict(record))
+        if not getattr(self, "_mutable_calibration_stage_active", False):
+            self.applied_imaging_calibration_changed.emit(dict(record))
         if save and getattr(self, "experiment_file_path", None):
             self.save_experiment()
         return dict(record)
@@ -11146,7 +11151,8 @@ class ExperimentModel(QObject):
         self.manual_refuel_checks = state
         if not use_sidecar:
             self.unsaved_changes = True
-        self.manual_refuel_check_changed.emit(dict(stored_record))
+        if not getattr(self, "_mutable_calibration_stage_active", False):
+            self.manual_refuel_check_changed.emit(dict(stored_record))
         if save and not use_sidecar and getattr(self, "experiment_file_path", None):
             self.save_experiment()
         return dict(stored_record)
@@ -11597,6 +11603,420 @@ class ExperimentModel(QObject):
         return {"ok": True, "code": "ok", "message": "", "record": record}
 
 
+    _MUTABLE_CALIBRATION_STATE_ATTRIBUTES = (
+        "plans_per_option",
+        "_stock_rows_cache",
+        "_fill_row_cache",
+        "_target_preview_map",
+        "_unreachable_preview_map",
+        "_reactions_df",
+        "_last_worst_nonfill_volume_nL",
+        "applied_imaging_calibrations",
+        "manual_refuel_checks",
+        "calibrated_stock_allocation",
+        "calibrated_stock_allocation_status",
+        "progress_data",
+        "_progress_execution_reference",
+        "unsaved_changes",
+    )
+
+    def _snapshot_mutable_calibration_state(self) -> dict:
+        attributes = {}
+        for name in ExperimentModel._MUTABLE_CALIBRATION_STATE_ATTRIBUTES:
+            if not hasattr(self, name):
+                attributes[name] = {"present": False}
+                continue
+            value = getattr(self, name)
+            attributes[name] = {
+                "present": True,
+                "value": (
+                    value.copy(deep=True)
+                    if isinstance(value, pd.DataFrame)
+                    else copy.deepcopy(value)
+                ),
+            }
+
+        metadata = getattr(self, "metadata", None)
+        option_states = []
+        for factor in list(getattr(self, "factors", []) or []):
+            for option in list(getattr(factor, "options", []) or []):
+                option_states.append((option, copy.deepcopy(vars(option))))
+
+        return {
+            "attributes": attributes,
+            "metadata_present": isinstance(metadata, dict),
+            "metadata": copy.deepcopy(metadata) if isinstance(metadata, dict) else None,
+            "option_states": option_states,
+        }
+
+    def _restore_mutable_calibration_state(self, snapshot: dict) -> None:
+        if snapshot.get("metadata_present"):
+            metadata = getattr(self, "metadata", None)
+            if not isinstance(metadata, dict):
+                self.metadata = {}
+                metadata = self.metadata
+            metadata.clear()
+            metadata.update(copy.deepcopy(snapshot["metadata"]))
+
+        for option, state in snapshot.get("option_states", []):
+            option.__dict__.clear()
+            option.__dict__.update(copy.deepcopy(state))
+
+        for name, entry in snapshot.get("attributes", {}).items():
+            if not entry.get("present"):
+                if hasattr(self, name):
+                    delattr(self, name)
+                continue
+            value = entry.get("value")
+            current = getattr(self, name, None)
+            if isinstance(current, dict) and isinstance(value, dict):
+                current.clear()
+                current.update(copy.deepcopy(value))
+            elif isinstance(value, pd.DataFrame):
+                setattr(self, name, value.copy(deep=True))
+            else:
+                setattr(self, name, copy.deepcopy(value))
+
+    def _snapshot_mutable_calibration_runtime(self) -> dict | None:
+        runtime = getattr(self, "_runtime_reaction_collection", None)
+        if runtime is None:
+            return None
+        getter = getattr(runtime, "get_all_reactions", None)
+        if not callable(getter):
+            has_assignments = getattr(self, "_has_runtime_assignments", None)
+            if callable(has_assignments) and has_assignments():
+                raise RuntimeError(
+                    "The assigned runtime cannot be snapshotted for calibration."
+                )
+            return None
+        reactions = list(getter())
+        if not reactions:
+            return None
+
+        reaction_states = []
+        for reaction in reactions:
+            reagent_getter = getattr(reaction, "get_all_reagents", None)
+            if not callable(reagent_getter):
+                raise RuntimeError(
+                    "An assigned runtime reaction cannot be snapshotted for calibration."
+                )
+            reagents = reagent_getter()
+            if not isinstance(reagents, dict):
+                raise RuntimeError(
+                    "An assigned runtime reagent mapping is malformed."
+                )
+            reagent_states = {}
+            for stock_id, reagent in reagents.items():
+                for field in ("target_droplets", "added_droplets", "completed"):
+                    if not hasattr(reagent, field):
+                        raise RuntimeError(
+                            "An assigned runtime reagent has incomplete progress state."
+                        )
+                reagent_states[str(stock_id)] = {
+                    "reagent": reagent,
+                    "target_droplets": copy.deepcopy(reagent.target_droplets),
+                    "added_droplets": copy.deepcopy(reagent.added_droplets),
+                    "completed": copy.deepcopy(reagent.completed),
+                }
+            reaction_states.append(
+                {
+                    "reaction": reaction,
+                    "reagents": dict(reagents),
+                    "reagent_states": reagent_states,
+                }
+            )
+        return {"runtime": runtime, "reactions": reaction_states}
+
+    @staticmethod
+    def _restore_mutable_calibration_runtime(snapshot: dict | None) -> None:
+        if snapshot is None:
+            return
+        for reaction_state in snapshot.get("reactions", []):
+            reaction = reaction_state["reaction"]
+            current = reaction.get_all_reagents()
+            current.clear()
+            current.update(reaction_state["reagents"])
+            for state in reaction_state["reagent_states"].values():
+                reagent = state["reagent"]
+                reagent.target_droplets = copy.deepcopy(state["target_droplets"])
+                reagent.added_droplets = copy.deepcopy(state["added_droplets"])
+                reagent.completed = copy.deepcopy(state["completed"])
+
+    def _snapshot_mutable_calibration_files(
+        self,
+        *,
+        include_runtime_files: bool,
+    ) -> list[dict]:
+        names = []
+        if include_runtime_files:
+            names.extend(
+                (
+                    "progress_file_path",
+                    "key_file_path",
+                    "concentration_key_file_path",
+                )
+            )
+        names.append("experiment_file_path")
+
+        snapshots = []
+        seen = set()
+        for name in names:
+            raw_path = getattr(self, name, None)
+            if not raw_path:
+                continue
+            path = os.path.abspath(os.fspath(raw_path))
+            if path in seen:
+                continue
+            seen.add(path)
+            exists = os.path.exists(path)
+            if exists and not os.path.isfile(path):
+                raise RuntimeError(
+                    f"Mutable calibration persistence path is not a file: {path}"
+                )
+            snapshots.append(
+                {
+                    "path": path,
+                    "existed": exists,
+                    "contents": Path(path).read_bytes() if exists else None,
+                }
+            )
+        return snapshots
+
+    @staticmethod
+    def _atomic_write_bytes(path: str, contents: bytes) -> None:
+        parent = os.path.dirname(path) or "."
+        fd, temporary = tempfile.mkstemp(
+            prefix="._tmp_",
+            suffix=".rollback",
+            dir=parent,
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(contents)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except Exception:
+            try:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+
+    @classmethod
+    def _restore_mutable_calibration_files(cls, snapshots: list[dict]) -> None:
+        errors = []
+        for snapshot in reversed(snapshots):
+            path = snapshot["path"]
+            try:
+                if snapshot["existed"]:
+                    expected = snapshot["contents"]
+                    current = (
+                        Path(path).read_bytes()
+                        if os.path.isfile(path)
+                        else None
+                    )
+                    if current != expected:
+                        cls._atomic_write_bytes(path, expected)
+                elif os.path.exists(path):
+                    if not os.path.isfile(path):
+                        raise RuntimeError(
+                            f"Refusing to remove non-file rollback target: {path}"
+                        )
+                    os.unlink(path)
+            except Exception as exc:
+                errors.append(f"{path}: {exc}")
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    @staticmethod
+    def _changed_mutable_calibration_records(before, after) -> list[dict]:
+        before_records = (
+            before.get("records", {})
+            if isinstance(before, dict)
+            else {}
+        )
+        after_records = (
+            after.get("records", {})
+            if isinstance(after, dict)
+            else {}
+        )
+        return [
+            copy.deepcopy(after_records[key])
+            for key in sorted(after_records)
+            if before_records.get(key) != after_records[key]
+            and isinstance(after_records[key], dict)
+        ]
+
+    def _publish_mutable_calibration_notifications(
+        self,
+        *,
+        state_snapshot: dict,
+        runtime_changed: bool,
+    ) -> None:
+        def _emit(signal, *args):
+            if signal is None or not hasattr(signal, "emit"):
+                return
+            try:
+                signal.emit(*args)
+            except Exception as exc:
+                print(
+                    "[ExperimentModel] WARNING: post-calibration notification "
+                    f"failed: {exc}"
+                )
+
+        reactions = getattr(self, "_reactions_df", None)
+        worst = float(
+            getattr(self, "_last_worst_nonfill_volume_nL", 0.0) or 0.0
+        )
+        _emit(
+            getattr(self, "experiment_generated", None),
+            len(reactions) if isinstance(reactions, pd.DataFrame) else 0,
+            worst,
+        )
+        _emit(getattr(self, "stock_updated", None))
+        if runtime_changed:
+            well_plate = getattr(self, "_runtime_well_plate", None)
+            _emit(getattr(well_plate, "well_state_changed_signal", None), "all")
+
+        attributes = state_snapshot.get("attributes", {})
+        before_applied = (
+            attributes.get("applied_imaging_calibrations", {}).get("value")
+            or {}
+        )
+        for record in ExperimentModel._changed_mutable_calibration_records(
+            before_applied,
+            getattr(self, "applied_imaging_calibrations", {}),
+        ):
+            _emit(
+                getattr(self, "applied_imaging_calibration_changed", None),
+                record,
+            )
+
+        before_refuel = (
+            attributes.get("manual_refuel_checks", {}).get("value")
+            or {}
+        )
+        for record in ExperimentModel._changed_mutable_calibration_records(
+            before_refuel,
+            getattr(self, "manual_refuel_checks", {}),
+        ):
+            _emit(
+                getattr(self, "manual_refuel_check_changed", None),
+                record,
+            )
+
+    def _run_mutable_calibration_transaction(
+        self,
+        *,
+        write_keys_if_assigned: bool,
+        stage_changes: Callable[[], dict],
+    ) -> dict:
+        if getattr(self, "_mutable_calibration_stage_active", False):
+            raise RuntimeError("Nested mutable calibration transactions are not supported.")
+
+        state_snapshot = ExperimentModel._snapshot_mutable_calibration_state(self)
+        runtime_snapshot = ExperimentModel._snapshot_mutable_calibration_runtime(self)
+        file_snapshots = ExperimentModel._snapshot_mutable_calibration_files(
+            self,
+            include_runtime_files=bool(
+                runtime_snapshot is not None and write_keys_if_assigned
+            )
+        )
+        previous_stage_flag = bool(
+            getattr(self, "_mutable_calibration_stage_active", False)
+        )
+        previous_strict_flag = bool(
+            getattr(self, "_mutable_calibration_runtime_strict", False)
+        )
+        self._mutable_calibration_stage_active = True
+        self._mutable_calibration_runtime_strict = runtime_snapshot is not None
+
+        staged = None
+        saved_experiment = False
+        try:
+            staged = stage_changes()
+            if not isinstance(staged, dict) or not isinstance(
+                staged.get("result"), dict
+            ):
+                raise RuntimeError(
+                    "Mutable calibration staging returned an invalid result."
+                )
+            if runtime_snapshot is not None:
+                rebound = self._refresh_runtime_after_plan_change(
+                    write_keys_if_assigned=write_keys_if_assigned
+                )
+                if not rebound:
+                    raise RuntimeError(
+                        "The assigned runtime did not accept calibrated targets."
+                    )
+            self.unsaved_changes = True
+            if getattr(self, "experiment_file_path", None):
+                self.save_experiment()
+                saved_experiment = True
+        except Exception as operation_error:
+            rollback_errors = []
+            try:
+                ExperimentModel._restore_mutable_calibration_runtime(
+                    runtime_snapshot
+                )
+            except Exception as exc:
+                rollback_errors.append(f"runtime: {exc}")
+            try:
+                ExperimentModel._restore_mutable_calibration_state(
+                    self,
+                    state_snapshot,
+                )
+            except Exception as exc:
+                rollback_errors.append(f"model: {exc}")
+            try:
+                ExperimentModel._restore_mutable_calibration_files(
+                    file_snapshots
+                )
+            except Exception as exc:
+                rollback_errors.append(f"files: {exc}")
+            self._mutable_calibration_stage_active = previous_stage_flag
+            self._mutable_calibration_runtime_strict = previous_strict_flag
+            if rollback_errors:
+                self.unsaved_changes = True
+                raise RuntimeError(
+                    "Mutable calibration failed and rollback was incomplete: "
+                    + "; ".join(rollback_errors)
+                ) from operation_error
+            raise
+
+        self._mutable_calibration_stage_active = previous_stage_flag
+        self._mutable_calibration_runtime_strict = previous_strict_flag
+        public_result = dict(staged["result"])
+        public_result["saved_experiment"] = bool(saved_experiment)
+
+        volume_warning = public_result.get("volume_warning")
+        warning_auditor = getattr(
+            self,
+            "_audit_calibration_volume_warning",
+            None,
+        )
+        if callable(warning_auditor):
+            try:
+                warning_auditor(
+                    volume_warning,
+                    stock_id=staged.get("audit_stock_id"),
+                    calibration_record=staged.get("calibration_record"),
+                )
+            except Exception as exc:
+                print(
+                    "[ExperimentAudit] Failed to record post-commit "
+                    f"calibration warning: {exc}"
+                )
+        ExperimentModel._publish_mutable_calibration_notifications(
+            self,
+            state_snapshot=state_snapshot,
+            runtime_changed=runtime_snapshot is not None,
+        )
+        return public_result
+
+
     def _apply_mutable_two_stock_requantization(
         self,
         *,
@@ -11623,41 +12043,7 @@ class ExperimentModel(QObject):
         if not isinstance(plan, dict) or int(plan.get("n_stocks", 0)) != 2:
             raise ValueError(f"No mutable two-stock plan exists for {key!r}.")
 
-        snapshot = {
-            "plans": copy.deepcopy(self.plans_per_option),
-            "stock_rows": copy.deepcopy(self._stock_rows_cache),
-            "fill_row": copy.deepcopy(self._fill_row_cache),
-            "preview": copy.deepcopy(self._target_preview_map),
-            "unreachable": copy.deepcopy(self._unreachable_preview_map),
-            "reactions": self._reactions_df.copy(deep=True),
-            "worst_nonfill": self._last_worst_nonfill_volume_nL,
-            "applied_calibrations": copy.deepcopy(self.applied_imaging_calibrations),
-            "calibrated_allocation": copy.deepcopy(self.calibrated_stock_allocation),
-            "calibrated_status": copy.deepcopy(self.calibrated_stock_allocation_status),
-            "unsaved_changes": bool(self.unsaved_changes),
-        }
-
-        def _restore() -> None:
-            self.plans_per_option.clear()
-            self.plans_per_option.update(copy.deepcopy(snapshot["plans"]))
-            self._stock_rows_cache = copy.deepcopy(snapshot["stock_rows"])
-            self._fill_row_cache = copy.deepcopy(snapshot["fill_row"])
-            self._target_preview_map = copy.deepcopy(snapshot["preview"])
-            self._unreachable_preview_map = copy.deepcopy(snapshot["unreachable"])
-            self._reactions_df = snapshot["reactions"].copy(deep=True)
-            self._last_worst_nonfill_volume_nL = snapshot["worst_nonfill"]
-            self.applied_imaging_calibrations = copy.deepcopy(
-                snapshot["applied_calibrations"]
-            )
-            self.calibrated_stock_allocation = copy.deepcopy(
-                snapshot["calibrated_allocation"]
-            )
-            self.calibrated_stock_allocation_status = copy.deepcopy(
-                snapshot["calibrated_status"]
-            )
-            self.unsaved_changes = bool(snapshot["unsaved_changes"])
-
-        try:
+        def _stage_changes() -> dict:
             stocks = list(plan.get("stocks") or [])
             stock_ids = list(result["stock_ids"])
             calibrated_index = int(result["calibrated_stock_index"])
@@ -11753,61 +12139,63 @@ class ExperimentModel(QObject):
                 "active": True,
                 "reason": "applied",
             }
-            self._refresh_runtime_after_plan_change(
-                write_keys_if_assigned=write_keys_if_assigned
+            volume_warning = (
+                self._calibration_volume_warning_for_generated_reactions()
             )
-            self.unsaved_changes = True
-            saved_experiment = False
-            if getattr(self, "experiment_file_path", None):
-                self.save_experiment()
-                saved_experiment = True
-        except Exception:
-            _restore()
-            raise
+            calibrated_rows = [
+                row for row in result["rows"]
+                if tuple(row["old_drops"]) != tuple(row["drops"])
+            ]
+            return {
+                "result": {
+                    "factor": key[0],
+                    "option": key[1],
+                    "n_stocks": 2,
+                    "calibrated_stock_id": calibrated_stock_id,
+                    "companion_stock_id": result["companion_stock_id"],
+                    "old_effective_volume_nL": float(
+                        result["old_effective_volumes_nL"][calibrated_index]
+                    ),
+                    "new_droplet_nL": float(
+                        result["new_effective_volumes_nL"][calibrated_index]
+                    ),
+                    "companion_effective_volume_nL": float(
+                        result["new_effective_volumes_nL"][
+                            result["companion_stock_index"]
+                        ]
+                    ),
+                    "old_distinct_level_loss": int(
+                        result["old_distinct_level_loss"]
+                    ),
+                    "new_distinct_level_loss": int(
+                        result["new_distinct_level_loss"]
+                    ),
+                    "worst_abs_error": float(result["worst_abs_error"]),
+                    "worst_nonfill_after_nL": float(
+                        result["worst_nonfill_volume_nL"]
+                    ),
+                    "changed_target_count": len(calibrated_rows),
+                    "count_changes": [
+                        {
+                            "target_final": float(row["target_final"]),
+                            "old_drops": tuple(row["old_drops"]),
+                            "new_drops": tuple(row["drops"]),
+                        }
+                        for row in calibrated_rows
+                    ],
+                    "saved_experiment": False,
+                    "volume_warning": volume_warning,
+                    "applied_imaging_calibration_recorded": record is not None,
+                },
+                "audit_stock_id": calibrated_stock_id,
+                "calibration_record": record,
+            }
 
-        volume_warning = self._calibration_volume_warning_for_generated_reactions()
-        self._audit_calibration_volume_warning(
-            volume_warning,
-            stock_id=calibrated_stock_id,
-            calibration_record=record,
+        return ExperimentModel._run_mutable_calibration_transaction(
+            self,
+            write_keys_if_assigned=write_keys_if_assigned,
+            stage_changes=_stage_changes,
         )
-
-        calibrated_rows = [
-            row for row in result["rows"]
-            if tuple(row["old_drops"]) != tuple(row["drops"])
-        ]
-        return {
-            "factor": key[0],
-            "option": key[1],
-            "n_stocks": 2,
-            "calibrated_stock_id": calibrated_stock_id,
-            "companion_stock_id": result["companion_stock_id"],
-            "old_effective_volume_nL": float(
-                result["old_effective_volumes_nL"][calibrated_index]
-            ),
-            "new_droplet_nL": float(
-                result["new_effective_volumes_nL"][calibrated_index]
-            ),
-            "companion_effective_volume_nL": float(
-                result["new_effective_volumes_nL"][result["companion_stock_index"]]
-            ),
-            "old_distinct_level_loss": int(result["old_distinct_level_loss"]),
-            "new_distinct_level_loss": int(result["new_distinct_level_loss"]),
-            "worst_abs_error": float(result["worst_abs_error"]),
-            "worst_nonfill_after_nL": float(result["worst_nonfill_volume_nL"]),
-            "changed_target_count": len(calibrated_rows),
-            "count_changes": [
-                {
-                    "target_final": float(row["target_final"]),
-                    "old_drops": tuple(row["old_drops"]),
-                    "new_drops": tuple(row["drops"]),
-                }
-                for row in calibrated_rows
-            ],
-            "saved_experiment": bool(saved_experiment),
-            "volume_warning": volume_warning,
-            "applied_imaging_calibration_recorded": record is not None,
-        }
 
 
     # ---------- apply a new droplet size while keeping stock concentration fixed ----------
@@ -12006,104 +12394,105 @@ class ExperimentModel(QObject):
                 key_t = self._normalize_target_key(t_add)
                 dp[key_t] = int(row["droplets"])
 
-        # ---- Patch the live plan & stock table cache ----
-        st["droplet_volume_nL"] = new_dv
-        st["delta_per_drop"] = delta
-        st["units"] = units
-        st["droplets_per_target"] = dp
-        # keep quantum small so future near-match logic is permissive but irrelevant (we use exact t_add keys)
-        st["quantum"] = 1e-6
+        def _stage_changes() -> dict:
+            # ---- Patch the live plan & stock table cache ----
+            st["droplet_volume_nL"] = new_dv
+            st["delta_per_drop"] = delta
+            st["units"] = units
+            st["droplets_per_target"] = dp
+            # Exact target keys make the permissive lookup quantum irrelevant.
+            st["quantum"] = 1e-6
 
-        current_design_dv = float(getattr(opt_obj, "droplet_nL", new_dv))
-        if (
-            getattr(opt_obj, "intended_droplet_nL", None) is None
-            and abs(current_design_dv - new_dv) > 1e-9
-        ):
-            opt_obj.intended_droplet_nL = current_design_dv
-        if (
-            getattr(opt_obj, "intended_printing_mode", None) is None
-            and original_printing_mode != applied_printing_mode
-        ):
-            opt_obj.intended_printing_mode = original_printing_mode
-
-        # Update the persistent design object so saves/loads reflect the new dv
-        opt_obj.droplet_nL = new_dv
-        opt_obj.printing_mode = applied_printing_mode
-        opt_obj.forced_stock_conc = c_stock
-
-        # Update the cached stock rows so UI tables reflect new dv
-        st["printing_mode"] = applied_printing_mode
-        updated_row = None
-        for r in self._stock_rows_cache:
+            current_design_dv = float(getattr(opt_obj, "droplet_nL", new_dv))
             if (
-                r.get("factor_name") == factor_name
-                and (r.get("option_name") or "") == (option_name or "")
-                and float(r.get("stock_concentration", -1)) == c_stock
+                getattr(opt_obj, "intended_droplet_nL", None) is None
+                and abs(current_design_dv - new_dv) > 1e-9
             ):
-                r["droplet_volume_nL"] = new_dv
-                r["delta_per_drop"] = delta
-                r["printing_mode"] = applied_printing_mode
-                updated_row = r
-                break
+                opt_obj.intended_droplet_nL = current_design_dv
+            if (
+                getattr(opt_obj, "intended_printing_mode", None) is None
+                and original_printing_mode != applied_printing_mode
+            ):
+                opt_obj.intended_printing_mode = original_printing_mode
 
-        # ---- Recompute the experiment so droplet counts and fill update everywhere ----
-        self.generate_experiment()
-        self._refresh_plan_preview_maps()
-        self._refresh_runtime_after_plan_change(write_keys_if_assigned=write_keys_if_assigned)
+            opt_obj.droplet_nL = new_dv
+            opt_obj.printing_mode = applied_printing_mode
+            opt_obj.forced_stock_conc = c_stock
 
-        # mark unsaved since design object changed
-        self.unsaved_changes = True
-        applied_recorded = False
-        record = None
-        if applied_calibration:
-            record_kwargs = dict(applied_calibration)
-            record_kwargs.setdefault("printing_mode", applied_printing_mode)
-            record_kwargs.setdefault("original_printing_mode", original_printing_mode)
-            record_kwargs.setdefault("applied_printing_mode", applied_printing_mode)
-            record = self.record_applied_imaging_calibration(
-                factor_name=factor_name,
-                option_name=option_name,
-                is_fill=False,
-                applied_design_volume_nL=new_dv,
-                save=False,
-                **record_kwargs,
+            st["printing_mode"] = applied_printing_mode
+            updated_row = None
+            for row in self._stock_rows_cache:
+                if (
+                    row.get("factor_name") == factor_name
+                    and (row.get("option_name") or "") == (option_name or "")
+                    and float(row.get("stock_concentration", -1)) == c_stock
+                ):
+                    row["droplet_volume_nL"] = new_dv
+                    row["delta_per_drop"] = delta
+                    row["printing_mode"] = applied_printing_mode
+                    updated_row = row
+                    break
+
+            self.generate_experiment()
+            self._refresh_plan_preview_maps()
+
+            record = None
+            if applied_calibration:
+                record_kwargs = dict(applied_calibration)
+                record_kwargs.setdefault("printing_mode", applied_printing_mode)
+                record_kwargs.setdefault(
+                    "original_printing_mode",
+                    original_printing_mode,
+                )
+                record_kwargs.setdefault(
+                    "applied_printing_mode",
+                    applied_printing_mode,
+                )
+                record = self.record_applied_imaging_calibration(
+                    factor_name=factor_name,
+                    option_name=option_name,
+                    is_fill=False,
+                    applied_design_volume_nL=new_dv,
+                    save=False,
+                    **record_kwargs,
+                )
+
+            warning_getter = getattr(
+                self,
+                "_calibration_volume_warning_for_generated_reactions",
+                None,
             )
-            applied_recorded = True
-        saved_experiment = False
-        if getattr(self, "experiment_file_path", None):
-            self.save_experiment()
-            saved_experiment = True
+            volume_warning = (
+                warning_getter() if callable(warning_getter) else None
+            )
+            return {
+                "result": {
+                    "factor": factor_name,
+                    "option": option_name,
+                    "stock_concentration": c_stock,
+                    "units": units,
+                    "new_droplet_nL": new_dv,
+                    "original_printing_mode": original_printing_mode,
+                    "applied_printing_mode": applied_printing_mode,
+                    "delta_per_drop": delta,
+                    "example_map": dict(list(dp.items())[: min(5, len(dp))]),
+                    "stock_row_updated": bool(updated_row),
+                    "worst_nonfill_after_nL": float(
+                        self._last_worst_nonfill_volume_nL or 0.0
+                    ),
+                    "saved_experiment": False,
+                    "applied_imaging_calibration_recorded": record is not None,
+                    "volume_warning": volume_warning,
+                },
+                "audit_stock_id": (record or {}).get("stock_id"),
+                "calibration_record": record,
+            }
 
-        warning_getter = getattr(
+        return ExperimentModel._run_mutable_calibration_transaction(
             self,
-            "_calibration_volume_warning_for_generated_reactions",
-            None,
+            write_keys_if_assigned=write_keys_if_assigned,
+            stage_changes=_stage_changes,
         )
-        volume_warning = warning_getter() if callable(warning_getter) else None
-        warning_auditor = getattr(self, "_audit_calibration_volume_warning", None)
-        if callable(warning_auditor):
-            warning_auditor(
-                volume_warning,
-                stock_id=(record or {}).get("stock_id"),
-                calibration_record=record,
-            )
-
-        return {
-            "factor": factor_name,
-            "option": option_name,
-            "stock_concentration": c_stock,
-            "units": units,
-            "new_droplet_nL": new_dv,
-            "original_printing_mode": original_printing_mode,
-            "applied_printing_mode": applied_printing_mode,
-            "delta_per_drop": delta,
-            "example_map": dict(list(dp.items())[: min(5, len(dp))]),
-            "stock_row_updated": bool(updated_row),
-            "worst_nonfill_after_nL": float(self._last_worst_nonfill_volume_nL or 0.0),
-            "saved_experiment": saved_experiment,
-            "applied_imaging_calibration_recorded": applied_recorded,
-            "volume_warning": volume_warning,
-        }
 
 
     # ------------- Public getters for the UI -------------
@@ -16881,7 +17270,7 @@ class ExperimentModel(QObject):
         if df.empty:
             # Nothing assigned yet; don't write a misleading header-only CSV
             return
-        df.to_csv(self.key_file_path, index_label="Well ID")
+        self._atomic_dataframe_csv(df, self.key_file_path)
 
     def progress_to_concentration_key(self) -> "pd.DataFrame":
         """
@@ -17015,7 +17404,7 @@ class ExperimentModel(QObject):
             return
         if decimals is not None and isinstance(decimals, int):
             df = df.round(decimals)
-        df.to_csv(self.concentration_key_file_path, index_label="Well ID")
+        self._atomic_dataframe_csv(df, self.concentration_key_file_path)
     
     def write_keys_now(self):
         """
@@ -17189,6 +17578,68 @@ class ExperimentModel(QObject):
         return True
 
 
+    def _iter_mutable_calibration_runtime_items(self):
+        start_lookup = {}
+        for factor in self.factors:
+            if factor.kind == "additive":
+                option = factor.options[0]
+                start_lookup[(factor.name, None)] = float(
+                    getattr(option, "starting_conc", 0.0) or 0.0
+                )
+            else:
+                for option in factor.options:
+                    start_lookup[(factor.name, option.name)] = float(
+                        getattr(option, "starting_conc", 0.0) or 0.0
+                    )
+
+        run_specs = list(self._iter_reaction_run_specs())
+        fill_counts = (
+            [int(value) for value in self._reactions_df["fill_drops"].tolist()]
+            if (
+                isinstance(self._reactions_df, pd.DataFrame)
+                and not self._reactions_df.empty
+                and "fill_drops" in self._reactions_df.columns
+            )
+            else [0] * len(run_specs)
+        )
+        if len(fill_counts) != len(run_specs):
+            raise RuntimeError(
+                "Generated fill targets do not match the runtime reaction count."
+            )
+
+        fill_name = self.get_fill_reagent_name()
+        for index, run_spec in enumerate(run_specs):
+            items = []
+            for key, target in run_spec["reaction"].items():
+                plan = self.plans_per_option.get(key)
+                if not isinstance(plan, dict):
+                    raise RuntimeError(
+                        f"No calibrated stock plan exists for {key!r}."
+                    )
+                starting = start_lookup.get(key, 0.0)
+                target_add = max(0.0, float(target) - starting)
+                reagent_name = key[0] if key[1] is None else key[1]
+                for stock in list(plan.get("stocks") or []):
+                    drops, _, unreachable, _ = self._resolve_drops_for_target(
+                        stock,
+                        target_add,
+                    )
+                    if unreachable:
+                        raise RuntimeError(
+                            f"The calibrated runtime target for {key!r} is unreachable."
+                        )
+                    items.append(
+                        (
+                            reagent_name,
+                            float(stock["stock_concentration"]),
+                            stock["units"],
+                            int(drops),
+                        )
+                    )
+            items.append((fill_name, 1.0, "--", int(fill_counts[index])))
+            yield items
+
+
     def _rebind_runtime_assignments_to_current_plans(self) -> bool:
         """
         Force per-well droplet counts in the runtime collection to match the
@@ -17200,16 +17651,99 @@ class ExperimentModel(QObject):
         if rc is None:
             return False
 
-        it = self.iter_reaction_stock_droplets()
+        strict = bool(
+            getattr(self, "_mutable_calibration_runtime_strict", False)
+        )
+        items_list = (
+            list(self._iter_mutable_calibration_runtime_items())
+            if strict
+            else None
+        )
+
+        if strict:
+            getter = getattr(rc, "get_all_reactions", None)
+            setter = getattr(rc, "set_reaction_items_for_index", None)
+            if not callable(getter) or not callable(setter):
+                raise RuntimeError(
+                    "The assigned runtime does not support reversible calibration updates."
+                )
+            reactions = list(getter())
+            if len(reactions) != len(items_list):
+                raise RuntimeError(
+                    "The assigned runtime reaction count does not match the calibrated design."
+                )
+            validated_items_list = []
+            for index, (reaction, items) in enumerate(zip(reactions, items_list)):
+                reagent_getter = getattr(reaction, "get_all_reagents", None)
+                if not callable(reagent_getter):
+                    raise RuntimeError(
+                        "The assigned runtime reaction cannot be validated before calibration."
+                    )
+                reagents = reagent_getter()
+                if not isinstance(reagents, dict):
+                    raise RuntimeError(
+                        "The assigned runtime reagent mapping is malformed."
+                    )
+                seen_stock_ids = set()
+                validated_items = []
+                for reagent_name, concentration, units, droplets in items:
+                    if (
+                        isinstance(droplets, bool)
+                        or not isinstance(droplets, (int, float))
+                        or not math.isfinite(float(droplets))
+                        or not float(droplets).is_integer()
+                        or int(droplets) < 0
+                    ):
+                        raise RuntimeError(
+                            f"The calibrated runtime target at reaction {index} is invalid."
+                        )
+                    stock_id = stock_id_for_parts(
+                        reagent_name,
+                        concentration,
+                        units,
+                    )
+                    if stock_id in seen_stock_ids:
+                        raise RuntimeError(
+                            f"The calibrated runtime target at reaction {index} duplicates stock {stock_id!r}."
+                        )
+                    seen_stock_ids.add(stock_id)
+                    if stock_id not in reagents and int(droplets) > 0:
+                        raise RuntimeError(
+                            f"The assigned runtime reaction {index} is missing stock {stock_id!r}."
+                        )
+                    if stock_id in reagents:
+                        validated_items.append(
+                            (
+                                reagent_name,
+                                concentration,
+                                units,
+                                int(droplets),
+                            )
+                        )
+                validated_items_list.append(validated_items)
+            items_list = validated_items_list
 
         try:
             # Most explicit: set each reaction's items
             if hasattr(rc, "set_reaction_items_for_index"):
-                for idx, items in enumerate(it):
-                    rc.set_reaction_items_for_index(idx, items)
+                iterator = (
+                    items_list
+                    if items_list is not None
+                    else self.iter_reaction_stock_droplets()
+                )
+                for idx, items in enumerate(iterator):
+                    updated = rc.set_reaction_items_for_index(idx, items)
+                    if strict and updated is False:
+                        raise RuntimeError(
+                            f"The assigned runtime rejected calibrated reaction {idx}."
+                        )
                 return True
 
             # Bulk reset from an iterator
+            if strict:
+                raise RuntimeError(
+                    "The assigned runtime does not expose a reversible per-reaction update."
+                )
             if hasattr(rc, "reset_from_iterator"):
                 rc.reset_from_iterator(self.iter_reaction_stock_droplets())
                 return True
@@ -17227,8 +17761,14 @@ class ExperimentModel(QObject):
                 return True
 
         except Exception as e:
+            if strict:
+                raise
             print(f"[ExperimentModel] WARNING: rebind of runtime assignments failed: {e}")
 
+        if strict:
+            raise RuntimeError(
+                "The assigned runtime does not support calibrated target updates."
+            )
         return False
 
     def _refresh_runtime_after_plan_change(self, *, write_keys_if_assigned: bool = True) -> bool:
@@ -17245,9 +17785,12 @@ class ExperimentModel(QObject):
                 self.write_keys_now()
 
         # Design/stock tables and other ExperimentModel listeners refresh from here.
-        self.stock_updated.emit()
+        if not getattr(self, "_mutable_calibration_stage_active", False):
+            self.stock_updated.emit()
 
-        if had_runtime_assignments:
+        if had_runtime_assignments and not getattr(
+            self, "_mutable_calibration_stage_active", False
+        ):
             wp = getattr(self, "_runtime_well_plate", None)
             signal = getattr(wp, "well_state_changed_signal", None)
             if signal is not None and hasattr(signal, "emit"):
@@ -17520,73 +18063,77 @@ class ExperimentModel(QObject):
 
         # Preview before we apply, so we can report useful deltas after recompute
         prev = self.preview_fill_requantized(new_fill_droplet_nL)
-        # Apply
-        if (
-            "intended_fill_droplet_volume_nL" not in self.metadata
-            and abs(old - new_fill_droplet_nL) > 1e-9
-        ):
-            self.metadata["intended_fill_droplet_volume_nL"] = old
-        if (
-            "intended_fill_printing_mode" not in self.metadata
-            and original_fill_mode != applied_fill_mode
-        ):
-            self.metadata["intended_fill_printing_mode"] = original_fill_mode
-        self.metadata["fill_droplet_volume_nL"] = new_fill_droplet_nL
-        self.metadata["fill_printing_mode"] = applied_fill_mode
-        self.generate_experiment()
 
-        self._refresh_runtime_after_plan_change(write_keys_if_assigned=write_keys_if_assigned)
+        def _stage_changes() -> dict:
+            if (
+                "intended_fill_droplet_volume_nL" not in self.metadata
+                and abs(old - new_fill_droplet_nL) > 1e-9
+            ):
+                self.metadata["intended_fill_droplet_volume_nL"] = old
+            if (
+                "intended_fill_printing_mode" not in self.metadata
+                and original_fill_mode != applied_fill_mode
+            ):
+                self.metadata["intended_fill_printing_mode"] = original_fill_mode
+            self.metadata["fill_droplet_volume_nL"] = new_fill_droplet_nL
+            self.metadata["fill_printing_mode"] = applied_fill_mode
+            self.generate_experiment()
 
-        self.unsaved_changes = True
-        applied_recorded = False
-        record = None
-        if applied_calibration:
-            record_kwargs = dict(applied_calibration)
-            record_kwargs.setdefault("printing_mode", applied_fill_mode)
-            record_kwargs.setdefault("original_printing_mode", original_fill_mode)
-            record_kwargs.setdefault("applied_printing_mode", applied_fill_mode)
-            record = self.record_applied_imaging_calibration(
-                factor_name=str(self.metadata.get("fill_reagent_name", "Water")),
-                option_name=None,
-                is_fill=True,
-                applied_design_volume_nL=new_fill_droplet_nL,
-                save=False,
-                **record_kwargs,
+            record = None
+            if applied_calibration:
+                record_kwargs = dict(applied_calibration)
+                record_kwargs.setdefault("printing_mode", applied_fill_mode)
+                record_kwargs.setdefault(
+                    "original_printing_mode",
+                    original_fill_mode,
+                )
+                record_kwargs.setdefault(
+                    "applied_printing_mode",
+                    applied_fill_mode,
+                )
+                record = self.record_applied_imaging_calibration(
+                    factor_name=str(
+                        self.metadata.get("fill_reagent_name", "Water")
+                    ),
+                    option_name=None,
+                    is_fill=True,
+                    applied_design_volume_nL=new_fill_droplet_nL,
+                    save=False,
+                    **record_kwargs,
+                )
+
+            warning_getter = getattr(
+                self,
+                "_calibration_volume_warning_for_generated_reactions",
+                None,
             )
-            applied_recorded = True
-        saved_experiment = False
-        if getattr(self, "experiment_file_path", None):
-            self.save_experiment()
-            saved_experiment = True
-        warning_getter = getattr(
+            volume_warning = (
+                warning_getter()
+                if callable(warning_getter)
+                else copy.deepcopy(prev.get("volume_warning"))
+            )
+            return {
+                "result": {
+                    "old_fill_nL": old,
+                    "new_fill_nL": new_fill_droplet_nL,
+                    "original_printing_mode": original_fill_mode,
+                    "applied_printing_mode": applied_fill_mode,
+                    "total_drops_old": prev.get("total_drops_old"),
+                    "total_drops_new": prev.get("total_drops_new"),
+                    "total_drops_delta": prev.get("total_drops_delta"),
+                    "saved_experiment": False,
+                    "applied_imaging_calibration_recorded": record is not None,
+                    "volume_warning": volume_warning,
+                },
+                "audit_stock_id": (record or {}).get("stock_id"),
+                "calibration_record": record,
+            }
+
+        return ExperimentModel._run_mutable_calibration_transaction(
             self,
-            "_calibration_volume_warning_for_generated_reactions",
-            None,
+            write_keys_if_assigned=write_keys_if_assigned,
+            stage_changes=_stage_changes,
         )
-        volume_warning = (
-            warning_getter()
-            if callable(warning_getter)
-            else copy.deepcopy(prev.get("volume_warning"))
-        )
-        warning_auditor = getattr(self, "_audit_calibration_volume_warning", None)
-        if callable(warning_auditor):
-            warning_auditor(
-                volume_warning,
-                stock_id=(record or {}).get("stock_id"),
-                calibration_record=record,
-            )
-        return {
-            "old_fill_nL": old,
-            "new_fill_nL": new_fill_droplet_nL,
-            "original_printing_mode": original_fill_mode,
-            "applied_printing_mode": applied_fill_mode,
-            "total_drops_old": prev.get("total_drops_old"),
-            "total_drops_new": prev.get("total_drops_new"),
-            "total_drops_delta": prev.get("total_drops_delta"),
-            "saved_experiment": saved_experiment,
-            "applied_imaging_calibration_recorded": applied_recorded,
-            "volume_warning": volume_warning,
-        }
 
 
     def read_progress_file(self, progress_file: str):

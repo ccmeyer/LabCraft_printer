@@ -1138,31 +1138,60 @@ def test_two_stock_calibrated_allocation_becomes_inactive_after_stock_input_chan
     }
 
 
-def test_two_stock_calibration_failure_restores_mutable_state(monkeypatch):
+@pytest.mark.parametrize("failure_point", ["generate", "record"])
+def test_two_stock_calibration_failure_restores_mutable_state(
+    monkeypatch,
+    failure_point,
+):
     em, calibrated_stock_id = _make_calibratable_two_stock_model()
     before_plan = copy.deepcopy(em.plans_per_option)
     before_rows = copy.deepcopy(em._stock_rows_cache)
     before_records = copy.deepcopy(em.applied_imaging_calibrations)
-    monkeypatch.setattr(
-        em,
-        "generate_experiment",
-        lambda: (_ for _ in ()).throw(RuntimeError("injected generation failure")),
+    before_refuel = copy.deepcopy(em.manual_refuel_checks)
+    before_allocation = copy.deepcopy(em.calibrated_stock_allocation)
+    before_status = copy.deepcopy(em.calibrated_stock_allocation_status)
+    before_reactions = em._reactions_df.copy(deep=True)
+    before_preview = copy.deepcopy(em._target_preview_map)
+    before_unreachable = copy.deepcopy(em._unreachable_preview_map)
+    before_unsaved = em.unsaved_changes
+    method_name = (
+        "generate_experiment"
+        if failure_point == "generate"
+        else "record_applied_imaging_calibration"
     )
+    original = getattr(em, method_name)
 
-    with pytest.raises(RuntimeError, match="injected generation failure"):
+    def _fail_after(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError(f"injected two-stock {failure_point} failure")
+
+    monkeypatch.setattr(em, method_name, _fail_after)
+    calibration = _two_stock_applied_calibration(calibrated_stock_id)
+    calibration["measured_volume_nL"] = 140.0
+
+    with pytest.raises(
+        RuntimeError,
+        match=f"injected two-stock {failure_point} failure",
+    ):
         em.apply_droplet_volume_for_option(
             "R",
             None,
-            12.0,
+            140.0,
             write_keys_if_assigned=False,
-            applied_calibration=_two_stock_applied_calibration(calibrated_stock_id),
-            printing_mode="droplet",
+            applied_calibration=calibration,
+            printing_mode="stream",
         )
 
     assert em.plans_per_option == before_plan
     assert em._stock_rows_cache == before_rows
     assert em.applied_imaging_calibrations == before_records
-    assert em.calibrated_stock_allocation_status["active"] is False
+    assert em.manual_refuel_checks == before_refuel
+    assert em.calibrated_stock_allocation == before_allocation
+    assert em.calibrated_stock_allocation_status == before_status
+    assert em._reactions_df.equals(before_reactions)
+    assert em._target_preview_map == before_preview
+    assert em._unreachable_preview_map == before_unreachable
+    assert em.unsaved_changes is before_unsaved
 
 
 def test_two_stock_calibration_pair_cap_fails_closed_without_mutating_preview():
