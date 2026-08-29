@@ -10,10 +10,10 @@ from tools.virtual_workflows.assertions import (
 from tools.virtual_workflows.joined_interaction_cases import (
     JOINED_INTERACTION_CASE,
 )
+from tools.virtual_workflows.resolution_stock_cases import TWO_STOCK_CASE
 
 
-def _literal_terminal_lifecycle():
-    case = JOINED_INTERACTION_CASE
+def _literal_terminal_lifecycle(case=JOINED_INTERACTION_CASE):
     expected = case.oracle("all_stocks_calibrated").keyed()
     begins = []
     attachments = []
@@ -22,9 +22,11 @@ def _literal_terminal_lifecycle():
     sequence = 0
     for execution_pass in case.execution_passes:
         for well_id in case.editor.selected_well_ids:
+            droplets = expected.get((execution_pass.stock_id, well_id), 0)
+            if droplets <= 0:
+                continue
             sequence += 1
             intent_id = f"intent-{sequence:02d}"
-            droplets = expected[(execution_pass.stock_id, well_id)]
             begins.append(
                 {
                     "intent_id": intent_id,
@@ -57,29 +59,27 @@ def _literal_terminal_lifecycle():
             {"stock_id": row.stock_id} for row in case.execution_passes
         ],
     }
-    boundaries = [
-        {
-            "stock_id": case.execution_passes[0].stock_id,
-            "observed_completed_count": 8,
-            "plan_state": "active",
-        },
-        {
-            "stock_id": case.execution_passes[1].stock_id,
-            "observed_completed_count": 16,
-            "plan_state": "active",
-        },
-        {
-            "stock_id": case.execution_passes[2].stock_id,
-            "observed_completed_count": 24,
-            "plan_state": "completed",
-        },
-    ]
+    boundaries = []
+    cumulative_completion = 0
+    for execution_pass in case.execution_passes:
+        cumulative_completion += execution_pass.expected_intents
+        boundaries.append(
+            {
+                "stock_id": execution_pass.stock_id,
+                "observed_completed_count": cumulative_completion,
+                "plan_state": (
+                    "completed"
+                    if execution_pass.order == len(case.execution_passes)
+                    else "active"
+                ),
+            }
+        )
     return lifecycle, boundaries
 
 
-def _reconcile(lifecycle, boundaries):
+def _reconcile(lifecycle, boundaries, case=JOINED_INTERACTION_CASE):
     return joined_terminal_lifecycle_reconciliation(
-        case=JOINED_INTERACTION_CASE,
+        case=case,
         lifecycle=lifecycle,
         pass_boundaries=boundaries,
     )
@@ -94,6 +94,19 @@ def test_joined_terminal_lifecycle_reconciles_literal_keyed_oracle():
     assert len(evidence["intent_counts"]) == 24
     assert len(evidence["simulator_dispenses"]) == 24
     assert set(evidence["command_join_checks"].values()) == {True}
+
+
+def test_joined_terminal_lifecycle_retains_zero_rows_without_dispatching_them():
+    lifecycle, boundaries = _literal_terminal_lifecycle(TWO_STOCK_CASE)
+
+    evidence = _reconcile(lifecycle, boundaries, TWO_STOCK_CASE)
+
+    assert all(evidence["checks"].values())
+    assert len(evidence["expected_counts"]) == 10
+    assert len(evidence["expected_intent_counts"]) == 7
+    assert len(evidence["zero_count_pairs"]) == 3
+    assert len(evidence["intent_counts"]) == 7
+    assert all(row["droplets"] > 0 for row in evidence["expected_intent_counts"])
 
 
 @pytest.mark.parametrize(

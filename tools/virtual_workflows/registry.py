@@ -287,7 +287,7 @@ _SCENARIO_DEFINITIONS = {
         fixture_path=(
             _FIXTURE_ROOT / "same_reagent_two_stock_calibration_terminal_v1.json"
         ),
-        expected_completion_count=10,
+        expected_completion_count=7,
         scenario_name="same_reagent_two_stock_calibration_terminal",
         runner_family="composed_journey",
         supports_pi_evidence=False,
@@ -300,7 +300,7 @@ _SCENARIO_DEFINITIONS = {
         fixture_path=(
             _FIXTURE_ROOT / "same_reagent_two_stock_progress_guard_v1.json"
         ),
-        expected_completion_count=2,
+        expected_completion_count=1,
         scenario_name="same_reagent_two_stock_progress_guard",
         runner_family="composed_journey",
         supports_pi_evidence=False,

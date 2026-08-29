@@ -1245,6 +1245,9 @@ def run_stock_calibration_only(
         }
 
     def apply(_runtime: JourneyRuntime) -> Mapping[str, Any]:
+        from tools.virtual_workflows.authoritative_evidence import read_model_audit_rows
+
+        audit_rows_before = read_model_audit_rows(runtime.context.experiment_model)
         before = capture_count_snapshot(runtime.context)
         before_plan = runtime.context.experiment_model.get_execution_plan_snapshot()
         before_effective_volumes = {
@@ -1253,6 +1256,13 @@ def run_stock_calibration_only(
         }
         preview = driver.inspect_preview()
         handled = driver.apply_selected(expected_title=spec.apply_success_title)
+        audit_rows_after = read_model_audit_rows(runtime.context.experiment_model)
+        audit_prefix_preserved = audit_rows_after[: len(audit_rows_before)] == audit_rows_before
+        audit_rows_added = (
+            audit_rows_after[len(audit_rows_before) :]
+            if audit_prefix_preserved
+            else []
+        )
         driver.close()
         after = capture_count_snapshot(runtime.context)
         after_plan = runtime.context.experiment_model.get_execution_plan_snapshot()
@@ -1267,6 +1277,10 @@ def run_stock_calibration_only(
                 "expected_volume_nL": spec.expected_volume_nL,
                 "preview": preview,
                 "handled_dialogs": handled,
+                "audit_rows_before": audit_rows_before,
+                "audit_rows_after": audit_rows_after,
+                "audit_rows_added": audit_rows_added,
+                "audit_prefix_preserved": audit_prefix_preserved,
                 "before": before,
                 "after": after,
                 "before_effective_volumes_nL": before_effective_volumes,

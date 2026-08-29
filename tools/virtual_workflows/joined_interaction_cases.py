@@ -258,7 +258,14 @@ class JoinedStockWellCount:
     def __post_init__(self) -> None:
         object.__setattr__(self, "stock_id", _identity(self.stock_id, "count stock"))
         object.__setattr__(self, "well_id", _identity(self.well_id, "count well"))
-        _positive_int(self.target_droplets, "target droplets")
+        if (
+            not isinstance(self.target_droplets, int)
+            or isinstance(self.target_droplets, bool)
+            or self.target_droplets < 0
+        ):
+            raise JoinedInteractionCaseError(
+                "target droplets must be a non-negative integer"
+            )
 
     def normalized(self) -> dict[str, Any]:
         return {"stock_id": self.stock_id, "well_id": self.well_id, "target_droplets": self.target_droplets}

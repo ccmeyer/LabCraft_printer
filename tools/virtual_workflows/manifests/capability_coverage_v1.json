@@ -317,7 +317,7 @@
     },
     {
       "id": "execution.same_reagent_two_stock_calibration_terminal",
-      "risk": "Two stocks for one reagent could lose their identities, re-quantize non-atomically, exceed volume constraints, or execute incorrect counts.",
+      "risk": "Two stocks for one reagent could lose their identities, re-quantize non-atomically, suppress or block warning-only calibration, lose structured warning audit evidence, or execute incorrect counts.",
       "owner_role": "execution lifecycle maintainers",
       "status": "covered",
       "required_verification_layers": ["contract", "host_sil"],

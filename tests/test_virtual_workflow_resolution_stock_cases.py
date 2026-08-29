@@ -60,17 +60,47 @@ def test_resolution_stock_literal_counts_and_revisions_are_exact():
         (row.stock_id, row.well_id): row.target_droplets
         for row in TWO_STOCK_CASE.oracle("all_stocks_calibrated").rows
     }
+    high_calibrated = {
+        (row.stock_id, row.well_id): row.target_droplets
+        for row in TWO_STOCK_CASE.oracle("high_calibrated").rows
+    }
     fill_calibrated = {
         (row.stock_id, row.well_id): row.target_droplets
         for row in TWO_STOCK_CASE.oracle("fill_calibrated").rows
     }
+    high_id = "Signal_2000.00_mM"
+    low_id = "Signal_25.00_mM"
+    fill_id = "Water_1.00_--"
+    assert [high_calibrated[(high_id, well)] for well in ("A3", "A4")] == [0, 0]
     assert [
-        fill_calibrated[("Water_1.00_--", f"A{index}")]
-        for index in range(1, 5)
-    ] == [13, 3, 18, 3]
-    assert [paired.get(("Signal_2000.00_mM", f"A{index}"), 0) for index in range(1, 5)] == [0, 0, 1, 4]
-    assert [paired[("Signal_25.00_mM", f"A{index}")] for index in range(1, 5)] == [9, 18, 4, 15]
-    assert [paired[("Water_1.00_--", f"A{index}")] for index in range(1, 5)] == [14, 4, 18, 2]
+        high_calibrated[(low_id, f"A{index}")] for index in range(1, 5)
+    ] == [10, 20, 100, 400]
+    assert [
+        high_calibrated[(fill_id, f"A{index}")] for index in range(1, 5)
+    ] == [14, 4, 0, 0]
+    assert fill_calibrated == high_calibrated
+    assert [paired[(high_id, well)] for well in ("A3", "A4")] == [0, 3]
+    assert [paired[(low_id, f"A{index}")] for index in range(1, 5)] == [
+        9,
+        18,
+        91,
+        102,
+    ]
+    assert [paired[(fill_id, f"A{index}")] for index in range(1, 5)] == [
+        14,
+        4,
+        0,
+        0,
+    ]
+    assert [
+        (row.expected_intents, row.expected_droplets, row.cumulative_completion)
+        for row in TWO_STOCK_CASE.execution_passes
+    ] == [(1, 3, 1), (4, 220, 5), (2, 18, 7)]
+    assert (
+        TWO_STOCK_CASE.terminal.expected_intents,
+        TWO_STOCK_CASE.terminal.expected_droplets,
+        TWO_STOCK_CASE.terminal.expected_completed_wells,
+    ) == (7, 241, 7)
     assert [row.output_revision for row in SINGLE_CASE.calibrations] == [3, 4, 5]
     assert [row.output_revision for row in TWO_STOCK_CASE.calibrations] == [3, 4, 5]
     assert SINGLE_CASE.terminal.terminal_revision == 6
@@ -82,6 +112,9 @@ def test_resolution_stock_auxiliary_fixtures_and_registration_are_consistent():
         payload, path = load_auxiliary_fixture(case_id)
         assert payload["fixture_id"] == case_id
         assert frozen_text_sha256(path) == EXPECTED_FIXTURE_SHA256[case_id]
+        if case_id == PROGRESS_GUARD_CASE_ID:
+            assert payload["workload"]["completion_count"] == 1
+            assert payload["expected"]["printed_droplets"] == 3
     for case_id in (
         SINGLE_CASE_ID,
         TWO_STOCK_CASE_ID,

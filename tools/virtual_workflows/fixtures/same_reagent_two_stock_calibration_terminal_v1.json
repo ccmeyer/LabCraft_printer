@@ -52,19 +52,19 @@
       {"stock_id": "Water_1.00_--", "well_id": "A1", "target_droplets": 14}, {"stock_id": "Water_1.00_--", "well_id": "A2", "target_droplets": 4}, {"stock_id": "Water_1.00_--", "well_id": "A3", "target_droplets": 3}, {"stock_id": "Water_1.00_--", "well_id": "A4", "target_droplets": 19}
     ],
     "high_calibrated": [
-      {"stock_id": "Signal_2000.00_mM", "well_id": "A3", "target_droplets": 1}, {"stock_id": "Signal_2000.00_mM", "well_id": "A4", "target_droplets": 4},
-      {"stock_id": "Signal_25.00_mM", "well_id": "A1", "target_droplets": 10}, {"stock_id": "Signal_25.00_mM", "well_id": "A2", "target_droplets": 20}, {"stock_id": "Signal_25.00_mM", "well_id": "A3", "target_droplets": 4}, {"stock_id": "Signal_25.00_mM", "well_id": "A4", "target_droplets": 16},
-      {"stock_id": "Water_1.00_--", "well_id": "A1", "target_droplets": 14}, {"stock_id": "Water_1.00_--", "well_id": "A2", "target_droplets": 4}, {"stock_id": "Water_1.00_--", "well_id": "A3", "target_droplets": 18}, {"stock_id": "Water_1.00_--", "well_id": "A4", "target_droplets": 3}
+      {"stock_id": "Signal_2000.00_mM", "well_id": "A3", "target_droplets": 0}, {"stock_id": "Signal_2000.00_mM", "well_id": "A4", "target_droplets": 0},
+      {"stock_id": "Signal_25.00_mM", "well_id": "A1", "target_droplets": 10}, {"stock_id": "Signal_25.00_mM", "well_id": "A2", "target_droplets": 20}, {"stock_id": "Signal_25.00_mM", "well_id": "A3", "target_droplets": 100}, {"stock_id": "Signal_25.00_mM", "well_id": "A4", "target_droplets": 400},
+      {"stock_id": "Water_1.00_--", "well_id": "A1", "target_droplets": 14}, {"stock_id": "Water_1.00_--", "well_id": "A2", "target_droplets": 4}, {"stock_id": "Water_1.00_--", "well_id": "A3", "target_droplets": 0}, {"stock_id": "Water_1.00_--", "well_id": "A4", "target_droplets": 0}
     ],
     "fill_calibrated": [
-      {"stock_id": "Signal_2000.00_mM", "well_id": "A3", "target_droplets": 1}, {"stock_id": "Signal_2000.00_mM", "well_id": "A4", "target_droplets": 4},
-      {"stock_id": "Signal_25.00_mM", "well_id": "A1", "target_droplets": 10}, {"stock_id": "Signal_25.00_mM", "well_id": "A2", "target_droplets": 20}, {"stock_id": "Signal_25.00_mM", "well_id": "A3", "target_droplets": 4}, {"stock_id": "Signal_25.00_mM", "well_id": "A4", "target_droplets": 16},
-      {"stock_id": "Water_1.00_--", "well_id": "A1", "target_droplets": 13}, {"stock_id": "Water_1.00_--", "well_id": "A2", "target_droplets": 3}, {"stock_id": "Water_1.00_--", "well_id": "A3", "target_droplets": 18}, {"stock_id": "Water_1.00_--", "well_id": "A4", "target_droplets": 3}
+      {"stock_id": "Signal_2000.00_mM", "well_id": "A3", "target_droplets": 0}, {"stock_id": "Signal_2000.00_mM", "well_id": "A4", "target_droplets": 0},
+      {"stock_id": "Signal_25.00_mM", "well_id": "A1", "target_droplets": 10}, {"stock_id": "Signal_25.00_mM", "well_id": "A2", "target_droplets": 20}, {"stock_id": "Signal_25.00_mM", "well_id": "A3", "target_droplets": 100}, {"stock_id": "Signal_25.00_mM", "well_id": "A4", "target_droplets": 400},
+      {"stock_id": "Water_1.00_--", "well_id": "A1", "target_droplets": 14}, {"stock_id": "Water_1.00_--", "well_id": "A2", "target_droplets": 4}, {"stock_id": "Water_1.00_--", "well_id": "A3", "target_droplets": 0}, {"stock_id": "Water_1.00_--", "well_id": "A4", "target_droplets": 0}
     ],
     "all_stocks_calibrated": [
-      {"stock_id": "Signal_2000.00_mM", "well_id": "A3", "target_droplets": 1}, {"stock_id": "Signal_2000.00_mM", "well_id": "A4", "target_droplets": 4},
-      {"stock_id": "Signal_25.00_mM", "well_id": "A1", "target_droplets": 9}, {"stock_id": "Signal_25.00_mM", "well_id": "A2", "target_droplets": 18}, {"stock_id": "Signal_25.00_mM", "well_id": "A3", "target_droplets": 4}, {"stock_id": "Signal_25.00_mM", "well_id": "A4", "target_droplets": 15},
-      {"stock_id": "Water_1.00_--", "well_id": "A1", "target_droplets": 14}, {"stock_id": "Water_1.00_--", "well_id": "A2", "target_droplets": 4}, {"stock_id": "Water_1.00_--", "well_id": "A3", "target_droplets": 18}, {"stock_id": "Water_1.00_--", "well_id": "A4", "target_droplets": 2}
+      {"stock_id": "Signal_2000.00_mM", "well_id": "A3", "target_droplets": 0}, {"stock_id": "Signal_2000.00_mM", "well_id": "A4", "target_droplets": 3},
+      {"stock_id": "Signal_25.00_mM", "well_id": "A1", "target_droplets": 9}, {"stock_id": "Signal_25.00_mM", "well_id": "A2", "target_droplets": 18}, {"stock_id": "Signal_25.00_mM", "well_id": "A3", "target_droplets": 91}, {"stock_id": "Signal_25.00_mM", "well_id": "A4", "target_droplets": 102},
+      {"stock_id": "Water_1.00_--", "well_id": "A1", "target_droplets": 14}, {"stock_id": "Water_1.00_--", "well_id": "A2", "target_droplets": 4}, {"stock_id": "Water_1.00_--", "well_id": "A3", "target_droplets": 0}, {"stock_id": "Water_1.00_--", "well_id": "A4", "target_droplets": 0}
     ]
   },
   "optimizer_expectations": {
@@ -79,10 +79,10 @@
     "maximum_pairs": 12000
   },
   "execution_passes": [
-    {"order": 1, "stock_id": "Signal_2000.00_mM", "expected_intents": 2, "expected_droplets": 5, "cumulative_completion": 2, "milestone": "signal_high_pass_complete"},
-    {"order": 2, "stock_id": "Signal_25.00_mM", "expected_intents": 4, "expected_droplets": 46, "cumulative_completion": 6, "milestone": "signal_low_pass_complete"},
-    {"order": 3, "stock_id": "Water_1.00_--", "expected_intents": 4, "expected_droplets": 38, "cumulative_completion": 10, "milestone": "water_pass_complete"}
+    {"order": 1, "stock_id": "Signal_2000.00_mM", "expected_intents": 1, "expected_droplets": 3, "cumulative_completion": 1, "milestone": "signal_high_pass_complete"},
+    {"order": 2, "stock_id": "Signal_25.00_mM", "expected_intents": 4, "expected_droplets": 220, "cumulative_completion": 5, "milestone": "signal_low_pass_complete"},
+    {"order": 3, "stock_id": "Water_1.00_--", "expected_intents": 2, "expected_droplets": 18, "cumulative_completion": 7, "milestone": "water_pass_complete"}
   ],
   "qualification": {"cli_seed": 1, "action_cap": 130, "simulator_evidence_cap": 1000, "offscreen_timeout_seconds": 180, "visible_timeout_seconds": 300, "visible_speed": 20, "required_screenshots": ["resolution_stocks_generated", "prepared", "first_stock_calibrated", "fresh_loaded", "fresh_activated", "all_stocks_calibrated", "signal_high_pass_complete", "signal_low_pass_complete", "water_pass_complete", "completed", "terminal_reloaded"]},
-  "terminal": {"expected_intents": 10, "expected_droplets": 89, "expected_completed_wells": 10, "expected_completed_stocks": 3, "application_sessions": 3, "terminal_revision": 6}
+  "terminal": {"expected_intents": 7, "expected_droplets": 241, "expected_completed_wells": 7, "expected_completed_stocks": 3, "application_sessions": 3, "terminal_revision": 6}
 }

@@ -2,6 +2,6 @@
   "fixture_id": "same_reagent_two_stock_progress_guard_v1",
   "schema_version": 1,
   "source_case_id": "same_reagent_two_stock_calibration_terminal_v1",
-  "workload": {"completion_count": 2},
-  "expected": {"progressed_stock_id": "Signal_2000.00_mM", "printed_droplets": 5, "blocked_stock_id": "Signal_25.00_mM", "eligibility_code": "affected_stock_progress"}
+  "workload": {"completion_count": 1},
+  "expected": {"progressed_stock_id": "Signal_2000.00_mM", "printed_droplets": 3, "blocked_stock_id": "Signal_25.00_mM", "eligibility_code": "affected_stock_progress"}
 }

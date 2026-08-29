@@ -54,13 +54,13 @@ IMPORT_FIXTURE_PATH = FIXTURE_ROOT / f"{IMPORT_CASE_ID}.json"
 # import so fixture edits cannot silently rewrite the test oracle.
 EXPECTED_FIXTURE_SHA256: Mapping[str, str] = {
     SINGLE_CASE_ID: "03a787d44a2d100a36c81d26bb685610f80412fbddffe2548a93a5c9a736e342",
-    TWO_STOCK_CASE_ID: "f192748b45783cde552f70a666e2968ac48e3adcd312860a40bab1d20bf19292",
-    PROGRESS_GUARD_CASE_ID: "f037bda7adbc777dd5a1d1b49250e668048f61eef2884b979123cf668bc6d66c",
+    TWO_STOCK_CASE_ID: "2b5c4884d83e95277669a0f01270965e34e5c70118a255862f9e9fe25f984ef7",
+    PROGRESS_GUARD_CASE_ID: "2a1d68e3bbed2265bc19045e75881c2e3a7011f96390b53241e93aed0cf367df",
     IMPORT_CASE_ID: "303f6ecadad083822634a8b2f1a6cf0fb9d05b51a1cadd8f40e657ec20c89262",
 }
 EXPECTED_CASE_SHA256: Mapping[str, str] = {
     SINGLE_CASE_ID: "b6e5a2abb157f8104347e8a6d9abe0c987dfd6c4d1fa999345c6b04b3866622c",
-    TWO_STOCK_CASE_ID: "758e09ea983663d4454fcd8e21d5a70619b8557e76817791ec2be9801e69b2b6",
+    TWO_STOCK_CASE_ID: "71d467a8644ffe12005be886cd5187491c31269ff561275e11bb35b30d7f8135",
 }
 
 
@@ -337,6 +337,7 @@ def validate_case(case: ResolutionStockCase, path: Path) -> None:
     expected_keys = {
         (row.stock_id, row.well_id)
         for row in case.oracle("all_stocks_calibrated").rows
+        if row.target_droplets > 0
     }
     if len(expected_keys) != case.terminal.expected_intents:
         raise ResolutionStockCaseError("terminal intent count differs from literal counts")

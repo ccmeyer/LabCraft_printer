@@ -14,6 +14,7 @@ from tools.virtual_workflows.resolution_stock_cases import (
     SINGLE_CASE_ID,
     TWO_STOCK_CASE,
     TWO_STOCK_CASE_ID,
+    load_auxiliary_fixture,
 )
 
 
@@ -89,11 +90,15 @@ def test_registered_same_reagent_progress_guard(qapp, tmp_path):
     guard = report["metrics"]["persistence"]["values"][
         "resolution_stock_lifecycle"
     ]["progress_guard"]
-    assert guard["progressed_drops"] == 5
+    fixture, _path = load_auxiliary_fixture(PROGRESS_GUARD_CASE_ID)
+    assert guard["progressed_drops"] == fixture["expected"]["printed_droplets"]
     assert guard["apply_state"]["enabled"] is False
     assert guard["apply_state"]["eligibility"]["code"] == "affected_stock_progress"
     assert all(guard["checks"].values())
-    assert workflow["completed_stock_well_count"] == 2
+    assert (
+        workflow["completed_stock_well_count"]
+        == fixture["workload"]["completion_count"]
+    )
 
 
 def test_registered_two_stock_csv_import_preview_reuse(qapp, tmp_path):

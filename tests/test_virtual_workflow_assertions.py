@@ -7,6 +7,8 @@ from tools.virtual_workflows.assertions import (
     AssertionResult,
     ExecutionLifecycleExpectation,
     SoftStopResumeExpectation,
+    _calibration_warning_transition_contract,
+    _expected_calibration_volume_warning,
     cleanup_assertion,
     completed_terminal_reload_assertion,
     dispense_counts_reconciled_assertion,
@@ -32,6 +34,164 @@ from tools.virtual_workflows.exploration import (
     CAMPAIGN_ID,
     build_sequence_fixture,
 )
+from tools.virtual_workflows.resolution_stock_cases import TWO_STOCK_CASE
+
+
+_FILL_WARNING_TOTALS = {"A1": 240.112, "A2": 240.032, "A3": 1000.0, "A4": 4000.0}
+
+
+@pytest.mark.parametrize(
+    ("totals_nL", "affected_ids", "maximum_total", "maximum_excess"),
+    (
+        (
+            {"A1": 240.0, "A2": 240.0, "A3": 1000.0, "A4": 4000.0},
+            ["A3", "A4"],
+            4000.0,
+            3760.0,
+        ),
+        (
+            _FILL_WARNING_TOTALS,
+            ["A1", "A2", "A3", "A4"],
+            4000.0,
+            3760.0,
+        ),
+        (
+            {"A1": 239.094, "A2": 237.996, "A3": 1000.818, "A4": 1157.760},
+            ["A3", "A4"],
+            1157.760,
+            917.760,
+        ),
+    ),
+)
+def test_two_stock_warning_truth_is_derived_from_frozen_terminal_totals(
+    totals_nL, affected_ids, maximum_total, maximum_excess
+):
+    warning = _expected_calibration_volume_warning(TWO_STOCK_CASE, totals_nL)
+
+    assert warning is not None
+    assert warning["warning_threshold_nL"] == 240.0
+    assert warning["final_reaction_volume_nL"] == 5000.0
+    assert warning["affected_row_count"] == len(affected_ids)
+    assert [row["row_id"] for row in warning["affected_rows"]] == affected_ids
+    assert [row["total_volume_nL"] for row in warning["affected_rows"]] == pytest.approx(
+        [totals_nL[row_id] for row_id in affected_ids]
+    )
+    assert warning["max_total_volume_nL"] == pytest.approx(maximum_total)
+    assert warning["max_excess_nL"] == pytest.approx(maximum_excess)
+    assert not any(
+        row["exceeds_final_reaction_volume"] for row in warning["affected_rows"]
+    )
+
+
+def _literal_fill_warning_transition():
+    warning = _expected_calibration_volume_warning(
+        TWO_STOCK_CASE, _FILL_WARNING_TOTALS
+    )
+    assert warning is not None
+    stock_id = "Water_1.00_--"
+    plan_id = "plan-1"
+    record_id = "calibration-1"
+    run_id = "run-fill-1"
+    transition = {
+        "stock_id": stock_id,
+        "preview": {
+            "payload": {
+                "volume_warning": copy.deepcopy(warning),
+                "source_row_fingerprint": [run_id],
+            },
+            "status": (
+                "Volume warning: 4 reaction rows exceed the 240.000 nL design "
+                "threshold; maximum excess is 3760.000 nL. "
+                "Affected: A1, A2, A3, A4."
+            ),
+            "apply_enabled": True,
+            "apply_state": "ready",
+        },
+        "audit_prefix_preserved": True,
+        "before": {"plan_id": plan_id, "plan_revision": 3},
+        "after": {"plan_id": plan_id, "plan_revision": 4},
+        "audit_rows_added": [
+            {
+                "event_type": "execution_plan_calibration_revised",
+                "level": "info",
+                "details": {
+                    "plan_id": plan_id,
+                    "previous_revision": 3,
+                    "plan_revision": 4,
+                    "stock_id": stock_id,
+                    "calibration_record_id": record_id,
+                },
+            },
+            {
+                "event_type": "calibration_volume_tolerance_exceeded",
+                "level": "warning",
+                "details": {
+                    "plan_id": plan_id,
+                    "plan_revision": 4,
+                    "stock_id": stock_id,
+                    "calibration_record_id": record_id,
+                    "run_id": run_id,
+                    "volume_warning": copy.deepcopy(warning),
+                },
+            },
+        ],
+    }
+    return transition, warning
+
+
+@pytest.mark.parametrize(
+    ("mutation", "failed_check"),
+    (
+        ("missing_preview_warning", "preview_warning_exact"),
+        ("tampered_preview_warning", "preview_warning_exact"),
+        ("wrong_affected_rows", "preview_warning_exact"),
+        ("disabled_apply", "apply_remains_enabled"),
+        ("missing_audit", "one_warning_audit_event"),
+        ("duplicate_audit", "one_warning_audit_event"),
+        ("wrong_audit_level", "audit_level_and_identity_exact"),
+    ),
+)
+def test_two_stock_warning_transition_mutations_fail_closed(mutation, failed_check):
+    transition, warning = _literal_fill_warning_transition()
+
+    if mutation == "missing_preview_warning":
+        transition["preview"]["payload"]["volume_warning"] = None
+    elif mutation == "tampered_preview_warning":
+        transition["preview"]["payload"]["volume_warning"]["max_excess_nL"] += 1.0
+    elif mutation == "wrong_affected_rows":
+        transition["preview"]["payload"]["volume_warning"]["affected_rows"].pop()
+    elif mutation == "disabled_apply":
+        transition["preview"]["apply_enabled"] = False
+    elif mutation == "missing_audit":
+        transition["audit_rows_added"].pop()
+    elif mutation == "duplicate_audit":
+        transition["audit_rows_added"].append(
+            copy.deepcopy(transition["audit_rows_added"][-1])
+        )
+    elif mutation == "wrong_audit_level":
+        transition["audit_rows_added"][-1]["level"] = "info"
+
+    evidence = _calibration_warning_transition_contract(
+        label="fill",
+        transition=transition,
+        expected_warning=warning,
+        totals_nL=_FILL_WARNING_TOTALS,
+    )
+
+    assert evidence["checks"][failed_check] is False
+
+
+def test_literal_two_stock_warning_transition_passes_every_contract_check():
+    transition, warning = _literal_fill_warning_transition()
+
+    evidence = _calibration_warning_transition_contract(
+        label="fill",
+        transition=transition,
+        expected_warning=warning,
+        totals_nL=_FILL_WARNING_TOTALS,
+    )
+
+    assert all(evidence["checks"].values())
 
 
 def test_assertion_result_rejects_ambiguous_decision():
