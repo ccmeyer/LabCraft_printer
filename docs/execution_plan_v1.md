@@ -170,6 +170,23 @@ The slice 1 writer:
   unchanged.
 - Uses deterministic sorted-key, two-space-indented JSON with a trailing newline.
 
+## Design-time stock resolution policy
+
+New experiment designs default to resolution-first stock allocation. The
+optimizer preserves requested concentration levels where its deterministic
+bounded search can do so. The advanced editor setting
+`allow_avoidable_target_grouping=true` explicitly selects concentration-first
+allocation, which may group requested levels to reduce stock concentration or
+printed volume; unavoidable grouping is always reported.
+
+Designs saved before this metadata field existed retain their historical
+concentration-first behavior when opened for editing. The model normalizes the
+missing field to `true`, identifies that choice to the editor as compatibility
+behavior, and persists the existing boolean on the next save or editable copy.
+Explicit `true` and `false` values are never reinterpreted. Authoritative and
+recorded execution plans always reload their frozen stock identities and counts
+without consulting this design-time optimization policy.
+
 ## Initial creation in Slice 3
 
 - **Finish/Apply** creates the initial plan only after reactions have been

@@ -541,6 +541,12 @@ class ExperimentModel(QObject):
     ZERO_LOSS_POLISH_WORK_UNITS = 256
     STOCK_PREP_SCHEMA_NAME = "labcraft.stock_prep"
     STOCK_PREP_SCHEMA_VERSION = 1
+    STOCK_RESOLUTION_POLICY_METADATA_KEY = "allow_avoidable_target_grouping"
+    STOCK_RESOLUTION_POLICY_RESOLUTION_FIRST = "resolution_first"
+    STOCK_RESOLUTION_POLICY_CONCENTRATION_FIRST = "concentration_first"
+    STOCK_RESOLUTION_POLICY_SOURCE_NEW_DEFAULT = "new_default"
+    STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT = "explicit"
+    STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING = "legacy_missing"
 
     # Signals to mirror the classic API
     stock_updated = Signal()
@@ -590,6 +596,9 @@ class ExperimentModel(QObject):
             "start_col": 0,
             "well_selection": self._default_well_selection(),
         }
+        self._stock_allocation_resolution_policy_source = (
+            self.STOCK_RESOLUTION_POLICY_SOURCE_NEW_DEFAULT
+        )
         self.calibration_storage_policy: CalibrationStoragePolicy = (
             new_experiment_policy()
         )
@@ -769,6 +778,57 @@ class ExperimentModel(QObject):
         )
     def set_metadata(self, **kwargs):
         self.metadata.update(kwargs)
+
+    def get_stock_allocation_resolution_policy(self) -> Dict[str, object]:
+        """Return the effective design-time target-resolution policy.
+
+        Older editable designs did not persist the grouping setting. Their
+        historical optimizer was concentration-first, so absence is normalized
+        to the opt-in grouping behavior instead of silently changing the plan.
+        The source is intentionally transient; the existing boolean remains the
+        only persisted policy field.
+        """
+        key = self.STOCK_RESOLUTION_POLICY_METADATA_KEY
+        metadata = self.metadata if isinstance(self.metadata, dict) else {}
+        if key not in metadata:
+            metadata[key] = True
+            self._stock_allocation_resolution_policy_source = (
+                self.STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING
+            )
+
+        allow_grouping = bool(metadata.get(key))
+        source = getattr(
+            self,
+            "_stock_allocation_resolution_policy_source",
+            self.STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT,
+        )
+        if source == self.STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING:
+            # Clearing the inferred setting explicitly opts into resolution-first.
+            if not allow_grouping:
+                source = self.STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT
+        elif source == self.STOCK_RESOLUTION_POLICY_SOURCE_NEW_DEFAULT:
+            # Direct model callers may update metadata without set_metadata().
+            if allow_grouping:
+                source = self.STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT
+        elif source not in {
+            self.STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT,
+            self.STOCK_RESOLUTION_POLICY_SOURCE_NEW_DEFAULT,
+        }:
+            source = self.STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT
+        self._stock_allocation_resolution_policy_source = source
+
+        mode = (
+            self.STOCK_RESOLUTION_POLICY_CONCENTRATION_FIRST
+            if allow_grouping
+            else self.STOCK_RESOLUTION_POLICY_RESOLUTION_FIRST
+        )
+        return {
+            "mode": mode,
+            "source": source,
+            "allow_avoidable_target_grouping": allow_grouping,
+            "inferred": source
+            == self.STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING,
+        }
 
     @staticmethod
     def _default_well_selection() -> Dict[str, object]:
@@ -2953,12 +3013,11 @@ class ExperimentModel(QObject):
             float(V_final) + float(V_tolerance),
             float(V_print) + float(V_tolerance),
         )
+        resolution_policy = self.get_stock_allocation_resolution_policy()
         allow_avoidable_grouping = bool(
-            self.metadata.get("allow_avoidable_target_grouping", False)
+            resolution_policy["allow_avoidable_target_grouping"]
         )
-        optimizer_strategy_used = (
-            "concentration_first" if allow_avoidable_grouping else "resolution_first"
-        )
+        optimizer_strategy_used = str(resolution_policy["mode"])
         optimizer_fallback_reason: Optional[str] = None
         stock_allocation_search_limited = False
         stock_allocation_states_evaluated = 0
@@ -7756,7 +7815,9 @@ class ExperimentModel(QObject):
                     self.metadata.get("allow_two_stock_solutions", False)
                 ),
                 "allow_avoidable_target_grouping": bool(
-                    self.metadata.get("allow_avoidable_target_grouping", False)
+                    self.get_stock_allocation_resolution_policy()[
+                        "allow_avoidable_target_grouping"
+                    ]
                 ),
             },
             "factors": factors,
@@ -12874,6 +12935,7 @@ class ExperimentModel(QObject):
         any explicit uploaded/manual reaction set.
         """
         self._ensure_well_selection_metadata()
+        self.get_stock_allocation_resolution_policy()
         data: Dict[str, object] = {
             "metadata": self.metadata,
             "calibration_storage": self.calibration_storage_policy.to_document(),
@@ -13002,7 +13064,15 @@ class ExperimentModel(QObject):
         # owned by this model so callers can continue using the exact persisted
         # payload for authoritative design-hash validation.
         self.metadata = copy.deepcopy(d.get("metadata", self.metadata))
-        self.metadata.setdefault("allow_avoidable_target_grouping", False)
+        if self.STOCK_RESOLUTION_POLICY_METADATA_KEY in self.metadata:
+            self._stock_allocation_resolution_policy_source = (
+                self.STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT
+            )
+        else:
+            self.metadata[self.STOCK_RESOLUTION_POLICY_METADATA_KEY] = True
+            self._stock_allocation_resolution_policy_source = (
+                self.STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING
+            )
         self.calibration_storage_policy = load_calibration_storage_policy(
             d.get("calibration_storage")
         )
@@ -18820,6 +18890,10 @@ class ExperimentModel(QObject):
             raise FileExistsError(f"Experiment folder already exists: {destination}")
         destination.parent.mkdir(parents=True, exist_ok=True)
 
+        source_metadata = data.get("metadata") if isinstance(data, dict) else None
+        source_missing_resolution_policy = not isinstance(source_metadata, dict) or (
+            self.STOCK_RESOLUTION_POLICY_METADATA_KEY not in source_metadata
+        )
         payload = self._duplicate_design_payload(
             data,
             new_name,
@@ -18889,6 +18963,12 @@ class ExperimentModel(QObject):
             str(destination / "experiment_design.json"),
             str(destination),
         )
+        if source_missing_resolution_policy:
+            # The copy now persists the normalized boolean, but session provenance
+            # lets the editor explain why concentration-first grouping is enabled.
+            self._stock_allocation_resolution_policy_source = (
+                self.STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING
+            )
         self.unsaved_changes = False
         return True
 
@@ -19248,6 +19328,9 @@ class ExperimentModel(QObject):
             "start_col": 0,
             "well_selection": self._default_well_selection(),
         }
+        self._stock_allocation_resolution_policy_source = (
+            self.STOCK_RESOLUTION_POLICY_SOURCE_NEW_DEFAULT
+        )
         self.calibration_storage_policy = new_experiment_policy()
         self._sync_calibration_storage_policy_to_manager()
         self.stock_prep_state = self._default_stock_prep_state()

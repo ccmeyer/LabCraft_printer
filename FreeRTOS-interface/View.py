@@ -13786,6 +13786,11 @@ class ExperimentDesignDialog(QDialog):
     REAGENT_COLUMN_COMPACT_AFTER = 3
 
     STATUS_SEVERITIES = {"info", "success", "warning", "error"}
+    LEGACY_RESOLUTION_POLICY_INFORMATION = (
+        "This design predates target-resolution optimization. Historical "
+        "concentration-first stock allocation is retained. Clear \u2018Allow avoidable "
+        "target-level grouping\u2019 to use resolution-first optimization."
+    )
 
     PROGRESS_POLICY_RESUME = "resume"
     PROGRESS_POLICY_RESET = "reset"
@@ -14169,13 +14174,14 @@ class ExperimentDesignDialog(QDialog):
             self.volume_tolerance_spin,
         )
         self.allow_avoidable_grouping_chk = QCheckBox()
-        self.allow_avoidable_grouping_chk.setChecked(bool(
-            self.model.metadata.get("allow_avoidable_target_grouping", False)
-        ))
+        self.allow_avoidable_grouping_chk.setChecked(
+            self._allow_avoidable_grouping_from_model()
+        )
         self.allow_avoidable_grouping_chk.setToolTip(
-            "Permit the optimizer to merge requested concentration levels when doing so "
-            "reduces required stock concentrations or printed volume. Unavoidable grouping "
-            "is always allowed and reported."
+            "Unchecked preserves requested concentration levels where the bounded search "
+            "can do so. Checked permits concentration-first grouping when it reduces "
+            "required stock concentrations or printed volume. Unavoidable grouping is "
+            "always allowed and reported."
         )
         advanced_settings_form.addRow(
             QLabel("Allow avoidable target-level grouping"),
@@ -17019,9 +17025,7 @@ class ExperimentDesignDialog(QDialog):
         allow_avoidable_grouping = (
             bool(grouping_widget.isChecked())
             if grouping_widget is not None
-            else bool(getattr(self.model, "metadata", {}).get(
-                "allow_avoidable_target_grouping", False
-            ))
+            else self._allow_avoidable_grouping_from_model()
         )
 
         # Keep plate metadata coherent at save-time, before finish handoff mutates runtime state.
@@ -17074,6 +17078,38 @@ class ExperimentDesignDialog(QDialog):
         if hasattr(self, "allow_two_chk") and self.allow_two_chk is not None:
             return bool(self.allow_two_chk.isChecked())
         return bool(self.model.metadata.get("allow_two_stock_solutions", False))
+
+    def _resolution_policy_from_model(self) -> dict:
+        getter = getattr(self.model, "get_stock_allocation_resolution_policy", None)
+        if callable(getter):
+            try:
+                return dict(getter())
+            except Exception:
+                pass
+        allow_grouping = bool(
+            getattr(self.model, "metadata", {}).get(
+                "allow_avoidable_target_grouping", False
+            )
+        )
+        return {
+            "mode": "concentration_first" if allow_grouping else "resolution_first",
+            "source": "explicit",
+            "allow_avoidable_target_grouping": allow_grouping,
+            "inferred": False,
+        }
+
+    def _allow_avoidable_grouping_from_model(self) -> bool:
+        return bool(
+            self._resolution_policy_from_model().get(
+                "allow_avoidable_target_grouping", False
+            )
+        )
+
+    def _legacy_resolution_policy_information(self) -> str:
+        if self._model_execution_is_read_only(self.model):
+            return ""
+        policy = self._resolution_policy_from_model()
+        return self.LEGACY_RESOLUTION_POLICY_INFORMATION if policy.get("inferred") else ""
 
     def _key_label(self, key: tuple[str, Optional[str]]) -> str:
         factor_name, option_name = key
@@ -18170,9 +18206,9 @@ class ExperimentDesignDialog(QDialog):
         )))
         self.volume_tolerance_spin.setValue(float(md.get("printed_volume_tolerance_nL", 50.0)))
         self.allow_two_chk.setChecked(bool(md.get("allow_two_stock_solutions", False)))
-        self.allow_avoidable_grouping_chk.setChecked(bool(
-            md.get("allow_avoidable_target_grouping", False)
-        ))
+        self.allow_avoidable_grouping_chk.setChecked(
+            self._allow_avoidable_grouping_from_model()
+        )
 
         if hasattr(self, "randomize_chk"):
             self.randomize_chk.setChecked(bool(md.get("randomize_assignments", False)))
@@ -19022,6 +19058,15 @@ class ExperimentDesignDialog(QDialog):
         if normalized not in self.STATUS_SEVERITIES:
             raise ValueError(f"Unsupported status severity: {severity}")
         message = str(msg or "")
+        compatibility_information = self._legacy_resolution_policy_information()
+        if (
+            message
+            and compatibility_information
+            and compatibility_information not in message
+        ):
+            message = f"{message} {compatibility_information}"
+            if normalized == "success":
+                normalized = "info"
         self._status_severity = normalized
         self.status_lbl.setToolTip(message)
         self.status_lbl.setText(message)
