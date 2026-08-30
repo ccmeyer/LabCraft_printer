@@ -170,7 +170,8 @@ def test_bnext_import_zero_loss_uses_structural_early_exit():
 
 
 @pytest.mark.parametrize("budget_nl", [300.0, 450.0, 600.0])
-def test_adversarial_bnext_resolution_work_is_wall_clock_bounded(budget_nl):
+
+def test_adversarial_bnext_resolution_work_is_deterministically_bounded(budget_nl):
     seed_model, _design = _bnext_model(
         budget_nl=budget_nl,
         allow_grouping=True,
@@ -195,16 +196,73 @@ def test_adversarial_bnext_resolution_work_is_wall_clock_bounded(budget_nl):
         allow_two=False,
     )
 
+    repeated_model, _design = _bnext_model(
+        budget_nl=budget_nl,
+        allow_grouping=False,
+        relax_stock_bounds=True,
+    )
+    repeated_result = repeated_model.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=60,
+        two_max_refine=40,
+        allow_two=False,
+    )
+
     assert seed_result["best"] is True
     assert resolution_result["best"] is True
-    assert resolution_result["stock_allocation_elapsed_ms"] <= 100.0
+    assert repeated_result["best"] is True
+    assert resolution_result["stock_allocation_elapsed_ms"] <= 2000.0
+    assert resolution_result["stock_allocation_work_units_evaluated"] <= (
+        resolution_result["stock_allocation_work_limit"]
+    )
+    assert sum(
+        resolution_result["stock_allocation_work_units_by_kind"].values()
+    ) == resolution_result["stock_allocation_work_units_evaluated"]
+    assert "time_budget" not in resolution_result["stock_allocation_limit_reasons"]
+    assert resolution_result["stock_allocation_stop_reason"] in {
+        "work_cap",
+        "state_cap",
+        "work_and_state_cap",
+        "zero_loss_polish_complete",
+        "search_exhausted",
+        "seed_zero_loss",
+    }
+    assert resolution_result["stock_allocation_time_budget_exceeded"] is (
+        resolution_result["stock_allocation_elapsed_ms"] > 75.0 + 1e-9
+    )
     assert _public_result_rank(
         resolution_model, resolution_result
     ) <= _public_result_rank(seed_model, seed_result)
-    if resolution_result["stock_allocation_search_limited"]:
-        assert "time_budget" in resolution_result["stock_allocation_limit_reasons"]
-        assert resolution_result["stock_allocation_stop_reason"] == "time_budget"
-    assert resolution_result["stock_allocation_time_budget_ms"] == pytest.approx(75.0)
+
+    stable_keys = (
+        "optimizer_seed_rank",
+        "optimizer_selected_rank",
+        "stock_allocation_stop_reason",
+        "stock_allocation_limit_reasons",
+        "stock_allocation_work_units_evaluated",
+        "stock_allocation_work_units_by_kind",
+        "stock_allocation_zero_loss_polish_work_used",
+        "stock_allocation_states_evaluated",
+        "stock_allocation_candidates_generated",
+        "stock_allocation_candidates_retained",
+        "stock_allocation_candidates_pruned",
+        "stock_allocation_candidates_deduplicated",
+        "stock_allocation_candidates_dominated",
+        "stock_allocation_branches_pruned",
+        "stock_allocation_loss_tiers_evaluated",
+    )
+    assert {
+        key: resolution_result[key]
+        for key in stable_keys
+    } == {
+        key: repeated_result[key]
+        for key in stable_keys
+    }
+    assert resolution_model.export_stock_allocation_reuse_payload(
+        resolution_result
+    )["plan_fingerprint"] == repeated_model.export_stock_allocation_reuse_payload(
+        repeated_result
+    )["plan_fingerprint"]
 
 
 def test_resolution_selection_matches_small_brute_force_oracle():
@@ -276,7 +334,8 @@ def test_resolution_selection_matches_small_brute_force_oracle():
     assert result["stock_allocation_time_to_best_ms"] is not None
 
 
-def test_384_row_increased_reagent_import_keeps_resolution_phase_bounded():
+
+def test_384_row_increased_reagent_import_keeps_resolution_work_bounded():
     model, row_count, reagent_count = _large_import_model()
 
     result = model.optimize_stock_solutions(
@@ -289,46 +348,101 @@ def test_384_row_increased_reagent_import_keeps_resolution_phase_bounded():
     assert len(model._uploaded_reactions) == row_count
     assert len(model.factors) == reagent_count
     assert result["best"] is True
-    assert result["stock_allocation_elapsed_ms"] <= 100.0
+    assert result["stock_allocation_elapsed_ms"] <= 2000.0
+    assert result["stock_allocation_work_units_evaluated"] <= result[
+        "stock_allocation_work_limit"
+    ]
+    assert sum(result["stock_allocation_work_units_by_kind"].values()) == result[
+        "stock_allocation_work_units_evaluated"
+    ]
     assert result["stock_allocation_candidates_generated"] > 0
     assert result["stock_allocation_candidates_retained"] <= result[
         "stock_allocation_candidates_generated"
     ]
     assert result["distinct_level_loss"] == 0
     assert result["stock_allocation_improved_seed"] is True
-    assert result["stock_allocation_time_to_best_ms"] < 75.0
+    assert result["stock_allocation_time_to_best_ms"] >= 0.0
     assert result["stock_allocation_stop_reason"] in {
         "search_exhausted",
         "zero_loss_polish_complete",
     }
     assert result["stock_allocation_search_limited"] is False
-
-
-def test_zero_loss_polish_uses_only_ten_ms_of_remaining_fake_clock(monkeypatch):
-    model, _row_count, _reagent_count = _large_import_model()
-    monkeypatch.setattr(model, "MAX_STOCK_ALLOCATION_SECONDS", 1.0)
-    calls = 0
-
-    def fake_clock():
-        nonlocal calls
-        calls += 1
-        return calls * 0.001
-
-    monkeypatch.setattr(model, "_stock_optimizer_monotonic", fake_clock)
-
-    result = model.optimize_stock_solutions(
-        quantum=0.1,
-        max_refine=20,
-        two_max_refine=20,
-        allow_two=False,
+    assert result["stock_allocation_time_budget_exceeded"] is (
+        result["stock_allocation_elapsed_ms"] > 75.0 + 1e-9
     )
 
-    assert result["best"] is True
-    assert result["distinct_level_loss"] == 0
-    assert result["stock_allocation_stop_reason"] == "zero_loss_polish_complete"
-    assert result["stock_allocation_limit_reasons"] == []
-    assert result["stock_allocation_time_to_best_ms"] is not None
-    assert (
-        result["stock_allocation_elapsed_ms"]
-        - result["stock_allocation_time_to_best_ms"]
-    ) <= 20.0
+
+
+
+def test_zero_loss_polish_uses_exact_deterministic_work_allowance(monkeypatch):
+    def run(clock):
+        model = ExperimentModel(prof=CURRENT_PROFILE)
+        model.set_metadata(
+            target_reaction_volume_nL=240.0,
+            printed_volume_tolerance_nL=0.0,
+            final_reaction_volume_nL=5000.0,
+            allow_two_stock_solutions=True,
+            allow_avoidable_target_grouping=False,
+        )
+        model.add_additive("R", [0.5, 1.0, 5.0, 20.0], "mM", 10.0)
+        model.factors[0].options[0].max_stock_conc = 2000.0
+        monkeypatch.setattr(model, "_stock_optimizer_monotonic", clock)
+        result = model.optimize_stock_solutions(
+            quantum=0.1,
+            max_refine=20,
+            two_max_refine=20,
+            allow_two=True,
+        )
+        return model, result
+
+    frozen_model, frozen_result = run(lambda: 0.0)
+
+    calls = 0
+
+    def slow_clock():
+        nonlocal calls
+        calls += 1
+        return calls * 1.0
+
+    slow_model, slow_result = run(slow_clock)
+
+    for result in (frozen_result, slow_result):
+        assert result["best"] is True
+        assert result["distinct_level_loss"] == 0
+        assert result["stock_allocation_stop_reason"] == (
+            "zero_loss_polish_complete"
+        )
+        assert result["stock_allocation_limit_reasons"] == []
+        assert result["stock_allocation_zero_loss_polish_work_limit"] == 256
+        assert result["stock_allocation_zero_loss_polish_work_used"] == 256
+        assert result["stock_allocation_time_to_best_ms"] is not None
+
+    stable_keys = (
+        "optimizer_seed_rank",
+        "optimizer_selected_rank",
+        "stock_allocation_stop_reason",
+        "stock_allocation_work_units_evaluated",
+        "stock_allocation_work_units_by_kind",
+        "stock_allocation_zero_loss_polish_work_used",
+        "stock_allocation_states_evaluated",
+        "stock_allocation_candidates_generated",
+        "stock_allocation_candidates_retained",
+        "stock_allocation_branches_pruned",
+        "two_stock_pairs_evaluated",
+        "two_stock_candidates_generated",
+        "two_stock_candidates_retained",
+    )
+    assert {
+        key: frozen_result[key]
+        for key in stable_keys
+    } == {
+        key: slow_result[key]
+        for key in stable_keys
+    }
+    assert frozen_model.export_stock_allocation_reuse_payload(
+        frozen_result
+    )["plan_fingerprint"] == slow_model.export_stock_allocation_reuse_payload(
+        slow_result
+    )["plan_fingerprint"]
+    assert frozen_result["stock_allocation_time_budget_exceeded"] is False
+    assert slow_result["stock_allocation_time_budget_exceeded"] is True

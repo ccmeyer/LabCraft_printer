@@ -17163,6 +17163,16 @@ class ExperimentDesignDialog(QDialog):
         time_to_best_ms = res.get("stock_allocation_time_to_best_ms")
         time_budget_ms = float(res.get("stock_allocation_time_budget_ms", 75.0))
         search_limited = bool(res.get("stock_allocation_search_limited"))
+        performance_target_exceeded = bool(
+            res.get("stock_allocation_time_budget_exceeded")
+        )
+        if performance_target_exceeded:
+            elapsed_ms = float(res.get("stock_allocation_elapsed_ms", 0.0))
+            parts.append(
+                "Resolution-first completed deterministically in "
+                f"{elapsed_ms:.1f} ms, above its {time_budget_ms:.0f} ms "
+                "performance target."
+            )
         if search_limited:
             allocation_limit_reasons = set(
                 res.get("stock_allocation_limit_reasons") or []
@@ -17180,6 +17190,19 @@ class ExperimentDesignDialog(QDialog):
                         f"{time_budget_ms:.0f} ms; the concentration-first plan was "
                         "retained."
                     )
+            elif allocation_limit_reasons == {"work_cap"}:
+                if improved_seed:
+                    parts.append(
+                        f"Resolution-first reduced grouped levels from {int(seed_loss)} "
+                        f"to {int(selected_loss)} before its deterministic work limit; "
+                        "secondary optimality was not proven."
+                    )
+                else:
+                    parts.append(
+                        "Resolution-first reached its deterministic work limit without "
+                        "finding better level resolution; the concentration-first plan "
+                        "was retained."
+                    )
             elif allocation_limit_reasons == {"state_cap"}:
                 if improved_seed:
                     parts.append(
@@ -17192,6 +17215,19 @@ class ExperimentDesignDialog(QDialog):
                         "Resolution-first reached its allocation-state limit without "
                         "finding better level resolution; the concentration-first plan "
                         "was retained."
+                    )
+            elif allocation_limit_reasons == {"work_cap", "state_cap"}:
+                if improved_seed:
+                    parts.append(
+                        f"Resolution-first reduced grouped levels from {int(seed_loss)} "
+                        f"to {int(selected_loss)} before its deterministic work and "
+                        "state limits; secondary optimality was not proven."
+                    )
+                else:
+                    parts.append(
+                        "Resolution-first reached its deterministic work and state "
+                        "limits without finding better level resolution; the "
+                        "concentration-first plan was retained."
                     )
             elif allocation_limit_reasons == {"time_budget", "state_cap"}:
                 if improved_seed:
@@ -17233,6 +17269,7 @@ class ExperimentDesignDialog(QDialog):
             or bounded_search
             or collapsed
             or search_limited
+            or performance_target_exceeded
             or res.get("optimizer_strategy_used") == "legacy_fallback"
         ) else "success"
         self._set_status(" ".join(parts), severity=severity)

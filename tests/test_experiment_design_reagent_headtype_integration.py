@@ -1847,6 +1847,40 @@ def test_optimization_status_distinguishes_time_and_state_limits(qapp):
     dialog.close()
 
 
+
+def test_optimization_status_shows_nonblocking_performance_warning(qapp):
+    dialog = _build_real_dialog()
+    dialog.model.plans_per_option = {}
+    dialog.model.get_target_preview_map = lambda: {}
+    dialog.run_btn.setEnabled(True)
+    dialog.save_btn.setEnabled(True)
+    dialog.finish_btn.setEnabled(True)
+
+    dialog._update_optimization_status(
+        {
+            "best": True,
+            "two_stock_search_limited_keys": [],
+            "stock_allocation_search_limited": False,
+            "stock_allocation_time_budget_exceeded": True,
+            "stock_allocation_elapsed_ms": 81.25,
+            "stock_allocation_time_budget_ms": 75.0,
+            "optimizer_seed_distinct_level_loss": 0,
+            "optimizer_selected_rank": {"total_distinct_level_loss": 0},
+            "stock_allocation_improved_seed": False,
+            "stock_allocation_stop_reason": "search_exhausted",
+        }
+    )
+
+    assert (
+        "Resolution-first completed deterministically in 81.2 ms, above its "
+        "75 ms performance target."
+    ) in dialog.status_lbl.text()
+    assert dialog.status_heading_lbl.text() == "Warning"
+    assert dialog.run_btn.isEnabled() is True
+    assert dialog.save_btn.isEnabled() is True
+    assert dialog.finish_btn.isEnabled() is True
+    dialog.close()
+
 def test_clear_imported_design_returns_to_an_empty_manual_editor(monkeypatch, qapp):
     dialog = _build_real_dialog()
     sample_design = pd.DataFrame(

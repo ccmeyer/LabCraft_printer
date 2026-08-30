@@ -1,4 +1,5 @@
 import copy
+import gc
 import json
 from types import SimpleNamespace
 
@@ -181,6 +182,7 @@ def _make_resolution_reproduction_model(
 
 
 @pytest.mark.parametrize("targets", ([0.5, 1.0, 5.0, 20.0], [1.0, 2.0, 5.0, 20.0]))
+
 def test_resolution_first_preserves_reported_target_levels(targets):
     em = _make_resolution_reproduction_model(targets)
 
@@ -201,8 +203,17 @@ def test_resolution_first_preserves_reported_target_levels(targets):
     assert result["optimizer_seed_rank"]["total_distinct_level_loss"] == 1
     assert result["optimizer_selected_rank"]["total_distinct_level_loss"] == 0
     assert result["stock_allocation_improved_seed"] is True
-    assert 0.0 <= result["stock_allocation_time_to_best_ms"] < 75.0
-    assert result["stock_allocation_stop_reason"] == "search_exhausted"
+    assert result["stock_allocation_time_to_best_ms"] >= 0.0
+    assert result["stock_allocation_stop_reason"] in {
+        "search_exhausted",
+        "zero_loss_polish_complete",
+    }
+    assert result["stock_allocation_work_units_evaluated"] <= result[
+        "stock_allocation_work_limit"
+    ]
+    assert sum(result["stock_allocation_work_units_by_kind"].values()) == result[
+        "stock_allocation_work_units_evaluated"
+    ]
     preview = em.get_target_preview_map()[("R", None)]
     assert len({row["achieved_final"] for row in preview}) == len(targets)
 
@@ -240,6 +251,7 @@ def test_grouping_opt_in_uses_concentration_first_seed_and_reports_collision(tar
     assert issue["collapsed_groups"][0]["droplet_assignments"] == [1, 1]
 
 
+
 def test_zero_loss_seed_skips_resolution_and_two_stock_enumeration(monkeypatch):
     em = _make_resolution_reproduction_model(
         [1.0, 2.0],
@@ -270,6 +282,16 @@ def test_zero_loss_seed_skips_resolution_and_two_stock_enumeration(monkeypatch):
     assert result["best"] is True
     assert result["distinct_level_loss"] == 0
     assert result["stock_allocation_states_evaluated"] == 0
+    assert result["stock_allocation_work_units_evaluated"] == 0
+    assert result["stock_allocation_work_limit"] == 12000
+    assert result["stock_allocation_work_units_by_kind"] == {
+        "two_stock_probe": 0,
+        "two_stock_pair": 0,
+        "candidate_pool": 0,
+        "global_search": 0,
+    }
+    assert result["stock_allocation_zero_loss_polish_work_limit"] == 256
+    assert result["stock_allocation_zero_loss_polish_work_used"] == 0
     assert result["stock_allocation_elapsed_ms"] == pytest.approx(0.0)
     assert result["stock_allocation_limit_reasons"] == []
     assert result["stock_allocation_candidates_generated"] == 0
@@ -281,7 +303,11 @@ def test_zero_loss_seed_skips_resolution_and_two_stock_enumeration(monkeypatch):
     assert result["stock_allocation_stop_reason"] == "seed_zero_loss"
     assert result["stock_allocation_improved_seed"] is False
     assert result["stock_allocation_time_to_best_ms"] is None
+    assert result["stock_allocation_time_budget_exceeded"] is False
+    assert result["stock_allocation_time_budget_overshoot_ms"] == pytest.approx(0.0)
+    assert result["stock_allocation_deadline_overshoot_ms"] == pytest.approx(0.0)
     assert calls == {"single": 1, "two": 0}
+
 
 
 def test_two_stock_resolution_search_can_rescue_a_colliding_feasible_single_plan():
@@ -316,58 +342,154 @@ def test_two_stock_resolution_search_can_rescue_a_colliding_feasible_single_plan
     assert two_result["best"] is True
     assert two_result["distinct_level_loss"] == 0
     assert two_result["stock_allocation_improved_seed"] is True
-    assert two_result["stock_allocation_time_to_best_ms"] < 75.0
-    assert two_result["stock_allocation_elapsed_ms"] < 75.0
+    assert two_result["stock_allocation_time_to_best_ms"] >= 0.0
     assert (
         two_result["stock_allocation_time_to_first_improvement_ms"]
         <= two_result["stock_allocation_time_to_best_ms"]
     )
     assert two_result["stock_allocation_deadline_overshoot_ms"] == pytest.approx(
-        0.0
+        two_result["stock_allocation_time_budget_overshoot_ms"]
     )
-    assert 0 < two_result["two_stock_pairs_evaluated"] < 1000
+    assert two_result["stock_allocation_stop_reason"] == "zero_loss_polish_complete"
+    assert two_result["stock_allocation_zero_loss_polish_work_used"] == 256
+    assert two_result["stock_allocation_work_units_evaluated"] == 314
+    assert two_result["stock_allocation_work_units_by_kind"] == {
+        "two_stock_probe": 56,
+        "two_stock_pair": 180,
+        "candidate_pool": 0,
+        "global_search": 78,
+    }
+    assert two_result["two_stock_pairs_evaluated"] == 180
     assert two_result["two_stock_candidates_generated"] > 0
     assert two_result["two_stock_candidates_retained"] > 0
     assert two_result["two_stock_target_row_cache_reuses"] > 0
     plan = two_model.plans_per_option[("R", None)]
     assert plan["n_stocks"] == 2
-    assert sorted(
-        stock["stock_concentration"] for stock in plan["stocks"]
-    ) == pytest.approx([25.0, 2000.0])
+    stocks_by_concentration = {
+        float(stock["stock_concentration"]): stock
+        for stock in plan["stocks"]
+    }
+    assert sorted(stocks_by_concentration) == pytest.approx([25.0, 2000.0])
+    assert stocks_by_concentration[2000.0]["droplets_per_target"] == {
+        0.5: 0,
+        1.0: 0,
+        5.0: 1,
+        20.0: 5,
+    }
+    assert stocks_by_concentration[25.0]["droplets_per_target"] == {
+        0.5: 10,
+        1.0: 20,
+        5.0: 20,
+        20.0: 0,
+    }
     assert len({
         row["achieved_final"]
         for row in two_model.get_target_preview_map()[("R", None)]
     }) == 4
 
 
-def test_two_stock_rescue_precedes_single_candidate_preprocessing(monkeypatch):
+
+def test_resolution_selection_is_independent_of_clock_speed_and_shape():
+    class ScriptedClock:
+        def __init__(self, increments):
+            self.increments = tuple(float(value) for value in increments)
+            self.index = 0
+            self.value = 0.0
+
+        def __call__(self):
+            current = self.value
+            increment = self.increments[min(self.index, len(self.increments) - 1)]
+            self.index += 1
+            self.value += increment
+            return current
+
+    def deterministic_evidence(model, result):
+        payload = model.export_stock_allocation_reuse_payload(result)
+        keys = (
+            "optimizer_seed_rank",
+            "optimizer_selected_rank",
+            "stock_allocation_stop_reason",
+            "stock_allocation_limit_reasons",
+            "two_stock_search_limited_keys",
+            "collapsed_target_keys",
+            "stock_allocation_states_evaluated",
+            "stock_allocation_work_units_evaluated",
+            "stock_allocation_work_limit",
+            "stock_allocation_work_units_by_kind",
+            "stock_allocation_zero_loss_polish_work_limit",
+            "stock_allocation_zero_loss_polish_work_used",
+            "stock_allocation_candidates_generated",
+            "stock_allocation_candidates_retained",
+            "stock_allocation_candidates_pruned",
+            "stock_allocation_candidates_deduplicated",
+            "stock_allocation_candidates_dominated",
+            "stock_allocation_branches_pruned",
+            "stock_allocation_loss_tiers_evaluated",
+            "two_stock_pairs_evaluated",
+            "two_stock_target_evaluations",
+            "two_stock_solver_iterations",
+            "two_stock_candidates_generated",
+            "two_stock_candidates_retained",
+            "two_stock_candidates_deduplicated",
+            "two_stock_target_row_cache_reuses",
+        )
+        return {
+            "plan_fingerprint": payload["plan_fingerprint"],
+            **{key: copy.deepcopy(result[key]) for key in keys},
+        }
+
+    clock_shapes = (
+        (0.0,),
+        (0.000001,),
+        (0.100001,),
+        (0.001, 0.2, 0.0001, 0.08),
+    )
+    for allow_two in (False, True):
+        evidence = []
+        time_flags = []
+        for increments in clock_shapes:
+            model = _make_resolution_reproduction_model(
+                [0.5, 1.0, 5.0, 20.0],
+                printed_volume_nl=240.0 if allow_two else 320.0,
+                include_other=not allow_two,
+                max_stock_conc=2000.0,
+            )
+            model._stock_optimizer_monotonic = ScriptedClock(increments)
+            result = model.optimize_stock_solutions(
+                quantum=0.1,
+                max_refine=20 if allow_two else 60,
+                two_max_refine=20 if allow_two else 40,
+                allow_two=allow_two,
+            )
+            evidence.append(deterministic_evidence(model, result))
+            time_flags.append(result["stock_allocation_time_budget_exceeded"])
+
+        assert evidence[1:] == [evidence[0], evidence[0], evidence[0]]
+        assert time_flags == [False, False, True, True]
+
+
+
+@pytest.mark.parametrize(
+    ("work_limit", "expected_pairs", "expected_loss", "expected_improved"),
+    (
+        (1, 0, 1, False),
+        (58, 1, 0, True),
+    ),
+)
+def test_two_stock_work_cap_keeps_only_validated_results(
+    monkeypatch,
+    work_limit,
+    expected_pairs,
+    expected_loss,
+    expected_improved,
+):
     em = _make_resolution_reproduction_model(
         [0.5, 1.0, 5.0, 20.0],
         printed_volume_nl=240.0,
         include_other=False,
         max_stock_conc=2000.0,
     )
-    original_two = em._enumerate_two_stock_candidates_with_meta
-    phase = {"two_started": False, "pre_two_clock_checks": 0}
-
-    def fake_clock():
-        if phase["two_started"]:
-            return 0.0
-        phase["pre_two_clock_checks"] += 1
-        # The former single-stock pre-pass needed more checks than this and
-        # therefore exhausted the deadline before entering pair generation.
-        return 0.0 if phase["pre_two_clock_checks"] <= 12 else 1.0
-
-    def track_two_stock_generation(*args, **kwargs):
-        phase["two_started"] = True
-        return original_two(*args, **kwargs)
-
-    monkeypatch.setattr(em, "_stock_optimizer_monotonic", fake_clock)
-    monkeypatch.setattr(
-        em,
-        "_enumerate_two_stock_candidates_with_meta",
-        track_two_stock_generation,
-    )
+    monkeypatch.setattr(em, "MAX_STOCK_ALLOCATION_WORK_UNITS", work_limit)
 
     result = em.optimize_stock_solutions(
         quantum=0.1,
@@ -376,57 +498,257 @@ def test_two_stock_rescue_precedes_single_candidate_preprocessing(monkeypatch):
         allow_two=True,
     )
 
-    assert phase["two_started"] is True
-    assert phase["pre_two_clock_checks"] <= 12
-    assert result["two_stock_pairs_evaluated"] > 0
-    assert result["distinct_level_loss"] == 0
-    assert result["stock_allocation_improved_seed"] is True
-    assert result["stock_allocation_elapsed_ms"] == pytest.approx(0.0)
-    assert em.plans_per_option[("R", None)]["n_stocks"] == 2
-
-
-def test_two_stock_probe_timeout_returns_untouched_seed(monkeypatch):
-    em = _make_resolution_reproduction_model(
-        [0.5, 1.0, 5.0, 20.0],
-        printed_volume_nl=240.0,
-        include_other=False,
-        max_stock_conc=2000.0,
-    )
-    original_two = em._enumerate_two_stock_candidates_with_meta
-    phase = {"two_started": False}
-
-    def fake_clock():
-        return 1.0 if phase["two_started"] else 0.0
-
-    def track_two_stock_generation(*args, **kwargs):
-        phase["two_started"] = True
-        return original_two(*args, **kwargs)
-
-    monkeypatch.setattr(em, "_stock_optimizer_monotonic", fake_clock)
-    monkeypatch.setattr(
-        em,
-        "_enumerate_two_stock_candidates_with_meta",
-        track_two_stock_generation,
-    )
-
-    result = em.optimize_stock_solutions(
-        quantum=0.1,
-        max_refine=20,
-        two_max_refine=20,
-        allow_two=True,
-    )
-
-    assert phase["two_started"] is True
     assert result["best"] is True
-    assert result["two_stock_pairs_evaluated"] == 0
-    assert result["stock_allocation_limit_reasons"] == ["time_budget"]
+    assert result["two_stock_pairs_evaluated"] == expected_pairs
+    assert result["distinct_level_loss"] == expected_loss
+    assert result["stock_allocation_limit_reasons"] == ["work_cap"]
     assert result["two_stock_search_limited_keys"] == [("R", None)]
-    assert result["stock_allocation_stop_reason"] == "time_budget"
-    assert result["stock_allocation_improved_seed"] is False
-    assert result["stock_allocation_time_to_best_ms"] is None
-    assert result["optimizer_selected_rank"] == result["optimizer_seed_rank"]
-    assert em.plans_per_option[("R", None)]["n_stocks"] == 1
+    assert result["stock_allocation_stop_reason"] == "work_cap"
+    assert result["stock_allocation_improved_seed"] is expected_improved
+    assert result["stock_allocation_work_units_evaluated"] == work_limit
+    assert sum(result["stock_allocation_work_units_by_kind"].values()) == work_limit
+    if expected_improved:
+        assert result["stock_allocation_time_to_best_ms"] is not None
+        assert (
+            result["optimizer_selected_rank"]["total_distinct_level_loss"]
+            < result["optimizer_seed_rank"]["total_distinct_level_loss"]
+        )
+        assert em.plans_per_option[("R", None)]["n_stocks"] == 2
+    else:
+        assert result["stock_allocation_time_to_best_ms"] is None
+        assert result["optimizer_selected_rank"] == result["optimizer_seed_rank"]
+        assert em.plans_per_option[("R", None)]["n_stocks"] == 1
 
+
+
+def test_two_stock_resolution_repeats_exact_plan_and_work_evidence_twenty_times():
+    expected_evidence = None
+    for _attempt in range(20):
+        em = _make_resolution_reproduction_model(
+            [0.5, 1.0, 5.0, 20.0],
+            printed_volume_nl=240.0,
+            include_other=False,
+            max_stock_conc=2000.0,
+        )
+        result = em.optimize_stock_solutions(
+            quantum=0.1,
+            max_refine=20,
+            two_max_refine=20,
+            allow_two=True,
+        )
+        plan = em.plans_per_option[("R", None)]
+        stocks = {
+            float(stock["stock_concentration"]): copy.deepcopy(
+                stock["droplets_per_target"]
+            )
+            for stock in plan["stocks"]
+        }
+        evidence = {
+            "plan_fingerprint": em.export_stock_allocation_reuse_payload(result)[
+                "plan_fingerprint"
+            ],
+            "stocks": stocks,
+            "seed_rank": copy.deepcopy(result["optimizer_seed_rank"]),
+            "selected_rank": copy.deepcopy(result["optimizer_selected_rank"]),
+            "stop_reason": result["stock_allocation_stop_reason"],
+            "limit_reasons": copy.deepcopy(
+                result["stock_allocation_limit_reasons"]
+            ),
+            "limited_keys": copy.deepcopy(
+                result["two_stock_search_limited_keys"]
+            ),
+            "work_units": result["stock_allocation_work_units_evaluated"],
+            "work_by_kind": copy.deepcopy(
+                result["stock_allocation_work_units_by_kind"]
+            ),
+            "polish_units": result[
+                "stock_allocation_zero_loss_polish_work_used"
+            ],
+            "states": result["stock_allocation_states_evaluated"],
+            "pairs": result["two_stock_pairs_evaluated"],
+            "target_evaluations": result["two_stock_target_evaluations"],
+            "solver_iterations": result["two_stock_solver_iterations"],
+            "generated": result["two_stock_candidates_generated"],
+            "retained": result["two_stock_candidates_retained"],
+            "deduplicated": result["two_stock_candidates_deduplicated"],
+        }
+        if expected_evidence is None:
+            expected_evidence = evidence
+        else:
+            assert evidence == expected_evidence
+
+    assert expected_evidence["stocks"] == {
+        2000.0: {0.5: 0, 1.0: 0, 5.0: 1, 20.0: 5},
+        25.0: {0.5: 10, 1.0: 20, 5.0: 20, 20.0: 0},
+    }
+    assert expected_evidence["stop_reason"] == "zero_loss_polish_complete"
+    assert expected_evidence["work_units"] == 314
+    assert expected_evidence["polish_units"] == 256
+
+
+def test_resolution_key_order_is_semantically_canonical():
+    def run(additive_order):
+        em = _make_model(target_volume_nl=320.0)
+        definitions = {
+            "R": ([0.5, 1.0, 5.0, 20.0], 10.0),
+            "Other": ([100.0], 10.0),
+        }
+        for name in additive_order:
+            targets, droplet_nl = definitions[name]
+            em.add_additive(name, targets, "mM", droplet_nl)
+        result = em.optimize_stock_solutions(
+            quantum=0.1,
+            max_refine=60,
+            two_max_refine=40,
+            allow_two=False,
+        )
+        plans = {
+            key: {
+                "n_stocks": int(plan["n_stocks"]),
+                "stocks": sorted(
+                    (
+                        float(stock["stock_concentration"]),
+                        float(stock["delta_per_drop"]),
+                        tuple(
+                            sorted(
+                                (
+                                    float(target),
+                                    int(drops),
+                                )
+                                for target, drops in stock[
+                                    "droplets_per_target"
+                                ].items()
+                            )
+                        ),
+                    )
+                    for stock in plan["stocks"]
+                ),
+            }
+            for key, plan in em.plans_per_option.items()
+        }
+        return result, plans
+
+    forward_result, forward_plans = run(("R", "Other"))
+    reverse_result, reverse_plans = run(("Other", "R"))
+
+    assert reverse_plans == forward_plans
+    assert reverse_result["optimizer_seed_rank"] == forward_result[
+        "optimizer_seed_rank"
+    ]
+    assert reverse_result["optimizer_selected_rank"] == forward_result[
+        "optimizer_selected_rank"
+    ]
+    assert reverse_result["stock_allocation_work_units_evaluated"] == (
+        forward_result["stock_allocation_work_units_evaluated"]
+    )
+    assert reverse_result["stock_allocation_work_units_by_kind"] == (
+        forward_result["stock_allocation_work_units_by_kind"]
+    )
+    assert reverse_result["stock_allocation_stop_reason"] == forward_result[
+        "stock_allocation_stop_reason"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("resolution_elapsed_seconds", "expected_warning"),
+    (
+        (0.074999, False),
+        (0.075, False),
+        (0.075000001, True),
+    ),
+)
+def test_resolution_performance_target_boundary(
+    resolution_elapsed_seconds,
+    expected_warning,
+):
+    em = _make_resolution_reproduction_model([0.5, 1.0, 5.0, 20.0])
+    readings = iter(
+        (
+            0.0,
+            0.0,
+            0.0,
+            resolution_elapsed_seconds,
+            resolution_elapsed_seconds,
+            resolution_elapsed_seconds,
+        )
+    )
+    em._stock_optimizer_monotonic = lambda: next(readings)
+
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=60,
+        two_max_refine=40,
+        allow_two=False,
+    )
+
+    assert result["best"] is True
+    assert result["stock_allocation_time_budget_exceeded"] is expected_warning
+    expected_overshoot = max(
+        0.0,
+        resolution_elapsed_seconds * 1000.0 - 75.0,
+    )
+    assert result["stock_allocation_time_budget_overshoot_ms"] == pytest.approx(
+        expected_overshoot
+    )
+    assert result["stock_allocation_deadline_overshoot_ms"] == pytest.approx(
+        expected_overshoot
+    )
+    performance_issues = [
+        issue
+        for issue in result["issues_by_key"].get(
+            ("__stock_allocation__", None),
+            [],
+        )
+        if issue["code"] == "stock_allocation_performance_target_exceeded"
+    ]
+    assert bool(performance_issues) is expected_warning
+    if expected_warning:
+        assert performance_issues[0]["severity"] == "warning"
+        assert performance_issues[0]["performance_target_ms"] == pytest.approx(
+            75.0
+        )
+
+
+def test_optimizer_total_timing_excludes_stock_updated_subscribers():
+    em = _make_resolution_reproduction_model([0.5, 1.0, 5.0, 20.0])
+
+    class MutableClock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    clock = MutableClock()
+    em._stock_optimizer_monotonic = clock
+    em.stock_updated.connect(lambda: setattr(clock, "value", 10.0))
+
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=60,
+        two_max_refine=40,
+        allow_two=False,
+    )
+
+    assert clock.value == pytest.approx(10.0)
+    assert result["optimizer_total_elapsed_ms"] == pytest.approx(0.0)
+
+
+def test_optimizer_does_not_change_process_gc_state():
+    em = _make_resolution_reproduction_model([0.5, 1.0, 5.0, 20.0])
+    gc_was_enabled = gc.isenabled()
+    try:
+        gc.disable()
+        result = em.optimize_stock_solutions(
+            quantum=0.1,
+            max_refine=60,
+            two_max_refine=40,
+            allow_two=False,
+        )
+        assert result["best"] is True
+        assert gc.isenabled() is False
+    finally:
+        if gc_was_enabled:
+            gc.enable()
 
 def _make_calibratable_two_stock_model():
     em = _make_resolution_reproduction_model(
@@ -1241,16 +1563,12 @@ def test_resolution_search_cap_is_deterministic_and_returns_best_validated_plan(
     )
 
 
-def test_resolution_timeout_before_preprocessing_returns_untouched_seed(monkeypatch):
+
+def test_resolution_work_cap_during_candidate_pool_returns_untouched_seed(
+    monkeypatch,
+):
     em = _make_resolution_reproduction_model([0.5, 1.0, 5.0, 20.0])
-    calls = 0
-
-    def fake_clock():
-        nonlocal calls
-        calls += 1
-        return 0.0 if calls < 4 else 1.0
-
-    monkeypatch.setattr(em, "_stock_optimizer_monotonic", fake_clock)
+    monkeypatch.setattr(em, "MAX_STOCK_ALLOCATION_WORK_UNITS", 1)
 
     result = em.optimize_stock_solutions(
         quantum=0.1,
@@ -1262,10 +1580,18 @@ def test_resolution_timeout_before_preprocessing_returns_untouched_seed(monkeypa
     assert result["best"] is True
     assert result["distinct_level_loss"] == 1
     assert result["stock_allocation_states_evaluated"] == 0
-    assert result["stock_allocation_candidates_generated"] == 0
-    assert result["stock_allocation_limit_reasons"] == ["time_budget"]
+    assert result["stock_allocation_candidates_generated"] == 1
+    assert result["stock_allocation_candidates_retained"] == 0
+    assert result["stock_allocation_work_units_evaluated"] == 1
+    assert result["stock_allocation_work_units_by_kind"] == {
+        "two_stock_probe": 0,
+        "two_stock_pair": 0,
+        "candidate_pool": 1,
+        "global_search": 0,
+    }
+    assert result["stock_allocation_limit_reasons"] == ["work_cap"]
     assert result["optimizer_strategy_used"] == "resolution_first"
-    assert result["stock_allocation_stop_reason"] == "time_budget"
+    assert result["stock_allocation_stop_reason"] == "work_cap"
     assert result["stock_allocation_improved_seed"] is False
     assert result["stock_allocation_time_to_best_ms"] is None
     bounded_issue = next(
@@ -1273,11 +1599,9 @@ def test_resolution_timeout_before_preprocessing_returns_untouched_seed(monkeypa
         for issue in result["issues_by_key"][("__stock_allocation__", None)]
         if issue["code"] == "bounded_stock_allocation_search"
     )
-    assert "No better level resolution was found within 75 ms" in bounded_issue[
-        "message"
-    ]
+    assert "deterministic work limit" in bounded_issue["message"]
     assert bounded_issue["improved_seed"] is False
-    assert bounded_issue["stop_reason"] == "time_budget"
+    assert bounded_issue["stop_reason"] == "work_cap"
 
 
 def test_resolution_tier_exhaustion_records_final_best_time(monkeypatch):
@@ -1299,16 +1623,10 @@ def test_resolution_tier_exhaustion_records_final_best_time(monkeypatch):
     assert result["stock_allocation_time_to_best_ms"] == pytest.approx(0.0)
 
 
-def test_resolution_timeout_during_candidate_pruning_returns_seed(monkeypatch):
+
+def test_resolution_work_cap_after_candidate_pool_returns_seed(monkeypatch):
     em = _make_resolution_reproduction_model([0.5, 1.0, 5.0, 20.0])
-    calls = 0
-
-    def fake_clock():
-        nonlocal calls
-        calls += 1
-        return 0.0 if calls < 24 else 1.0
-
-    monkeypatch.setattr(em, "_stock_optimizer_monotonic", fake_clock)
+    monkeypatch.setattr(em, "MAX_STOCK_ALLOCATION_WORK_UNITS", 223)
 
     result = em.optimize_stock_solutions(
         quantum=0.1,
@@ -1320,23 +1638,20 @@ def test_resolution_timeout_during_candidate_pruning_returns_seed(monkeypatch):
     assert result["best"] is True
     assert result["distinct_level_loss"] == 1
     assert result["stock_allocation_states_evaluated"] == 0
-    assert result["stock_allocation_candidates_generated"] > 0
-    assert result["stock_allocation_candidates_retained"] > 0
-    assert result["stock_allocation_limit_reasons"] == ["time_budget"]
-    assert result["stock_allocation_stop_reason"] == "time_budget"
+    assert result["stock_allocation_candidates_generated"] == 223
+    assert result["stock_allocation_candidates_retained"] == 223
+    assert result["stock_allocation_work_units_evaluated"] == 223
+    assert result["stock_allocation_work_units_by_kind"]["candidate_pool"] == 223
+    assert result["stock_allocation_work_units_by_kind"]["global_search"] == 0
+    assert result["stock_allocation_limit_reasons"] == ["work_cap"]
+    assert result["stock_allocation_stop_reason"] == "work_cap"
     assert result["stock_allocation_improved_seed"] is False
 
 
-def test_resolution_timeout_during_branching_returns_best_found(monkeypatch):
+
+def test_resolution_work_cap_during_branching_returns_best_found(monkeypatch):
     em = _make_resolution_reproduction_model([0.5, 1.0, 5.0, 20.0])
-    calls = 0
-
-    def fake_clock():
-        nonlocal calls
-        calls += 1
-        return 0.0 if calls < 260 else 1.0
-
-    monkeypatch.setattr(em, "_stock_optimizer_monotonic", fake_clock)
+    monkeypatch.setattr(em, "MAX_STOCK_ALLOCATION_WORK_UNITS", 230)
 
     result = em.optimize_stock_solutions(
         quantum=0.1,
@@ -1348,9 +1663,11 @@ def test_resolution_timeout_during_branching_returns_best_found(monkeypatch):
     assert result["best"] is True
     assert result["distinct_level_loss"] == 0
     assert result["stock_allocation_states_evaluated"] == 1
-    assert result["stock_allocation_branches_pruned"] > 0
-    assert result["stock_allocation_limit_reasons"] == ["time_budget"]
-    assert result["stock_allocation_stop_reason"] == "time_budget"
+    assert result["stock_allocation_work_units_evaluated"] == 230
+    assert result["stock_allocation_work_units_by_kind"]["candidate_pool"] == 223
+    assert result["stock_allocation_work_units_by_kind"]["global_search"] == 7
+    assert result["stock_allocation_limit_reasons"] == ["work_cap"]
+    assert result["stock_allocation_stop_reason"] == "work_cap"
     assert result["stock_allocation_improved_seed"] is True
     assert result["stock_allocation_time_to_best_ms"] is not None
     bounded_issue = next(
@@ -1363,11 +1680,13 @@ def test_resolution_timeout_during_branching_returns_best_found(monkeypatch):
     assert bounded_issue["improved_seed"] is True
 
 
-def test_two_stock_enumeration_uses_shared_resolution_deadline(monkeypatch):
+
+def test_two_stock_clock_overrun_does_not_interrupt_pair_polishing(monkeypatch):
     em = _make_resolution_reproduction_model(
         [0.5, 1.0, 5.0, 20.0],
         printed_volume_nl=240.0,
         include_other=False,
+        max_stock_conc=2000.0,
     )
     original_two = em._enumerate_two_stock_candidates_with_meta
     phase = {"zero_loss_candidate_validated": False}
@@ -1375,7 +1694,7 @@ def test_two_stock_enumeration_uses_shared_resolution_deadline(monkeypatch):
     def fake_clock():
         return 1.0 if phase["zero_loss_candidate_validated"] else 0.0
 
-    def stop_after_validated_improvement(*args, **kwargs):
+    def track_validated_improvement(*args, **kwargs):
         original_callback = kwargs["candidate_callback"]
 
         def tracked_callback(plan):
@@ -1391,7 +1710,7 @@ def test_two_stock_enumeration_uses_shared_resolution_deadline(monkeypatch):
     monkeypatch.setattr(
         em,
         "_enumerate_two_stock_candidates_with_meta",
-        stop_after_validated_improvement,
+        track_validated_improvement,
     )
 
     result = em.optimize_stock_solutions(
@@ -1404,32 +1723,45 @@ def test_two_stock_enumeration_uses_shared_resolution_deadline(monkeypatch):
     assert result["best"] is True
     assert phase["zero_loss_candidate_validated"] is True
     assert result["distinct_level_loss"] == 0
-    assert result["two_stock_pairs_evaluated"] > 0
-    assert result["stock_allocation_limit_reasons"] == ["time_budget"]
-    assert result["two_stock_search_limited_keys"] == [("R", None)]
-    assert em.plans_per_option[("R", None)]["n_stocks"] == 2
-    assert result["stock_allocation_stop_reason"] == "time_budget"
-    assert result["stock_allocation_improved_seed"] is True
-    assert result["stock_allocation_time_to_best_ms"] is not None
-    assert (
-        result["optimizer_selected_rank"]["total_distinct_level_loss"]
-        < result["optimizer_seed_rank"]["total_distinct_level_loss"]
+    assert result["two_stock_pairs_evaluated"] == 180
+    assert result["stock_allocation_limit_reasons"] == []
+    assert result["two_stock_search_limited_keys"] == []
+    assert result["stock_allocation_stop_reason"] == "zero_loss_polish_complete"
+    assert result["stock_allocation_zero_loss_polish_work_used"] == 256
+    assert result["stock_allocation_time_budget_exceeded"] is True
+    assert result["stock_allocation_time_budget_overshoot_ms"] == pytest.approx(
+        925.0
     )
+    assert result["stock_allocation_deadline_overshoot_ms"] == pytest.approx(
+        result["stock_allocation_time_budget_overshoot_ms"]
+    )
+    assert em.plans_per_option[("R", None)]["n_stocks"] == 2
 
 
-def test_two_stock_enumeration_returns_partial_candidates_at_deadline():
+
+def test_two_stock_enumeration_returns_complete_candidates_at_work_cap():
     em = _make_resolution_reproduction_model(
         [0.5, 1.0, 5.0, 20.0],
         printed_volume_nl=240.0,
         include_other=False,
+        max_stock_conc=2000.0,
     )
-    deadline_checks = 0
+    work_limit = 57
+    work_used = 0
+    work_by_kind = {
+        "two_stock_probe": 0,
+        "two_stock_pair": 0,
+    }
+    limit_reasons = set()
     diagnostics = {}
 
-    def deadline_reached():
-        nonlocal deadline_checks
-        deadline_checks += 1
-        return deadline_checks >= 200
+    def consume_work(kind, units=1):
+        nonlocal work_used
+        if work_used + int(units) > work_limit:
+            return False
+        work_used += int(units)
+        work_by_kind[kind] += int(units)
+        return True
 
     candidates, search_limited = em._enumerate_two_stock_candidates_with_meta(
         [0.5, 1.0, 5.0, 20.0],
@@ -1439,15 +1771,22 @@ def test_two_stock_enumeration_returns_partial_candidates_at_deadline():
         volume_budget_nL=240.0,
         nominal_volume_budget_nL=240.0,
         max_refine=20,
+        max_stock_conc=2000.0,
         resolution_first=True,
-        deadline_reached=deadline_reached,
+        consume_work=consume_work,
+        limit_reasons=limit_reasons,
         diagnostics=diagnostics,
     )
 
     assert search_limited is True
-    assert deadline_checks == 200
+    assert work_used == work_limit
+    assert work_by_kind == {
+        "two_stock_probe": 56,
+        "two_stock_pair": 1,
+    }
+    assert limit_reasons == {"work_cap"}
     assert candidates
-    assert diagnostics["two_stock_pairs_evaluated"] > 0
+    assert diagnostics["two_stock_pairs_evaluated"] == 1
     assert diagnostics["two_stock_target_evaluations"] > 0
     assert diagnostics["two_stock_solver_iterations"] > 0
     assert diagnostics["two_stock_candidates_generated"] >= len(candidates)
@@ -1492,17 +1831,11 @@ def test_resolution_search_exception_returns_untouched_seed(monkeypatch):
     )
 
 
-def test_resolution_reports_combined_time_and_state_limits(monkeypatch):
+
+def test_resolution_state_cap_is_independent_of_slow_clock(monkeypatch):
     em = _make_resolution_reproduction_model([0.5, 1.0, 5.0, 20.0])
     monkeypatch.setattr(em, "MAX_STOCK_ALLOCATION_STATES", 1)
-    calls = 0
-
-    def fake_clock():
-        nonlocal calls
-        calls += 1
-        return 0.0 if calls < 254 else 1.0
-
-    monkeypatch.setattr(em, "_stock_optimizer_monotonic", fake_clock)
+    monkeypatch.setattr(em, "_stock_optimizer_monotonic", lambda: 1.0)
 
     result = em.optimize_stock_solutions(
         quantum=0.1,
@@ -1512,8 +1845,10 @@ def test_resolution_reports_combined_time_and_state_limits(monkeypatch):
     )
 
     assert result["best"] is True
-    assert result["stock_allocation_limit_reasons"] == ["state_cap", "time_budget"]
-    assert result["stock_allocation_stop_reason"] == "time_and_state_cap"
+    assert result["stock_allocation_limit_reasons"] == ["state_cap"]
+    assert result["stock_allocation_stop_reason"] == "state_cap"
+    assert result["stock_allocation_states_evaluated"] == 1
+    assert result["stock_allocation_time_budget_exceeded"] is False
 
 
 def test_locked_optimizer_result_reports_not_run_diagnostics(monkeypatch):
