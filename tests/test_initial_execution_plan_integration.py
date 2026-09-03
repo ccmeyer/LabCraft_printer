@@ -295,7 +295,12 @@ def test_valid_two_stock_editor_result_survives_runtime_projection_and_finalizat
     )
 
 
-def _configure_calibratable_two_stock_execution(model):
+def _configure_calibratable_two_stock_execution(
+    model,
+    *,
+    base_replicates=1,
+    additional_conditions=None,
+):
     em = model.experiment_model
     em.factors = []
     em.set_metadata(
@@ -303,7 +308,7 @@ def _configure_calibratable_two_stock_execution(model):
         randomize_assignments=False,
         start_row=0,
         start_col=0,
-        replicates=1,
+        replicates=base_replicates,
         target_reaction_volume_nL=240.0,
         final_reaction_volume_nL=5000.0,
         printed_volume_tolerance_nL=0.0,
@@ -313,6 +318,8 @@ def _configure_calibratable_two_stock_execution(model):
         allow_avoidable_target_grouping=False,
     )
     em.add_additive("Signal", [0.5, 1.0, 5.0, 20.0], "mM", 10.0)
+    if additional_conditions is not None:
+        em.set_additional_conditions(additional_conditions)
     result = em.optimize_stock_solutions(
         quantum=0.1,
         max_refine=20,
@@ -396,6 +403,96 @@ def test_finalized_two_stock_calibration_requantizes_both_legs_atomically(
         + 1e-9
         for well in revised.wells
     )
+
+def test_finalized_two_stock_calibration_uses_only_frozen_subset_targets(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = _configure_calibratable_two_stock_execution(
+        model,
+        base_replicates=0,
+        additional_conditions=[
+            {
+                "label": "Subset low",
+                "replicates": 1,
+                "targets": {("Signal", None): 5.0},
+            },
+            {
+                "label": "Subset high",
+                "replicates": 1,
+                "targets": {("Signal", None): 20.0},
+            },
+        ],
+    )
+    before = load_execution_plan(em.execution_plan_file_path)
+    design_before = Path(em.experiment_file_path).read_bytes()
+    signal_stocks = sorted(
+        (stock for stock in before.stocks if stock.factor_name == "Signal"),
+        key=lambda stock: stock.concentration,
+        reverse=True,
+    )
+    calibrated = signal_stocks[0]
+
+    preview = em.preview_requantized_for_option(
+        ("Signal", None),
+        12.0,
+        calibrated_stock_id=calibrated.stock_id,
+        printing_mode="droplet",
+    )
+
+    assert preview["ok"] is True
+    assert [row["target_final"] for row in preview["rows"]] == [5.0, 20.0]
+    expected_counts = {
+        row["target_final"]: tuple(row["drops"])
+        for row in preview["rows"]
+    }
+
+    result = em.apply_droplet_volume_for_option(
+        "Signal",
+        None,
+        12.0,
+        applied_calibration={
+            "stock_id": calibrated.stock_id,
+            "printer_head": SimpleNamespace(
+                printer_head_id="two-stock-subset-head"
+            ),
+            "measured_volume_nL": 12.0,
+            "pw_us": 1200,
+            "pressure_psi": 0.8,
+            "run_id": "two-stock-subset-calibration",
+            "phase": "synthetic_characterization",
+        },
+        printing_mode="droplet",
+    )
+
+    revised = load_execution_plan(em.execution_plan_file_path)
+    assert revised.plan_revision == result["execution_plan_revision"]
+    assert revised.plan_revision == before.plan_revision + 2
+    assert revised.state is ExecutionPlanState.ACTIVE
+    assert len(revised.wells) == 2
+    assert result["changed_target_count"] == 2
+    assert Path(em.experiment_file_path).read_bytes() == design_before
+    assert em.factors[0].options[0].targets == [0.5, 1.0, 5.0, 20.0]
+
+    reactions_by_id = {
+        f"R{index + 1}": spec["reaction"]
+        for index, spec in enumerate(em._iter_reaction_run_specs())
+    }
+    for well in revised.wells:
+        target = float(reactions_by_id[well.reaction_id][("Signal", None)])
+        actual_counts = tuple(
+            next(
+                (
+                    dispense.target_dispenses
+                    for dispense in well.dispenses
+                    if dispense.stock_id == stock_id
+                ),
+                0,
+            )
+            for stock_id in preview["stock_ids"]
+        )
+        assert actual_counts == expected_counts[target]
+
 
 def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
     experiment_model_factory,

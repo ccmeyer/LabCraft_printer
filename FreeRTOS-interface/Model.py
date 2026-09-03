@@ -691,6 +691,7 @@ class ExperimentModel(QObject):
         # runtime context provided by Model for progress/key creation
         self._runtime_well_plate = None
         self._runtime_reaction_collection = None
+        self._runtime_stock_solution_manager = None
         self._mutable_calibration_stage_active = False
         self._mutable_calibration_runtime_strict = False
 
@@ -6241,7 +6242,7 @@ class ExperimentModel(QObject):
                     "n_stocks": 1,
                     "stocks": [
                         {
-                            "delta_per_drop": p1.delta_per_drop, 
+                            "delta_per_drop": p1.delta_per_drop,
                             "stock_concentration": p1.stock_concentration,
                             "droplet_volume_nL": p1.droplet_nL,
                             "units": p1.units,
@@ -9223,7 +9224,7 @@ class ExperimentModel(QObject):
         self._reactions_df = pd.DataFrame()
         self._last_worst_nonfill_volume_nL = None
         self.stock_updated.emit()
-    
+
     def has_explicit_well_assignments(self) -> bool:
         """
         True if the uploaded design included a well column with at least one
@@ -10195,14 +10196,11 @@ class ExperimentModel(QObject):
             return {"ok": False, "code": "missing_design_option", "reason": "The reagent is absent from the current design."}
         starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
         units = str(getattr(option, "units", "") or stocks[0].get("units") or "")
-        target_values = {float(target) for target in self.get_targets_for_key(key)}
-        for spec in self._iter_reaction_run_specs():
-            reaction = spec.get("reaction") or {}
-            if key in reaction:
-                target_values.add(float(reaction[key]))
-        ordered_targets = sorted(target_values)
-        if not ordered_targets:
-            return {"ok": False, "code": "missing_targets", "reason": "The reagent has no requested targets."}
+        execution_plan = self.get_execution_plan_snapshot()
+        authoritative_execution = bool(
+            execution_plan is not None
+            and self.get_execution_plan_source() != "legacy_reconstruction"
+        )
 
         try:
             _target_limits, run_rows = self._calibration_target_volume_limits(
@@ -10213,10 +10211,31 @@ class ExperimentModel(QObject):
         except Exception as exc:
             return {"ok": False, "code": "row_context_invalid", "reason": str(exc)}
 
-        execution_plan = self.get_execution_plan_snapshot()
+        if authoritative_execution:
+            target_values = {
+                float(row["reaction"][key])
+                for row in run_rows
+                if isinstance(row.get("reaction"), Mapping)
+                and key in row["reaction"]
+            }
+        else:
+            target_values = {
+                float(target) for target in self.get_targets_for_key(key)
+            }
+            for spec in self._iter_reaction_run_specs():
+                reaction = spec.get("reaction") or {}
+                if key in reaction:
+                    target_values.add(float(reaction[key]))
+        ordered_targets = sorted(target_values)
+        if not ordered_targets:
+            return {
+                "ok": False,
+                "code": "missing_targets",
+                "reason": "The reagent has no requested execution targets.",
+            }
+
         if (
-            execution_plan is not None
-            and self.get_execution_plan_source() != "legacy_reconstruction"
+            authoritative_execution
         ):
             fill_candidates = [
                 stock
@@ -10282,7 +10301,18 @@ class ExperimentModel(QObject):
         for target_final in ordered_targets:
             target_key = self._normalize_target_key(target_final)
             target_add = max(0.0, float(target_final) - starting)
-            current_counts = self._counts_for_plan_target(key, target_final, plan)
+            try:
+                current_counts = self._counts_for_plan_target(
+                    key,
+                    target_final,
+                    plan,
+                )
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "code": "invalid_stock_plan",
+                    "reason": str(exc),
+                }
             current_achieved = sum(
                 int(count) * concentrations[index] * old_volumes[index] / final_volume
                 for index, count in enumerate(current_counts)
@@ -13338,10 +13368,16 @@ class ExperimentModel(QObject):
     # -----------------------------
     # Runtime context / calibration
     # -----------------------------
-    def set_runtime_context(self, well_plate, reaction_collection):
+    def set_runtime_context(
+        self,
+        well_plate,
+        reaction_collection,
+        stock_solution_manager=None,
+    ):
         """Model will set these right before we write progress/key."""
         self._runtime_well_plate = well_plate
         self._runtime_reaction_collection = reaction_collection
+        self._runtime_stock_solution_manager = stock_solution_manager
 
     def set_calibration_manager(self, mgr):
         """Optional; if your app has a calibration manager, wire it here."""
@@ -18123,6 +18159,7 @@ class ExperimentModel(QObject):
         if rc is None:
             return False
 
+        runtime_additions = []
         strict = bool(
             getattr(self, "_mutable_calibration_runtime_strict", False)
         )
@@ -18145,6 +18182,12 @@ class ExperimentModel(QObject):
                     "The assigned runtime reaction count does not match the calibrated design."
                 )
             validated_items_list = []
+            stock_manager = getattr(
+                self,
+                "_runtime_stock_solution_manager",
+                None,
+            )
+            stock_getter = getattr(stock_manager, "get_stock_by_id", None)
             for index, (reaction, items) in enumerate(zip(reactions, items_list)):
                 reagent_getter = getattr(reaction, "get_all_reagents", None)
                 if not callable(reagent_getter):
@@ -18179,23 +18222,72 @@ class ExperimentModel(QObject):
                             f"The calibrated runtime target at reaction {index} duplicates stock {stock_id!r}."
                         )
                     seen_stock_ids.add(stock_id)
-                    if stock_id not in reagents and int(droplets) > 0:
-                        raise RuntimeError(
-                            f"The assigned runtime reaction {index} is missing stock {stock_id!r}."
-                        )
-                    if stock_id in reagents:
-                        validated_items.append(
-                            (
-                                reagent_name,
-                                concentration,
-                                units,
-                                int(droplets),
+                    if stock_id not in reagents:
+                        if int(droplets) <= 0:
+                            continue
+                        if not callable(stock_getter):
+                            raise RuntimeError(
+                                "The assigned runtime cannot resolve newly required "
+                                f"stock {stock_id!r}."
                             )
+                        try:
+                            stock_solution = stock_getter(stock_id)
+                        except Exception as exc:
+                            raise RuntimeError(
+                                "The assigned runtime cannot resolve newly required "
+                                f"stock {stock_id!r}."
+                            ) from exc
+                        try:
+                            identity_matches = (
+                                stock_solution is not None
+                                and str(getattr(stock_solution, "stock_id", "")) == stock_id
+                                and str(getattr(stock_solution, "reagent_name", ""))
+                                == str(reagent_name)
+                                and math.isclose(
+                                    float(
+                                        getattr(
+                                            stock_solution,
+                                            "raw_concentration",
+                                            float("nan"),
+                                        )
+                                    ),
+                                    float(concentration),
+                                    rel_tol=0.0,
+                                    abs_tol=1e-12,
+                                )
+                                and str(getattr(stock_solution, "units", ""))
+                                == str(units)
+                            )
+                        except (TypeError, ValueError):
+                            identity_matches = False
+                        if not identity_matches:
+                            raise RuntimeError(
+                                "The assigned runtime stock registry does not match "
+                                f"newly required stock {stock_id!r}."
+                            )
+                        add_reagent = getattr(reaction, "add_reagent", None)
+                        if not callable(add_reagent):
+                            raise RuntimeError(
+                                f"The assigned runtime reaction {index} cannot add stock {stock_id!r}."
+                            )
+                        runtime_additions.append(
+                            (reaction, stock_solution, int(droplets))
                         )
+                    validated_items.append(
+                        (
+                            reagent_name,
+                            concentration,
+                            units,
+                            int(droplets),
+                        )
+                    )
                 validated_items_list.append(validated_items)
             items_list = validated_items_list
 
         try:
+            for reaction, stock_solution, droplets in runtime_additions:
+                reaction.add_reagent(stock_solution, droplets)
+
             # Most explicit: set each reaction's items
             if hasattr(rc, "set_reaction_items_for_index"):
                 iterator = (
@@ -19613,6 +19705,7 @@ class ExperimentModel(QObject):
         self.concentration_key_file_path = None
         self._runtime_well_plate = None
         self._runtime_reaction_collection = None
+        self._runtime_stock_solution_manager = None
         self._execution_plan_snapshot = None
         self._execution_plan_source = None
         self._reconstructed_execution_plan = None
@@ -23889,7 +23982,11 @@ class Model(QObject):
             self.experiment_model.update_all_paths()
 
         # Give ExperimentModel a runtime view so it can build progress/key files
-        self.experiment_model.set_runtime_context(self.well_plate, self.reaction_collection)
+        self.experiment_model.set_runtime_context(
+            self.well_plate,
+            self.reaction_collection,
+            self.stock_solutions,
+        )
 
         execution_plan = None
         execution_plan_status = None
@@ -23912,7 +24009,7 @@ class Model(QObject):
         except Exception as exc:
             if finalize_execution_plan:
                 self.experiment_model.set_execution_plan_finalization_error(exc)
-                self.experiment_model.set_runtime_context(None, None)
+                self.experiment_model.set_runtime_context(None, None, None)
                 self._clear_runtime_experiment_without_signal()
                 raise RuntimeError(
                     f"Experiment finalization failed before the execution artifacts were ready: {exc}"
@@ -24441,6 +24538,7 @@ class Model(QObject):
         self.experiment_model.set_runtime_context(
             self.well_plate,
             self.reaction_collection,
+            self.stock_solutions,
         )
         self.experiment_model._authoritative_runtime_active = True
         self.experiment_model._write_execution_plan_exports(
@@ -24613,6 +24711,7 @@ class Model(QObject):
         self.experiment_model.set_runtime_context(
             self.well_plate,
             self.reaction_collection,
+            self.stock_solutions,
         )
         self.experiment_model._authoritative_runtime_active = False
         self.experiment_model._active_authoritative_execution_session = None

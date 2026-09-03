@@ -341,6 +341,43 @@ def _configure_calibrated_volume_design(em, *, targets=None):
     em.save_experiment()
 
 
+def _configure_mutable_two_stock_design(em):
+    em.factors = []
+    em.set_metadata(
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=1,
+        target_reaction_volume_nL=240.0,
+        final_reaction_volume_nL=5000.0,
+        printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+        allow_two_stock_solutions=True,
+        allow_avoidable_target_grouping=False,
+    )
+    em.add_additive(
+        "Signal",
+        [0.5, 1.0, 5.0, 20.0],
+        "mM",
+        10.0,
+        max_stock_conc=2000.0,
+    )
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=True,
+    )
+    assert result["best"] is True
+    assert result["two_stock_keys"] == [("Signal", None)]
+    em.generate_experiment()
+    em.save_experiment()
+    plan = em._calibration_plan_with_stock_ids(("Signal", None))
+    assert plan["n_stocks"] == 2
+    return tuple(stock["stock_id"] for stock in plan["stocks"])
+
+
 def _attach_mutable_runtime(model):
     em = model.experiment_model
     model.stock_solutions, model.reaction_collection = (
@@ -349,7 +386,11 @@ def _attach_mutable_runtime(model):
     model.well_plate.assign_reactions_to_wells(
         model.reaction_collection.get_all_reactions()
     )
-    em.set_runtime_context(model.well_plate, model.reaction_collection)
+    em.set_runtime_context(
+        model.well_plate,
+        model.reaction_collection,
+        model.stock_solutions,
+    )
     em.write_keys_now()
     return model.reaction_collection
 
@@ -734,6 +775,200 @@ def test_mutable_calibration_without_key_write_still_rebinds_runtime(
     assert _first_option_payload(saved, "glycerol")["droplet_nL"] == pytest.approx(
         30.0
     )
+
+
+def _mutable_two_stock_transition(model):
+    em = model.experiment_model
+    calibrated_stock_id, companion_stock_id = (
+        _configure_mutable_two_stock_design(em)
+    )
+    runtime = _attach_mutable_runtime(model)
+    reaction = next(
+        item
+        for item in runtime.get_all_reactions()
+        if calibrated_stock_id in item.get_all_reagents()
+        and item.get_all_reagents()[
+            calibrated_stock_id
+        ].target_droplets == 5
+        and companion_stock_id not in item.get_all_reagents()
+    )
+    return (
+        em,
+        runtime,
+        reaction,
+        calibrated_stock_id,
+        companion_stock_id,
+    )
+
+
+def _apply_mutable_two_stock_transition(
+    em,
+    calibrated_stock_id,
+    *,
+    write_keys_if_assigned=True,
+):
+    return em.apply_droplet_volume_for_option(
+        "Signal",
+        None,
+        12.0,
+        write_keys_if_assigned=write_keys_if_assigned,
+        applied_calibration={
+            "stock_id": calibrated_stock_id,
+            "printer_head": _printer_head(
+                calibrated_stock_id,
+                printer_head_id="mutable-two-stock-head",
+                printing_mode="droplet",
+            ),
+            "measured_volume_nL": 12.0,
+            "run_id": "mutable-two-stock-calibration",
+        },
+        printing_mode="droplet",
+    )
+
+
+def test_mutable_two_stock_calibration_adds_newly_positive_runtime_leg(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    (
+        em,
+        _runtime,
+        reaction,
+        calibrated_stock_id,
+        companion_stock_id,
+    ) = _mutable_two_stock_transition(model)
+    calibrated_reagent = reaction.get_all_reagents()[calibrated_stock_id]
+    calibrated_reagent.added_droplets = 1
+    calibrated_reagent.completed = calibrated_reagent.is_complete()
+    em.write_keys_now()
+    em.save_experiment()
+
+    result = _apply_mutable_two_stock_transition(
+        em,
+        calibrated_stock_id,
+    )
+
+    assert {
+        (
+            row["target_final"],
+            tuple(row["old_drops"]),
+            tuple(row["new_drops"]),
+        )
+        for row in result["count_changes"]
+    } >= {(20.0, (5, 0), (4, 16))}
+    reagents = reaction.get_all_reagents()
+    assert reagents[calibrated_stock_id].target_droplets == 4
+    assert reagents[calibrated_stock_id].added_droplets == 1
+    companion = reagents[companion_stock_id]
+    assert companion.stock_solution is model.stock_solutions.get_stock_by_id(
+        companion_stock_id
+    )
+    assert companion.target_droplets == 16
+    assert companion.added_droplets == 0
+    assert companion.completed is False
+
+    well = next(
+        item
+        for item in model.well_plate.get_all_wells()
+        if item.get_assigned_reaction() is reaction
+    )
+    progress = json.loads(
+        Path(em.progress_file_path).read_text(encoding="utf-8")
+    )
+    assert progress[well.well_id]["reagents"][companion_stock_id] == {
+        "target_droplets": 16,
+        "added_droplets": 0,
+    }
+    assert companion_stock_id in Path(em.key_file_path).read_text(
+        encoding="utf-8"
+    )
+    concentration_key = Path(
+        em.concentration_key_file_path
+    ).read_text(encoding="utf-8")
+    assert "Signal_mM" in concentration_key
+    assert f"{well.well_id},20.0," in concentration_key
+
+
+@pytest.mark.parametrize(
+    ("registry_factory", "match"),
+    [
+        (
+            lambda _stock_id, _canonical: None,
+            "cannot resolve newly required stock",
+        ),
+        (
+            lambda stock_id, canonical: SimpleNamespace(
+                stock_id=stock_id,
+                reagent_name="Wrong reagent",
+                raw_concentration=canonical.raw_concentration,
+                units=canonical.units,
+            ),
+            "stock registry does not match newly required stock",
+        ),
+    ],
+)
+def test_mutable_two_stock_calibration_rejects_invalid_runtime_stock_registry(
+    experiment_model_factory,
+    registry_factory,
+    match,
+):
+    model = experiment_model_factory()
+    (
+        em,
+        runtime,
+        _reaction,
+        calibrated_stock_id,
+        companion_stock_id,
+    ) = _mutable_two_stock_transition(model)
+    state_before = _mutable_calibration_state(em, runtime)
+    canonical = model.stock_solutions.get_stock_by_id(companion_stock_id)
+    resolved = registry_factory(companion_stock_id, canonical)
+    em._runtime_stock_solution_manager = (
+        None
+        if resolved is None
+        else SimpleNamespace(get_stock_by_id=lambda _stock_id: resolved)
+    )
+
+    with pytest.raises(RuntimeError, match=match):
+        _apply_mutable_two_stock_transition(
+            em,
+            calibrated_stock_id,
+        )
+
+    assert _mutable_calibration_state(em, runtime) == state_before
+
+
+def test_mutable_two_stock_calibration_rolls_back_new_runtime_leg(
+    experiment_model_factory,
+    monkeypatch,
+):
+    model = experiment_model_factory()
+    (
+        em,
+        runtime,
+        reaction,
+        calibrated_stock_id,
+        companion_stock_id,
+    ) = _mutable_two_stock_transition(model)
+    state_before = _mutable_calibration_state(em, runtime)
+
+    def fail_after_runtime_rebind():
+        assert companion_stock_id in reaction.get_all_reagents()
+        raise RuntimeError("injected key persistence failure")
+
+    monkeypatch.setattr(em, "create_key_file", fail_after_runtime_rebind)
+
+    with pytest.raises(
+        RuntimeError,
+        match="injected key persistence failure",
+    ):
+        _apply_mutable_two_stock_transition(
+            em,
+            calibrated_stock_id,
+        )
+
+    assert companion_stock_id not in reaction.get_all_reagents()
+    assert _mutable_calibration_state(em, runtime) == state_before
 
 
 def test_mutable_single_stock_calibration_above_threshold_warns_and_applies(

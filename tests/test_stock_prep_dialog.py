@@ -661,6 +661,79 @@ def test_stock_prep_rows_use_current_plan_totals_and_exclude_fill():
     assert rows[1]["total_volume_uL"] == 0.28
 
 
+def test_real_two_stock_plan_renders_and_persists_rows_by_exact_stock_id(
+    qapp,
+    tmp_path,
+):
+    em = _make_real_model()
+    em.experiment_dir_path = str(tmp_path)
+    em.update_all_paths()
+    em.set_metadata(
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=1,
+        target_reaction_volume_nL=240.0,
+        final_reaction_volume_nL=5000.0,
+        printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+        allow_two_stock_solutions=True,
+        allow_avoidable_target_grouping=False,
+    )
+    em.add_additive(
+        "Signal",
+        [0.5, 1.0, 5.0, 20.0],
+        "mM",
+        10.0,
+        max_stock_conc=2000.0,
+    )
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=True,
+    )
+    assert result["best"] is True
+    assert result["two_stock_keys"] == [("Signal", None)]
+    em.generate_experiment()
+    em.save_experiment()
+
+    rows = em.get_stock_prep_rows()
+    stock_ids = [row["stock_id"] for row in rows]
+    assert len(rows) == 2
+    assert len(set(stock_ids)) == 2
+
+    main_window = SimpleNamespace(color_dict={}, popup_message=Mock())
+    dialog = StockPrepDialog(em, main_window)
+    assert dialog.table.rowCount() == 2
+    assert [
+        dialog.table.item(index, StockPrepDialog.COL_REAGENT).text()
+        for index in range(2)
+    ] == ["Signal", "Signal"]
+    assert len(
+        {
+            dialog.table.item(
+                index,
+                StockPrepDialog.COL_TARGET_CONC,
+            ).text()
+            for index in range(2)
+        }
+    ) == 2
+
+    for index, (prep_volume, source_concentration) in enumerate(
+        ((111.0, 1500.0), (222.0, 2500.0))
+    ):
+        _prep_spin(dialog, index).setValue(prep_volume)
+        _source_spin(dialog, index).setValue(source_concentration)
+    assert dialog._persist_stock_prep_state() is True
+
+    persisted = em.load_stock_prep_worksheet()
+    assert list(persisted["entries"]) == stock_ids
+    assert persisted["entries"][stock_ids[0]]["prep_volume_uL"] == 111.0
+    assert persisted["entries"][stock_ids[1]]["prep_volume_uL"] == 222.0
+
+
 @pytest.mark.parametrize(
     ("state", "expected"),
     [
