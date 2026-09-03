@@ -7,6 +7,7 @@ from tools.virtual_workflows.assertions import (
     AssertionResult,
     ExecutionLifecycleExpectation,
     SoftStopResumeExpectation,
+    _resolution_optimizer_timing_evidence,
     _calibration_warning_transition_contract,
     _expected_calibration_volume_warning,
     cleanup_assertion,
@@ -78,9 +79,53 @@ def test_two_stock_warning_truth_is_derived_from_frozen_terminal_totals(
     )
     assert warning["max_total_volume_nL"] == pytest.approx(maximum_total)
     assert warning["max_excess_nL"] == pytest.approx(maximum_excess)
-    assert not any(
+    assert warning["planned_nonprinted_volume_nL"] == pytest.approx(4760.0)
+    assert warning["max_projected_final_volume_nL"] == pytest.approx(
+        maximum_total + 4760.0
+    )
+    assert warning["max_projected_final_excess_nL"] == pytest.approx(
+        maximum_excess
+    )
+    assert [row["printed_volume_nL"] for row in warning["affected_rows"]] == (
+        pytest.approx([totals_nL[row_id] for row_id in affected_ids])
+    )
+    assert all(
         row["exceeds_final_reaction_volume"] for row in warning["affected_rows"]
     )
+
+def test_resolution_optimizer_timing_is_telemetry_not_a_host_speed_gate():
+    expectations = SimpleNamespace(
+        maximum_time_to_best_ms=75.0,
+        maximum_resolution_elapsed_ms=100.0,
+    )
+    timing = _resolution_optimizer_timing_evidence(
+        {
+            "stock_allocation_time_to_best_ms": 80.0,
+            "stock_allocation_elapsed_ms": 120.0,
+            "stock_allocation_time_budget_exceeded": True,
+            "stock_allocation_time_budget_overshoot_ms": 45.0,
+        },
+        expectations,
+    )
+
+    assert timing["telemetry_valid"] is True
+    assert timing["time_to_best_within_fixture_target"] is False
+    assert timing["resolution_elapsed_within_fixture_target"] is False
+    assert timing["performance_target_exceeded"] is True
+    assert timing["performance_target_overshoot_ms"] == 45.0
+
+
+def test_resolution_optimizer_timing_rejects_invalid_telemetry():
+    expectations = SimpleNamespace(
+        maximum_time_to_best_ms=75.0,
+        maximum_resolution_elapsed_ms=100.0,
+    )
+
+    timing = _resolution_optimizer_timing_evidence(
+        {"stock_allocation_time_to_best_ms": -1.0}, expectations
+    )
+
+    assert timing["telemetry_valid"] is False
 
 
 def _literal_fill_warning_transition():

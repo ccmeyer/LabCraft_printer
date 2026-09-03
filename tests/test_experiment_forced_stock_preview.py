@@ -1,11 +1,13 @@
 import copy
 import gc
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
+from ExperimentAuditLog import ExperimentAuditLog
 from Model import (
     CURRENT_PROFILE,
     ExperimentModel,
@@ -973,9 +975,20 @@ def test_calibration_volume_warning_boundary_and_final_volume_context():
     assert warning["affected_row_count"] == 2
     assert warning["max_total_volume_nL"] == pytest.approx(130.0)
     assert warning["max_excess_nL"] == pytest.approx(10.0)
+    assert warning["planned_nonprinted_volume_nL"] == pytest.approx(25.0)
+    assert warning["max_projected_final_volume_nL"] == pytest.approx(155.0)
+    assert warning["max_projected_final_excess_nL"] == pytest.approx(30.0)
     assert [row["row_id"] for row in warning["affected_rows"]] == ["A1", "A2"]
-    assert warning["affected_rows"][0]["exceeds_final_reaction_volume"] is False
-    assert warning["affected_rows"][1]["exceeds_final_reaction_volume"] is True
+    assert [row["printed_volume_nL"] for row in warning["affected_rows"]] == pytest.approx(
+        [120.0 + 2e-9, 130.0]
+    )
+    assert [
+        row["projected_final_volume_nL"] for row in warning["affected_rows"]
+    ] == pytest.approx([145.0 + 2e-9, 155.0])
+    assert all(
+        row["exceeds_final_reaction_volume"]
+        for row in warning["affected_rows"]
+    )
 
 
 def test_calibration_volume_warning_audit_failure_does_not_undo_mutable_apply():
@@ -995,6 +1008,7 @@ def test_calibration_volume_warning_audit_failure_does_not_undo_mutable_apply():
     applied = em.apply_droplet_volume_for_option(
         "R",
         None,
+
         140.0,
         write_keys_if_assigned=False,
         applied_calibration=calibration,
@@ -1002,10 +1016,87 @@ def test_calibration_volume_warning_audit_failure_does_not_undo_mutable_apply():
     )
 
     assert applied["volume_warning"]["affected_row_count"] > 0
+    assert applied["volume_warning_audit_status"] == "pending"
+    assert applied["volume_warning_audit_event_id"]
+    assert "unavailable" in applied["volume_warning_audit_error"]
+    assert list(em.calibration_volume_warning_audits["events"]) == [
+        applied["volume_warning_audit_event_id"]
+    ]
     assert em.plans_per_option[("R", None)]["stocks"][0][
         "droplet_volume_nL"
     ] == pytest.approx(140.0)
 
+
+
+def test_mutable_warning_outbox_survives_delivery_failure_and_repairs_once(
+    tmp_path,
+):
+    em, calibrated_stock_id = _make_calibratable_two_stock_model()
+    em.experiment_dir_path = str(tmp_path)
+    em.update_all_paths()
+    em.save_experiment()
+
+    audit_path = tmp_path / "experiment_audit.jsonl"
+    audit_log = ExperimentAuditLog(audit_path=audit_path)
+    actual_ensure = audit_log.ensure_event
+    delivery_available = False
+
+    def _ensure(intent, **kwargs):
+        if not delivery_available:
+            raise OSError("simulated audit fsync failure")
+        return actual_ensure(intent, **kwargs)
+
+    audit_log.ensure_event = _ensure
+    em.set_calibration_manager(
+        SimpleNamespace(
+            model=SimpleNamespace(
+                _get_experiment_audit_log=lambda: audit_log
+            )
+        )
+    )
+    calibration = _two_stock_applied_calibration(calibrated_stock_id)
+    calibration["measured_volume_nL"] = 140.0
+
+    applied = em.apply_droplet_volume_for_option(
+        "R",
+        None,
+        140.0,
+        write_keys_if_assigned=False,
+        applied_calibration=calibration,
+        printing_mode="stream",
+    )
+
+    assert applied["volume_warning_audit_status"] == "pending"
+    assert "simulated audit fsync failure" in applied["volume_warning_audit_error"]
+    assert not audit_path.exists()
+    saved = json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8"))
+    event_id = applied["volume_warning_audit_event_id"]
+    assert list(saved["calibration_volume_warning_audits"]["events"]) == [event_id]
+
+    restored = ExperimentModel(prof=CURRENT_PROFILE)
+    restored.from_dict(saved)
+    restored.experiment_dir_path = str(tmp_path)
+    restored.update_all_paths()
+    restored.set_calibration_manager(
+        SimpleNamespace(
+            model=SimpleNamespace(
+                _get_experiment_audit_log=lambda: audit_log
+            )
+        )
+    )
+    delivery_available = True
+
+    first = restored.reconcile_calibration_volume_warning_audits()
+    second = restored.reconcile_calibration_volume_warning_audits()
+    rows = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert first["status"] == second["status"] == "recorded"
+    assert first["recorded_event_ids"] == second["recorded_event_ids"] == [event_id]
+    assert [row["event_id"] for row in rows] == [event_id]
 
 
 def test_two_stock_calibration_can_select_the_companion_leg():
@@ -1074,15 +1165,8 @@ def test_over_threshold_calibrated_allocation_restores_complete_result_without_s
     normal_result_keys = set(baseline.optimize_stock_solutions(allow_two=True))
 
     em, calibrated_stock_id = _make_calibratable_two_stock_model()
-    audit_events = []
     em.set_calibration_manager(
-        SimpleNamespace(
-            model=SimpleNamespace(
-                record_experiment_audit_event=lambda *args, **kwargs: (
-                    audit_events.append((args, kwargs))
-                )
-            )
-        )
+        SimpleNamespace(model=SimpleNamespace())
     )
     initial_calibration = _two_stock_applied_calibration(calibrated_stock_id)
     initial_calibration.update(
@@ -1112,8 +1196,11 @@ def test_over_threshold_calibrated_allocation_restores_complete_result_without_s
     )
     warning = copy.deepcopy(applied['volume_warning'])
     assert warning is not None
-    audit_count_after_apply = len(audit_events)
+    audit_count_after_apply = len(
+        em.calibration_volume_warning_audits["events"]
+    )
     assert audit_count_after_apply > 0
+    assert applied["volume_warning_audit_status"] == "pending"
 
     expected_plan = copy.deepcopy(em.plans_per_option)
     expected_reactions = em._reactions_df.to_dict('records')
@@ -1150,13 +1237,7 @@ def test_over_threshold_calibrated_allocation_restores_complete_result_without_s
         _unexpected_search,
     )
     restored.set_calibration_manager(
-        SimpleNamespace(
-            model=SimpleNamespace(
-                record_experiment_audit_event=lambda *args, **kwargs: (
-                    audit_events.append((args, kwargs))
-                )
-            )
-        )
+        SimpleNamespace(model=SimpleNamespace())
     )
     result = restored.optimize_stock_solutions(allow_two=True)
 
@@ -1178,7 +1259,9 @@ def test_over_threshold_calibrated_allocation_restores_complete_result_without_s
     assert result['optimizer_total_elapsed_ms'] == 0.0
     assert restored.plans_per_option == expected_plan
     assert restored.applied_imaging_calibrations == expected_records
-    assert len(audit_events) == audit_count_after_apply
+    assert len(
+        restored.calibration_volume_warning_audits["events"]
+    ) == audit_count_after_apply
     reused_design_path = tmp_path / 'reused_experiment_design.json'
     restored._atomic_json_dump(str(reused_design_path), restored.to_dict())
     reused_document = json.loads(
@@ -1469,6 +1552,7 @@ def test_two_stock_calibration_failure_restores_mutable_state(
     before_plan = copy.deepcopy(em.plans_per_option)
     before_rows = copy.deepcopy(em._stock_rows_cache)
     before_records = copy.deepcopy(em.applied_imaging_calibrations)
+    before_warning_audits = copy.deepcopy(em.calibration_volume_warning_audits)
     before_refuel = copy.deepcopy(em.manual_refuel_checks)
     before_allocation = copy.deepcopy(em.calibrated_stock_allocation)
     before_status = copy.deepcopy(em.calibrated_stock_allocation_status)
@@ -1507,6 +1591,7 @@ def test_two_stock_calibration_failure_restores_mutable_state(
     assert em.plans_per_option == before_plan
     assert em._stock_rows_cache == before_rows
     assert em.applied_imaging_calibrations == before_records
+    assert em.calibration_volume_warning_audits == before_warning_audits
     assert em.manual_refuel_checks == before_refuel
     assert em.calibrated_stock_allocation == before_allocation
     assert em.calibrated_stock_allocation_status == before_status

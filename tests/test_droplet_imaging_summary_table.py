@@ -338,7 +338,7 @@ def _build_experiment_model(current_stock, *, current_mode="droplet"):
         get_applied_imaging_calibration=_get_applied_imaging_calibration,
     )
 
-def _install_volume_warning_result(experiment_model, volume_warning):
+def _install_volume_warning_result(experiment_model, volume_warning, *, audit_status=None):
     normal_preview = experiment_model.preview_requantized_for_option
     normal_apply = experiment_model.apply_droplet_volume_for_option
     fill_preview = experiment_model.preview_fill_requantized
@@ -356,6 +356,8 @@ def _install_volume_warning_result(experiment_model, volume_warning):
     def _normal_apply(*args, **kwargs):
         result = normal_apply(*args, **kwargs)
         result["volume_warning"] = volume_warning
+        if audit_status is not None:
+            result["volume_warning_audit_status"] = audit_status
         return result
 
     def _fill_preview(*args, **kwargs):
@@ -366,6 +368,8 @@ def _install_volume_warning_result(experiment_model, volume_warning):
     def _fill_apply(*args, **kwargs):
         result = fill_apply(*args, **kwargs)
         result["volume_warning"] = volume_warning
+        if audit_status is not None:
+            result["volume_warning_audit_status"] = audit_status
         return result
 
     experiment_model.preview_requantized_for_option = _normal_preview
@@ -2004,6 +2008,7 @@ def test_volume_warning_preview_stays_applicable_and_apply_uses_warning_message(
     experiment_model = _install_volume_warning_result(
         _build_experiment_model(current_stock, current_mode="droplet"),
         _volume_warning_fixture(),
+        audit_status="pending",
     )
     warning_calls = []
     info_calls = []
@@ -2057,6 +2062,10 @@ def test_volume_warning_preview_stays_applicable_and_apply_uses_warning_message(
     assert len(applied_warnings) == 1
     assert applied_warnings[0][2].startswith("Applied with volume warning.")
     assert "Affected: A1, B2" in applied_warnings[0][2]
+    assert (
+        "warning evidence was saved; audit timeline synchronization is pending"
+        in applied_warnings[0][2]
+    )
     assert not any(
         len(call) >= 2 and call[1] in {"Applied", "Applied (Fill)"}
         for call in info_calls
@@ -2540,6 +2549,7 @@ def test_stream_apply_yes_schedules_manual_refuel_check_and_closes_imager(monkey
     experiment_model = _install_volume_warning_result(
         _build_experiment_model("Water", current_mode="droplet"),
         _volume_warning_fixture(),
+        audit_status="pending",
     )
     dialog, manager = _build_dialog(
         monkeypatch,
@@ -2571,6 +2581,10 @@ def test_stream_apply_yes_schedules_manual_refuel_check_and_closes_imager(monkey
     assert "Manual Refuel Check Required" in main_window.popup_yes_no.call_args.args[0]
     assert "Volume warning: 2 reaction rows exceed" in main_window.popup_yes_no.call_args.args[1]
     assert "Affected: A1, B2" in main_window.popup_yes_no.call_args.args[1]
+    assert (
+        "warning evidence was saved; audit timeline synchronization is pending"
+        in main_window.popup_yes_no.call_args.args[1]
+    )
     assert main_window.popup_yes_no.call_args.kwargs["parent"] is dialog
     launch.assert_called_once_with()
     assert close_calls == [True]

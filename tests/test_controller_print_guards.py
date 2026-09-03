@@ -384,6 +384,32 @@ def test_terminal_plan_print_request_reports_lifecycle_reason_without_preflight_
     c.machine.resume_commands.assert_not_called()
 
 
+def test_print_preflight_reconciles_pending_warning_audits_without_blocking():
+    c = _make_controller(
+        well_plate=FakeWellPlate([FakeWell("A1", 3, target=7)]),
+        printer_head=_make_printer_head(),
+        initial_state="resume_ready",
+    )
+    experiment_model = c.model.experiment_model
+    experiment_model.reconcile_calibration_volume_warning_audits = Mock(
+        return_value={
+            "status": "pending",
+            "pending_event_ids": ["warning-event"],
+            "errors": ["audit timeline unavailable"],
+        }
+    )
+    experiment_model.get_execution_plan_snapshot.return_value = SimpleNamespace(
+        state=SimpleNamespace(value="completed")
+    )
+
+    Controller.print_array(c)
+
+    experiment_model.reconcile_calibration_volume_warning_audits.assert_called_once_with()
+    assert c.error_occurred_signal.calls[0][0] == "Print Array Unavailable"
+    c.close_gripper.assert_not_called()
+    c.move_to_location.assert_not_called()
+
+
 def test_nonterminal_authoritative_head_binding_failure_keeps_existing_message():
     c = _make_controller(
         well_plate=FakeWellPlate([FakeWell("A1", 5)]),

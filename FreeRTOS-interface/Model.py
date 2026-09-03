@@ -40,7 +40,11 @@ import matplotlib.pyplot as plt
 from enum import Enum
 import CalibrationClasses
 from CalibrationMemoryStore import CalibrationMemoryStore
-from ExperimentAuditLog import ExperimentAuditLog
+from ExperimentAuditLog import (
+    ExperimentAuditLog,
+    build_calibration_volume_warning_audit_intent,
+    normalize_calibration_volume_warning_audit_intent,
+)
 from ExecutionPlan import (
     ExecutionPlanState,
     ProgressExecutionReference,
@@ -610,6 +614,10 @@ class ExperimentModel(QObject):
         self.applied_imaging_calibrations: Dict[str, Any] = {
             "schema_version": 1,
             "records": {},
+        }
+        self.calibration_volume_warning_audits: Dict[str, Any] = {
+            "schema_version": 1,
+            "events": {},
         }
         self.calibrated_stock_allocation: Dict[str, Any] = {
             "schema_version": 1,
@@ -9070,6 +9078,7 @@ class ExperimentModel(QObject):
         self._clear_design_derived_state()
         self.stock_prep_state = self._default_stock_prep_state()
         self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(None)
+        self.calibration_volume_warning_audits = self._normalize_calibration_volume_warning_audits(None)
         self.manual_refuel_checks = self._normalize_manual_refuel_checks(None)
         self.unsaved_changes = True
         self.stock_updated.emit()
@@ -9753,6 +9762,7 @@ class ExperimentModel(QObject):
             for value in (target, tolerance, final, warning_threshold)
         ):
             raise RuntimeError("Calibration volume-warning inputs must be finite.")
+        planned_nonprinted = max(0.0, final - target)
 
         affected_rows: list[dict[str, Any]] = []
         for index, raw_row in enumerate(rows):
@@ -9765,6 +9775,8 @@ class ExperimentModel(QObject):
             if total <= warning_threshold + 1e-9:
                 continue
             excess = total - warning_threshold
+            projected_final = planned_nonprinted + total
+            projected_final_excess = max(0.0, projected_final - final)
             well_id = row.get("well_id")
             reaction_id = row.get("reaction_id")
             row_id = (
@@ -9781,8 +9793,14 @@ class ExperimentModel(QObject):
                         None if reaction_id in (None, "") else str(reaction_id)
                     ),
                     "total_volume_nL": total,
+                    "printed_volume_nL": total,
+                    "planned_nonprinted_volume_nL": planned_nonprinted,
+                    "projected_final_volume_nL": projected_final,
+                    "projected_final_excess_nL": projected_final_excess,
                     "excess_nL": excess,
-                    "exceeds_final_reaction_volume": bool(total > final + 1e-9),
+                    "exceeds_final_reaction_volume": bool(
+                        projected_final > final + 1e-9
+                    ),
                 }
             )
 
@@ -9799,6 +9817,13 @@ class ExperimentModel(QObject):
                 row["total_volume_nL"] for row in affected_rows
             ),
             "max_excess_nL": max(row["excess_nL"] for row in affected_rows),
+            "planned_nonprinted_volume_nL": planned_nonprinted,
+            "max_projected_final_volume_nL": max(
+                row["projected_final_volume_nL"] for row in affected_rows
+            ),
+            "max_projected_final_excess_nL": max(
+                row["projected_final_excess_nL"] for row in affected_rows
+            ),
             "affected_rows": affected_rows,
         }
 
@@ -10802,6 +10827,28 @@ class ExperimentModel(QObject):
             "records": records,
         }
 
+    @staticmethod
+    def _normalize_calibration_volume_warning_audits(payload) -> Dict[str, Any]:
+        if payload is None:
+            return {"schema_version": 1, "events": {}}
+        if not isinstance(payload, Mapping):
+            raise ValueError("Calibration volume-warning audits must be an object.")
+        if int(payload.get("schema_version", 1) or 1) != 1:
+            raise ValueError("Unsupported calibration volume-warning audit schema.")
+        raw_events = payload.get("events", {})
+        if not isinstance(raw_events, Mapping):
+            raise ValueError("Calibration volume-warning audit events must be an object.")
+        events = {}
+        for key, value in raw_events.items():
+            normalized = normalize_calibration_volume_warning_audit_intent(
+                dict(value) if isinstance(value, Mapping) else value
+            )
+            if str(key) != normalized["event_id"]:
+                raise ValueError(
+                    "Calibration volume-warning audit key must equal event_id."
+                )
+            events[str(key)] = normalized
+        return {"schema_version": 1, "events": events}
     @staticmethod
     def _normalize_calibrated_stock_allocation(payload) -> Dict[str, Any]:
         if not isinstance(payload, Mapping):
@@ -11835,6 +11882,7 @@ class ExperimentModel(QObject):
         "_reactions_df",
         "_last_worst_nonfill_volume_nL",
         "applied_imaging_calibrations",
+        "calibration_volume_warning_audits",
         "manual_refuel_checks",
         "calibrated_stock_allocation",
         "calibrated_stock_allocation_status",
@@ -12166,6 +12214,15 @@ class ExperimentModel(QObject):
                 raise RuntimeError(
                     "Mutable calibration staging returned an invalid result."
                 )
+            staged["volume_warning_audit_intent"] = (
+                ExperimentModel._stage_mutable_calibration_volume_warning_audit(
+                    self,
+                    staged["result"].get("volume_warning"),
+                    stock_id=staged.get("audit_stock_id"),
+                    calibration_record=staged.get("calibration_record"),
+                    calibration_record_key=staged.get("calibration_record_key"),
+                )
+            )
             if runtime_snapshot is not None:
                 rebound = self._refresh_runtime_after_plan_change(
                     write_keys_if_assigned=write_keys_if_assigned
@@ -12214,24 +12271,18 @@ class ExperimentModel(QObject):
         public_result = dict(staged["result"])
         public_result["saved_experiment"] = bool(saved_experiment)
 
-        volume_warning = public_result.get("volume_warning")
-        warning_auditor = getattr(
-            self,
-            "_audit_calibration_volume_warning",
-            None,
+        audit_intent = staged.get("volume_warning_audit_intent")
+        reconciliation = (
+            ExperimentModel.reconcile_calibration_volume_warning_audits(self)
+            if audit_intent is not None
+            else None
         )
-        if callable(warning_auditor):
-            try:
-                warning_auditor(
-                    volume_warning,
-                    stock_id=staged.get("audit_stock_id"),
-                    calibration_record=staged.get("calibration_record"),
-                )
-            except Exception as exc:
-                print(
-                    "[ExperimentAudit] Failed to record post-commit "
-                    f"calibration warning: {exc}"
-                )
+        public_result.update(
+            ExperimentModel._calibration_volume_warning_audit_result(
+                audit_intent,
+                reconciliation,
+            )
+        )
         ExperimentModel._publish_mutable_calibration_notifications(
             self,
             state_snapshot=state_snapshot,
@@ -12412,6 +12463,7 @@ class ExperimentModel(QObject):
                 },
                 "audit_stock_id": calibrated_stock_id,
                 "calibration_record": record,
+                "calibration_record_key": record_key,
             }
 
         return ExperimentModel._run_mutable_calibration_transaction(
@@ -12525,6 +12577,9 @@ class ExperimentModel(QObject):
                 ),
                 "changed_target_count": result.get("changed_target_count"),
                 "volume_warning": copy.deepcopy(result.get("volume_warning")),
+                "volume_warning_audit_event_id": result.get("volume_warning_audit_event_id"),
+                "volume_warning_audit_status": result.get("volume_warning_audit_status"),
+                "volume_warning_audit_error": result.get("volume_warning_audit_error"),
                 "count_changes": copy.deepcopy(result.get("count_changes") or []),
             }
         key = (factor_name, option_name)
@@ -12943,6 +12998,9 @@ class ExperimentModel(QObject):
             "applied_imaging_calibrations": self._normalize_applied_imaging_calibrations(
                 getattr(self, "applied_imaging_calibrations", None)
             ),
+            "calibration_volume_warning_audits": self._normalize_calibration_volume_warning_audits(
+                getattr(self, "calibration_volume_warning_audits", None)
+            ),
             "calibrated_stock_allocation": self._normalize_calibrated_stock_allocation(
                 getattr(self, "calibrated_stock_allocation", None)
             ),
@@ -13087,6 +13145,9 @@ class ExperimentModel(QObject):
         )
         self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(
             d.get("applied_imaging_calibrations")
+        )
+        self.calibration_volume_warning_audits = self._normalize_calibration_volume_warning_audits(
+            d.get("calibration_volume_warning_audits")
         )
         self.calibrated_stock_allocation = self._normalize_calibrated_stock_allocation(
             d.get("calibrated_stock_allocation")
@@ -15789,50 +15850,198 @@ class ExperimentModel(QObject):
         if callable(recorder):
             recorder(event_type, summary, details=details)
 
-    def _audit_calibration_volume_warning(
+    def _build_calibration_volume_warning_audit_intent(
         self,
         volume_warning: Mapping[str, Any] | None,
         *,
         stock_id: str | None,
         calibration_record: Mapping[str, Any] | None = None,
+        calibration_record_key: str | None = None,
         plan=None,
-    ) -> None:
+    ) -> dict | None:
         if not volume_warning:
-            return
-        manager = getattr(self, "_calibration_manager", None)
-        owner = getattr(manager, "model", None)
-        recorder = getattr(owner, "record_experiment_audit_event", None)
-        if not callable(recorder):
-            return
+            return None
         record = dict(calibration_record or {})
+        record_id = record.get("record_id") or calibration_record_key
+        timestamp_utc = (
+            record.get("recorded_at_utc")
+            or record.get("recorded_at")
+            or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
         details = {
             "stock_id": None if stock_id in (None, "") else str(stock_id),
-            "calibration_record_id": record.get("record_id"),
+            "calibration_record_id": (
+                None if record_id in (None, "") else str(record_id)
+            ),
             "result_id": record.get("result_id"),
             "result_sha256": record.get("result_sha256"),
             "process_run_id": record.get("process_run_id"),
             "run_id": record.get("run_id"),
             "volume_warning": copy.deepcopy(dict(volume_warning)),
         }
+        identity = {
+            key: details[key]
+            for key in (
+                "stock_id",
+                "calibration_record_id",
+                "result_id",
+                "result_sha256",
+                "process_run_id",
+                "run_id",
+            )
+        }
         if plan is not None:
             details.update(
-                {
-                    "plan_id": plan.plan_id,
-                    "plan_revision": plan.plan_revision,
-                }
+                {"plan_id": plan.plan_id, "plan_revision": int(plan.plan_revision)}
             )
+            identity.update(
+                {"plan_id": plan.plan_id, "plan_revision": int(plan.plan_revision)}
+            )
+        return build_calibration_volume_warning_audit_intent(
+            identity=identity,
+            timestamp_utc=str(timestamp_utc),
+            details=details,
+        )
+
+    def _stage_mutable_calibration_volume_warning_audit(
+        self,
+        volume_warning: Mapping[str, Any] | None,
+        *,
+        stock_id: str | None,
+        calibration_record: Mapping[str, Any] | None = None,
+        calibration_record_key: str | None = None,
+    ) -> dict | None:
+        intent = ExperimentModel._build_calibration_volume_warning_audit_intent(
+            self,
+            volume_warning,
+            stock_id=stock_id,
+            calibration_record=calibration_record,
+            calibration_record_key=calibration_record_key,
+        )
+        if intent is None:
+            return None
+        outbox = ExperimentModel._normalize_calibration_volume_warning_audits(
+            getattr(self, "calibration_volume_warning_audits", None)
+        )
+        existing = outbox["events"].get(intent["event_id"])
+        if existing is not None and existing != intent:
+            raise RuntimeError(
+                "Calibration volume-warning audit event ID conflicts with durable evidence."
+            )
+        outbox["events"][intent["event_id"]] = intent
+        self.calibration_volume_warning_audits = outbox
+        return intent
+
+    def _stage_execution_calibration_volume_warning_audit(
+        self,
+        document,
+        volume_warning: Mapping[str, Any] | None,
+        *,
+        stock_id: str | None,
+        calibration_record: Mapping[str, Any] | None,
+        plan,
+    ) -> dict | None:
+        intent = self._build_calibration_volume_warning_audit_intent(
+            volume_warning,
+            stock_id=stock_id,
+            calibration_record=calibration_record,
+            plan=plan,
+        )
+        if intent is None:
+            return None
+        existing = document.volume_warning_audits.get(intent["event_id"])
+        if existing is not None and existing != intent:
+            raise RuntimeError(
+                "Execution calibration volume-warning audit event ID conflicts with durable evidence."
+            )
+        document.volume_warning_audits[intent["event_id"]] = intent
+        return intent
+
+    def get_calibration_volume_warning_audit_intents(self) -> dict[str, dict]:
+        intents = dict(
+            self._normalize_calibration_volume_warning_audits(
+                getattr(self, "calibration_volume_warning_audits", None)
+            )["events"]
+        )
+        plan = self.get_execution_plan_snapshot()
+        path = getattr(self, "execution_calibrations_file_path", None)
+        if plan is not None and path and os.path.isfile(path):
+            document = load_execution_calibrations(path)
+            if document.plan_id != plan.plan_id:
+                raise RuntimeError(
+                    "Execution calibration warning outbox plan ID does not match."
+                )
+            for event_id, intent in document.volume_warning_audits.items():
+                existing = intents.get(event_id)
+                if existing is not None and existing != intent:
+                    raise RuntimeError(
+                        "Calibration volume-warning audit event ID conflicts across stores."
+                    )
+                intents[event_id] = intent
+        return {key: copy.deepcopy(intents[key]) for key in sorted(intents)}
+
+    def reconcile_calibration_volume_warning_audits(self) -> dict:
         try:
-            recorder(
-                "calibration_volume_tolerance_exceeded",
-                "Calibration applied with volume warning",
-                details=details,
-                level="warning",
-            )
+            intents = self.get_calibration_volume_warning_audit_intents()
         except Exception as exc:
-            print(
-                "[ExperimentAudit] Failed to record calibration volume warning: "
-                f"{exc}"
-            )
+            return {
+                "status": "pending",
+                "event_ids": [],
+                "recorded_event_ids": [],
+                "pending_event_ids": [],
+                "errors": [str(exc)],
+            }
+        manager = getattr(self, "_calibration_manager", None)
+        owner = getattr(manager, "model", None)
+        log_getter = getattr(owner, "_get_experiment_audit_log", None)
+        log = log_getter() if callable(log_getter) else None
+        recorded = []
+        pending = []
+        errors = []
+        for event_id, intent in intents.items():
+            if log is None or not callable(getattr(log, "ensure_event", None)):
+                pending.append(event_id)
+                errors.append("Experiment audit timeline is unavailable.")
+                continue
+            try:
+                log.ensure_event(intent)
+                recorded.append(event_id)
+            except Exception as exc:
+                pending.append(event_id)
+                errors.append(f"{event_id}: {exc}")
+        return {
+            "status": "pending" if pending else "recorded",
+            "event_ids": list(intents),
+            "recorded_event_ids": recorded,
+            "pending_event_ids": pending,
+            "errors": errors,
+        }
+
+    @staticmethod
+    def _calibration_volume_warning_audit_result(
+        intent: Mapping[str, Any] | None,
+        reconciliation: Mapping[str, Any] | None,
+    ) -> dict:
+        if not intent:
+            return {
+                "volume_warning_audit_event_id": None,
+                "volume_warning_audit_status": "not_required",
+                "volume_warning_audit_error": None,
+            }
+        reconciliation = dict(reconciliation or {})
+        event_id = str(intent["event_id"])
+        recorded = set(reconciliation.get("recorded_event_ids") or [])
+        status = "recorded" if event_id in recorded else "pending"
+        errors = reconciliation.get("errors") or []
+        return {
+            "volume_warning_audit_event_id": event_id,
+            "volume_warning_audit_status": status,
+            "volume_warning_audit_error": (
+                "; ".join(str(value) for value in errors)
+                if status == "pending"
+                else None
+            ),
+        }
 
     def lock_execution_plan(
         self,
@@ -16882,12 +17091,35 @@ class ExperimentModel(QObject):
                 "full_validation_count": 1,
             }
             self.set_execution_plan_sync_error(None)
-            return {
+            volume_warning = self._calibration_volume_warning_for_execution_plan(plan)
+            audit_intent = next(
+                (
+                    intent
+                    for intent in document.volume_warning_audits.values()
+                    if intent.get("details", {}).get("calibration_record_id")
+                    == record_id
+                    and intent.get("details", {}).get("plan_id") == plan.plan_id
+                    and int(
+                        intent.get("details", {}).get("plan_revision", -1)
+                    )
+                    == int(plan.plan_revision)
+                ),
+                None,
+            )
+            reconciliation = self.reconcile_calibration_volume_warning_audits()
+            response = {
                 "plan": plan,
                 "record": record.to_dict(),
                 "status": "reused",
-                "volume_warning": self._calibration_volume_warning_for_execution_plan(plan),
+                "volume_warning": volume_warning,
             }
+            response.update(
+                self._calibration_volume_warning_audit_result(
+                    audit_intent,
+                    reconciliation,
+                )
+            )
+            return response
 
         requantized = None
         if len(identity_matches) == 2:
@@ -16955,6 +17187,13 @@ class ExperimentModel(QObject):
                 raise RuntimeError(
                     "Two-stock calibration changed the execution stock identities."
                 )
+        audit_intent = self._stage_execution_calibration_volume_warning_audit(
+            document,
+            volume_warning,
+            stock_id=stock_id,
+            calibration_record=record.to_dict(),
+            plan=candidate,
+        )
         cached_commit = bool(
             getattr(self, "_active_authoritative_execution_session", None)
             is not None
@@ -17026,18 +17265,19 @@ class ExperimentModel(QObject):
                 "new_effective_volume_nL": float(new_effective_volume_nL),
             },
         )
-        self._audit_calibration_volume_warning(
-            volume_warning,
-            stock_id=stock_id,
-            calibration_record=record.to_dict(),
-            plan=candidate,
-        )
+        reconciliation = self.reconcile_calibration_volume_warning_audits()
         response = {
             "plan": candidate,
             "record": record.to_dict(),
             "status": status,
             "volume_warning": volume_warning,
         }
+        response.update(
+            self._calibration_volume_warning_audit_result(
+                audit_intent,
+                reconciliation,
+            )
+        )
         if requantized is not None:
             changed_rows = [
                 row
@@ -18264,6 +18504,9 @@ class ExperimentModel(QObject):
                 "applied_imaging_calibration_recorded": True,
                 "execution_plan_revision": result["plan"].plan_revision,
                 "volume_warning": copy.deepcopy(result.get("volume_warning")),
+                "volume_warning_audit_event_id": result.get("volume_warning_audit_event_id"),
+                "volume_warning_audit_status": result.get("volume_warning_audit_status"),
+                "volume_warning_audit_error": result.get("volume_warning_audit_error"),
                 "execution_plan_status": result["status"],
             }
         metadata = getattr(self, "metadata", {}) or {}
@@ -18872,6 +19115,7 @@ class ExperimentModel(QObject):
                     option["printing_mode"] = intended_mode
         payload["stock_prep"] = self._default_stock_prep_state()
         payload["applied_imaging_calibrations"] = self._normalize_applied_imaging_calibrations(None)
+        payload["calibration_volume_warning_audits"] = self._normalize_calibration_volume_warning_audits(None)
         payload["manual_refuel_checks"] = self._normalize_manual_refuel_checks(None)
         return payload
 
@@ -19339,6 +19583,7 @@ class ExperimentModel(QObject):
         self._stock_prep_worksheet_source = None
         self._stock_prep_worksheet_loaded_path = None
         self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(None)
+        self.calibration_volume_warning_audits = self._normalize_calibration_volume_warning_audits(None)
         self.manual_refuel_checks = self._normalize_manual_refuel_checks(None)
         self.plans_per_option.clear()
         self._unreachable_preview_map = {}
@@ -22534,6 +22779,30 @@ class Model(QObject):
             print(f"[ExperimentAudit] Failed to record event '{event_type}': {e}")
         return None
 
+    def get_calibration_volume_warning_audit_intents(self):
+        getter = getattr(
+            self.experiment_model,
+            "get_calibration_volume_warning_audit_intents",
+            None,
+        )
+        return getter() if callable(getter) else {}
+
+    def reconcile_calibration_volume_warning_audits(self):
+        reconciler = getattr(
+            self.experiment_model,
+            "reconcile_calibration_volume_warning_audits",
+            None,
+        )
+        if not callable(reconciler):
+            return {
+                "status": "recorded",
+                "event_ids": [],
+                "recorded_event_ids": [],
+                "pending_event_ids": [],
+                "errors": [],
+            }
+        return reconciler()
+
     @staticmethod
     def _clean_identity_text(value):
         if value is None:
@@ -23652,6 +23921,13 @@ class Model(QObject):
 
         if execution_plan is not None:
             self._rack_runtime_plan_id = execution_plan.plan_id
+
+        audit_reconciliation = self.reconcile_calibration_volume_warning_audits()
+        if audit_reconciliation.get("status") == "pending":
+            print(
+                "[ExperimentAudit] Calibration warning timeline synchronization "
+                "remains pending after experiment load."
+            )
 
         assigned_well_count = sum(
             1

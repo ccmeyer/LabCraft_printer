@@ -10,11 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from ExperimentAuditLog import normalize_calibration_volume_warning_audit_intent
 from ExecutionPlan import canonical_sha256
 
 
 SCHEMA_NAME = "labcraft.execution_calibrations"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 CALIBRATION_RECORD_NAMESPACE = uuid.UUID("54945835-c76e-4ccf-94c4-9fa9a78e034a")
 PRINTING_MODES = {"droplet", "stream"}
 
@@ -275,6 +276,7 @@ class ExecutionCalibrationDocument:
     plan_id: str
     records: dict[str, ExecutionCalibrationRecord] = field(default_factory=dict)
     manual_refuel_checks: dict[str, dict[str, Any]] = field(default_factory=dict)
+    volume_warning_audits: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _canonical_uuid(self.plan_id, "execution_calibrations.plan_id")
@@ -347,6 +349,14 @@ class ExecutionCalibrationDocument:
             ):
                 _optional_number(record.get(name), f"{path}.{name}")
 
+        normalized_audits = {}
+        for key, intent in self.volume_warning_audits.items():
+            normalized = normalize_calibration_volume_warning_audit_intent(intent)
+            if key != normalized["event_id"]:
+                raise ValueError("Volume-warning audit key must equal event_id.")
+            normalized_audits[str(key)] = normalized
+        self.volume_warning_audits = normalized_audits
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_name": SCHEMA_NAME,
@@ -356,32 +366,48 @@ class ExecutionCalibrationDocument:
             "manual_refuel_checks": {
                 key: value for key, value in sorted(self.manual_refuel_checks.items())
             },
+            "volume_warning_audits": {
+                key: value for key, value in sorted(self.volume_warning_audits.items())
+            },
         }
 
     @classmethod
     def from_dict(cls, payload: Any) -> "ExecutionCalibrationDocument":
         if not isinstance(payload, Mapping):
             raise ValueError("execution_calibrations.json must contain an object")
-        _require_exact_fields(
-            payload,
-            {"schema_name", "schema_version", "plan_id", "records", "manual_refuel_checks"},
-            "execution_calibrations",
-        )
-        if payload["schema_name"] != SCHEMA_NAME or payload["schema_version"] not in {1, SCHEMA_VERSION}:
+        schema_version = payload.get("schema_version")
+        expected_fields = {
+            "schema_name",
+            "schema_version",
+            "plan_id",
+            "records",
+            "manual_refuel_checks",
+        }
+        if schema_version == SCHEMA_VERSION:
+            expected_fields.add("volume_warning_audits")
+        _require_exact_fields(payload, expected_fields, "execution_calibrations")
+        if payload["schema_name"] != SCHEMA_NAME or schema_version not in {1, 2, SCHEMA_VERSION}:
             raise ValueError("Unsupported execution-calibration schema name or version.")
         if not isinstance(payload["records"], Mapping) or not isinstance(payload["manual_refuel_checks"], Mapping):
             raise ValueError("Execution-calibration records and manual checks must be objects.")
+        volume_warning_audits = payload.get("volume_warning_audits", {})
+        if not isinstance(volume_warning_audits, Mapping):
+            raise ValueError("Execution-calibration volume-warning audits must be an object.")
         return cls(
             plan_id=payload["plan_id"],
             records={
                 str(key): ExecutionCalibrationRecord.from_dict(
-                    value, schema_version=int(payload["schema_version"])
+                    value, schema_version=int(schema_version)
                 )
                 for key, value in payload["records"].items()
             },
             manual_refuel_checks={
                 str(key): dict(value) if isinstance(value, Mapping) else value
                 for key, value in payload["manual_refuel_checks"].items()
+            },
+            volume_warning_audits={
+                str(key): dict(value) if isinstance(value, Mapping) else value
+                for key, value in volume_warning_audits.items()
             },
         )
 

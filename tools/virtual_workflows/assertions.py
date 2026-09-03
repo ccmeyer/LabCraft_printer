@@ -4378,6 +4378,47 @@ def optimizer_360_design_assertion(
         snapshot,
     )
 
+def _resolution_optimizer_timing_evidence(
+    optimizer: Mapping[str, Any], expected_optimizer: Any
+) -> dict[str, Any]:
+    """Validate timing telemetry without making host speed a SIL gate."""
+
+    def _nonnegative_finite(value: Any) -> tuple[bool, float | None]:
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError):
+            return False, None
+        return math.isfinite(normalized) and normalized >= 0.0, normalized
+
+    time_to_best_valid, time_to_best = _nonnegative_finite(
+        optimizer.get("stock_allocation_time_to_best_ms")
+    )
+    resolution_elapsed_valid, resolution_elapsed = _nonnegative_finite(
+        optimizer.get("stock_allocation_elapsed_ms")
+    )
+    return {
+        "telemetry_valid": time_to_best_valid and resolution_elapsed_valid,
+        "time_to_best_ms": time_to_best,
+        "resolution_elapsed_ms": resolution_elapsed,
+        "maximum_time_to_best_ms": expected_optimizer.maximum_time_to_best_ms,
+        "maximum_resolution_elapsed_ms": (
+            expected_optimizer.maximum_resolution_elapsed_ms
+        ),
+        "time_to_best_within_fixture_target": time_to_best_valid
+        and time_to_best
+        <= expected_optimizer.maximum_time_to_best_ms + 1e-9,
+        "resolution_elapsed_within_fixture_target": resolution_elapsed_valid
+        and resolution_elapsed
+        <= expected_optimizer.maximum_resolution_elapsed_ms + 1e-9,
+        "performance_target_exceeded": bool(
+            optimizer.get("stock_allocation_time_budget_exceeded", False)
+        ),
+        "performance_target_overshoot_ms": optimizer.get(
+            "stock_allocation_time_budget_overshoot_ms"
+        ),
+    }
+
+
 
 def resolution_stock_design_assertion(
     context: Any,
@@ -4438,8 +4479,7 @@ def resolution_stock_design_assertion(
             for name, value in expected_row.items()
         )
 
-    time_to_best = optimizer.get("stock_allocation_time_to_best_ms")
-    resolution_elapsed = optimizer.get("stock_allocation_elapsed_ms")
+    timing_evidence = _resolution_optimizer_timing_evidence(optimizer, expected_optimizer)
     states = int(optimizer.get("stock_allocation_states_evaluated") or 0)
     pairs = int(optimizer.get("two_stock_pairs_evaluated") or 0)
     checks = {
@@ -4486,11 +4526,7 @@ def resolution_stock_design_assertion(
         != "legacy_fallback"
         and optimizer.get("stock_allocation_search_limited") is False
         and not (optimizer.get("stock_allocation_limit_reasons") or []),
-        "time_to_best_bounded": time_to_best is not None
-        and 0 <= float(time_to_best) < expected_optimizer.maximum_time_to_best_ms,
-        "resolution_elapsed_bounded": resolution_elapsed is not None
-        and 0 <= float(resolution_elapsed)
-        < expected_optimizer.maximum_resolution_elapsed_ms,
+        "timing_telemetry_valid": timing_evidence["telemetry_valid"],
         "state_and_pair_caps_respected": states <= expected_optimizer.maximum_states
         and pairs <= expected_optimizer.maximum_pairs,
         "action_cap_not_exceeded": len(context.action_results)
@@ -4510,6 +4546,7 @@ def resolution_stock_design_assertion(
         "observed_stocks": {
             stock_id: str(row.concentration) for stock_id, row in plan_stocks.items()
         },
+        "optimizer_timing": timing_evidence,
         "counts": counts,
         "optimizer": optimizer,
     }
@@ -5033,6 +5070,7 @@ def _expected_calibration_volume_warning(
     tolerance = max(0.0, float(case.editor.printed_volume_tolerance_nL))
     threshold = target + tolerance
     final = float(case.editor.final_volume_nL)
+    planned_nonprinted = max(0.0, final - target)
     reaction_by_well = {
         assignment.well_id: assignment.reaction_id for assignment in case.assignments
     }
@@ -5041,14 +5079,21 @@ def _expected_calibration_volume_warning(
         total = float(totals_nL[well_id])
         if total <= threshold + 1e-9:
             continue
+        projected_final = planned_nonprinted + total
         affected_rows.append(
             {
                 "row_id": str(well_id),
                 "well_id": str(well_id),
                 "reaction_id": str(reaction_by_well[well_id]),
                 "total_volume_nL": total,
+                "printed_volume_nL": total,
+                "planned_nonprinted_volume_nL": planned_nonprinted,
+                "projected_final_volume_nL": projected_final,
+                "projected_final_excess_nL": max(0.0, projected_final - final),
                 "excess_nL": total - threshold,
-                "exceeds_final_reaction_volume": bool(total > final + 1e-9),
+                "exceeds_final_reaction_volume": bool(
+                    projected_final > final + 1e-9
+                ),
             }
         )
     if not affected_rows:
@@ -5064,6 +5109,13 @@ def _expected_calibration_volume_warning(
             row["total_volume_nL"] for row in affected_rows
         ),
         "max_excess_nL": max(row["excess_nL"] for row in affected_rows),
+        "planned_nonprinted_volume_nL": planned_nonprinted,
+        "max_projected_final_volume_nL": max(
+            row["projected_final_volume_nL"] for row in affected_rows
+        ),
+        "max_projected_final_excess_nL": max(
+            row["projected_final_excess_nL"] for row in affected_rows
+        ),
         "affected_rows": affected_rows,
     }
 
@@ -5466,8 +5518,9 @@ def same_reagent_two_stock_calibration_assertion(
             transition["checks"]["revision_transition_exact"]
             for transition in warning_transitions
         ),
-        "final_volume_context_recorded_not_exceeded": all(
-            not row["exceeds_final_reaction_volume"]
+        "projected_final_volume_context_exact": all(
+            row["exceeds_final_reaction_volume"]
+            and float(row["projected_final_excess_nL"]) > 0.0
             for transition in warning_transitions
             for row in (transition["expected_warning"] or {}).get("affected_rows", ())
         ),

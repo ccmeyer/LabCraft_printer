@@ -14502,6 +14502,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 )
             )
 
+        def _audit_pending_text(result):
+            if not isinstance(result, dict):
+                return ""
+            if result.get("volume_warning_audit_status") != "pending":
+                return ""
+            return (
+                "Calibration was applied and its warning evidence was saved; "
+                "audit timeline synchronization is pending."
+            )
+
         # --- Special case: fill reagent
         if payload.get("is_fill"):
             try:
@@ -14581,6 +14591,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             warning_text = DropletImagingDialog._bridge_volume_warning_text(volume_warning)
             if warning_text:
                 fill_message = f"{fill_message}\n\n{warning_text}"
+            audit_pending_text = _audit_pending_text(out)
+            if audit_pending_text:
+                fill_message = f"{fill_message}\n\n{audit_pending_text}"
             if _prompt_manual_refuel_if_available(
                 applied_calibration,
                 fill_message,
@@ -14602,6 +14615,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     f"({out['total_drops_delta']:+d})"
                 )
                     + (f"\n\n{warning_text}" if warning_text else "")
+                    + (f"\n\n{audit_pending_text}" if audit_pending_text else "")
             )
             return
 
@@ -14739,6 +14753,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 f"Applied with volume warning.\n\n{message}"
                 f"\n\n{warning_text}"
             )
+        audit_pending_text = _audit_pending_text(apply_result)
+        if audit_pending_text:
+            message = f"{message}\n\n{audit_pending_text}"
         if _prompt_manual_refuel_if_available(
             applied_calibration,
             message,

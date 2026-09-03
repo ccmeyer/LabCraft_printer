@@ -405,6 +405,16 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
     audit_owner = SimpleNamespace(experiment_model=em)
     audit_log = ExperimentAuditLog(model=audit_owner)
     audit_owner.record_experiment_audit_event = audit_log.record
+    audit_owner._get_experiment_audit_log = lambda: audit_log
+    actual_ensure = audit_log.ensure_event
+    delivery_available = False
+
+    def _ensure(intent, **kwargs):
+        if not delivery_available:
+            raise OSError("simulated finalized audit fsync failure")
+        return actual_ensure(intent, **kwargs)
+
+    audit_log.ensure_event = _ensure
     em.set_calibration_manager(SimpleNamespace(model=audit_owner))
 
     design_before = Path(em.experiment_file_path).read_bytes()
@@ -446,6 +456,9 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
             "result_sha256": "a" * 64,
             "process_run_id": "two-stock-stream-warning-process",
             "phase": "synthetic_characterization",
+            "original_printing_mode": "droplet",
+            "applied_printing_mode": "stream",
+            "printing_mode": "stream",
         },
         printing_mode="stream",
     )
@@ -454,6 +467,11 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
     revised_by_id = {stock.stock_id: stock for stock in revised.stocks}
     warning = result["volume_warning"]
     assert warning == preview_warning
+    assert result["volume_warning_audit_status"] == "pending"
+    assert result["volume_warning_audit_event_id"]
+    assert "simulated finalized audit fsync failure" in result[
+        "volume_warning_audit_error"
+    ]
     assert Path(em.experiment_file_path).read_bytes() == design_before
     assert revised_by_id[calibrated.stock_id].effective_volume_nL == pytest.approx(
         140.0
@@ -472,6 +490,11 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
         for well_id, row in warned_by_well.items()
     )
 
+    delivery_available = True
+    first_repair = em.reconcile_calibration_volume_warning_audits()
+    second_repair = em.reconcile_calibration_volume_warning_audits()
+    assert first_repair["status"] == second_repair["status"] == "recorded"
+
     audit_rows = ExperimentAuditReader(
         audit_path=em.experiment_audit_file_path
     ).read_rows()
@@ -481,6 +504,10 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
         if row.event_type == "calibration_volume_tolerance_exceeded"
     ]
     assert len(warning_rows) == 1
+    sidecar = load_execution_calibrations(em.execution_calibrations_file_path)
+    assert list(sidecar.volume_warning_audits) == [
+        result["volume_warning_audit_event_id"]
+    ]
     audit_row = warning_rows[0]
     assert audit_row.is_valid is True
     assert audit_row.level == "warning"
@@ -490,6 +517,51 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
     assert details["calibration_record_id"] is not None
     assert details["result_id"] == "two-stock-stream-warning-result"
     assert details["plan_id"] == revised.plan_id
+    reused = em.apply_droplet_volume_for_option(
+        "Signal",
+        None,
+        140.0,
+        applied_calibration={
+            "stock_id": calibrated.stock_id,
+            "printer_head": SimpleNamespace(
+                printer_head_id="two-stock-stream-warning-head"
+            ),
+            "measured_volume_nL": 140.0,
+            "pw_us": 1200,
+            "pressure_psi": 0.8,
+            "run_id": "two-stock-stream-warning",
+            "result_id": "two-stock-stream-warning-result",
+            "result_sha256": "a" * 64,
+            "process_run_id": "two-stock-stream-warning-process",
+            "phase": "synthetic_characterization",
+            "original_printing_mode": "droplet",
+            "applied_printing_mode": "stream",
+            "printing_mode": "stream",
+        },
+        printing_mode="stream",
+    )
+
+    assert reused["execution_plan_status"] == "reused"
+    assert reused["execution_plan_revision"] == revised.plan_revision
+    assert reused["volume_warning_audit_status"] == "recorded"
+    assert reused["volume_warning_audit_event_id"] == result[
+        "volume_warning_audit_event_id"
+    ]
+    repaired_warning_rows = [
+        row
+        for row in ExperimentAuditReader(
+            audit_path=em.experiment_audit_file_path
+        ).read_rows()
+        if row.event_type == "calibration_volume_tolerance_exceeded"
+    ]
+    assert len(repaired_warning_rows) == 1
+    assert len(
+        load_execution_calibrations(
+            em.execution_calibrations_file_path
+        ).volume_warning_audits
+    ) == 1
+
+
     assert details["plan_revision"] == revised.plan_revision
 
 

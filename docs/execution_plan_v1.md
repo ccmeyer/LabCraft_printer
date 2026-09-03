@@ -98,8 +98,13 @@ records must contain exactly the fields documented below.
 - The design optimization tolerance is a nonnegative finite number. Initial
   design optimization continues to enforce its volume policy. Later calibration
   treats target printed volume plus this tolerance as a warning threshold, not
-  an Apply limit. The final reaction volume is retained as diagnostic context;
-  v1 does not define a separate physical well-capacity field.
+  an Apply limit.
+- Calibration warning evidence distinguishes printed volume from projected final
+  mixture volume. Planned non-printed volume is inferred as
+  `max(0, final reaction volume - target printed volume)` and is added to the
+  recalculated printed total for the projection. The intended final volume is
+  diagnostic context, not a physical-capacity or Apply gate. Physical well
+  capacity is intentionally not modeled by v1.
 
 ### Stocks
 
@@ -266,9 +271,11 @@ activation and resume flow described below.
 ## Execution calibration sidecar
 
 `execution_calibrations.json` uses schema
-`labcraft.execution_calibrations`, version 1. Its root contains exactly the
-schema identity, `plan_id`, deterministic calibration records, and manual-refuel
-checks. Unknown, missing, malformed, or duplicate fields fail closed.
+`labcraft.execution_calibrations`, version 3. Its root contains the schema
+identity, `plan_id`, deterministic calibration records, manual-refuel checks,
+and immutable `volume_warning_audits`. Readers continue to accept version 1
+and 2 sidecars as empty warning-outbox inputs. Unknown, missing, malformed, or
+duplicate fields fail closed.
 
 Calibration-record UUIDs are deterministic UUID5 values derived from the plan,
 stock, printer head, source-result fingerprint, exact effective volume,
@@ -303,12 +310,21 @@ the final reaction volume independently rejects an otherwise valid in-envelope
 calibration.
 
 After preview and again from the committed candidate, calibration recalculates
-every well's exact total. A total above target printed volume plus design
-tolerance produces a prominent, non-blocking
-`calibration_volume_tolerance_exceeded` warning with per-well evidence. A
-distinct successful warned application appends the same structured evidence at
-warning level to `experiment_audit.jsonl`; audit-write failure does not roll
-back the calibration. Progress preserves all added counts while targets and its
+every well's exact printed total. A printed total above target printed volume
+plus design tolerance produces a prominent, non-blocking
+`calibration_volume_tolerance_exceeded` warning. Its per-well evidence includes
+printed volume, inferred planned non-printed volume, projected final volume, and
+projected excess above the intended final volume. None of those diagnostic
+projection values blocks Apply or printing.
+
+Each distinct successful warned application commits an immutable audit intent
+inside the same mutable-design or execution-calibration transaction. The
+append-only `experiment_audit.jsonl` timeline is an idempotent projection of
+that authoritative evidence: identical event IDs are reused, conflicting IDs
+and malformed tails are preserved as integrity errors, and missing rows are
+retried after load, when the timeline opens, and before printing. Timeline
+delivery failure remains visible as pending but cannot roll back calibration or
+block printing. Progress preserves all added counts while targets and its
 `__execution__` revision reference are atomically replaced. `key.csv` and
 `concentration_key.csv` are regenerated from the committed plan, not by running
 stock optimization. `experiment_design.json` remains byte-identical throughout

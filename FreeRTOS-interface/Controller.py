@@ -12382,6 +12382,25 @@ class Controller(QObject):
         required number of droplets for the currently loaded printer head.
         '''
         experiment_model = getattr(self.model, "experiment_model", None)
+        audit_reconciler = getattr(
+            experiment_model,
+            "reconcile_calibration_volume_warning_audits",
+            None,
+        )
+        if callable(audit_reconciler):
+            try:
+                audit_result = audit_reconciler()
+                if audit_result.get("status") == "pending":
+                    print(
+                        "[ExperimentAudit] Calibration warning timeline "
+                        "synchronization remains pending; printing is not blocked."
+                    )
+            except Exception as exc:
+                print(
+                    "[ExperimentAudit] Calibration warning timeline reconciliation "
+                    f"failed nonblockingly before print: {exc}"
+                )
+
         terminal_guard = self.get_print_array_terminal_guard()
         if bool(terminal_guard.get("blocked")):
             message = str(terminal_guard.get("message") or "Printing is unavailable.")
