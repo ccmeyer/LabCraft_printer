@@ -354,12 +354,14 @@ def test_two_stock_resolution_search_can_rescue_a_colliding_feasible_single_plan
     )
     assert two_result["stock_allocation_stop_reason"] == "zero_loss_polish_complete"
     assert two_result["stock_allocation_zero_loss_polish_work_used"] == 256
-    assert two_result["stock_allocation_work_units_evaluated"] == 314
+    assert two_result["stock_allocation_baseline_rank"] == single_result["optimizer_selected_rank"]
+    assert two_result["stock_allocation_baseline_work"] == single_result["stock_allocation_work_units_evaluated"]
+    assert two_result["stock_allocation_work_units_evaluated"] == 398
     assert two_result["stock_allocation_work_units_by_kind"] == {
         "two_stock_probe": 56,
         "two_stock_pair": 180,
-        "candidate_pool": 0,
-        "global_search": 78,
+        "candidate_pool": 41,
+        "global_search": 121,
     }
     assert two_result["two_stock_pairs_evaluated"] == 180
     assert two_result["two_stock_candidates_generated"] > 0
@@ -475,7 +477,8 @@ def test_resolution_selection_is_independent_of_clock_speed_and_shape():
     ("work_limit", "expected_pairs", "expected_loss", "expected_improved"),
     (
         (1, 0, 1, False),
-        (58, 1, 0, True),
+        (58, 0, 1, False),
+        (200, 1, 0, True),
     ),
 )
 def test_two_stock_work_cap_keeps_only_validated_results(
@@ -503,8 +506,12 @@ def test_two_stock_work_cap_keeps_only_validated_results(
     assert result["best"] is True
     assert result["two_stock_pairs_evaluated"] == expected_pairs
     assert result["distinct_level_loss"] == expected_loss
-    assert result["stock_allocation_limit_reasons"] == ["work_cap"]
-    assert result["two_stock_search_limited_keys"] == [("R", None)]
+    assert result["stock_allocation_limit_reasons"] == (
+        ["pair_quota", "work_cap"] if expected_improved else ["work_cap"]
+    )
+    assert result["two_stock_search_limited_keys"] == (
+        [("R", None)] if expected_improved else []
+    )
     assert result["stock_allocation_stop_reason"] == "work_cap"
     assert result["stock_allocation_improved_seed"] is expected_improved
     assert result["stock_allocation_work_units_evaluated"] == work_limit
@@ -584,7 +591,7 @@ def test_two_stock_resolution_repeats_exact_plan_and_work_evidence_twenty_times(
         25.0: {0.5: 10, 1.0: 20, 5.0: 20, 20.0: 0},
     }
     assert expected_evidence["stop_reason"] == "zero_loss_polish_complete"
-    assert expected_evidence["work_units"] == 314
+    assert expected_evidence["work_units"] == 398
     assert expected_evidence["polish_units"] == 256
 
 
@@ -1914,6 +1921,30 @@ def test_resolution_search_exception_returns_untouched_seed(monkeypatch):
         for issues in result["issues_by_key"].values()
         for issue in issues
     )
+
+
+def test_pair_search_failure_keeps_completed_baseline_instead_of_seed(monkeypatch):
+    def make():
+        model = _make_resolution_reproduction_model([0.5, 1.0, 5.0, 20.0])
+        model.add_additive("Fixed", [1.0, 1.0001], "mM", 10.0, forced_stock_conc=500.0)
+        return model
+
+    single, two = make(), make()
+    baseline = single.optimize_stock_solutions(max_refine=60, two_max_refine=40, allow_two=False)
+    assert baseline["best"] is True
+    assert baseline["optimizer_selected_rank"] != baseline["optimizer_seed_rank"]
+
+    def fail_pair_scan(*args, **kwargs):
+        raise RuntimeError("injected pair scan failure")
+
+    monkeypatch.setattr(two, "_enumerate_two_stock_candidates_with_meta", fail_pair_scan)
+    result = two.optimize_stock_solutions(max_refine=60, two_max_refine=40, allow_two=True)
+    assert result["best"] is True
+    assert "injected pair scan failure" in result["optimizer_fallback_reason"]
+    assert result["optimizer_selected_rank"] == baseline["optimizer_selected_rank"]
+    assert result["stock_allocation_baseline_rank"] == baseline["optimizer_selected_rank"]
+    assert result["stock_allocation_improved_seed"] is True
+    assert two.plans_per_option == single.plans_per_option
 
 
 

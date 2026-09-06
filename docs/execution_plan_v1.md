@@ -192,6 +192,40 @@ Explicit `true` and `false` values are never reinterpreted. Authoritative and
 recorded execution plans always reload their frozen stock identities and counts
 without consulting this design-time optimization policy.
 
+Resolution-first allocation completes the same single-stock search in both
+modes before spending work on optional two-stock improvements. When single-stock
+optimization succeeds, enabling two-stock mode cannot replace that baseline
+with a worse allocation under the full resolution rank. A zero-loss baseline
+using only single stocks skips pair enumeration. Designs requiring two stocks
+for feasibility retain the existing bounded feasibility fallback.
+
+The resolution phases share a deterministic 12,000-work-unit allowance. After
+the baseline, at least half the remaining work is reserved for candidate
+preparation and combined search. The rest is divided equally among eligible
+reagents/options, with remainder units assigned in canonical key order.
+Collapsed options are scanned before volume donors; fixed stocks are excluded
+and existing pair candidates are reused. Unused scan allowance remains
+available to combined search. Exhaustion or a handled search failure retains
+the best allocation already validated, including accepted pair improvements.
+
+Diagnostic result fields `stock_allocation_baseline_rank`,
+`stock_allocation_baseline_work`, `stock_allocation_pair_work_by_key`, and
+`stock_allocation_combined_work` expose these phases. Per-key entries use
+JSON-encoded `[factor, option]` keys and report `limit`, `used`, and
+`quota_exhausted`. `pair_quota` identifies a limited scan rather than claiming
+the candidate space was exhausted. Work and candidate counters accumulate
+across phases. When no single-stock allocation is feasible, the baseline phase
+starts from the feasible incumbent, which can already contain two stocks.
+
+The 75 ms resolution target is diagnostic, not a wall-clock deadline. Work
+units have different costs depending on target counts and reaction structure.
+`optimizer_seed_elapsed_ms` includes seed/feasibility work outside the shared
+resolution allowance; `stock_allocation_elapsed_ms` covers resolution phases;
+`optimizer_total_elapsed_ms` covers the optimizer through result construction,
+excluding stock-update subscribers. End-to-end benchmarks additionally measure
+the complete call. The editor still runs synchronously without cancellation;
+Windows timings do not qualify Raspberry Pi responsiveness.
+
 ## Initial creation in Slice 3
 
 - **Finish/Apply** creates the initial plan only after reactions have been

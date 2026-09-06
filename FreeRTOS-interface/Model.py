@@ -2892,6 +2892,10 @@ class ExperimentModel(QObject):
                 "optimizer_seed_worst_level_loss": None,
                 "optimizer_seed_rank": None,
                 "optimizer_selected_rank": None,
+                "stock_allocation_baseline_rank": None,
+                "stock_allocation_baseline_work": 0,
+                "stock_allocation_combined_work": 0,
+                "stock_allocation_pair_work_by_key": {},
                 "stock_allocation_improved_seed": False,
                 "stock_allocation_time_to_first_improvement_ms": None,
                 "stock_allocation_time_to_best_ms": None,
@@ -3031,6 +3035,10 @@ class ExperimentModel(QObject):
         stock_allocation_search_limited = False
         stock_allocation_states_evaluated = 0
         stock_allocation_work_units_evaluated = 0
+        stock_allocation_baseline_rank = None
+        stock_allocation_baseline_work = 0
+        stock_allocation_combined_work = 0
+        stock_allocation_pair_work_by_key = {}
         stock_allocation_work_units_by_kind: Dict[str, int] = {
             "two_stock_probe": 0,
             "two_stock_pair": 0,
@@ -3111,6 +3119,17 @@ class ExperimentModel(QObject):
             factor = str(key[0])
             option = "" if key[1] in (None, "") else str(key[1])
             return (factor.casefold(), factor, option.casefold(), option)
+
+        def _resolution_phase_diagnostics() -> Dict[str, Any]:
+            return {
+                "stock_allocation_baseline_rank": copy.deepcopy(stock_allocation_baseline_rank),
+                "stock_allocation_baseline_work": int(stock_allocation_baseline_work),
+                "stock_allocation_combined_work": int(stock_allocation_combined_work),
+                "stock_allocation_pair_work_by_key": {
+                    json.dumps(key): dict(stock_allocation_pair_work_by_key[key])
+                    for key in sorted(stock_allocation_pair_work_by_key, key=_canonical_resolution_key)
+                },
+            }
 
         def _mark_two_stock_search_limited(key: Tuple[str, Optional[str]]):
             if key not in two_stock_search_limited_keys:
@@ -3220,6 +3239,7 @@ class ExperimentModel(QObject):
                 ),
                 "optimizer_seed_rank": copy.deepcopy(optimizer_seed_rank),
                 "optimizer_selected_rank": copy.deepcopy(optimizer_selected_rank),
+                **_resolution_phase_diagnostics(),
                 "stock_allocation_improved_seed": bool(
                     stock_allocation_improved_seed
                 ),
@@ -4408,7 +4428,8 @@ class ExperimentModel(QObject):
         # -----------------------------
         # Step 2: two-stock switches
         # -----------------------------
-        if worst_case_nonfill_volume() > V_print + 1e-6 and allow_two:
+        feasibility_limit = V_print if allow_avoidable_grouping else V_accept
+        if worst_case_nonfill_volume() > feasibility_limit + 1e-6 and allow_two:
             while True:
                 worst = worst_case_nonfill_volume()
                 if worst <= V_print + 1e-6:
@@ -5142,8 +5163,25 @@ class ExperimentModel(QObject):
             # can be reused without another pair scan.
             if existing is not None:
                 return False
+            quota = stock_allocation_pair_work_by_key[key]
+            if quota["limit"] == 0:
+                quota["quota_exhausted"] = True
+                stock_allocation_limit_reasons.add("pair_quota")
+                _mark_two_stock_search_limited(key)
+                return False
             incremental_twos: List[TwoStockPlan] = []
             incremental_signatures: Set[Tuple[Any, ...]] = set()
+
+            def _consume_pair_work(kind: str) -> bool:
+                quota = stock_allocation_pair_work_by_key[key]
+                if quota["used"] >= quota["limit"]:
+                    quota["quota_exhausted"] = True
+                    stock_allocation_limit_reasons.add("pair_quota")
+                    return False
+                if not _consume_resolution_work(kind):
+                    return False
+                quota["used"] += 1
+                return True
 
             def _incremental_stop_requested() -> bool:
                 return (
@@ -5212,6 +5250,7 @@ class ExperimentModel(QObject):
                     _restore_selection_snapshot(best_snapshot)
                     return False
 
+            pair_limit_reasons: Set[str] = set()
             resolved, search_limited = self._enumerate_two_stock_candidates_with_meta(
                 _adj_targets_for_opt(key, opt),
                 opt.droplet_nL,
@@ -5223,12 +5262,16 @@ class ExperimentModel(QObject):
                 max_refine=two_max_refine,
                 max_stock_conc=getattr(opt, "max_stock_conc", None),
                 resolution_first=True,
-                limit_reasons=stock_allocation_limit_reasons,
+                limit_reasons=pair_limit_reasons,
                 diagnostics=two_stock_diagnostics,
                 candidate_callback=_consider_generated_plan,
                 stop_requested=_incremental_stop_requested,
-                consume_work=_consume_resolution_work,
+                consume_work=_consume_pair_work,
             )
+            if stock_allocation_pair_work_by_key[key]["quota_exhausted"]:
+                pair_limit_reasons.discard("work_cap")
+                pair_limit_reasons.add("pair_quota")
+            stock_allocation_limit_reasons.update(pair_limit_reasons)
             if search_limited or (
                 {"work_cap", "state_cap"} & stock_allocation_limit_reasons
             ):
@@ -5440,11 +5483,11 @@ class ExperimentModel(QObject):
                 nonlocal stock_allocation_candidates_pruned
                 nonlocal stock_allocation_candidates_deduplicated
                 nonlocal stock_allocation_candidates_dominated
-                stock_allocation_candidates_generated = int(generated_total)
-                stock_allocation_candidates_retained = int(retained_total)
-                stock_allocation_candidates_deduplicated = int(deduplicated_total)
-                stock_allocation_candidates_dominated = int(dominated_total)
-                stock_allocation_candidates_pruned = max(
+                stock_allocation_candidates_generated += int(generated_total)
+                stock_allocation_candidates_retained += int(retained_total)
+                stock_allocation_candidates_deduplicated += int(deduplicated_total)
+                stock_allocation_candidates_dominated += int(dominated_total)
+                stock_allocation_candidates_pruned += max(
                     0, int(generated_total - retained_total)
                 )
 
@@ -5976,6 +6019,7 @@ class ExperimentModel(QObject):
         optimizer_seed_rank = _resolution_rank_payload(seed_details)
         best_snapshot = seed_snapshot
         best_details = seed_details
+        stock_allocation_baseline_rank = _resolution_rank_payload(seed_details)
 
         if allow_avoidable_grouping:
             stock_allocation_stop_reason = "grouping_allowed"
@@ -5985,112 +6029,82 @@ class ExperimentModel(QObject):
         if not allow_avoidable_grouping and int(seed_details["quality"][0]) > 0:
             resolution_started_at = optimizer_clock()
             try:
-                if allow_two:
-                    # Prioritize two-stock rescue before global candidate
-                    # preprocessing can consume the shared deterministic budget.
-                    collapsed_keys = [
-                        key
-                        for key, evaluation in best_details["evaluations"].items()
-                        if int(evaluation["score"].lost_levels) > 0
-                    ]
-                    collapsed_keys.sort(
-                        key=lambda key: (
-                            -int(best_details["evaluations"][key]["score"].lost_levels),
-                            _canonical_resolution_key(key),
-                        )
-                    )
-                    for key in collapsed_keys:
-                        if (
-                            _zero_loss_polish_exhausted()
-                            or _resolution_work_limit_reached()
-                        ):
-                            break
-                        _ensure_resolution_twos_for_key(key)
-
-                    if (
-                        not _zero_loss_polish_exhausted()
-                        and not _resolution_work_limit_reached()
-                        and stock_allocation_states_evaluated
-                        < self.MAX_STOCK_ALLOCATION_STATES
-                    ):
-                        state, candidate_details = _run_bounded_resolution_search(
-                            include_twos=True,
-                            incumbent_details=best_details,
-                        )
-                        best_snapshot, best_details = _accept_resolution_state(
-                            state,
-                            candidate_details,
-                            best_snapshot,
-                            best_details,
-                        )
-
-                    donor_keys = []
-                    if (
-                        int(best_details["quality"][0]) > 0
-                        and not _zero_loss_polish_exhausted()
-                        and not _resolution_work_limit_reached()
-                        and stock_allocation_states_evaluated
-                        < self.MAX_STOCK_ALLOCATION_STATES
-                    ):
-                        donor_keys = [
-                            key
-                            for key, evaluation in best_details["evaluations"].items()
-                            if key not in collapsed_keys
-                            and float(evaluation["score"].max_volume_nL) > 0.0
-                        ]
-                        donor_keys.sort(
-                            key=lambda key: (
-                                -float(
-                                    best_details["evaluations"][key]["score"].max_volume_nL
-                                ),
-                                _canonical_resolution_key(key),
-                            )
-                        )
-                    for key in donor_keys:
-                        if (
-                            int(best_details["quality"][0]) == 0
-                            or _zero_loss_polish_exhausted()
-                            or _resolution_work_limit_reached()
-                            or stock_allocation_states_evaluated
-                            >= self.MAX_STOCK_ALLOCATION_STATES
-                        ):
-                            break
-                        if not _ensure_resolution_twos_for_key(key):
-                            continue
-                        if (
-                            _zero_loss_polish_exhausted()
-                            or _resolution_work_limit_reached()
-                        ):
-                            break
-                        state, candidate_details = _run_bounded_resolution_search(
-                            include_twos=True,
-                            incumbent_details=best_details,
-                        )
-                        best_snapshot, best_details = _accept_resolution_state(
-                            state,
-                            candidate_details,
-                            best_snapshot,
-                            best_details,
-                        )
-                else:
+                # Both modes complete exactly the same single-stock search before
+                # optional pair exploration can spend any resolution work.
+                try:
                     state, candidate_details = _run_bounded_resolution_search(
                         include_twos=False,
                         incumbent_details=best_details,
                     )
-                    best_snapshot, best_details = _accept_resolution_state(
-                        state,
-                        candidate_details,
-                        best_snapshot,
-                        best_details,
+                finally:
+                    stock_allocation_baseline_work = stock_allocation_work_units_evaluated
+                best_snapshot, best_details = _accept_resolution_state(
+                    state, candidate_details, best_snapshot, best_details,
+                )
+                stock_allocation_baseline_rank = _resolution_rank_payload(best_details)
+
+                if (
+                    allow_two
+                    and int(best_details["quality"][0]) > 0
+                    and not _resolution_work_limit_reached()
+                    and stock_allocation_states_evaluated < self.MAX_STOCK_ALLOCATION_STATES
+                ):
+                    # Reserve at least half the remaining work for combining
+                    # candidates. A difficult first reagent cannot starve peers.
+                    eligible_keys = [
+                        key for key, evaluation in best_details["evaluations"].items()
+                        if getattr(option_by_key[key], "forced_stock_conc", None) in (None, 0.0)
+                        and (
+                            int(evaluation["score"].lost_levels) > 0
+                            or float(evaluation["score"].max_volume_nL) > 0.0
+                        )
+                        and _candidate_lists_for_key(key)[3] is None
+                    ]
+                    eligible_keys.sort(key=_canonical_resolution_key)
+                    remaining = max(
+                        0, self.MAX_STOCK_ALLOCATION_WORK_UNITS
+                        - stock_allocation_work_units_evaluated,
                     )
+                    pair_budget = remaining // 2
+                    quota, remainder = divmod(pair_budget, len(eligible_keys) or 1)
+                    for index, key in enumerate(eligible_keys):
+                        stock_allocation_pair_work_by_key[key] = {
+                            "limit": quota + int(index < remainder),
+                            "used": 0,
+                            "quota_exhausted": False,
+                        }
+                    processing_keys = sorted(
+                        eligible_keys,
+                        key=lambda key: (
+                            int(best_details["evaluations"][key]["score"].lost_levels) == 0,
+                            _canonical_resolution_key(key),
+                        ),
+                    )
+                    resolution_search_exhausted = False
+                    for key in processing_keys:
+                        if _zero_loss_polish_exhausted() or _resolution_work_limit_reached():
+                            break
+                        _ensure_resolution_twos_for_key(key)
+
+                    combined_started_at_work = stock_allocation_work_units_evaluated
+                    try:
+                        state, candidate_details = _run_bounded_resolution_search(
+                            include_twos=True,
+                            incumbent_details=best_details,
+                        )
+                        best_snapshot, best_details = _accept_resolution_state(
+                            state, candidate_details, best_snapshot, best_details,
+                        )
+                    finally:
+                        stock_allocation_combined_work = (
+                            stock_allocation_work_units_evaluated - combined_started_at_work
+                        )
             except Exception as exc:
-                _restore_selection_snapshot(seed_snapshot)
-                best_snapshot = seed_snapshot
-                best_details = seed_details
+                # Pair exploration must never discard a validated baseline or
+                # an improvement already accepted by the incremental callback.
+                _restore_selection_snapshot(best_snapshot)
                 optimizer_strategy_used = "legacy_fallback"
                 optimizer_fallback_reason = f"{type(exc).__name__}: {exc}"
-                stock_allocation_time_to_first_improvement_ms = None
-                stock_allocation_time_to_best_ms = None
             finally:
                 resolution_finished_at = optimizer_clock()
                 stock_allocation_elapsed_ms = max(
@@ -6126,16 +6140,15 @@ class ExperimentModel(QObject):
                     and int(best_details["quality"][0]) == 0
                 ):
                     stock_allocation_stop_reason = "zero_loss_polish_complete"
-                elif resolution_search_exhausted:
-                    stock_allocation_stop_reason = "search_exhausted"
+                elif "pair_quota" in stock_allocation_limit_reasons:
+                    stock_allocation_stop_reason = "pair_quota"
                 else:
                     stock_allocation_stop_reason = "search_exhausted"
 
         _restore_selection_snapshot(best_snapshot)
         optimizer_selected_rank = _resolution_rank_payload(best_details)
         stock_allocation_improved_seed = bool(
-            optimizer_strategy_used != "legacy_fallback"
-            and _resolution_details_order(best_details)
+            _resolution_details_order(best_details)
             < _resolution_details_order(seed_details)
         )
         if not stock_allocation_improved_seed:
@@ -6478,8 +6491,8 @@ class ExperimentModel(QObject):
                 severity="warning",
                 code="legacy_optimizer_fallback",
                 message=(
-                    "Resolution-first stock allocation could not be validated; "
-                    "the feasible concentration-first plan was retained."
+                    "Further resolution-first stock allocation could not be validated; "
+                    "the best previously validated plan was retained."
                 ),
                 fallback_reason=str(optimizer_fallback_reason),
             )
@@ -6903,6 +6916,7 @@ class ExperimentModel(QObject):
             ),
             "optimizer_seed_rank": copy.deepcopy(optimizer_seed_rank),
             "optimizer_selected_rank": copy.deepcopy(optimizer_selected_rank),
+            **_resolution_phase_diagnostics(),
             "stock_allocation_improved_seed": bool(
                 stock_allocation_improved_seed
             ),
@@ -8121,6 +8135,10 @@ class ExperimentModel(QObject):
             'optimizer_seed_worst_level_loss': int(worst_loss),
             'optimizer_seed_rank': copy.deepcopy(rank),
             'optimizer_selected_rank': copy.deepcopy(rank),
+            'stock_allocation_baseline_rank': None,
+            'stock_allocation_baseline_work': 0,
+            'stock_allocation_combined_work': 0,
+            'stock_allocation_pair_work_by_key': {},
             'stock_allocation_improved_seed': False,
             'stock_allocation_time_to_first_improvement_ms': None,
             'stock_allocation_time_to_best_ms': None,
