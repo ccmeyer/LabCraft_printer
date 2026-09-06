@@ -341,7 +341,7 @@ def _configure_calibrated_volume_design(em, *, targets=None):
     em.save_experiment()
 
 
-def _configure_mutable_two_stock_design(em):
+def _configure_mutable_two_stock_design(em, *, include_other=False):
     em.factors = []
     em.set_metadata(
         randomize_assignments=False,
@@ -363,6 +363,8 @@ def _configure_mutable_two_stock_design(em):
         10.0,
         max_stock_conc=2000.0,
     )
+    if include_other:
+        em.add_additive("Other", [0.01], "mM", 10.0, forced_stock_conc=5.0)
     result = em.optimize_stock_solutions(
         quantum=0.1,
         max_refine=20,
@@ -376,6 +378,173 @@ def _configure_mutable_two_stock_design(em):
     plan = em._calibration_plan_with_stock_ids(("Signal", None))
     assert plan["n_stocks"] == 2
     return tuple(stock["stock_id"] for stock in plan["stocks"])
+
+
+def _apply_sequential_calibration(em, stock_id, *, factor="Signal", volume=12.0):
+    calibration = {
+        "stock_id": stock_id,
+        "printer_head": _printer_head(stock_id, printer_head_id=f"head-{stock_id}"),
+        "measured_volume_nL": volume,
+        "run_id": f"sequential-{stock_id}-{volume}",
+    }
+    if factor == "Water":
+        return em.apply_fill_droplet_volume(
+            volume, write_keys_if_assigned=False, applied_calibration=calibration,
+        )
+    return em.apply_droplet_volume_for_option(
+        factor, None, volume, write_keys_if_assigned=False,
+        applied_calibration=calibration, printing_mode="droplet",
+    )
+
+
+def test_sequential_calibrations_preserve_two_stock_allocation(experiment_model_factory):
+    em = experiment_model_factory().experiment_model
+    signal_ids = _configure_mutable_two_stock_design(em, include_other=True)
+    _apply_sequential_calibration(em, signal_ids[0])
+    signal_before = copy.deepcopy(em.plans_per_option[("Signal", None)])
+    assert [stock["droplet_volume_nL"] for stock in signal_before["stocks"]] == [12.0, 10.0]
+    anchor_before = em.calibrated_stock_allocation["calibration_record_key"]
+
+    other_id = _stock_id_for_design_row(em, "Other")
+    _apply_sequential_calibration(em, other_id, factor="Other")
+
+    assert em.calibrated_stock_allocation["allocation"]["input_fingerprint"] == (
+        em.stock_allocation_input_fingerprint()
+    )
+    assert em.calibrated_stock_allocation["calibrated_stock_id"] == signal_ids[0]
+    assert em.calibrated_stock_allocation["calibration_record_key"] == anchor_before
+    records_before = copy.deepcopy(em.applied_imaging_calibrations)
+    assert {record["stock_id"] for record in records_before["records"].values()} == {
+        signal_ids[0], other_id,
+    }
+    assert em.plans_per_option[("Signal", None)] == signal_before
+
+    reloaded = experiment_model_factory().experiment_model
+    reloaded.load_experiment(em.experiment_file_path, em.experiment_dir_path)
+    assert reloaded.calibrated_stock_allocation_status["active"] is True
+    # File loading enters historical inspection mode; editable design loading
+    # below exercises re-optimization without bypassing that read-only guard.
+    assert reloaded.calibrated_stock_allocation["allocation"]["plan_fingerprint"] == (
+        em.calibrated_stock_allocation["allocation"]["plan_fingerprint"]
+    )
+    assert reloaded.applied_imaging_calibrations == records_before
+    editable = experiment_model_factory().experiment_model
+    editable.from_dict(json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8")))
+    for candidate in (em, editable):
+        result = candidate.optimize_stock_solutions(allow_two=True)
+        assert result["best"] is True, result
+        assert result["calibrated_stock_allocation_reused"] is True
+        assert candidate.plans_per_option[("Signal", None)] == signal_before
+        assert candidate.applied_imaging_calibrations == records_before
+        assert [s["droplet_volume_nL"] for s in candidate.plans_per_option[("Other", None)]["stocks"]] == [12.0]
+
+
+@pytest.mark.parametrize("next_calibration", ["fill", "companion"])
+def test_sequential_fill_or_companion_calibration_refreshes_allocation(
+    experiment_model_factory, next_calibration,
+):
+    em = experiment_model_factory().experiment_model
+    signal_ids = _configure_mutable_two_stock_design(em)
+    _apply_sequential_calibration(em, signal_ids[0])
+    signal_before = copy.deepcopy(em.plans_per_option[("Signal", None)])
+    anchor_before = em.calibrated_stock_allocation["calibration_record_key"]
+    if next_calibration == "fill":
+        _apply_sequential_calibration(
+            em, _stock_id_for_design_row(em, "Water"), factor="Water", volume=11.0,
+        )
+        assert em.plans_per_option[("Signal", None)] == signal_before
+        assert em.calibrated_stock_allocation["calibration_record_key"] == anchor_before
+    else:
+        _apply_sequential_calibration(em, signal_ids[1], volume=11.0)
+        assert em.calibrated_stock_allocation["calibrated_stock_id"] == signal_ids[1]
+        assert [s["droplet_volume_nL"] for s in em.plans_per_option[("Signal", None)]["stocks"]] == [12.0, 11.0]
+
+    plans_after = copy.deepcopy(em.plans_per_option)
+    records_after = copy.deepcopy(em.applied_imaging_calibrations)
+    reactions_after = em._reactions_df.to_dict(orient="split")
+    restored = experiment_model_factory().experiment_model
+    restored.from_dict(json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8")))
+    assert restored.calibrated_stock_allocation_status["active"] is True
+    for candidate in (em, restored):
+        assert candidate.optimize_stock_solutions(allow_two=True)["calibrated_stock_allocation_reused"]
+        candidate.generate_experiment()
+        assert candidate.plans_per_option == plans_after
+        assert candidate.applied_imaging_calibrations == records_after
+        assert candidate._reactions_df.to_dict(orient="split") == reactions_after
+
+
+@pytest.mark.parametrize("failure_point", ["export", "runtime", "save"])
+def test_sequential_calibration_allocation_publication_rolls_back(
+    experiment_model_factory, monkeypatch, failure_point,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    signal_ids = _configure_mutable_two_stock_design(em, include_other=True)
+    _apply_sequential_calibration(em, signal_ids[0])
+    runtime = _attach_mutable_runtime(model)
+    other_id = _stock_id_for_design_row(em, "Other")
+    before = _mutable_calibration_state(em, runtime)
+    emitted = []
+    for signal in (
+        em.stock_updated, em.experiment_generated,
+        em.applied_imaging_calibration_changed, em.manual_refuel_check_changed,
+        model.well_plate.well_state_changed_signal,
+    ):
+        signal.connect(lambda *args: emitted.append(args))
+    method_name = {
+        "export": "_export_calibrated_stock_allocation_payload",
+        "runtime": "_refresh_runtime_after_plan_change",
+        "save": "save_experiment",
+    }[failure_point]
+    original = getattr(em, method_name)
+
+    def fail_after(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError(f"injected {failure_point} failure")
+
+    monkeypatch.setattr(em, method_name, fail_after)
+    with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+        _apply_sequential_calibration(em, other_id, factor="Other")
+    assert _mutable_calibration_state(em, runtime) == before
+    assert emitted == []
+
+
+@pytest.mark.parametrize("drift", ["inputs", "live_plan", "saved_plan", "identity"])
+def test_sequential_calibration_rejects_inconsistent_active_allocation(
+    experiment_model_factory, drift,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    signal_ids = _configure_mutable_two_stock_design(em, include_other=True)
+    _apply_sequential_calibration(em, signal_ids[0])
+    runtime = _attach_mutable_runtime(model)
+    other_id = _stock_id_for_design_row(em, "Other")
+    if drift == "inputs":
+        em.metadata["final_reaction_volume_nL"] = 5001.0
+    elif drift == "live_plan":
+        em.plans_per_option[("Signal", None)]["stocks"][0]["droplet_volume_nL"] = 13.0
+    elif drift == "saved_plan":
+        stored_plans = em.calibrated_stock_allocation["allocation"]["plans_per_option"]
+        stored_plans['["Signal",null]']["stocks"][0]["droplet_volume_nL"] = 13.0
+    else:
+        em.calibrated_stock_allocation["calibrated_stock_id"] = "missing-stock"
+    before = _mutable_calibration_state(em, runtime)
+    with pytest.raises(RuntimeError, match="active calibrated stock allocation is inconsistent"):
+        _apply_sequential_calibration(em, other_id, factor="Other")
+    assert _mutable_calibration_state(em, runtime) == before
+
+
+def test_sequential_calibration_does_not_reactivate_inactive_allocation(
+    experiment_model_factory,
+):
+    em = experiment_model_factory().experiment_model
+    signal_ids = _configure_mutable_two_stock_design(em, include_other=True)
+    _apply_sequential_calibration(em, signal_ids[0])
+    em.calibrated_stock_allocation["active"] = False
+    em.calibrated_stock_allocation["stale_reason"] = "stock_input_fingerprint_mismatch"
+    before = copy.deepcopy(em.calibrated_stock_allocation)
+    _apply_sequential_calibration(em, _stock_id_for_design_row(em, "Other"), factor="Other")
+    assert em.calibrated_stock_allocation == before
 
 
 def _attach_mutable_runtime(model):

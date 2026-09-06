@@ -297,6 +297,9 @@ Applying a distinct calibration creates the next immutable plan revision. It:
   reference, and calibration-record reference;
 - preserves every unrelated non-fill target and permits only the calibrated
   stock, its one related companion, and fill to change per-well counts;
+- preserves all counts, including fill, in wells selecting another choice-group
+  option; missing reaction records or positive calibrated-stock counts in a
+  reaction omitting that option remain integrity errors;
 - recalculates fill from remaining target printed volume, reducing it to zero
   when calibrated non-fill volume already meets or exceeds that target; and
 - recomputes exact expected well volumes without re-running the design-time
@@ -308,6 +311,16 @@ is exhausted, required stock identities are missing, or execution integrity and
 progress constraints are violated. Neither the recorded design threshold nor
 the final reaction volume independently rejects an otherwise valid in-envelope
 calibration.
+
+Before finalization, a mutable two-stock calibration saves the complete stock
+allocation. Later single-stock, fill, or two-stock calibrations refresh that
+allocation within the same guarded transaction, preserving earlier measured
+volumes, stock identities, and calibration records across editable-design
+reload and re-optimization. An active allocation must match the current inputs
+and live stock plan before calibration starts; inconsistent active allocations
+are rejected, and unrelated calibrations do not reactivate inactive allocations.
+Allocation export, runtime rebinding, or save failures restore the prior model,
+runtime, and file state through the existing transaction rollback.
 
 After preview and again from the committed candidate, calibration recalculates
 every well's exact printed total. A printed total above target printed volume

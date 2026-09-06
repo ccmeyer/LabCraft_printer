@@ -338,6 +338,121 @@ def _configure_calibratable_two_stock_execution(
     return em
 
 
+def _configure_choice_two_stock_execution(model, *, replicates=1):
+    em = model.experiment_model
+    em.factors = []
+    em.set_metadata(
+        randomize_assignments=False, start_row=0, start_col=0,
+        replicates=replicates, target_reaction_volume_nL=240.0,
+        final_reaction_volume_nL=5000.0, printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Water", fill_droplet_volume_nL=10.0,
+        allow_two_stock_solutions=True, allow_avoidable_target_grouping=False,
+    )
+    em.add_choice_group("Signal")
+    em.add_choice_option("Signal", "Signal A", [0.0, 0.5, 1.0, 5.0, 20.0], "mM", 10.0)
+    em.add_choice_option("Signal", "Signal B", [1.0], "mM", 10.0)
+    result = em.optimize_stock_solutions(
+        quantum=0.1, max_refine=20, two_max_refine=20, allow_two=True,
+    )
+    assert result["best"] is True
+    assert result["two_stock_keys"] == [("Signal", "Signal A")]
+    em.generate_experiment()
+    em.save_experiment()
+    Model.load_experiment_from_model(model, load_progress=False, finalize_execution_plan=True)
+    return em
+
+
+@pytest.mark.parametrize("replicates", [1, 2])
+def test_choice_two_stock_calibration_preserves_other_option_wells(
+    experiment_model_factory, replicates,
+):
+    em = _configure_choice_two_stock_execution(
+        experiment_model_factory(), replicates=replicates,
+    )
+    before = load_execution_plan(em.execution_plan_file_path)
+    design_before = Path(em.experiment_file_path).read_bytes()
+    signal_stocks = sorted(
+        (stock for stock in before.stocks if stock.option_name == "Signal A"),
+        key=lambda stock: stock.concentration, reverse=True,
+    )
+    calibrated, companion = signal_stocks
+    preview = em.preview_requantized_for_option(
+        ("Signal", "Signal A"), 12.0,
+        calibrated_stock_id=calibrated.stock_id, printing_mode="droplet",
+    )
+    assert preview["ok"] is True
+    expected = {row["target_final"]: tuple(row["drops"]) for row in preview["rows"]}
+    result = em.apply_droplet_volume_for_option(
+        "Signal", "Signal A", 12.0, printing_mode="droplet",
+        applied_calibration={
+            "stock_id": calibrated.stock_id,
+            "printer_head": SimpleNamespace(printer_head_id="choice-calibration-head"),
+            "measured_volume_nL": 12.0, "run_id": "choice-calibration",
+        },
+    )
+    revised = load_execution_plan(em.execution_plan_file_path)
+    assert revised.plan_revision == result["execution_plan_revision"]
+    assert revised.plan_revision == before.plan_revision + 2
+    assert Path(em.experiment_file_path).read_bytes() == design_before
+    assert next(s for s in revised.stocks if s.stock_id == companion.stock_id) == companion
+    reactions = {
+        f"R{index + 1}": spec["reaction"]
+        for index, spec in enumerate(em._iter_reaction_run_specs())
+    }
+    for old_well, new_well in zip(before.wells, revised.wells):
+        reaction = reactions[old_well.reaction_id]
+        if ("Signal", "Signal A") not in reaction:
+            assert new_well == old_well
+        else:
+            counts = {d.stock_id: d.target_dispenses for d in new_well.dispenses}
+            actual = tuple(counts.get(s.stock_id, 0) for s in signal_stocks)
+            assert actual == expected[reaction[("Signal", "Signal A")]]
+    assert expected[0.0] == (0, 0)
+    validate_revision_history(Path(em.experiment_dir_path))
+
+
+@pytest.mark.parametrize(
+    "fault, message",
+    [
+        ("missing_reaction", "No frozen design reaction matches"),
+        ("malformed_reaction", "No frozen design reaction matches"),
+        ("missing_reaction_field", "No frozen design reaction matches"),
+        ("positive_absent_option", "omits the calibrated reagent"),
+        ("missing_mapping", "has no mapping for target"),
+    ],
+)
+def test_choice_two_stock_target_counts_reject_inconsistent_reactions(
+    experiment_model_factory, monkeypatch, fault, message,
+):
+    em = _configure_choice_two_stock_execution(experiment_model_factory())
+    plan = load_execution_plan(em.execution_plan_file_path)
+    stock_id = next(s.stock_id for s in plan.stocks if s.option_name == "Signal A")
+    requantized = em._requantize_fixed_two_stock_group(
+        ("Signal", "Signal A"), calibrated_stock_id=stock_id,
+        new_effective_volume_nL=12.0,
+    )
+    assert requantized["ok"] is True
+    specs = list(em._iter_reaction_run_specs())
+    if fault == "missing_reaction":
+        specs.pop()
+    elif fault == "malformed_reaction":
+        specs[-1]["reaction"] = None
+    elif fault == "missing_reaction_field":
+        specs[-1].pop("reaction")
+    elif fault == "positive_absent_option":
+        # This well actually dispenses Signal A; omitting that option is corruption.
+        specs[1]["reaction"] = {("Signal", "Signal B"): 1.0}
+    else:
+        requantized["mapping_by_target"].pop(0.5)
+    monkeypatch.setattr(em, "_iter_reaction_run_specs", lambda: iter(specs))
+    design_bytes = Path(em.experiment_file_path).read_bytes()
+    plan_bytes = Path(em.execution_plan_file_path).read_bytes()
+    with pytest.raises(RuntimeError, match=message):
+        em._calibrated_two_stock_target_counts(plan, requantized)
+    assert Path(em.experiment_file_path).read_bytes() == design_bytes
+    assert Path(em.execution_plan_file_path).read_bytes() == plan_bytes
+
+
 def test_finalized_two_stock_calibration_requantizes_both_legs_atomically(
     experiment_model_factory,
 ):

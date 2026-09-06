@@ -12208,6 +12208,46 @@ class ExperimentModel(QObject):
                 record,
             )
 
+    def _mutable_calibrated_allocation_anchor(self) -> dict | None:
+        """Validate an active allocation before a calibration can replace it."""
+        allocation = ExperimentModel._normalize_calibrated_stock_allocation(
+            getattr(self, "calibrated_stock_allocation", None)
+        )
+        if not allocation.get("active"):
+            return None
+        try:
+            payload = allocation["allocation"]
+            if payload["input_fingerprint"] != self.stock_allocation_input_fingerprint():
+                raise ValueError("stock inputs no longer match")
+            stored_plans = {}
+            for raw_key, plan in payload["plans_per_option"].items():
+                key = tuple(json.loads(raw_key)) if isinstance(raw_key, str) else raw_key
+                if not isinstance(key, tuple) or len(key) != 2 or key in stored_plans:
+                    raise ValueError("invalid or duplicate stock plan key")
+                stored_plans[key] = plan
+            stored_fingerprint = self._canonical_payload_sha256(
+                self._stock_allocation_plan_document(stored_plans, payload["stock_rows"])
+            )
+            live_fingerprint = self._canonical_payload_sha256(
+                self._stock_allocation_plan_document(
+                    self.plans_per_option, self._stock_rows_cache,
+                )
+            )
+            if not stored_fingerprint == payload["plan_fingerprint"] == live_fingerprint:
+                raise ValueError("saved and live stock plans no longer match")
+            stock_id = allocation["calibrated_stock_id"]
+            if stock_id not in {stock_id_for_row(row) for row in self._stock_rows_cache}:
+                raise ValueError("calibrated stock identity is missing")
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise RuntimeError(
+                f"The active calibrated stock allocation is inconsistent: {exc}. "
+                "Calibration was not applied."
+            ) from exc
+        return {
+            "calibrated_stock_id": stock_id,
+            "calibration_record_key": allocation.get("calibration_record_key"),
+        }
+
     def _run_mutable_calibration_transaction(
         self,
         *,
@@ -12217,6 +12257,7 @@ class ExperimentModel(QObject):
         if getattr(self, "_mutable_calibration_stage_active", False):
             raise RuntimeError("Nested mutable calibration transactions are not supported.")
 
+        allocation_anchor = ExperimentModel._mutable_calibrated_allocation_anchor(self)
         state_snapshot = ExperimentModel._snapshot_mutable_calibration_state(self)
         runtime_snapshot = ExperimentModel._snapshot_mutable_calibration_runtime(self)
         file_snapshots = ExperimentModel._snapshot_mutable_calibration_files(
@@ -12244,6 +12285,15 @@ class ExperimentModel(QObject):
                 raise RuntimeError(
                     "Mutable calibration staging returned an invalid result."
                 )
+            allocation_anchor = staged.get("calibrated_allocation_anchor", allocation_anchor)
+            if allocation_anchor is not None:
+                self.calibrated_stock_allocation = (
+                    self._export_calibrated_stock_allocation_payload(**allocation_anchor)
+                )
+                self.calibrated_stock_allocation_status = {
+                    "active": True,
+                    "reason": "applied",
+                }
             staged["volume_warning_audit_intent"] = (
                 ExperimentModel._stage_mutable_calibration_volume_warning_audit(
                     self,
@@ -12433,16 +12483,6 @@ class ExperimentModel(QObject):
                     record.get("factor_name"),
                     record.get("option_name"),
                 )
-            self.calibrated_stock_allocation = (
-                self._export_calibrated_stock_allocation_payload(
-                    calibrated_stock_id=calibrated_stock_id,
-                    calibration_record_key=record_key,
-                )
-            )
-            self.calibrated_stock_allocation_status = {
-                "active": True,
-                "reason": "applied",
-            }
             volume_warning = (
                 self._calibration_volume_warning_for_generated_reactions()
             )
@@ -12494,6 +12534,10 @@ class ExperimentModel(QObject):
                 "audit_stock_id": calibrated_stock_id,
                 "calibration_record": record,
                 "calibration_record_key": record_key,
+                "calibrated_allocation_anchor": {
+                    "calibrated_stock_id": calibrated_stock_id,
+                    "calibration_record_key": record_key,
+                },
             }
 
         return ExperimentModel._run_mutable_calibration_transaction(
@@ -16802,7 +16846,7 @@ class ExperimentModel(QObject):
             )
         key = (str(requantized["factor_name"]), requantized.get("option_name"))
         reaction_targets = {
-            f"R{index + 1}": spec.get("reaction", {})
+            f"R{index + 1}": spec.get("reaction")
             for index, spec in enumerate(self._iter_reaction_run_specs())
         }
         mapping = {
@@ -16816,20 +16860,28 @@ class ExperimentModel(QObject):
         results: dict[str, dict[str, int]] = {}
         for well in plan.wells:
             reaction = reaction_targets.get(well.reaction_id)
-            if not isinstance(reaction, Mapping) or key not in reaction:
+            if not isinstance(reaction, Mapping):
                 raise RuntimeError(
                     f"No frozen design reaction matches {well.reaction_id!r} for the calibrated reagent."
                 )
+            counts = {
+                dispense.stock_id: int(dispense.target_dispenses)
+                for dispense in well.dispenses
+            }
+            if key not in reaction:
+                if any(counts.get(stock_id, 0) > 0 for stock_id in stock_ids):
+                    raise RuntimeError(
+                        f"Reaction {well.reaction_id!r} omits the calibrated reagent "
+                        "but its well has positive counts for that reagent."
+                    )
+                results[well.well_id] = counts
+                continue
             target_key = self._normalize_target_key(float(reaction[key]))
             if target_key not in mapping:
                 raise RuntimeError(
                     f"The calibration result has no mapping for target {float(reaction[key]):.6g}."
                 )
             pair = mapping[target_key]
-            counts = {
-                dispense.stock_id: int(dispense.target_dispenses)
-                for dispense in well.dispenses
-            }
             for index, stock_id in enumerate(stock_ids):
                 count = int(pair[index])
                 if count > 0 or stock_id in counts:
