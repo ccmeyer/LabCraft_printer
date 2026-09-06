@@ -397,6 +397,94 @@ def _apply_sequential_calibration(em, stock_id, *, factor="Signal", volume=12.0)
     )
 
 
+@pytest.mark.parametrize("copy_source", ["memory", "saved"])
+def test_fresh_copy_discards_calibrated_allocation(
+    experiment_model_factory, tmp_path, copy_source,
+):
+    source = experiment_model_factory().experiment_model
+    stock_ids = _configure_mutable_two_stock_design(source)
+    _apply_sequential_calibration(source, stock_ids[0])
+    assert source.calibrated_stock_allocation["active"] is True
+    assert [s["droplet_volume_nL"] for s in source.plans_per_option[("Signal", None)]["stocks"]] == [12.0, 10.0]
+    source_state = copy.deepcopy(source.to_dict())
+    source_status = copy.deepcopy(source.calibrated_stock_allocation_status)
+    source_dir = Path(source.experiment_dir_path)
+    source_files = {
+        p.relative_to(source_dir): p.read_bytes()
+        for p in source_dir.rglob("*") if p.is_file()
+    }
+    nominal = experiment_model_factory().experiment_model
+    _configure_mutable_two_stock_design(nominal)
+    nominal.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
+    nominal_counts = [s["droplets_per_target"] for s in nominal.plans_per_option[("Signal", None)]["stocks"]]
+
+    duplicate = experiment_model_factory().experiment_model
+    destination = tmp_path / "fresh_copy"
+    if copy_source == "memory":
+        duplicate.from_dict(source_state)
+        assert duplicate.duplicate_experiment("FreshCopy", str(destination))
+    else:
+        assert duplicate.duplicate_design_from(source.experiment_file_path, "FreshCopy", str(destination))
+
+    payload = json.loads((destination / "experiment_design.json").read_text(encoding="utf-8"))
+    stocks = duplicate.plans_per_option[("Signal", None)]["stocks"]
+    assert [s["droplet_volume_nL"] for s in stocks] == [10.0, 10.0]
+    assert [s["droplets_per_target"] for s in stocks] == nominal_counts
+    assert payload["calibrated_stock_allocation"] == {"schema_version": 1, "active": False}
+    assert payload["applied_imaging_calibrations"]["records"] == {}
+    assert duplicate.calibrated_stock_allocation_status["active"] is False
+
+    reloaded = experiment_model_factory().experiment_model
+    reloaded.load_experiment(str(destination / "experiment_design.json"), str(destination))
+    assert reloaded.calibrated_stock_allocation_status["active"] is False
+    assert reloaded.plans_per_option[("Signal", None)] == duplicate.plans_per_option[("Signal", None)]
+    # Use editable loading for optimization; file loading is historical inspection.
+    editable = experiment_model_factory().experiment_model
+    editable.from_dict(payload)
+    result = editable.optimize_stock_solutions(allow_two=True)
+    assert result["best"] is True
+    assert not result.get("calibrated_stock_allocation_reused", False)
+    stocks = editable.plans_per_option[("Signal", None)]["stocks"]
+    assert [s["droplet_volume_nL"] for s in stocks] == [10.0, 10.0]
+    assert [s["droplets_per_target"] for s in stocks] == nominal_counts
+    assert source.to_dict() == source_state
+    assert source.calibrated_stock_allocation_status == source_status
+    assert {
+        p.relative_to(source_dir): p.read_bytes()
+        for p in source_dir.rglob("*") if p.is_file()
+    } == source_files
+
+
+@pytest.mark.parametrize("allocation_state", ["active", "inactive", "absent"])
+def test_reset_discards_calibrated_allocation(experiment_model_factory, allocation_state):
+    em = experiment_model_factory().experiment_model
+    stock_ids = _configure_mutable_two_stock_design(em)
+    nominal_counts = copy.deepcopy([
+        s["droplets_per_target"] for s in em.plans_per_option[("Signal", None)]["stocks"]
+    ])
+    nominal_metadata = copy.deepcopy(em.metadata)
+    _apply_sequential_calibration(em, stock_ids[0])
+    if allocation_state == "inactive":
+        em.calibrated_stock_allocation["active"] = False
+        em.calibrated_stock_allocation["stale_reason"] = "inputs_changed"
+    elif allocation_state == "absent":
+        del em.calibrated_stock_allocation
+
+    em.reset_experiment_model()
+
+    assert em.calibrated_stock_allocation == {"schema_version": 1, "active": False}
+    assert em.calibrated_stock_allocation_status == {"active": False, "reason": "not_configured"}
+    assert em.applied_imaging_calibrations["records"] == {}
+    em.set_metadata(**nominal_metadata)
+    em.add_additive("Signal", [0.5, 1.0, 5.0, 20.0], "mM", 10.0, max_stock_conc=2000.0)
+    result = em.optimize_stock_solutions(allow_two=True)
+    assert result["best"] is True
+    assert not result.get("calibrated_stock_allocation_reused", False)
+    stocks = em.plans_per_option[("Signal", None)]["stocks"]
+    assert [s["droplet_volume_nL"] for s in stocks] == [10.0, 10.0]
+    assert [s["droplets_per_target"] for s in stocks] == nominal_counts
+
+
 def test_sequential_calibrations_preserve_two_stock_allocation(experiment_model_factory):
     em = experiment_model_factory().experiment_model
     signal_ids = _configure_mutable_two_stock_design(em, include_other=True)

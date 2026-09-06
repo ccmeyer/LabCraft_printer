@@ -19260,6 +19260,7 @@ class ExperimentModel(QObject):
         payload["stock_prep"] = self._default_stock_prep_state()
         payload["applied_imaging_calibrations"] = self._normalize_applied_imaging_calibrations(None)
         payload["calibration_volume_warning_audits"] = self._normalize_calibration_volume_warning_audits(None)
+        payload["calibrated_stock_allocation"] = self._normalize_calibrated_stock_allocation(None)
         payload["manual_refuel_checks"] = self._normalize_manual_refuel_checks(None)
         return payload
 
@@ -19728,6 +19729,11 @@ class ExperimentModel(QObject):
         self._stock_prep_worksheet_loaded_path = None
         self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(None)
         self.calibration_volume_warning_audits = self._normalize_calibration_volume_warning_audits(None)
+        self.calibrated_stock_allocation = self._normalize_calibrated_stock_allocation(None)
+        self.calibrated_stock_allocation_status = {
+            "active": False,
+            "reason": "not_configured",
+        }
         self.manual_refuel_checks = self._normalize_manual_refuel_checks(None)
         self.plans_per_option.clear()
         self._unreachable_preview_map = {}
