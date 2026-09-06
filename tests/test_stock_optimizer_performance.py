@@ -1,9 +1,155 @@
 import itertools
+import random
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
 from Model import CURRENT_PROFILE, ExperimentModel
+
+
+def _scalar_candidate_dominates(better, worse):
+    """Original scalar predicate, including its short-circuit behavior."""
+    a, b = better["score"], worse["score"]
+    pairs = (
+        (int(a.lost_levels), int(b.lost_levels)),
+        (int(a.n_stocks), int(b.n_stocks)),
+        (float(a.worst_abs_error), float(b.worst_abs_error)),
+        (float(a.error_sum), float(b.error_sum)),
+        (float(a.concentration_burden), float(b.concentration_burden)),
+        (float(a.max_volume_nL), float(b.max_volume_nL)),
+    )
+    if any(left > right + 1e-12 for left, right in pairs):
+        return False
+    if any(left > right + 1e-12 for left, right in zip(better["level_volumes"], worse["level_volumes"])):
+        return False
+    return any(left < right - 1e-12 for left, right in pairs) or any(
+        left < right - 1e-12 for left, right in zip(better["level_volumes"], worse["level_volumes"])
+    )
+
+
+def _scalar_candidate_filter(entries, *, forced=False, diagnostics=None):
+    """Independent reference for the original sequential dominance filter."""
+    retained = []
+    for entry in entries:
+        dominated = False
+        if not forced:
+            for other in retained:
+                if _scalar_candidate_dominates(other, entry):
+                    dominated = True
+                    break
+        if not dominated:
+            retained.append(entry)
+    return retained
+
+
+def _filter_entry(values=(0, 1, 0.0, 0.0, 1.0, 1.0), volumes=()):
+    names = ("lost_levels", "n_stocks", "worst_abs_error", "error_sum", "concentration_burden", "max_volume_nL")
+    return {"score": SimpleNamespace(**dict(zip(names, values))), "level_volumes": tuple(volumes)}
+
+
+@pytest.mark.parametrize("levels", [0, 17, 260])
+def test_batched_candidate_filter_matches_scalar_randomized_oracle(levels):
+    rng = random.Random(731)
+    entries = [
+        _filter_entry(
+            (rng.randrange(3), rng.randrange(1, 3), *(rng.random() for _ in range(4))),
+            [rng.randrange(5) for _ in range(levels)],
+        ) for _ in range(150)
+    ]
+    entries.extend(entries[:5])
+    expected = _scalar_candidate_filter(entries)
+    actual = ExperimentModel._filter_resolution_candidate_entries(entries)
+    assert [id(entry) for entry in actual] == [id(entry) for entry in expected]
+
+
+@pytest.mark.parametrize("difference", [0.0, 0.999e-12, 1e-12, 1.001e-12, 2e-12])
+@pytest.mark.parametrize("criterion", ["scalar", "volume"])
+def test_batched_candidate_filter_preserves_tolerance(difference, criterion):
+    if criterion == "scalar":
+        entries = [_filter_entry((0, 1, x, 0, 1, 1)) for x in (0.0, difference)]
+    else:
+        entries = [_filter_entry(volumes=[x]) for x in (0.0, difference)]
+    expected = _scalar_candidate_filter(entries)
+    actual = ExperimentModel._filter_resolution_candidate_entries(entries)
+    assert [id(entry) for entry in actual] == [id(entry) for entry in expected]
+
+
+def test_batched_candidate_filter_bounds_blocks_and_accumulates_diagnostics():
+    # Equal vectors are not strictly dominated. Every retained row and column
+    # must be examined, including the second row and column blocks.
+    entries = [_filter_entry(volumes=[1.0] * 260) for _ in range(258)]
+    diagnostics = {}
+    for _ in range(2):
+        actual = ExperimentModel._filter_resolution_candidate_entries(entries, diagnostics=diagnostics)
+        assert [id(entry) for entry in actual] == [id(entry) for entry in entries]
+    assert diagnostics["stock_allocation_dominance_pairs_evaluated"] == 2 * 258 * 257 // 2
+    assert diagnostics["stock_allocation_dominance_max_block_elements"] == 256 * 256
+    assert diagnostics["stock_allocation_dominance_blocks_evaluated"] > 2 * 257
+
+
+@pytest.mark.parametrize("late_tradeoff", [False, True])
+def test_batched_candidate_filter_checks_late_columns_before_pruning(late_tradeoff):
+    first = _filter_entry((0, 1, 0, 0, 1, 1), [1.0] * 259 + [2.0 if late_tradeoff else 0.0])
+    second = _filter_entry((0, 1, 1, 0, 1, 1), [1.0] * 260)
+    actual = ExperimentModel._filter_resolution_candidate_entries([first, second])
+    assert [id(entry) for entry in actual] == ([id(first), id(second)] if late_tradeoff else [id(first)])
+
+
+def test_batched_candidate_filter_finds_dominator_in_later_row_block():
+    entries = [_filter_entry((0, 1, i, 0, 1, 1), [258 - i]) for i in range(257)]
+    entries.append(_filter_entry((0, 1, 257, 0, 1, 1), [2]))
+    actual = ExperimentModel._filter_resolution_candidate_entries(entries)
+    assert [id(entry) for entry in actual] == [id(entry) for entry in entries[:-1]]
+
+
+@pytest.mark.parametrize("forced", [False, True])
+def test_batched_candidate_filter_handles_empty_singleton_and_tradeoffs(forced):
+    entries = [
+        _filter_entry((0, 1, 0, 0, 1, 1), [-0.0, 1e100]),
+        _filter_entry((0, 1, 0, 0, 2, 1), [0.0, 1e100]),
+        _filter_entry((0, 1, 0, 0, 0.5, 2), [0.0, 1e100]),
+    ]
+    for pool in ([], entries[:1], entries):
+        diagnostics = {}
+        actual = ExperimentModel._filter_resolution_candidate_entries(pool, forced=forced, diagnostics=diagnostics)
+        expected = _scalar_candidate_filter(pool, forced=forced)
+        assert [id(entry) for entry in actual] == [id(entry) for entry in expected]
+        if forced or len(pool) < 2:
+            assert not any(diagnostics.values())
+
+
+def _dense_target_model():
+    model = ExperimentModel(prof=CURRENT_PROFILE)
+    model.set_metadata(
+        target_reaction_volume_nL=240.0, final_reaction_volume_nL=5000.0,
+        printed_volume_tolerance_nL=0.0, allow_two_stock_solutions=True,
+        allow_avoidable_target_grouping=False,
+    )
+    model.add_additive("R", [0.25 * i for i in range(1, 13)] + [5, 10, 15, 20, 21], "mM", 10.0, max_stock_conc=2000.0)
+    return model
+
+
+def test_dense_target_filter_matches_scalar_plan_and_work(monkeypatch):
+    results = []
+    for scalar in (False, True):
+        model = _dense_target_model()
+        if scalar:
+            monkeypatch.setattr(model, "_filter_resolution_candidate_entries", _scalar_candidate_filter)
+        result = model.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
+        assert result["best"] is True
+        assert result["distinct_level_loss"] == 0
+        keys = (
+            "optimizer_selected_rank", "stock_allocation_candidates_retained",
+            "stock_allocation_candidates_dominated", "stock_allocation_stop_reason",
+            "stock_allocation_work_units_evaluated", "stock_allocation_work_units_by_kind",
+            "stock_allocation_baseline_work", "stock_allocation_combined_work",
+        )
+        results.append(({key: result[key] for key in keys}, model.export_stock_allocation_reuse_payload(result)["plan_fingerprint"]))
+        if not scalar:
+            assert result["stock_allocation_dominance_pairs_evaluated"] > 0
+            assert result["stock_allocation_dominance_max_block_elements"] <= 65536
+    assert results[0] == results[1]
 
 
 _BENCHMARK_LEVEL_COUNTS = (6, 6, 6, 6, 6, 5, 5, 5)

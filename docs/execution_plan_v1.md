@@ -217,6 +217,23 @@ the candidate space was exhausted. Work and candidate counters accumulate
 across phases. When no single-stock allocation is feasible, the baseline phase
 starts from the feasible incumbent, which can already contain two stocks.
 
+Candidate dominance filtering uses NumPy batches while preserving the original
+sequential decisions, `1e-12` comparison tolerance, and candidate identities and
+ordering. Each candidate is compared only against earlier retained candidates;
+fixed stocks bypass dominance filtering. Each temporary comparison matrix is
+at most 256 candidates by 256 criteria (65,536 elements). Numeric storage grows
+linearly with candidate count times criterion count, without constructing a
+candidate-by-candidate matrix. Worst-case comparison work remains quadratic;
+batching reduces Python overhead rather than changing the search space.
+
+The diagnostic fields `stock_allocation_dominance_pairs_evaluated` and
+`stock_allocation_dominance_blocks_evaluated` accumulate actual filtering work
+across resolution phases. Pair counts include every retained candidate in an
+evaluated row batch, even when an early match could end a scalar scan sooner.
+`stock_allocation_dominance_max_block_elements` records the largest temporary
+comparison block. These counters do not consume the existing resolution work
+allowance or change stopping decisions; paths that do not filter report zero.
+
 The 75 ms resolution target is diagnostic, not a wall-clock deadline. Work
 units have different costs depending on target counts and reaction structure.
 `optimizer_seed_elapsed_ms` includes seed/feasibility work outside the shared

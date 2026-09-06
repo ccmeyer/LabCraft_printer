@@ -2871,6 +2871,67 @@ class ExperimentModel(QObject):
 
     # ------------- Optimization -------------
 
+    @staticmethod
+    def _filter_resolution_candidate_entries(
+        entries: List[Dict[str, Any]],
+        *,
+        forced: bool = False,
+        diagnostics: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Preserve sequential dominance decisions using bounded NumPy blocks."""
+        if forced or len(entries) < 2:
+            return list(entries)
+        criterion_count = 6 + len(entries[0]["level_volumes"])
+        # Only retained vectors are filled. Storage is linear in pool size;
+        # no candidate-by-candidate comparison matrix is materialized.
+        vectors = np.empty((len(entries), criterion_count), dtype=np.float64)
+        retained = []
+        pairs_evaluated = blocks_evaluated = max_block_elements = 0
+        for entry in entries:
+            score = entry["score"]
+            vector = np.asarray((
+                int(score.lost_levels), int(score.n_stocks),
+                float(score.worst_abs_error), float(score.error_sum),
+                float(score.concentration_burden), float(score.max_volume_nL),
+                *entry["level_volumes"],
+            ), dtype=np.float64)
+            if len(vector) != criterion_count:
+                raise ValueError("Candidate filtering requires matching target criteria.")
+            upper = vector + 1e-12
+            lower = vector - 1e-12
+            dominated = False
+            for start in range(0, len(retained), 256):
+                block = vectors[start:min(start + 256, len(retained))]
+                pairs_evaluated += len(block)
+                no_worse = np.ones(len(block), dtype=bool)
+                strictly_better = np.zeros(len(block), dtype=bool)
+                for column in range(0, criterion_count, 256):
+                    stop = min(column + 256, criterion_count)
+                    values = block[:, column:stop]
+                    blocks_evaluated += 1
+                    max_block_elements = max(max_block_elements, values.size)
+                    # Keep the original > / < predicates (including their
+                    # tolerance), rather than replacing them with <= or >=.
+                    no_worse &= ~np.any(values > upper[column:stop], axis=1)
+                    strictly_better |= np.any(values < lower[column:stop], axis=1)
+                    if not np.any(no_worse):
+                        break
+                if np.any(no_worse & strictly_better):
+                    dominated = True
+                    break
+            if not dominated:
+                vectors[len(retained)] = vector
+                retained.append(entry)
+        if diagnostics is not None:
+            for name, value in (
+                ("stock_allocation_dominance_pairs_evaluated", pairs_evaluated),
+                ("stock_allocation_dominance_blocks_evaluated", blocks_evaluated),
+            ):
+                diagnostics[name] = int(diagnostics.get(name, 0)) + value
+            name = "stock_allocation_dominance_max_block_elements"
+            diagnostics[name] = max(int(diagnostics.get(name, 0)), max_block_elements)
+        return retained
+
     def optimize_stock_solutions(
         self,
         *,
@@ -2896,6 +2957,9 @@ class ExperimentModel(QObject):
                 "stock_allocation_baseline_work": 0,
                 "stock_allocation_combined_work": 0,
                 "stock_allocation_pair_work_by_key": {},
+                "stock_allocation_dominance_pairs_evaluated": 0,
+                "stock_allocation_dominance_blocks_evaluated": 0,
+                "stock_allocation_dominance_max_block_elements": 0,
                 "stock_allocation_improved_seed": False,
                 "stock_allocation_time_to_first_improvement_ms": None,
                 "stock_allocation_time_to_best_ms": None,
@@ -3039,6 +3103,11 @@ class ExperimentModel(QObject):
         stock_allocation_baseline_work = 0
         stock_allocation_combined_work = 0
         stock_allocation_pair_work_by_key = {}
+        dominance_diagnostics = {
+            "stock_allocation_dominance_pairs_evaluated": 0,
+            "stock_allocation_dominance_blocks_evaluated": 0,
+            "stock_allocation_dominance_max_block_elements": 0,
+        }
         stock_allocation_work_units_by_kind: Dict[str, int] = {
             "two_stock_probe": 0,
             "two_stock_pair": 0,
@@ -3122,6 +3191,7 @@ class ExperimentModel(QObject):
 
         def _resolution_phase_diagnostics() -> Dict[str, Any]:
             return {
+                **dominance_diagnostics,
                 "stock_allocation_baseline_rank": copy.deepcopy(stock_allocation_baseline_rank),
                 "stock_allocation_baseline_work": int(stock_allocation_baseline_work),
                 "stock_allocation_combined_work": int(stock_allocation_combined_work),
@@ -5414,46 +5484,6 @@ class ExperimentModel(QObject):
             )
             return entry
 
-        def _candidate_dominates(
-            better: Mapping[str, Any],
-            worse: Mapping[str, Any],
-        ) -> bool:
-            better_score = better["score"]
-            worse_score = worse["score"]
-            scalar_pairs = (
-                (int(better_score.lost_levels), int(worse_score.lost_levels)),
-                (int(better_score.n_stocks), int(worse_score.n_stocks)),
-                (
-                    float(better_score.worst_abs_error),
-                    float(worse_score.worst_abs_error),
-                ),
-                (float(better_score.error_sum), float(worse_score.error_sum)),
-                (
-                    float(better_score.concentration_burden),
-                    float(worse_score.concentration_burden),
-                ),
-                (
-                    float(better_score.max_volume_nL),
-                    float(worse_score.max_volume_nL),
-                ),
-            )
-            if any(left > right + 1e-12 for left, right in scalar_pairs):
-                return False
-            better_volumes = better["level_volumes"]
-            worse_volumes = worse["level_volumes"]
-            if any(
-                left > right + 1e-12
-                for left, right in zip(better_volumes, worse_volumes)
-            ):
-                return False
-            return bool(
-                any(left < right - 1e-12 for left, right in scalar_pairs)
-                or any(
-                    left < right - 1e-12
-                    for left, right in zip(better_volumes, worse_volumes)
-                )
-            )
-
         def _build_resolution_candidate_pools(
             *,
             include_twos: bool,
@@ -5534,18 +5564,10 @@ class ExperimentModel(QObject):
 
                 opt = option_by_key[key]
                 forced = getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
-                retained: List[Dict[str, Any]] = []
-                for entry in unique_entries:
-                    dominated = False
-                    if not forced:
-                        for other in retained:
-                            if _candidate_dominates(other, entry):
-                                dominated = True
-                                break
-                    if dominated:
-                        dominated_total += 1
-                    else:
-                        retained.append(entry)
+                retained = self._filter_resolution_candidate_entries(
+                    unique_entries, forced=forced, diagnostics=dominance_diagnostics,
+                )
+                dominated_total += len(unique_entries) - len(retained)
                 retained.sort(key=lambda entry: (
                     int(entry["score"].lost_levels),
                     float(entry["score"].max_volume_nL),
@@ -8139,6 +8161,9 @@ class ExperimentModel(QObject):
             'stock_allocation_baseline_work': 0,
             'stock_allocation_combined_work': 0,
             'stock_allocation_pair_work_by_key': {},
+            'stock_allocation_dominance_pairs_evaluated': 0,
+            'stock_allocation_dominance_blocks_evaluated': 0,
+            'stock_allocation_dominance_max_block_elements': 0,
             'stock_allocation_improved_seed': False,
             'stock_allocation_time_to_first_improvement_ms': None,
             'stock_allocation_time_to_best_ms': None,
