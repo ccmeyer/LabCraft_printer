@@ -11,6 +11,7 @@ from typing import List, Dict, Tuple, Optional, Any, Set, Iterable, Mapping, Cal
 
 from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
+from OptimizationJobs import OptimizationCancelled, input_fingerprint
 from PySide6.QtStateMachine import QStateMachine, QState, QFinalState, QSignalTransition
 import json
 import tempfile
@@ -561,6 +562,7 @@ class ExperimentModel(QObject):
 
     def __init__(self, prof=None, *, experiments_root=None):
         super().__init__()
+        self._optimization_control = None
         # Factors (additive & choice groups)
         self.factors: List[FactorSpec] = []
         self.additional_conditions: List[AdditionalConditionSpec] = []
@@ -1972,7 +1974,9 @@ class ExperimentModel(QObject):
 
         deltas: Set[float] = set()
         for t in xs:
+            self._optimization_checkpoint()
             for k in range(1, max_refine + 1):
+                self._optimization_checkpoint()
                 delta = float(t) / float(k)
                 if delta >= min_delta:
                     deltas.add(self._normalize_target_key(delta))
@@ -2386,19 +2390,23 @@ class ExperimentModel(QObject):
             if max_delta >= min_delta and math.isfinite(max_delta):
                 candidate_deltas.add(self._normalize_target_key(max_delta))
                 for target in (t for t in xs if t > 1e-12):
+                    self._optimization_checkpoint()
                     drops_at_max = max(1, int(math.ceil(float(target) / max_delta)))
                     for drops in (drops_at_max, drops_at_max + 1):
+                        self._optimization_checkpoint()
                         delta = float(target) / float(drops)
                         if delta >= min_delta and delta <= max_delta + 1e-12:
                             candidate_deltas.add(self._normalize_target_key(delta))
 
         for delta in sorted(candidate_deltas):
+            self._optimization_checkpoint()
             stock_c = (float(delta) * final_volume_nL) / droplet_nL
             if max_stock_conc is not None and stock_c > (float(max_stock_conc) + 1e-12):
                 continue
             drops: Dict[float, int] = {}
             feasible = True
             for t in xs:
+                self._optimization_checkpoint()
                 row = self._evaluate_single_forced_target(
                     t_final=float(t),
                     starting_conc=0.0,
@@ -2484,6 +2492,9 @@ class ExperimentModel(QObject):
         # Deduplicate mappings as they are generated. This keeps partial work
         # useful when the shared deterministic work cap interrupts a pair scan.
         pairs_by_mapping: Dict[Tuple[Any, ...], TwoStockPlan] = {}
+        # Count pairs are immutable and shared across candidates. Keeping one
+        # copy per distinct pair avoids retaining a tuple per target per plan.
+        count_pairs: Dict[Tuple[int, int], Tuple[int, int]] = {}
         pairs_scanned = 0
         pair_limit_hit = False
         callback_stop = False
@@ -2513,6 +2524,7 @@ class ExperimentModel(QObject):
             primary_delta = float(deltas[primary_index])
             minimum_companion_delta = 0.0
             for target in xs_pos:
+                self._optimization_checkpoint()
                 primary_drops = min(
                     maximum_total_drops,
                     max(
@@ -2538,6 +2550,7 @@ class ExperimentModel(QObject):
                 errors: List[float] = []
                 feasible = True
                 for target in xs_pos:
+                    self._optimization_checkpoint()
                     primary_drops = min(
                         maximum_total_drops,
                         max(
@@ -2578,6 +2591,7 @@ class ExperimentModel(QObject):
             # prelude stays deterministic without an unchecked full sort.
             ranked: List[Tuple[Tuple[Any, ...], int]] = []
             for secondary_index in range(primary_index + 1, len(deltas)):
+                self._optimization_checkpoint()
                 if consume_work is not None and not consume_work("two_stock_probe"):
                     raise _StockAllocationWorkLimitReached
                 ranked.append(
@@ -2602,6 +2616,7 @@ class ExperimentModel(QObject):
                         max(0, len(deltas) - 1),
                     )
                 for primary_index in range(primary_probe_count):
+                    self._optimization_checkpoint()
                     probe_indices = _resolution_probe_indices(primary_index)
                     probed.update(
                         (primary_index, secondary_index)
@@ -2609,6 +2624,7 @@ class ExperimentModel(QObject):
                     )
                     yield primary_index, probe_indices
             for primary_index in range(len(deltas)):
+                self._optimization_checkpoint()
                 yield primary_index, (
                     secondary_index
                     for secondary_index in range(primary_index + 1, len(deltas))
@@ -2617,7 +2633,9 @@ class ExperimentModel(QObject):
 
         try:
             for i, secondary_indices in _pair_groups():
+                self._optimization_checkpoint()
                 for j in secondary_indices:
+                    self._optimization_checkpoint()
                     if stop_requested is not None and stop_requested():
                         callback_stop = True
                         break
@@ -2649,13 +2667,19 @@ class ExperimentModel(QObject):
 
                     drops_map: Dict[float, Tuple[int, int]] = {}
                     target_rows: Dict[float, Dict[str, Any]] = {}
+                    # All targets share these immutable pair values. Avoid
+                    # retaining two extra tuples per target: large candidate
+                    # pools otherwise cause long process-wide GC pauses.
+                    pair_concentrations = (c1, c2)
+                    pair_deltas = None
                     max_drops = 0
                     feasible = True
                     for t_real in xs:
+                        self._optimization_checkpoint()
                         row = self._evaluate_two_stock_target(
                             t_final=float(t_real),
                             starting_conc=0.0,
-                            stock_concentrations=(c1, c2),
+                            stock_concentrations=pair_concentrations,
                             droplet_nL=droplet_nL,
                             final_volume_nL=final_volume_nL,
                             units=units,
@@ -2666,8 +2690,13 @@ class ExperimentModel(QObject):
                             feasible = False
                             break
                         a, b = row["droplets"]
+                        row["droplets"] = count_pairs.setdefault(row["droplets"], row["droplets"])
+                        row["stock_concentration"] = pair_concentrations
+                        if pair_deltas is None:
+                            pair_deltas = row["delta_per_drop"]
+                        row["delta_per_drop"] = pair_deltas
                         target_key = self._normalize_target_key(float(t_real))
-                        drops_map[target_key] = (int(a), int(b))
+                        drops_map[target_key] = row["droplets"]
                         target_rows[target_key] = dict(row)
                         max_drops = max(max_drops, int(a) + int(b))
 
@@ -2692,7 +2721,7 @@ class ExperimentModel(QObject):
                     error_sum = float(sum(errors))
                     plan = TwoStockPlan(
                         deltas=(d1, d2),
-                        stock_concs=(c1, c2),
+                        stock_concs=pair_concentrations,
                         droplet_nL=droplet_nL,
                         units=units,
                         droplets_per_target=drops_map,
@@ -2713,16 +2742,10 @@ class ExperimentModel(QObject):
                         diagnostics["two_stock_candidates_generated"] = int(
                             diagnostics.get("two_stock_candidates_generated", 0)
                         ) + 1
-                    mapping_signature = tuple(
-                        sorted(
-                            (
-                                round(float(target), 12),
-                                int(drops[0]),
-                                int(drops[1]),
-                            )
-                            for target, drops in drops_map.items()
-                        )
-                    )
+                    # Every feasible candidate covers the same sorted targets.
+                    # Reuse its immutable count pairs instead of allocating a
+                    # second target/count tuple for every target of every pair.
+                    mapping_signature = tuple(drops_map[target] for target in xs)
                     incumbent = pairs_by_mapping.get(mapping_signature)
                     if incumbent is not None and _candidate_rank(incumbent) <= _candidate_rank(plan):
                         if diagnostics is not None:
@@ -2790,6 +2813,7 @@ class ExperimentModel(QObject):
         pruned: List[TwoStockPlan] = []
         best_vol = float("inf")
         for p in pairs:
+            self._optimization_checkpoint()
             if p.max_volume_nL + 1e-12 < best_vol:
                 pruned.append(p)
                 best_vol = p.max_volume_nL
@@ -2797,6 +2821,7 @@ class ExperimentModel(QObject):
         accuracy_by_volume: Dict[float, Tuple[TwoStockPlan, _PlanAccuracyScore]] = {}
         resolution_by_volume: Dict[float, Tuple[TwoStockPlan, Tuple[Any, ...]]] = {}
         for p in pairs:
+            self._optimization_checkpoint()
             volume_key = round(float(p.max_volume_nL), 12)
             accuracy_score = _PlanAccuracyScore(
                 worst_abs_error=float(p.worst_abs_error),
@@ -2823,9 +2848,11 @@ class ExperimentModel(QObject):
                     resolution_by_volume[volume_key] = (p, score)
 
         for p, _score in accuracy_by_volume.values():
+            self._optimization_checkpoint()
             if p not in pruned:
                 pruned.append(p)
         for p, _score in resolution_by_volume.values():
+            self._optimization_checkpoint()
             if p not in pruned:
                 pruned.append(p)
 
@@ -2871,12 +2898,89 @@ class ExperimentModel(QObject):
 
     # ------------- Optimization -------------
 
+    _OPTIMIZATION_INPUT_ATTRIBUTES = (
+        "factors", "additional_conditions", "metadata", "legacy_mode",
+        "_stock_allocation_resolution_policy_source", "_uploaded_reactions",
+        "_uploaded_well_ids", "applied_imaging_calibrations",
+        "calibration_volume_warning_audits", "calibrated_stock_allocation",
+        "calibrated_stock_allocation_status", "plans_per_option",
+        "_stock_rows_cache", "_fill_row_cache", "_target_preview_map",
+        "_unreachable_preview_map", "_last_worst_nonfill_volume_nL",
+    )
+    _OPTIMIZATION_OUTPUT_ATTRIBUTES = (
+        "plans_per_option", "_stock_rows_cache", "_fill_row_cache",
+        "_target_preview_map", "_unreachable_preview_map", "_reactions_df",
+        "_last_worst_nonfill_volume_nL", "calibrated_stock_allocation",
+        "calibrated_stock_allocation_status",
+    )
+
+    def _optimization_checkpoint(self, phase=None):
+        control = getattr(self, "_optimization_control", None)
+        if control is not None:
+            control.report(phase) if phase else control.check()
+
+    def capture_optimization_inputs(self):
+        return copy.deepcopy({name: getattr(self, name)
+                              for name in self._OPTIMIZATION_INPUT_ATTRIBUTES})
+
+    def restore_optimization_inputs(self, snapshot):
+        if set(snapshot) != set(self._OPTIMIZATION_INPUT_ATTRIBUTES):
+            raise ValueError("Incomplete optimization input snapshot.")
+        for name, value in snapshot.items():
+            setattr(self, name, copy.deepcopy(value))
+
+    def capture_optimization_outputs(self):
+        return copy.deepcopy({name: getattr(self, name)
+                              for name in self._OPTIMIZATION_OUTPUT_ATTRIBUTES})
+
+    def validate_optimization_allocation(self, result):
+        """Check detached results with the exact reuse validator, without normalization."""
+        self._optimization_checkpoint("Validating allocation")
+        previous = self.capture_optimization_outputs()
+        payload = self.export_stock_allocation_reuse_payload(result)
+        calibrated = self.calibrated_stock_allocation or {}
+        options = {}
+        if calibrated.get("active"):
+            payload["calibrated_independent_volumes"] = True
+            options = dict(reuse_context="calibration",
+                           expected_calibrated_stock_id=calibrated.get("calibrated_stock_id"))
+        try:
+            validation = self.install_stock_allocation_reuse_payload(payload, **options)
+            if not validation.get("reused"):
+                raise ValueError(f"Computed allocation failed validation: {validation.get('reason')}")
+        finally:
+            for name, value in previous.items():
+                setattr(self, name, value)
+        self._optimization_checkpoint()
+
+    def install_optimization_outputs(self, computed, expected_fingerprint):
+        if self.is_execution_design_locked():
+            raise ValueError("The experiment is now locked.")
+        if input_fingerprint(self.capture_optimization_inputs()) != expected_fingerprint:
+            raise ValueError("The experiment changed during optimization.")
+        if set(computed) != set(self._OPTIMIZATION_OUTPUT_ATTRIBUTES):
+            raise ValueError("Incomplete optimization result.")
+        previous = self.capture_optimization_outputs()
+        replacement = copy.deepcopy(computed)
+        try:
+            for name in self._OPTIMIZATION_OUTPUT_ATTRIBUTES:
+                setattr(self, name, replacement[name])
+        except Exception:
+            for name, value in previous.items():
+                setattr(self, name, value)
+            raise
+        self.stock_updated.emit()
+        self.experiment_generated.emit(
+            len(self._reactions_df), float(self._last_worst_nonfill_volume_nL or 0.0),
+        )
+
     @staticmethod
     def _filter_resolution_candidate_entries(
         entries: List[Dict[str, Any]],
         *,
         forced: bool = False,
         diagnostics: Optional[Dict[str, Any]] = None,
+        control=None,
     ) -> List[Dict[str, Any]]:
         """Preserve sequential dominance decisions using bounded NumPy blocks."""
         if forced or len(entries) < 2:
@@ -2888,6 +2992,8 @@ class ExperimentModel(QObject):
         retained = []
         pairs_evaluated = blocks_evaluated = max_block_elements = 0
         for entry in entries:
+            if control is not None:
+                control.check()
             score = entry["score"]
             vector = np.asarray((
                 int(score.lost_levels), int(score.n_stocks),
@@ -2901,6 +3007,8 @@ class ExperimentModel(QObject):
             lower = vector - 1e-12
             dominated = False
             for start in range(0, len(retained), 256):
+                if control is not None:
+                    control.check()
                 block = vectors[start:min(start + 256, len(retained))]
                 pairs_evaluated += len(block)
                 no_worse = np.ones(len(block), dtype=bool)
@@ -2990,6 +3098,7 @@ class ExperimentModel(QObject):
                 "stock_allocation_stop_reason": "not_run",
             }
 
+        self._optimization_checkpoint("Preparing candidates")
         calibrated_allocation = self._normalize_calibrated_stock_allocation(
             getattr(self, "calibrated_stock_allocation", None)
         )
@@ -3077,6 +3186,8 @@ class ExperimentModel(QObject):
         V_final = float(self.metadata.get("final_reaction_volume_nL", V_print))
         try:
             V_tolerance = float(self.metadata.get("printed_volume_tolerance_nL", 50.0))
+        except OptimizationCancelled:
+            raise
         except Exception:
             V_tolerance = 0.0
         if not math.isfinite(V_tolerance) or V_tolerance < 0.0:
@@ -3167,6 +3278,7 @@ class ExperimentModel(QObject):
                 for target in (getattr(opt, "targets", []) or [])
             }
             for target in additional_targets_by_key.get(key, []):
+                self._optimization_checkpoint()
                 values.add(self._normalize_target_key(float(target)))
             return sorted(values)
 
@@ -3356,9 +3468,13 @@ class ExperimentModel(QObject):
 
         unknown_additional_targets: List[Dict[str, Any]] = []
         for row in additional_condition_rows:
+            self._optimization_checkpoint()
             for key, target in (row.get("reaction") or {}).items():
+                self._optimization_checkpoint()
                 try:
                     target_value = float(target)
+                except OptimizationCancelled:
+                    raise
                 except Exception:
                     target_value = 0.0
                 if abs(target_value) <= 1e-12:
@@ -3449,6 +3565,7 @@ class ExperimentModel(QObject):
             dp: Dict[float, int] = {}
 
             for t_final in _effective_targets_for_opt(key, opt):
+                self._optimization_checkpoint()
                 row = self._evaluate_single_forced_target(
                     t_final=t_final,
                     starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
@@ -3483,6 +3600,7 @@ class ExperimentModel(QObject):
             )
 
         for f in self.factors:
+            self._optimization_checkpoint()
             if f.kind == "additive":
                 o = f.options[0]
                 additive_option_map[f.name] = o
@@ -3574,6 +3692,7 @@ class ExperimentModel(QObject):
             else:
                 bucket = []
                 for opt in f.options:
+                    self._optimization_checkpoint()
                     choice_option_map[(f.name, opt.name)] = opt
                     t_adj = _adj_targets_for_opt((f.name, opt.name), opt)
                     forced = getattr(opt, "forced_stock_conc", None)
@@ -3664,6 +3783,7 @@ class ExperimentModel(QObject):
 
         def _ensure_additive_twos(name: str) -> List[TwoStockPlan]:
             for idx, (entry_name, singles, twos) in enumerate(additives):
+                self._optimization_checkpoint()
                 if entry_name != name:
                     continue
                 if twos is not None:
@@ -3692,6 +3812,7 @@ class ExperimentModel(QObject):
         def _ensure_choice_twos(gname: str, oname: str) -> List[TwoStockPlan]:
             bucket = choice_groups.get(gname, [])
             for idx, (entry_name, singles, twos) in enumerate(bucket):
+                self._optimization_checkpoint()
                 if entry_name != oname:
                     continue
                 if twos is not None:
@@ -3763,13 +3884,16 @@ class ExperimentModel(QObject):
         add_idx = {name: 0 for name, singles, _ in additives if singles}
         ch_idx: Dict[Tuple[str, str], int] = {}
         for gname, bucket in choice_groups.items():
+            self._optimization_checkpoint()
             for oname, singles, _ in bucket:
+                self._optimization_checkpoint()
                 if singles:
                     ch_idx[(gname, oname)] = 0
 
         # Two-stock selections (index into twos), None means single-stock
         add_two_idx: Dict[str, Optional[int]] = {}
         for name, singles, twos in additives:
+            self._optimization_checkpoint()
             if not singles:
                 resolved = twos if twos is not None else _ensure_additive_twos(name)
                 add_two_idx[name] = 0 if resolved else None
@@ -3778,7 +3902,9 @@ class ExperimentModel(QObject):
 
         ch_two_idx: Dict[Tuple[str, str], Optional[int]] = {}
         for gname, bucket in choice_groups.items():
+            self._optimization_checkpoint()
             for oname, singles, twos in bucket:
+                self._optimization_checkpoint()
                 if not singles:
                     resolved = twos if twos is not None else _ensure_choice_twos(gname, oname)
                     ch_two_idx[(gname, oname)] = 0 if resolved else None
@@ -3794,12 +3920,16 @@ class ExperimentModel(QObject):
         uploaded_reactions = list(getattr(self, "_uploaded_reactions", None) or [])
         uploaded_targets_by_key: Dict[Tuple[str, Optional[str]], List[Tuple[int, float]]] = {}
         for row_index, rxn in enumerate(uploaded_reactions):
+            self._optimization_checkpoint()
             for key, target in (rxn or {}).items():
+                self._optimization_checkpoint()
                 uploaded_targets_by_key.setdefault(key, []).append((int(row_index), float(target)))
         additional_row_targets_by_key: Dict[Tuple[str, Optional[str]], List[Tuple[int, float]]] = {}
         for row in additional_condition_rows:
+            self._optimization_checkpoint()
             row_index = int(row.get("row_index", 0))
             for key, target in (row.get("reaction") or {}).items():
+                self._optimization_checkpoint()
                 additional_row_targets_by_key.setdefault(key, []).append((row_index, float(target)))
         uploaded_row_totals_cache: Optional[List[float]] = None
         uploaded_key_volume_cache: Dict[Tuple[str, Optional[str]], List[float]] = {}
@@ -3822,6 +3952,7 @@ class ExperimentModel(QObject):
                 return
 
             for key in changed_keys:
+                self._optimization_checkpoint()
                 selected_plan_cache.pop(key, None)
                 if uploaded_row_totals_cache is None:
                     uploaded_key_volume_cache.pop(key, None)
@@ -3829,12 +3960,14 @@ class ExperimentModel(QObject):
                     old_volumes = uploaded_key_volume_cache.pop(key, None)
                     if old_volumes is not None:
                         for index, volume in enumerate(old_volumes):
+                            self._optimization_checkpoint()
                             uploaded_row_totals_cache[index] -= float(volume)
 
                     if key in uploaded_targets_by_key:
                         new_volumes = _uploaded_key_row_volumes(key)
                         uploaded_key_volume_cache[key] = new_volumes
                         for index, volume in enumerate(new_volumes):
+                            self._optimization_checkpoint()
                             uploaded_row_totals_cache[index] += float(volume)
 
                 if additional_row_totals_cache is None:
@@ -3844,6 +3977,7 @@ class ExperimentModel(QObject):
                 old_volumes = additional_key_volume_cache.pop(key, None)
                 if old_volumes is not None:
                     for index, volume in enumerate(old_volumes):
+                        self._optimization_checkpoint()
                         additional_row_totals_cache[index] -= float(volume)
 
                 if key not in additional_row_targets_by_key:
@@ -3851,12 +3985,14 @@ class ExperimentModel(QObject):
                 new_volumes = _additional_key_row_volumes(key)
                 additional_key_volume_cache[key] = new_volumes
                 for index, volume in enumerate(new_volumes):
+                    self._optimization_checkpoint()
                     additional_row_totals_cache[index] += float(volume)
 
         def selection_counts() -> Tuple[int, float]:
             tot_stocks = 0
             sum_conc = 0.0
             for name, singles, twos in additives:
+                self._optimization_checkpoint()
                 if add_two_idx[name] is not None:
                     resolved_twos = twos if twos is not None else _ensure_additive_twos(name)
                     p2 = resolved_twos[add_two_idx[name]]
@@ -3867,7 +4003,9 @@ class ExperimentModel(QObject):
                     tot_stocks += 1
                     sum_conc += p1.stock_concentration
             for gname, bucket in choice_groups.items():
+                self._optimization_checkpoint()
                 for oname, singles, twos in bucket:
+                    self._optimization_checkpoint()
                     if ch_two_idx[(gname, oname)] is not None:
                         resolved_twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
                         p2 = resolved_twos[ch_two_idx[(gname, oname)]]
@@ -3887,6 +4025,7 @@ class ExperimentModel(QObject):
             plan = None
             if option_name in (None, ""):
                 for name, singles, twos in additives:
+                    self._optimization_checkpoint()
                     if name != factor_name:
                         continue
                     if add_two_idx[name] is not None:
@@ -3901,6 +4040,7 @@ class ExperimentModel(QObject):
 
             bucket = choice_groups.get(factor_name, [])
             for oname, singles, twos in bucket:
+                self._optimization_checkpoint()
                 if oname != option_name:
                     continue
                 if ch_two_idx[(factor_name, oname)] is not None:
@@ -3989,6 +4129,7 @@ class ExperimentModel(QObject):
         def _uploaded_key_row_volumes(key: Tuple[str, Optional[str]]) -> List[float]:
             volumes = [0.0] * len(uploaded_reactions)
             for row_index, target in uploaded_targets_by_key.get(key, []):
+                self._optimization_checkpoint()
                 volume_nL, _contributor = _selected_plan_volume_for_target(
                     key,
                     float(target),
@@ -4000,6 +4141,7 @@ class ExperimentModel(QObject):
         def _additional_key_row_volumes(key: Tuple[str, Optional[str]]) -> List[float]:
             volumes = [0.0] * len(additional_condition_rows)
             for row_index, target in additional_row_targets_by_key.get(key, []):
+                self._optimization_checkpoint()
                 volume_nL, _contributor = _selected_plan_volume_for_target(
                     key,
                     float(target),
@@ -4018,9 +4160,11 @@ class ExperimentModel(QObject):
             uploaded_key_volume_cache.clear()
             totals = [0.0] * len(uploaded_reactions)
             for key in uploaded_targets_by_key.keys():
+                self._optimization_checkpoint()
                 volumes = _uploaded_key_row_volumes(key)
                 uploaded_key_volume_cache[key] = volumes
                 for index, volume in enumerate(volumes):
+                    self._optimization_checkpoint()
                     totals[index] += float(volume)
             uploaded_row_totals_cache = totals
             return uploaded_row_totals_cache
@@ -4035,9 +4179,11 @@ class ExperimentModel(QObject):
             additional_key_volume_cache.clear()
             totals = [0.0] * len(additional_condition_rows)
             for key in additional_row_targets_by_key.keys():
+                self._optimization_checkpoint()
                 volumes = _additional_key_row_volumes(key)
                 additional_key_volume_cache[key] = volumes
                 for index, volume in enumerate(volumes):
+                    self._optimization_checkpoint()
                     totals[index] += float(volume)
             additional_row_totals_cache = totals
             return additional_row_totals_cache
@@ -4089,6 +4235,7 @@ class ExperimentModel(QObject):
             rxn = uploaded_reactions[row_index] if 0 <= row_index < len(uploaded_reactions) else {}
             contributors: List[Dict[str, Any]] = []
             for key, target in (rxn or {}).items():
+                self._optimization_checkpoint()
                 _volume_nL, contributor = _selected_plan_volume_for_target(
                     key,
                     float(target),
@@ -4110,6 +4257,7 @@ class ExperimentModel(QObject):
             row = additional_condition_rows[row_index] if 0 <= row_index < len(additional_condition_rows) else {}
             contributors: List[Dict[str, Any]] = []
             for key, target in (row.get("reaction") or {}).items():
+                self._optimization_checkpoint()
                 _volume_nL, contributor = _selected_plan_volume_for_target(
                     key,
                     float(target),
@@ -4238,14 +4386,17 @@ class ExperimentModel(QObject):
 
             total = 0.0
             for name, singles, twos in additives:
+                self._optimization_checkpoint()
                 if add_two_idx[name] is not None:
                     resolved_twos = twos if twos is not None else _ensure_additive_twos(name)
                     total += resolved_twos[add_two_idx[name]].max_volume_nL
                 else:
                     total += singles[add_idx[name]].max_volume_nL
             for gname, bucket in choice_groups.items():
+                self._optimization_checkpoint()
                 m = 0.0
                 for oname, singles, twos in bucket:
+                    self._optimization_checkpoint()
                     if ch_two_idx[(gname, oname)] is not None:
                         resolved_twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
                         v = resolved_twos[ch_two_idx[(gname, oname)]].max_volume_nL
@@ -4276,6 +4427,7 @@ class ExperimentModel(QObject):
             # current volumes for each option
             vols: List[Tuple[str, float]] = []
             for n, singles, twos in bucket:
+                self._optimization_checkpoint()
                 v = (twos[ch_two_idx[(gname, n)]].max_volume_nL
                     if ch_two_idx[(gname, n)] is not None
                     else singles[ch_idx[(gname, n)]].max_volume_nL)
@@ -4316,6 +4468,7 @@ class ExperimentModel(QObject):
                 # still sharing by tie_count.
                 k = i + 1
                 while k < len(singles_this) and singles_this[k].max_volume_nL >= cur_max - 1e-9:
+                    self._optimization_checkpoint()
                     k += 1
                 if k < len(singles_this):
                     ahead_drop = max(0.0, cur.max_volume_nL - singles_this[k].max_volume_nL)
@@ -4328,6 +4481,7 @@ class ExperimentModel(QObject):
             # Unique argmax but next step still above others_max: look ahead to first k < others_max
             k = i + 1
             while k < len(singles_this) and singles_this[k].max_volume_nL >= others_max - 1e-9:
+                self._optimization_checkpoint()
                 k += 1
             if k < len(singles_this):
                 drop = max(0.0, cur_max - max(others_max, singles_this[k].max_volume_nL))
@@ -4357,8 +4511,10 @@ class ExperimentModel(QObject):
                 return False
             singles_this = None
             for g, bucket in choice_groups.items():
+                self._optimization_checkpoint()
                 if g == gname:
                     for n, s, _ in bucket:
+                        self._optimization_checkpoint()
                         if n == oname:
                             singles_this = s
                             break
@@ -4391,6 +4547,7 @@ class ExperimentModel(QObject):
             )
             candidates: List[Tuple[int, _PlanAccuracyScore]] = []
             for idx, candidate in enumerate(singles):
+                self._optimization_checkpoint()
                 if (
                     idx == current_index
                     or float(candidate.max_volume_nL) > local_volume_limit + 1e-12
@@ -4426,6 +4583,7 @@ class ExperimentModel(QObject):
             )
             candidates: List[Tuple[int, _PlanAccuracyScore]] = []
             for idx, candidate in enumerate(twos):
+                self._optimization_checkpoint()
                 if (
                     idx == current_index
                     or float(candidate.max_volume_nL) > local_volume_limit + 1e-12
@@ -4448,6 +4606,7 @@ class ExperimentModel(QObject):
         # Step 1: single-stock only
         # -----------------------------
         while True:
+            self._optimization_checkpoint()
             worst = worst_case_nonfill_volume()
             if worst <= V_print + 1e-6:
                 break
@@ -4459,6 +4618,7 @@ class ExperimentModel(QObject):
 
             # Additives
             for name, singles, _ in additives:
+                self._optimization_checkpoint()
                 if not can_bump_add(name):
                     continue
                 vol_red, conc_inc = bump_gain_add(name)
@@ -4472,7 +4632,9 @@ class ExperimentModel(QObject):
 
             # Choice options (tie-aware)
             for gname, bucket in choice_groups.items():
+                self._optimization_checkpoint()
                 for oname, singles, _ in bucket:
+                    self._optimization_checkpoint()
                     if not can_bump_opt(gname, oname):
                         continue
                     vol_red_eff, conc_eff = bump_gain_opt(gname, oname)
@@ -4501,6 +4663,7 @@ class ExperimentModel(QObject):
         feasibility_limit = V_print if allow_avoidable_grouping else V_accept
         if worst_case_nonfill_volume() > feasibility_limit + 1e-6 and allow_two:
             while True:
+                self._optimization_checkpoint()
                 worst = worst_case_nonfill_volume()
                 if worst <= V_print + 1e-6:
                     break
@@ -4511,11 +4674,13 @@ class ExperimentModel(QObject):
 
                 # Additives
                 for name, singles, twos in additives:
+                    self._optimization_checkpoint()
                     twos = twos if twos is not None else _ensure_additive_twos(name)
                     if not twos:
                         continue
                     cur_v = singles[add_idx[name]].max_volume_nL if add_two_idx[name] is None else twos[add_two_idx[name]].max_volume_nL
                     for i2, p2 in enumerate(twos):
+                        self._optimization_checkpoint()
                         if add_two_idx[name] is not None and add_two_idx[name] == i2:
                             continue
                         vol_red_local = max(0.0, cur_v - p2.max_volume_nL)
@@ -4532,8 +4697,10 @@ class ExperimentModel(QObject):
                 best_tie_gain = 0.0
                 best_tie_penalty = float("inf")
                 for gname, bucket in choice_groups.items():
+                    self._optimization_checkpoint()
                     vols = []
                     for oname, singles, twos in bucket:
+                        self._optimization_checkpoint()
                         twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
                         v = twos[ch_two_idx[(gname, oname)]].max_volume_nL if ch_two_idx[(gname, oname)] is not None else singles[ch_idx[(gname, oname)]].max_volume_nL
                         vols.append((oname, v))
@@ -4542,6 +4709,7 @@ class ExperimentModel(QObject):
                     others_max = {oname: (max(x for n, x in vols if n != oname) if len(vols) > 1 else 0.0) for oname, _ in vols}
 
                     for oname, singles, twos in bucket:
+                        self._optimization_checkpoint()
                         twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
                         if not twos:
                             continue
@@ -4549,6 +4717,7 @@ class ExperimentModel(QObject):
                         is_argmax = abs(cur_v - cur_group_max) <= 1e-9
 
                         for i2, p2 in enumerate(twos):
+                            self._optimization_checkpoint()
                             if ch_two_idx[(gname, oname)] is not None and ch_two_idx[(gname, oname)] == i2:
                                 continue
                             new_group_max = max(others_max[oname], p2.max_volume_nL) if is_argmax else cur_group_max
@@ -4581,6 +4750,7 @@ class ExperimentModel(QObject):
                     if aggregate_issue is None:
                         aggregate_issue = additional_issue
                     for name, singles, twos in additives:
+                        self._optimization_checkpoint()
                         if add_two_idx[name] is not None:
                             continue
                         opt = additive_option_map[name]
@@ -4593,7 +4763,9 @@ class ExperimentModel(QObject):
                             )
                             _record_volume_budget_issue((name, None), opt, required_volume_nL=selected.max_volume_nL, code=code)
                     for gname, bucket in choice_groups.items():
+                        self._optimization_checkpoint()
                         for oname, singles, twos in bucket:
+                            self._optimization_checkpoint()
                             key = (gname, oname)
                             if ch_two_idx[key] is not None:
                                 continue
@@ -4639,6 +4811,7 @@ class ExperimentModel(QObject):
 
         # Additives
         for idx, (name, singles, twos) in enumerate(additives):
+            self._optimization_checkpoint()
             if add_two_idx.get(name) is None:
                 continue
             twos = twos if twos is not None else _ensure_additive_twos(name)
@@ -4672,6 +4845,7 @@ class ExperimentModel(QObject):
             saved_two = add_two_idx[name]
             best_i = None
             for i, p1 in enumerate(singles):
+                self._optimization_checkpoint()
                 add_two_idx[name] = None
                 add_idx[name] = i
                 _invalidate_selected_volume_cache((name, None))
@@ -4684,8 +4858,10 @@ class ExperimentModel(QObject):
 
         # Choice groups
         for gname, bucket in list(choice_groups.items()):
+            self._optimization_checkpoint()
             new_bucket = []
             for oname, singles, twos in bucket:
+                self._optimization_checkpoint()
                 key = (gname, oname)
                 if ch_two_idx.get(key) is None:
                     new_bucket.append((oname, singles, twos))
@@ -4719,6 +4895,7 @@ class ExperimentModel(QObject):
                     saved_two = ch_two_idx[key]
                     best_i = None
                     for i, p1 in enumerate(singles):
+                        self._optimization_checkpoint()
                         ch_two_idx[key] = None
                         ch_idx[key] = i
                         _invalidate_selected_volume_cache(key)
@@ -4735,12 +4912,15 @@ class ExperimentModel(QObject):
         if worst_case_nonfill_volume() <= V_print + 1e-6:
             changed = True
             while changed:
+                self._optimization_checkpoint()
                 changed = False
                 for name, singles, _ in additives:
+                    self._optimization_checkpoint()
                     if add_two_idx[name] is not None:
                         continue
                     i = add_idx[name]
                     while i > 0:
+                        self._optimization_checkpoint()
                         prev_i = i - 1
                         add_idx[name] = prev_i
                         _invalidate_selected_volume_cache((name, None))
@@ -4752,12 +4932,15 @@ class ExperimentModel(QObject):
                             _invalidate_selected_volume_cache((name, None))
                             break
                 for gname, bucket in choice_groups.items():
+                    self._optimization_checkpoint()
                     for oname, singles, _ in bucket:
+                        self._optimization_checkpoint()
                         key = (gname, oname)
                         if ch_two_idx[key] is not None:
                             continue
                         i = ch_idx[key]
                         while i > 0:
+                            self._optimization_checkpoint()
                             prev_i = i - 1
                             ch_idx[key] = prev_i
                             _invalidate_selected_volume_cache(key)
@@ -4784,6 +4967,7 @@ class ExperimentModel(QObject):
         )
 
         for name, singles, twos in additives:
+            self._optimization_checkpoint()
             opt = additive_option_map[name]
             if getattr(opt, "forced_stock_conc", None) not in (None, 0.0):
                 continue
@@ -4793,6 +4977,7 @@ class ExperimentModel(QObject):
                 for candidate_index in _refine_two_candidates(
                     (name, None), opt, resolved_twos, current_index
                 ):
+                    self._optimization_checkpoint()
                     add_two_idx[name] = candidate_index
                     _invalidate_selected_volume_cache((name, None))
                     if worst_case_nonfill_volume() <= refinement_volume_limit + 1e-6:
@@ -4804,6 +4989,7 @@ class ExperimentModel(QObject):
                 for candidate_index in _refine_single_candidates(
                     (name, None), opt, singles, current_index
                 ):
+                    self._optimization_checkpoint()
                     add_idx[name] = candidate_index
                     _invalidate_selected_volume_cache((name, None))
                     if worst_case_nonfill_volume() <= refinement_volume_limit + 1e-6:
@@ -4812,7 +4998,9 @@ class ExperimentModel(QObject):
                     _invalidate_selected_volume_cache((name, None))
 
         for gname, bucket in choice_groups.items():
+            self._optimization_checkpoint()
             for oname, singles, twos in bucket:
+                self._optimization_checkpoint()
                 key = (gname, oname)
                 opt = choice_option_map[key]
                 if getattr(opt, "forced_stock_conc", None) not in (None, 0.0):
@@ -4823,6 +5011,7 @@ class ExperimentModel(QObject):
                     for candidate_index in _refine_two_candidates(
                         key, opt, resolved_twos, current_index
                     ):
+                        self._optimization_checkpoint()
                         ch_two_idx[key] = candidate_index
                         _invalidate_selected_volume_cache(key)
                         if worst_case_nonfill_volume() <= refinement_volume_limit + 1e-6:
@@ -4834,6 +5023,7 @@ class ExperimentModel(QObject):
                     for candidate_index in _refine_single_candidates(
                         key, opt, singles, current_index
                     ):
+                        self._optimization_checkpoint()
                         ch_idx[key] = candidate_index
                         _invalidate_selected_volume_cache(key)
                         if worst_case_nonfill_volume() <= refinement_volume_limit + 1e-6:
@@ -4908,6 +5098,7 @@ class ExperimentModel(QObject):
             target_count = 0
             concentration_burden = 0.0
             for key in sorted(option_by_key, key=_canonical_resolution_key):
+                self._optimization_checkpoint()
                 plan = _selected_plan_for_key(key)
                 if plan is None:
                     continue
@@ -4972,6 +5163,7 @@ class ExperimentModel(QObject):
                 )
 
             for key, evaluation in details.get("evaluations", {}).items():
+                self._optimization_checkpoint()
                 plan = evaluation["plan"]
                 opt = option_by_key[key]
                 if isinstance(plan, SingleStockPlan):
@@ -5013,6 +5205,7 @@ class ExperimentModel(QObject):
                 for row in evaluation.get("rows", []):
                     # A fixed user-provided stock can legitimately leave a target
                     # unreachable; generated candidates may not introduce that state.
+                    self._optimization_checkpoint()
                     if not bool(row.get("reachable")) and forced_stock in (None, 0.0):
                         raise ValueError(
                             f"Resolution allocation cannot reach a target for {key!r}."
@@ -5054,11 +5247,13 @@ class ExperimentModel(QObject):
             factor_name, option_name = key
             if option_name in (None, ""):
                 for idx, (name, singles, twos) in enumerate(additives):
+                    self._optimization_checkpoint()
                     if name == factor_name:
                         return "add", idx, singles, twos
             else:
                 bucket = choice_groups.get(factor_name, [])
                 for idx, (name, singles, twos) in enumerate(bucket):
+                    self._optimization_checkpoint()
                     if name == option_name:
                         return "choice", idx, singles, twos
             raise KeyError(key)
@@ -5350,6 +5545,7 @@ class ExperimentModel(QObject):
             merged = list(existing or [])
             signatures = {_two_plan_signature(plan) for plan in merged}
             for plan in resolved:
+                self._optimization_checkpoint()
                 signature = _two_plan_signature(plan)
                 if signature not in signatures:
                     signatures.add(signature)
@@ -5364,6 +5560,7 @@ class ExperimentModel(QObject):
             if resolution_metrics_prepared:
                 return True
             for key in sorted(option_by_key, key=_canonical_resolution_key):
+                self._optimization_checkpoint()
                 opt = option_by_key[key]
                 levels = tuple(_effective_targets_for_opt(key, opt))
                 level_lookup = {
@@ -5376,6 +5573,7 @@ class ExperimentModel(QObject):
                     len(uploaded_reactions), len(levels), dtype=np.int32
                 )
                 for row_index, target in uploaded_targets_by_key.get(key, []):
+                    self._optimization_checkpoint()
                     target_key = self._normalize_target_key(float(target))
                     if target_key not in level_lookup:
                         raise ValueError(
@@ -5388,6 +5586,7 @@ class ExperimentModel(QObject):
                     len(additional_condition_rows), len(levels), dtype=np.int32
                 )
                 for row_index, target in additional_row_targets_by_key.get(key, []):
+                    self._optimization_checkpoint()
                     target_key = self._normalize_target_key(float(target))
                     if target_key not in level_lookup:
                         raise ValueError(
@@ -5438,6 +5637,7 @@ class ExperimentModel(QObject):
                 droplet_signature: List[Any] = []
                 level_volumes: List[float] = []
                 for target in resolution_target_levels[key]:
+                    self._optimization_checkpoint()
                     target_key = self._normalize_target_key(float(target))
                     row = rows_by_target.get(target_key)
                     if row is None:
@@ -5522,12 +5722,14 @@ class ExperimentModel(QObject):
                 )
 
             for key in keys:
+                self._optimization_checkpoint()
                 if _resolution_work_limit_reached():
                     _publish_counts(sum(len(value) for value in pools.values()))
                     return None, None
                 _kind, _idx, singles, twos = _candidate_lists_for_key(key)
                 entries: List[Dict[str, Any]] = []
                 for index, plan in enumerate(singles):
+                    self._optimization_checkpoint()
                     if not _consume_resolution_work("candidate_pool"):
                         _publish_counts(sum(len(value) for value in pools.values()))
                         return None, None
@@ -5538,6 +5740,7 @@ class ExperimentModel(QObject):
                     )
                     generated_total += 1
                 for index, plan in enumerate(twos or []):
+                    self._optimization_checkpoint()
                     if not include_twos and id(plan) != incumbent_plan_ids.get(key):
                         continue
                     if not _consume_resolution_work("candidate_pool"):
@@ -5553,6 +5756,7 @@ class ExperimentModel(QObject):
 
                 deduplicated: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
                 for entry in entries:
+                    self._optimization_checkpoint()
                     signature = entry["droplet_signature"]
                     incumbent = deduplicated.get(signature)
                     if incumbent is None or entry["local_rank"] < incumbent["local_rank"]:
@@ -5566,6 +5770,8 @@ class ExperimentModel(QObject):
                 forced = getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
                 retained = self._filter_resolution_candidate_entries(
                     unique_entries, forced=forced, diagnostics=dominance_diagnostics,
+                    **({"control": self._optimization_control}
+                       if getattr(self, "_optimization_control", None) is not None else {}),
                 )
                 dominated_total += len(unique_entries) - len(retained)
                 retained.sort(key=lambda entry: (
@@ -5587,6 +5793,7 @@ class ExperimentModel(QObject):
             state: Mapping[Tuple[str, Optional[str]], Mapping[str, Any]],
         ):
             for key, entry in state.items():
+                self._optimization_checkpoint()
                 factor_name, option_name = key
                 if option_name in (None, ""):
                     if entry["mode"] == "single":
@@ -5606,12 +5813,15 @@ class ExperimentModel(QObject):
         def _achievable_loss_tiers(keys, pools, seed_tier):
             tiers: Set[Tuple[int, int]] = {(0, 0)}
             for key in keys:
+                self._optimization_checkpoint()
                 losses = {
                     int(entry["score"].lost_levels) for entry in pools[key]
                 }
                 next_tiers: Set[Tuple[int, int]] = set()
                 for total_loss, worst_loss in tiers:
+                    self._optimization_checkpoint()
                     for local_loss in losses:
+                        self._optimization_checkpoint()
                         tier = (
                             int(total_loss + local_loss),
                             int(max(worst_loss, local_loss)),
@@ -5661,6 +5871,7 @@ class ExperimentModel(QObject):
             )
             donor_reductions: List[Tuple[float, Tuple[str, Optional[str]]]] = []
             for key in keys:
+                self._optimization_checkpoint()
                 if key in collapsed_keys:
                     continue
                 seed_volume = float(
@@ -5701,10 +5912,13 @@ class ExperimentModel(QObject):
             minimum_additional_by_key: Dict[Any, np.ndarray] = {}
             minimum_base_by_key: Dict[Any, float] = {}
             for key in ordered_keys:
+                self._optimization_checkpoint()
                 level_count = len(resolution_target_levels[key])
                 minimum_levels = [math.inf] * level_count
                 for entry in pools[key]:
+                    self._optimization_checkpoint()
                     for level_index, volume in enumerate(entry["level_volumes"]):
+                        self._optimization_checkpoint()
                         minimum_levels[level_index] = min(
                             minimum_levels[level_index], float(volume)
                         )
@@ -5733,6 +5947,7 @@ class ExperimentModel(QObject):
             suffix_concentration = [0.0] * (key_count + 1)
             suffix_worst_error = [0.0] * (key_count + 1)
             for position in range(key_count - 1, -1, -1):
+                self._optimization_checkpoint()
                 key = ordered_keys[position]
                 entries = pools[key]
                 suffix_uploaded[position] = (
@@ -5768,6 +5983,7 @@ class ExperimentModel(QObject):
             ]
             choice_keys_by_group: Dict[str, List[Tuple[str, Optional[str]]]] = {}
             for key in ordered_keys:
+                self._optimization_checkpoint()
                 if key[1] not in (None, ""):
                     choice_keys_by_group.setdefault(key[0], []).append(key)
 
@@ -5797,6 +6013,7 @@ class ExperimentModel(QObject):
                 )
                 choice_total = 0.0
                 for group_keys in choice_keys_by_group.values():
+                    self._optimization_checkpoint()
                     choice_total += max(
                         (
                             float(selected_entries[key]["score"].max_volume_nL)
@@ -5822,6 +6039,7 @@ class ExperimentModel(QObject):
                 return max(uploaded_bound, additional_bound)
 
             for target_tier in tiers:
+                self._optimization_checkpoint()
                 if search_aborted or _search_stop_reached():
                     break
                 stock_allocation_loss_tiers_evaluated += 1
@@ -5935,6 +6153,7 @@ class ExperimentModel(QObject):
 
                     key = ordered_keys[position]
                     for entry in pools[key]:
+                        self._optimization_checkpoint()
                         score = entry["score"]
                         local_loss = int(score.lost_levels)
                         next_total = total_loss + local_loss
@@ -5985,7 +6204,13 @@ class ExperimentModel(QObject):
                         if search_aborted:
                             return
 
-                _search_tier(0, 0, 0, 0, 0.0, 0.0, 0.0)
+                try:
+                    _search_tier(0, 0, 0, 0, 0.0, 0.0, 0.0)
+                finally:
+                    # The recursive closure otherwise retains candidate pools
+                    # from completed searches until a process-wide full GC.
+                    # Release it on success, failure and cancellation alike.
+                    _search_tier = None
                 if tier_feasible or search_aborted:
                     break
 
@@ -6049,6 +6274,7 @@ class ExperimentModel(QObject):
             stock_allocation_stop_reason = "seed_zero_loss"
 
         if not allow_avoidable_grouping and int(seed_details["quality"][0]) > 0:
+            self._optimization_checkpoint("Optimizing allocations")
             resolution_started_at = optimizer_clock()
             try:
                 # Both modes complete exactly the same single-stock search before
@@ -6071,6 +6297,7 @@ class ExperimentModel(QObject):
                     and not _resolution_work_limit_reached()
                     and stock_allocation_states_evaluated < self.MAX_STOCK_ALLOCATION_STATES
                 ):
+                    self._optimization_checkpoint("Exploring two-stock allocations")
                     # Reserve at least half the remaining work for combining
                     # candidates. A difficult first reagent cannot starve peers.
                     eligible_keys = [
@@ -6090,6 +6317,7 @@ class ExperimentModel(QObject):
                     pair_budget = remaining // 2
                     quota, remainder = divmod(pair_budget, len(eligible_keys) or 1)
                     for index, key in enumerate(eligible_keys):
+                        self._optimization_checkpoint()
                         stock_allocation_pair_work_by_key[key] = {
                             "limit": quota + int(index < remainder),
                             "used": 0,
@@ -6104,6 +6332,7 @@ class ExperimentModel(QObject):
                     )
                     resolution_search_exhausted = False
                     for key in processing_keys:
+                        self._optimization_checkpoint()
                         if _zero_loss_polish_exhausted() or _resolution_work_limit_reached():
                             break
                         _ensure_resolution_twos_for_key(key)
@@ -6121,6 +6350,8 @@ class ExperimentModel(QObject):
                         stock_allocation_combined_work = (
                             stock_allocation_work_units_evaluated - combined_started_at_work
                         )
+            except OptimizationCancelled:
+                raise
             except Exception as exc:
                 # Pair exploration must never discard a validated baseline or
                 # an improvement already accepted by the incremental callback.
@@ -6188,6 +6419,7 @@ class ExperimentModel(QObject):
             if aggregate_issue is None:
                 aggregate_issue = additional_issue
             for name, singles, twos in additives:
+                self._optimization_checkpoint()
                 if add_two_idx[name] is not None:
                     continue
                 opt = additive_option_map[name]
@@ -6200,7 +6432,9 @@ class ExperimentModel(QObject):
                     )
                     _record_volume_budget_issue((name, None), opt, required_volume_nL=selected.max_volume_nL, code=code)
             for gname, bucket in choice_groups.items():
+                self._optimization_checkpoint()
                 for oname, singles, twos in bucket:
+                    self._optimization_checkpoint()
                     key = (gname, oname)
                     if ch_two_idx[key] is not None:
                         continue
@@ -6230,6 +6464,7 @@ class ExperimentModel(QObject):
         stock_rows = []
 
         for name, singles, twos in additives:
+            self._optimization_checkpoint()
             if add_two_idx[name] is not None:
                 twos = twos if twos is not None else _ensure_additive_twos(name)
                 p2 = twos[add_two_idx[name]]
@@ -6296,7 +6531,9 @@ class ExperimentModel(QObject):
                 ))
 
         for gname, bucket in choice_groups.items():
+            self._optimization_checkpoint()
             for oname, singles, twos in bucket:
+                self._optimization_checkpoint()
                 key = (gname, oname)
                 if ch_two_idx[key] is not None:
                     twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
@@ -6370,6 +6607,7 @@ class ExperimentModel(QObject):
         distinct_level_loss = 0
         collapsed_target_keys: List[Tuple[str, Optional[str]]] = []
         for key, rows in self._target_preview_map.items():
+            self._optimization_checkpoint()
             resolution_summary = self._summarize_target_resolution_rows(rows)
             lost_level_count = int(resolution_summary["lost_level_count"])
             if lost_level_count <= 0:
@@ -6529,6 +6767,7 @@ class ExperimentModel(QObject):
         )
 
         for key in two_stock_search_limited_keys:
+            self._optimization_checkpoint()
             opt = self._get_option_for_key(key)
             if opt is None:
                 continue
@@ -6550,6 +6789,7 @@ class ExperimentModel(QObject):
             )
 
         for key, rows in self._target_preview_map.items():
+            self._optimization_checkpoint()
             opt = self._get_option_for_key(key)
             if opt is None or getattr(opt, "forced_stock_conc", None) in (None, 0.0):
                 continue
@@ -6601,6 +6841,7 @@ class ExperimentModel(QObject):
             return value if value >= 0 else None
 
         for key, opt in expected_options.items():
+            self._optimization_checkpoint()
             plan = self.plans_per_option.get(key)
             label = self._design_key_label(key)
             if not isinstance(plan, Mapping):
@@ -6660,6 +6901,7 @@ class ExperimentModel(QObject):
 
             max_stock = getattr(opt, "max_stock_conc", None)
             for stock_index, stock in enumerate(stocks):
+                self._optimization_checkpoint()
                 try:
                     concentration = float(stock.get("stock_concentration"))
                     droplet_volume = float(stock.get("droplet_volume_nL"))
@@ -6700,6 +6942,7 @@ class ExperimentModel(QObject):
                 for row in self._target_preview_map.get(key, [])
             }
             for requested_final in _effective_targets_for_opt(key, opt):
+                self._optimization_checkpoint()
                 requested_key = self._normalize_target_key(requested_final)
                 target_adjusted = max(0.0, float(requested_final) - starting)
                 stored_drops = [
@@ -6755,8 +6998,10 @@ class ExperimentModel(QObject):
 
         if materialized_mappings_valid:
             for run_spec in self._iter_unique_reaction_constraint_specs():
+                self._optimization_checkpoint()
                 row_volume_nL = 0.0
                 for key, target in run_spec["reaction"].items():
+                    self._optimization_checkpoint()
                     opt = expected_options.get(key)
                     plan = self.plans_per_option.get(key)
                     if opt is None or not isinstance(plan, Mapping):
@@ -6768,6 +7013,7 @@ class ExperimentModel(QObject):
                         - float(getattr(opt, "starting_conc", 0.0) or 0.0),
                     )
                     for stock in plan.get("stocks") or []:
+                        self._optimization_checkpoint()
                         drops = _explicit_mapping_value(stock, target_adjusted)
                         if drops is None:
                             materialized_mappings_valid = False
@@ -6811,6 +7057,7 @@ class ExperimentModel(QObject):
         ]
         rows_by_runtime_id: Dict[str, Dict[str, Any]] = {}
         for row in runtime_identity_rows:
+            self._optimization_checkpoint()
             try:
                 runtime_stock_id = stock_id_for_row(row)
             except ValueError as exc:
@@ -7292,6 +7539,7 @@ class ExperimentModel(QObject):
 
                 # Additives
                 for f in additives:
+                    self._optimization_checkpoint()
                     opt = f.options[0]
                     levels = sorted(set(float(t) for t in opt.targets))
                     facs.append({
@@ -7302,13 +7550,18 @@ class ExperimentModel(QObject):
 
                 # Choice groups
                 for f in choices:
+                    self._optimization_checkpoint()
                     lvls = []
                     for opt in f.options:
+                        self._optimization_checkpoint()
                         if not self._choice_option_contributes_to_base_design(opt):
                             continue
                         for t in opt.targets:
+                            self._optimization_checkpoint()
                             try:
                                 value = float(t)
+                            except OptimizationCancelled:
+                                raise
                             except Exception:
                                 continue
                             if math.isfinite(value):
@@ -7346,8 +7599,10 @@ class ExperimentModel(QObject):
 
                 reactions: List[Dict] = []
                 for row in design:
+                    self._optimization_checkpoint()
                     sel = {}
                     for fd, idx in zip(facs, row.tolist()):
+                        self._optimization_checkpoint()
                         if fd["kind"] == "additive":
                             t = fd["levels"][int(idx)]
                             sel[fd["key"]] = t
@@ -7360,6 +7615,8 @@ class ExperimentModel(QObject):
                 return reactions
 
             except DesignSizeLimitError:
+                raise
+            except OptimizationCancelled:
                 raise
             except Exception as e:
                 raise DesignSizeLimitError(
@@ -7379,6 +7636,7 @@ class ExperimentModel(QObject):
         add_target_lists = []
         add_keys = []
         for f in additives_list:
+            self._optimization_checkpoint()
             opt = f.options[0]
             add_target_lists.append(opt.targets)
             add_keys.append((f.name, None))
@@ -7388,8 +7646,10 @@ class ExperimentModel(QObject):
         # For choices, each group contributes a sum over options (option, target) tuples
         choice_lists = []
         for f in choices_list:
+            self._optimization_checkpoint()
             tuples = []  # ( (group, option), targets list )
             for opt in f.options:
+                self._optimization_checkpoint()
                 if not self._choice_option_contributes_to_base_design(opt):
                     continue
                 tuples.append(((f.name, opt.name), opt.targets))
@@ -7399,25 +7659,33 @@ class ExperimentModel(QObject):
         # Build per-group choice sets
         per_group_choices: List[List[Tuple[Tuple[str, str], float]]] = []
         for tuples in choice_lists:
+            self._optimization_checkpoint()
             one_group = []
             for key, tlist in tuples:
+                self._optimization_checkpoint()
                 for t in tlist:
+                    self._optimization_checkpoint()
                     one_group.append((key, t))
             per_group_choices.append(one_group)
 
         reactions = []
         for add_selection in add_combos:
+            self._optimization_checkpoint()
             if not per_group_choices:
                 selections = {}
                 for k, t in zip(add_keys, add_selection):
+                    self._optimization_checkpoint()
                     selections[k] = t
                 reactions.append(selections)
             else:
                 for picks in itertools.product(*per_group_choices):
+                    self._optimization_checkpoint()
                     selections = {}
                     for k, t in zip(add_keys, add_selection):
+                        self._optimization_checkpoint()
                         selections[k] = t
                     for (g, o), t in picks:
+                        self._optimization_checkpoint()
                         if not any(key[0] == g for key in selections.keys() if key[1] is not None):
                             selections[(g, o)] = t
                     reactions.append(selections)
@@ -8244,6 +8512,7 @@ class ExperimentModel(QObject):
         plans: Dict[Tuple[str, Optional[str]], Dict[str, Any]] = {}
         if isinstance(raw_plans, Mapping):
             for raw_key, raw_plan in raw_plans.items():
+                self._optimization_checkpoint()
                 if isinstance(raw_key, tuple) and len(raw_key) == 2:
                     key = (str(raw_key[0]), raw_key[1])
                 elif isinstance(raw_key, str):
@@ -8331,6 +8600,7 @@ class ExperimentModel(QObject):
                 )
             )
             for key, option in expected_options.items():
+                self._optimization_checkpoint()
                 plan = plans[key]
                 stocks = list(plan.get("stocks") or [])
                 n_stocks = int(plan.get("n_stocks", len(stocks)))
@@ -8487,6 +8757,7 @@ class ExperimentModel(QObject):
             self._fill_row_cache = None
             self._refresh_plan_preview_maps()
             for key, option in expected_options.items():
+                self._optimization_checkpoint()
                 rows = self._target_preview_map.get(key) or []
                 targets = self._effective_targets_for_key(key, option)
                 if len(rows) != len(targets) or any(
@@ -8510,6 +8781,7 @@ class ExperimentModel(QObject):
                             f'for {key!r}.'
                         )
                 for target in targets:
+                    self._optimization_checkpoint()
                     adjusted = self._normalize_target_key(
                         max(0.0, float(target) - starting)
                     )
@@ -8573,6 +8845,9 @@ class ExperimentModel(QObject):
                 raise ValueError(
                     'Reusable calibrated stock identity does not match the runtime plan.'
                 )
+        except OptimizationCancelled:
+            _restore()
+            raise
         except Exception as exc:
             _restore()
             return {
@@ -8625,6 +8900,8 @@ class ExperimentModel(QObject):
                 if printed_volume_tolerance_nL is not None
                 else self.metadata.get("printed_volume_tolerance_nL", 50.0)
             )
+        except OptimizationCancelled:
+            raise
         except Exception:
             printed_volume_tolerance = 0.0
         if not math.isfinite(printed_volume_tolerance) or printed_volume_tolerance < 0.0:
@@ -8654,6 +8931,8 @@ class ExperimentModel(QObject):
             stock_copy["printing_mode"] = mode
             try:
                 droplet_nL = float(stock_copy.get("droplet_nL"))
+            except OptimizationCancelled:
+                raise
             except Exception:
                 droplet_nL = printing_mode_default_ejection_volume_nl(mode)
             if not math.isfinite(droplet_nL) or droplet_nL <= 0:
@@ -8664,6 +8943,7 @@ class ExperimentModel(QObject):
         def _csv_stock_for_spec(spec: Dict[str, Any]):
             tokens = set(spec["tokens"])
             for stock in stock_candidates:
+                self._optimization_checkpoint()
                 if tokens.intersection(set(stock.get("tokens", []))):
                     matched_stock_names.add(stock["name"])
                     return _stock_with_mode_defaults(stock)
@@ -8671,9 +8951,12 @@ class ExperimentModel(QObject):
 
         def _manual_stock_for_spec(spec: Dict[str, Any], base_stock: Dict[str, Any] | None = None):
             for candidate_key, value in max_stock_map.items():
+                self._optimization_checkpoint()
                 if candidate_key == spec["name"] or self._normalize_import_token(candidate_key) in set(spec["tokens"]):
                     try:
                         stock_conc = float(value)
+                    except OptimizationCancelled:
+                        raise
                     except Exception:
                         continue
                     if stock_conc > 0 and math.isfinite(stock_conc):
@@ -8703,6 +8986,7 @@ class ExperimentModel(QObject):
         spec_by_key = {(spec["name"], None): spec for spec in parsed["reagent_specs"]}
         stocks_by_reagent: Dict[str, Dict[str, Any] | None] = {}
         for spec in parsed["reagent_specs"]:
+            self._optimization_checkpoint()
             stock = _stock_for_spec(spec)
             stocks_by_reagent[spec["name"]] = stock
             if stock is not None:
@@ -8736,6 +9020,7 @@ class ExperimentModel(QObject):
                     })
 
         for stock in stock_candidates:
+            self._optimization_checkpoint()
             if stock["name"] not in matched_stock_names and not any(
                 self._normalize_import_token(stock["name"]) == self._normalize_import_token(k)
                 for k in max_stock_map.keys()
@@ -8746,6 +9031,7 @@ class ExperimentModel(QObject):
         reagent_specs = list(parsed["reagent_specs"])
         well_ids = parsed.get("well_ids") or []
         for row_index, rxn in enumerate(parsed["reactions"]):
+            self._optimization_checkpoint()
             signature = tuple(
                 float(f"{float(rxn.get((spec['name'], None), 0.0)):.12g}")
                 for spec in reagent_specs
@@ -8774,10 +9060,12 @@ class ExperimentModel(QObject):
             row["count"] += 1
 
         for signature, row in composition_lookup.items():
+            self._optimization_checkpoint()
             total = 0.0
             missing = False
             unit_mismatch = False
             for idx, spec in enumerate(reagent_specs):
+                self._optimization_checkpoint()
                 target = float(signature[idx])
                 stock = stocks_by_reagent.get(spec["name"])
                 row["targets"][spec["name"]] = target
@@ -8844,6 +9132,7 @@ class ExperimentModel(QObject):
 
         try:
             draft = ExperimentModel(prof=CURRENT_PROFILE)
+            draft._optimization_control = getattr(self, "_optimization_control", None)
             draft.set_metadata(
                 target_reaction_volume_nL=printed_volume,
                 printed_volume_tolerance_nL=printed_volume_tolerance,
@@ -8857,6 +9146,7 @@ class ExperimentModel(QObject):
                 starting_conc_default=starting_conc_default,
             )
             for factor in draft.factors:
+                self._optimization_checkpoint()
                 stock = stocks_by_reagent.get(factor.name)
                 if stock is not None and factor.options:
                     opt = factor.options[0]
@@ -8880,11 +9170,14 @@ class ExperimentModel(QObject):
             issues_by_key = res.get("issues_by_key") or {}
             if issues_by_key:
                 for key, issue_list in issues_by_key.items():
+                    self._optimization_checkpoint()
                     for issue in issue_list:
+                        self._optimization_checkpoint()
                         _record_draft_optimizer_issue(key, issue)
             if res.get("best"):
                 stock_leg_indices: Dict[str, int] = {}
                 for row in draft.get_stock_table_rows(include_fill=False):
+                    self._optimization_checkpoint()
                     factor_name = str(row.get("factor_name"))
                     plan = draft.plans_per_option.get((factor_name, None)) or {}
                     leg_index = stock_leg_indices.get(factor_name, 0)
@@ -8909,11 +9202,15 @@ class ExperimentModel(QObject):
                         "code": "draft_optimizer_failed",
                         "message": str(res.get("reason")),
                     })
+        except OptimizationCancelled:
+            raise
         except Exception:
             draft_stock_rows_by_name = {}
             stock_allocation_reuse_payload = None
 
+        self._optimization_checkpoint("Preparing report")
         for issue in issues:
+            self._optimization_checkpoint()
             if issue.get("field") != "volume_budget":
                 continue
             code = str(issue.get("code") or "")
@@ -8921,6 +9218,7 @@ class ExperimentModel(QObject):
             if row_index is None:
                 continue
             for row in composition_lookup.values():
+                self._optimization_checkpoint()
                 if int(row_index) not in set(int(idx) for idx in row.get("row_indices", [])):
                     continue
                 if "selected_plan_required_volume_nL" not in row and issue.get("required_volume_nL") is not None:
@@ -8950,6 +9248,7 @@ class ExperimentModel(QObject):
 
         stock_rows: List[Dict[str, Any]] = []
         for spec in reagent_specs:
+            self._optimization_checkpoint()
             targets = sorted(set(float(t) for t in spec.get("targets", [])))
             positives = [t for t in targets if t > 1e-12]
             diffs = [
@@ -8978,6 +9277,8 @@ class ExperimentModel(QObject):
             if ideal_stock is not None:
                 try:
                     delta_per_drop = float(ideal_stock) * float(droplet_nL) / final_volume
+                except OptimizationCancelled:
+                    raise
                 except Exception:
                     delta_per_drop = None
             worst_volume = None
@@ -9050,6 +9351,7 @@ class ExperimentModel(QObject):
             }
             preview_legs = ideal_rows or [ideal_row]
             for leg_index, leg_row in enumerate(preview_legs):
+                self._optimization_checkpoint()
                 stock_row = dict(base_stock_row)
                 leg_stock = leg_row.get("stock_concentration", ideal_stock)
                 leg_delta = leg_row.get("delta_per_drop")
@@ -9322,7 +9624,9 @@ class ExperimentModel(QObject):
         base_reps = self._metadata_replicate_count()
 
         for replicate_index in range(base_reps):
+            self._optimization_checkpoint()
             for reaction_index, reaction in enumerate(base_reactions):
+                self._optimization_checkpoint()
                 yield {
                     "reaction": dict(reaction),
                     "design_source": "base",
@@ -9332,12 +9636,16 @@ class ExperimentModel(QObject):
                 }
 
         for condition_index, condition in enumerate(self.additional_conditions):
+            self._optimization_checkpoint()
             try:
                 condition_reps = int(condition.replicates)
+            except OptimizationCancelled:
+                raise
             except Exception:
                 condition_reps = 1
             condition_reps = max(1, condition_reps)
             for replicate_index in range(condition_reps):
+                self._optimization_checkpoint()
                 yield {
                     "reaction": dict(condition.targets),
                     "design_source": "additional_condition",
@@ -9367,11 +9675,13 @@ class ExperimentModel(QObject):
         # Map (factor, option_or_None) -> starting_conc and units
         start_lookup: Dict[Tuple[str, Optional[str]], Tuple[float, str]] = {}
         for f in self.factors:
+            self._optimization_checkpoint()
             if f.kind == "additive":
                 o = f.options[0]
                 start_lookup[(f.name, None)] = (float(getattr(o, "starting_conc", 0.0) or 0.0), o.units)
             else:
                 for o in f.options:
+                    self._optimization_checkpoint()
                     start_lookup[(f.name, o.name)] = (float(getattr(o, "starting_conc", 0.0) or 0.0), o.units)
 
         # Per-stock totals and per-reaction maxima
@@ -9382,6 +9692,7 @@ class ExperimentModel(QObject):
         fill_total_drops = 0
 
         for global_index, run_spec in enumerate(run_specs):
+            self._optimization_checkpoint()
             rxn = run_spec["reaction"]
             used_nL = 0.0
 
@@ -9389,6 +9700,7 @@ class ExperimentModel(QObject):
             per_rxn_drops: Dict[Tuple[str, str, float], int] = {}
 
             for key, target in rxn.items():
+                self._optimization_checkpoint()
                 plan = self.plans_per_option.get(key)
                 if plan is None:
                     raise ValueError(
@@ -9442,6 +9754,7 @@ class ExperimentModel(QObject):
 
             # update per-stock per-reaction maxima
             for k, drops in per_rxn_drops.items():
+                self._optimization_checkpoint()
                 stock_max_per_rxn_drops[k] = max(stock_max_per_rxn_drops.get(k, 0), drops)
 
             worst_nonfill = max(worst_nonfill, used_nL)
@@ -9483,6 +9796,7 @@ class ExperimentModel(QObject):
         # Build stock rows cache (with totals AND per-reaction max volume)
         stock_table = []
         for row in self._stock_rows_cache:
+            self._optimization_checkpoint()
             tot_key = (row["factor_name"], row["option_name"], row["stock_concentration"])
             drops = stock_totals.get(tot_key, 0)
             dv_nL = float(row["droplet_volume_nL"])

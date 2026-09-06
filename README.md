@@ -95,6 +95,35 @@ On this Windows checkout, use the repo virtual environment directly:
 ```
 
 Avoid `py -m pytest -q` here unless the Windows Python launcher has been verified; in some agent shells it fails with `No installed Python found!`.
+
+The editor and import wizard calculate stock allocations on a dedicated Qt
+worker. Design edits pause during calculation; Cancel preserves the previous
+results. Save, preview, and finalize wait for successful publication. Calibration
+transactions and non-UI model APIs remain synchronous.
+
+Run the opt-in no-hardware optimizer responsiveness qualification separately
+from ordinary tests (one warm-up and five measured runs per workload):
+
+```powershell
+.\env\Scripts\python.exe tools\benchmark_optimizer_async.py `
+  --output "$env:TEMP\labcraft-optimizer-async.json"
+```
+
+The harness uses simulated editor dependencies, renders Qt offscreen by default,
+and requires evidence outside the repository. It measures complete editor
+updates and import calculations against synchronous computation, a 20 ms UI
+heartbeat, cancellation, and phase timing.
+Qualification requires every measured heartbeat gap to be at most 250 ms and
+cancellation to complete within one second. It reports a failed gate without
+changing optimizer work limits. Windows results do not qualify the Pi.
+
+For Pi qualification, commit/push the feature branch and use the documented
+`Status -> Sync -> Validate` development workflow below. Run the same harness
+and focused optimizer/UI tests from the exact validated development checkout,
+using its bound shared interpreter read-only, `PYTHONDONTWRITEBYTECODE=1`, and
+external output/pytest temporary directories. Use the existing offscreen
+no-hardware `Launch` lane for application smoke testing and collect final
+read-only status. Do not run against the production checkout or install packages.
 The full Python suite commonly takes 3-8 minutes on Windows and in agent sandboxes.
 Automation should use a process timeout of at least 15 minutes (`900000` ms) to avoid killing a valid run and paying collection/startup cost again.
 Pytest is configured in `pytest.ini` to collect from `tests/`, and its optional cache provider is disabled to avoid `.pytest_cache` permission warnings in OneDrive/sandboxed runs. That only disables pytest cache conveniences such as `--last-failed`; it does not affect normal validation.

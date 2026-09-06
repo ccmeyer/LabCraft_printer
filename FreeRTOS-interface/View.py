@@ -1,4 +1,7 @@
 from __future__ import annotations
+from OptimizationJobs import (
+    OptimizationRequest, OptimizationOutcome, optimization_job_manager, input_fingerprint,
+)
 
 # Import your model & dataclasses
 from Model import (
@@ -3127,6 +3130,17 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """Handle the window close event."""
+        manager = optimization_job_manager()
+        if manager.busy:
+            event.ignore()
+            if not getattr(self, "_optimization_close_pending", False):
+                self._optimization_close_pending = True
+                def resume_close():
+                    self._optimization_close_pending = False
+                    self.close()
+                manager.settled.connect(resume_close, Qt.SingleShotConnection)
+            manager.cancel()
+            return
         if getattr(self, "_close_after_disconnect", False):
             self._close_after_disconnect = False
             event.accept()
@@ -12461,7 +12475,109 @@ class _BusyUiContext:
         return False
 
 
+class _AsyncOptimizationUi:
+    """Nonblocking busy state shared by the editor and import wizard."""
+    def __init__(self, owner, widgets, status, restore, completed):
+        self.owner = owner
+        self.status = status
+        self.restore = restore
+        self.completed = completed
+        self.close_after = None
+        inputs = owner.findChildren(QtWidgets.QWidget)
+        editable_types = (QtWidgets.QAbstractButton, QtWidgets.QAbstractSpinBox,
+                          QLineEdit, QComboBox, QTableWidget)
+        controls = list(widgets) + [w for w in inputs if isinstance(w, editable_types)]
+        close_button = getattr(owner, "cancel_btn", None)
+        self.states = [(w, w.isEnabled()) for w in dict.fromkeys(controls)
+                       if w is not None and w is not close_button]
+        self.previous_suspend = getattr(owner, "_auto_update_suspended", False)
+        owner._auto_update_suspended = True
+        owner._optimization_ui = self
+        timer = getattr(owner, "_auto_timer", None)
+        if timer is not None:
+            timer.stop()
+        for widget, _ in self.states:
+            widget.setEnabled(False)
+        self.dialog = QtWidgets.QProgressDialog("Updating…", "Cancel", 0, 0, owner)
+        self.dialog.setWindowModality(Qt.NonModal)
+        self.dialog.setAutoClose(False)
+        self.dialog.setAutoReset(False)
+        self.dialog.setMinimumDuration(0)
+        self.dialog.canceled.connect(self.cancel)
+        self.dialog.show()
+
+    def phase(self, text):
+        if self.close_after is None:
+            self.dialog.setLabelText(text)
+            self.status(text)
+
+    def cancel(self):
+        optimization_job_manager().cancel(self.owner)
+        self.status("Canceling optimization…")
+
+    def close_when_finished(self, callback):
+        self.close_after = callback
+        self.cancel()
+
+    def finish(self, outcome):
+        self.dialog.blockSignals(True)
+        self.dialog.close()
+        self.dialog.deleteLater()
+        for widget, enabled in self.states:
+            widget.setEnabled(enabled)
+        self.owner._optimization_ui = None
+        self.owner._auto_update_suspended = self.previous_suspend
+        self.restore()
+        self.completed(outcome)
+        if self.close_after:
+            QTimer.singleShot(0, self.close_after)
+
+
+def _submit_optimization_ui_job(owner, kind, options, widgets, status, restore, completed, guard):
+    """The testable boundary between UI preparation and isolated computation."""
+    manager = optimization_job_manager()
+    if manager.busy:
+        return False, {"pending": True}
+    source_model = owner.model
+    def session_identity():
+        return (
+            getattr(source_model, "experiment_file_path", None),
+            getattr(source_model, "experiment_dir_path", None),
+            id(getattr(source_model, "_execution_plan_snapshot", None)),
+        )
+    source_session = session_identity()
+    snapshot = source_model.capture_optimization_inputs()
+    fingerprint = input_fingerprint(snapshot)
+    request = OptimizationRequest(snapshot, kind=kind, options=copy.deepcopy(options))
+
+    def publish(outcome):
+        if outcome.status == "succeeded":
+            try:
+                if owner.model is not source_model or session_identity() != source_session or not guard():
+                    raise ValueError("The experiment is no longer available for this update.")
+                if input_fingerprint(source_model.capture_optimization_inputs()) != fingerprint:
+                    raise ValueError("The experiment changed during optimization.")
+                if kind == "design" and outcome.result.get("best"):
+                    source_model.install_optimization_outputs(outcome.computed, fingerprint)
+            except Exception as exc:
+                outcome = OptimizationOutcome(request.job_id, "failed", error=str(exc))
+        completed(outcome)
+
+    ui = _AsyncOptimizationUi(owner, widgets, status, restore, publish)
+    try:
+        accepted = manager.submit(owner, request, ui.finish, ui.phase)
+    except Exception as exc:
+        ui.finish(OptimizationOutcome(request.job_id, "failed", error=str(exc)))
+        return False, {"reason": str(exc)}
+    if not accepted:
+        message = "Optimization is unavailable while another job or shutdown is active."
+        ui.finish(OptimizationOutcome(request.job_id, "failed", error=message))
+        return False, {"reason": message}
+    return False, {"pending": True, "job_id": request.job_id}
+
+
 class ExperimentImportWizard(QDialog):
+    optimization_finished = Signal(bool, object)
     """Preflight uploaded reaction designs before applying them to the editor."""
 
     COMPOSITION_FIRST_REAGENT_COL = 3
@@ -12887,15 +13003,37 @@ class ExperimentImportWizard(QDialog):
         if self._reject_invalid_volume_inputs():
             return
 
-        with _BusyUiContext(
-            self,
-            "Calculating feasibility... this may take a moment on Raspberry Pi.",
-            widgets=self._busy_widgets(),
-            status_setter=self.status_lbl.setText,
-            failure_message="Feasibility calculation failed.",
-        ):
-            self.report = self.model.build_import_feasibility_report(
-                self.design_df,
+        manager = optimization_job_manager()
+        if manager.busy:
+            return
+        options = self._feasibility_job_options()
+        fingerprint = input_fingerprint(options)
+        def finished(outcome):
+            if (outcome.status != "succeeded"
+                    or input_fingerprint(self._feasibility_job_options()) != fingerprint
+                    or ExperimentDesignDialog._model_execution_is_read_only(self.model)):
+                self._mark_report_dirty(outcome.error or "Calculation canceled or inputs changed. Previous report retained.")
+                self.optimization_finished.emit(False, outcome.result)
+                return
+            self.report = outcome.result
+            self._populate_composition_table(self.report)
+            self._populate_stock_table(self.report)
+            self._update_status()
+            self._mark_report_clean()
+            self.optimization_finished.emit(True, self.report)
+
+        self._mark_report_dirty("Calculating feasibility…")
+        return _submit_optimization_ui_job(
+            self, "import", options, self._busy_widgets(), self.status_lbl.setText,
+            lambda: (self._update_calculate_button_state(), self._update_apply_enabled()), finished,
+            lambda: not ExperimentDesignDialog._model_execution_is_read_only(self.model)
+                    and not (isinstance(self.parent(), ExperimentDesignDialog)
+                             and self.parent()._gripper_edit_lock_is_active()),
+        )
+
+    def _feasibility_job_options(self):
+        return dict(
+                df=self.design_df,
                 max_stock_df=self.max_stock_df,
                 max_stock_map=self._manual_max_stock_by_reagent,
                 units_default="",
@@ -12905,11 +13043,22 @@ class ExperimentImportWizard(QDialog):
                 printed_volume_tolerance_nL=float(self.printed_volume_tolerance_spin.value()),
                 final_volume_nL=float(self.final_volume_spin.value()),
                 allow_two=bool(self.allow_two_chk.isChecked()),
-            )
-            self._populate_composition_table(self.report)
-            self._populate_stock_table(self.report)
-        self._update_status()
-        self._mark_report_clean()
+        )
+
+    def reject(self):
+        ui = getattr(self, "_optimization_ui", None)
+        if ui is not None:
+            ui.close_when_finished(self.reject)
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        ui = getattr(self, "_optimization_ui", None)
+        if ui is not None:
+            event.ignore()
+            ui.close_when_finished(self.close)
+            return
+        super().closeEvent(event)
 
     def _status_brush(self, status: str) -> QtGui.QBrush | None:
         status = str(status or "")
@@ -13756,6 +13905,7 @@ class WellSelectionDialog(QDialog):
 
 
 class ExperimentDesignDialog(QDialog):
+    optimization_finished = Signal(bool, object)
     """
     UI for composing reagents (additives and choice groups), optimizing stock solutions,
     and generating the design using ExperimentModelV2.
@@ -16049,8 +16199,23 @@ class ExperimentDesignDialog(QDialog):
         return getter()
 
     def _on_preview_reactions(self):
-        if not self._ensure_reaction_preview_current():
+        if self._reject_duplicate_reagent_labels(show_dialog=True) is not None:
             return
+        if self._manual_assignments_active() and not self._can_reuse_current_generated_design():
+            self._set_status(
+                "Reaction preview requires a current generated design when explicit well assignments are active.",
+                severity="error",
+            )
+            return
+        if self._can_reuse_current_generated_design():
+            self._show_current_reaction_preview()
+        else:
+            self._run_design_optimization_flow(
+                show_failure_dialog=True, on_complete=self._show_current_reaction_preview,
+                failure_title="Could not update reactions and stock solutions",
+            )
+
+    def _show_current_reaction_preview(self):
         preview_df = self._reaction_preview_dataframe()
         dialog = ReactionPreviewDialog(preview_df, self)
         dialog.exec()
@@ -16367,6 +16532,11 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_editable_copy_availability()
         self._apply_gripper_edit_lock_state(lifecycle=lifecycle)
         self._refresh_conditional_design_option_states()
+
+        ui = getattr(self, "_optimization_ui", None)
+        if ui is not None:
+            for widget, _ in ui.states:
+                widget.setEnabled(False)
 
     def _refresh_conditional_design_option_states(self, *_args):
         for checkbox_name, label_name, spin_name in (
@@ -17441,7 +17611,10 @@ class ExperimentDesignDialog(QDialog):
         refresh_lock_states: bool = False,
         busy_message: str | None = None,
         show_busy_dialog: bool = True,
+        on_complete=None,
     ) -> tuple[bool, dict | None]:
+        if optimization_job_manager().busy:
+            return False, {"best": None, "pending": True}
         if self._gripper_edit_lock_is_active():
             message = self.GRIPPER_LOCK_STATUS
             self._set_status(message, severity="warning")
@@ -17532,46 +17705,56 @@ class ExperimentDesignDialog(QDialog):
                 "issues_by_key": input_issues,
             }
 
-        try:
-            with _BusyUiContext(
-                self,
-                busy_message
-                or "Updating reactions and stock solutions... this may take a moment on Raspberry Pi.",
-                widgets=self._design_busy_widgets(),
-                status_setter=self._set_status,
-                failure_status_setter=lambda message: self._set_status(
-                    message, severity="error"
-                ),
-                failure_message="Reactions and stock solutions could not be updated.",
-                show_dialog=show_busy_dialog,
-            ):
-                if reuse_stock_allocation:
-                    res = copy.deepcopy(
-                        getattr(self, "_last_optimization_result", None) or {}
-                    )
-                    res.update({
-                        "best": True,
-                        "stock_allocation_reused": True,
-                    })
-                else:
-                    res = self.model.optimize_stock_solutions(
-                        quantum=0.1,
-                        max_refine=60,
-                        two_max_refine=40,
-                        allow_two=self._allow_two_setting(),
-                    )
-                if res.get("best"):
-                    self.model.generate_experiment()
-        except DesignSizeLimitError as exc:
-            message = str(exc)
-            if show_failure_dialog or show_capacity_dialog:
-                title = "Cannot Generate Design" if exc.code == "empty_design" else "Design Too Large"
-                QMessageBox.warning(self, title, message)
-            return self._handle_design_size_failure(
-                message,
-                estimate=getattr(exc, "estimate", size_estimate),
-                refresh_lock_states=refresh_lock_states,
-            )
+        options = {
+            "allow_two": self._allow_two_setting(),
+            "reuse_allocation": reuse_stock_allocation,
+            "previous_result": copy.deepcopy(getattr(self, "_last_optimization_result", None)),
+        }
+        self._set_stock_table_stale(True, "Updating reactions and stock solutions…")
+
+        def finished(outcome):
+            res = outcome.result
+            try:
+                if outcome.status != "succeeded":
+                    self._mark_design_optimization_dirty()
+                    message = outcome.error or "Optimization canceled. Previous results retained."
+                    self._set_status(message, severity="warning")
+                    self.optimization_finished.emit(False, {"reason": message, "status": outcome.status})
+                    return False, {"reason": message, "status": outcome.status}
+                ok, res = self._complete_design_optimization_flow(
+                    res, size_estimate=size_estimate,
+                    show_failure_dialog=show_failure_dialog, failure_title=failure_title,
+                    failure_prefix=failure_prefix, show_capacity_dialog=show_capacity_dialog,
+                    refresh_lock_states=refresh_lock_states,
+                )
+            except Exception as exc:
+                self._mark_design_optimization_dirty()
+                self._set_status(str(exc), severity="error")
+                self.optimization_finished.emit(False, {"reason": str(exc)})
+                return
+            if ok and on_complete is not None:
+                try:
+                    if on_complete() is False:
+                        ok = False
+                except Exception as exc:
+                    ok = False
+                    self._mark_draft_dirty()
+                    self._set_status(str(exc), severity="error")
+            self.optimization_finished.emit(ok, res)
+            return ok, res
+
+        return _submit_optimization_ui_job(
+            self, "design", options, self._design_busy_widgets(), self._set_status,
+            self._refresh_all_lock_states, finished,
+            lambda: not self._gripper_edit_lock_is_active()
+                    and not self._model_execution_is_read_only(self.model),
+        )
+
+    def _complete_design_optimization_flow(
+        self, res, *, size_estimate=None, show_failure_dialog=False,
+        failure_title="Could not update reactions and stock solutions", failure_prefix="",
+        show_capacity_dialog=False, refresh_lock_states=False,
+    ):
         merged_issues = self._merge_issue_maps(res.get("issues_by_key") or {})
         self._apply_stock_input_issue_state(merged_issues)
 
@@ -18300,7 +18483,7 @@ class ExperimentDesignDialog(QDialog):
         - Create Experiments/<name>/ with initial files
         - Refresh UI
         """
-        if not self._confirm_unsaved_changes("starting a new experiment"):
+        if not self._confirm_unsaved_changes("starting a new experiment", self._on_new_experiment):
             return False
         if not self._confirm_resume_ready_new_experiment():
             return False
@@ -18418,7 +18601,7 @@ class ExperimentDesignDialog(QDialog):
         )
         return True
 
-    def _on_save_design(self):
+    def _on_save_design(self, _checked=False, *, on_saved=None):
         """
         Save the current design (factors + metadata) to Experiments/<name>/experiment_design.json.
         If needed, optimize/generate so stock table is fresh in the preview.
@@ -18429,7 +18612,8 @@ class ExperimentDesignDialog(QDialog):
                 severity="warning",
             )
             return False
-        ok, res = self._run_design_optimization_flow(
+        return self._run_design_optimization_flow(
+            on_complete=lambda: self._save_computed_design(on_saved),
             show_failure_dialog=True,
             failure_title="Could not update reactions and stock solutions",
             show_capacity_dialog=False,
@@ -18438,8 +18622,7 @@ class ExperimentDesignDialog(QDialog):
                 "a moment on Raspberry Pi."
             ),
         )
-        if not ok:
-            return False
+    def _save_computed_design(self, on_saved=None):
         self._persist_design_identity_registry_entries()
 
         has_prepared_plan = bool(
@@ -18474,6 +18657,8 @@ class ExperimentDesignDialog(QDialog):
                     message,
                 )
                 return False
+            if on_saved:
+                on_saved()
             return True
 
         # Ensure folder exists / name is current, then save
@@ -18494,10 +18679,12 @@ class ExperimentDesignDialog(QDialog):
             f"Design saved to: {self.model.experiment_file_path}",
             severity="success",
         )
+        if on_saved:
+            on_saved()
         return True
 
     def _on_duplicate_design(self):
-        if not self._confirm_unsaved_changes("creating an editable copy"):
+        if not self._confirm_unsaved_changes("creating an editable copy", self._on_duplicate_design):
             return False
         source_file, source_dir, source_error = (
             self._resolve_current_persisted_design_source()
@@ -18652,9 +18839,13 @@ class ExperimentDesignDialog(QDialog):
             )
             return
 
-        if not self._confirm_unsaved_changes("loading another experiment"):
+        if not self._confirm_unsaved_changes(
+            "loading another experiment", lambda: self._load_selected_design(exp_dir, path),
+        ):
             return False
+        return self._load_selected_design(exp_dir, path)
 
+    def _load_selected_design(self, exp_dir, path):
         progress_path = os.path.join(exp_dir, "progress.json")
         progress_status = {}
         get_status = getattr(self.model, "get_progress_status", None)
@@ -18943,16 +19134,15 @@ class ExperimentDesignDialog(QDialog):
             self._update_summary_labels()
             self._apply_target_color_state()
         else:
-            # Reuse the same logic as Update Reactions and Stock Solutions.
-            if not self._on_optimize_and_generate(
-                show_capacity_dialog=True,
-                busy_message=(
-                    "Updating reactions and stock solutions... this may take a moment on "
-                    "Raspberry Pi."
-                ),
-            ):
-                return
+            self._run_design_optimization_flow(
+                show_failure_dialog=True, show_capacity_dialog=True,
+                on_complete=self._finish_computed_design,
+            )
+            return
 
+        self._finish_computed_design()
+
+    def _finish_computed_design(self):
         self._persist_design_identity_registry_entries()
         has_prepared_plan = bool(
             getattr(self.model, "execution_plan_file_path", None)
@@ -18962,10 +19152,6 @@ class ExperimentDesignDialog(QDialog):
             # Fresh finalization retains the existing create/save path.
             self._ensure_experiment_dir()
             self.model.save_experiment()
-
-        self._set_status(
-            "Design finalized and saved. Closing...", severity="success"
-        )
 
         # Propagate the experiment to the main window
         try:
@@ -18989,6 +19175,7 @@ class ExperimentDesignDialog(QDialog):
             return
 
         # Close dialog after explicit apply.
+        self._set_status("Design finalized and saved. Closing...", severity="success")
         self._mark_draft_saved()
         self._allow_close_without_prompt = True
         self.accept()
@@ -19106,7 +19293,7 @@ class ExperimentDesignDialog(QDialog):
         except Exception:
             return str(x)
 
-    def _confirm_unsaved_changes(self, action_text: str) -> bool:
+    def _confirm_unsaved_changes(self, action_text: str, after_save=None) -> bool:
         if (
             getattr(self, "_allow_close_without_prompt", False)
             or not self._draft_is_dirty()
@@ -19138,7 +19325,8 @@ class ExperimentDesignDialog(QDialog):
             prompt.exec()
             clicked = prompt.clickedButton()
             if clicked is save_button:
-                return bool(self._on_save_design())
+                self._on_save_design(on_saved=after_save)
+                return False
             if clicked is discard_button:
                 return True
             return False
@@ -19146,7 +19334,11 @@ class ExperimentDesignDialog(QDialog):
             self._unsaved_prompt_active = False
 
     def reject(self):
-        if not self._confirm_unsaved_changes("closing the editor"):
+        ui = getattr(self, "_optimization_ui", None)
+        if ui is not None:
+            ui.close_when_finished(self.reject)
+            return
+        if not self._confirm_unsaved_changes("closing the editor", self.close):
             return
         self._allow_close_without_prompt = True
         super().reject()
@@ -19155,7 +19347,12 @@ class ExperimentDesignDialog(QDialog):
         """
         Protect unsaved drafts, then perform close-time cleanup.
         """
-        if not self._confirm_unsaved_changes("closing the editor"):
+        ui = getattr(self, "_optimization_ui", None)
+        if ui is not None:
+            event.ignore()
+            ui.close_when_finished(self.close)
+            return
+        if not self._confirm_unsaved_changes("closing the editor", self.close):
             event.ignore()
             return
         self._allow_close_without_prompt = True

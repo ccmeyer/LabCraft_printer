@@ -1,3 +1,4 @@
+from tests.optimization_ui_helpers import immediate_optimization_jobs, complete_flow
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,8 @@ def _build_dialog_stub(
     legacy_read_only: bool = False,
 ):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog._uploaded_design_active = False
     dialog._editing_locked_by_gripper = False
     dialog._auto_timer = Mock()
@@ -209,6 +212,7 @@ def _assert_mutating_controls_disabled(dialog):
 
 def test_experiment_designer_close_without_finish_does_not_apply(qapp):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
     QDialog.__init__(dialog)
     complete_mock = Mock()
     dialog.main_window = SimpleNamespace(
@@ -225,9 +229,11 @@ def test_experiment_designer_close_without_finish_does_not_apply(qapp):
 
 def test_experiment_designer_finish_calls_apply_once():
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog._editing_locked_by_gripper = False
     dialog._apply_requested = False
-    dialog._on_optimize_and_generate = Mock()
+    dialog._run_design_optimization_flow = Mock(side_effect=complete_flow)
     dialog._ensure_experiment_dir = Mock()
     dialog._set_status = Mock()
     dialog.accept = Mock()
@@ -245,9 +251,11 @@ def test_experiment_designer_finish_calls_apply_once():
 
 def test_experiment_designer_finish_stops_when_capacity_check_fails():
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog._editing_locked_by_gripper = False
     dialog._apply_requested = False
-    dialog._on_optimize_and_generate = Mock(return_value=False)
+    dialog._run_design_optimization_flow = Mock(return_value=(False, {}))
     dialog._ensure_experiment_dir = Mock()
     dialog._set_status = Mock()
     dialog.accept = Mock()
@@ -267,9 +275,11 @@ def test_experiment_designer_finish_stops_when_capacity_check_fails():
 
 def test_experiment_designer_finish_surfaces_apply_errors_and_stays_open(monkeypatch, qapp):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog._editing_locked_by_gripper = False
     dialog._apply_requested = False
-    dialog._on_optimize_and_generate = Mock(return_value=True)
+    dialog._run_design_optimization_flow = Mock(side_effect=complete_flow)
     dialog._ensure_experiment_dir = Mock()
     dialog.status_lbl = QLabel("")
     dialog._set_status = ExperimentDesignDialog._set_status.__get__(dialog, ExperimentDesignDialog)
@@ -298,6 +308,8 @@ def test_experiment_designer_save_replaces_untouched_prepared_plan(
     plan_path = tmp_path / "execution_plan.json"
     plan_path.write_text("{}", encoding="utf-8")
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog._apply_requested = False
     dialog.exp_name_edit = QLineEdit("prepared-edited")
     dialog.status_lbl = QLabel("")
@@ -318,7 +330,7 @@ def test_experiment_designer_save_replaces_untouched_prepared_plan(
         save_experiment=Mock(),
     )
 
-    ExperimentDesignDialog._on_save_design(dialog)
+    ExperimentDesignDialog._save_computed_design(dialog)
 
     complete_mock.assert_called_once_with(
         load_progress=False,
@@ -858,6 +870,7 @@ def _build_duplicate_dialog(qapp, source_dir: Path):
     )
 
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
     QDialog.__init__(dialog)
     dialog.status_lbl = QLabel("")
     dialog._set_status = ExperimentDesignDialog._set_status.__get__(
@@ -987,6 +1000,8 @@ def test_editable_copy_button_disabled_for_inconsistent_current_paths(
         encoding="utf-8",
     )
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog.duplicate_btn = QPushButton()
     dialog.model = SimpleNamespace(
         experiment_file_path=str(other_file),

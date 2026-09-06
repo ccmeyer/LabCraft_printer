@@ -1,3 +1,4 @@
+from tests.optimization_ui_helpers import immediate_optimization_jobs, complete_flow
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -187,6 +188,8 @@ def test_reaction_preview_dialog_is_read_only_and_summarizes_rows(qapp):
 
 def _make_preview_action_dialog(preview_df, tmp_path=None):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog.model = SimpleNamespace(
         experiment_dir_path=str(tmp_path) if tmp_path is not None else None,
         get_reaction_preview_dataframe=lambda: preview_df.copy(),
@@ -199,7 +202,7 @@ def _make_preview_action_dialog(preview_df, tmp_path=None):
 
     def run_flow(**kwargs):
         dialog._optimization_calls.append(kwargs)
-        return True, {"best": True}
+        return complete_flow(**kwargs)
 
     dialog._run_design_optimization_flow = run_flow
     return dialog
@@ -265,6 +268,8 @@ def _install_lock_widgets(dialog):
 
 def test_preview_button_participates_in_busy_and_lock_states(qapp):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     _install_lock_widgets(dialog)
     dialog.model = SimpleNamespace(_uploaded_well_ids=["A1"])
 

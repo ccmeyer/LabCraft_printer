@@ -1,3 +1,4 @@
+from tests.optimization_ui_helpers import immediate_optimization_jobs, complete_flow
 import json
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -182,6 +183,8 @@ def _bind_dialog_method(dialog, name):
 
 def _build_dialog_stub(runtime_model):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog.runtime_model = runtime_model
     dialog.main_window = SimpleNamespace(model=runtime_model)
     dialog.model = ExperimentModel(prof=CURRENT_PROFILE)
@@ -1134,7 +1137,7 @@ def test_save_draft_clears_dirty_only_after_persistence_succeeds(monkeypatch, qa
     dialog.model.save_experiment = Mock()
     dialog._mark_draft_dirty()
 
-    assert dialog._on_save_design() is True
+    assert dialog._save_computed_design() is True
     assert dialog._draft_is_dirty() is False
 
     dialog.model.save_experiment = Mock(side_effect=OSError("disk unavailable"))
@@ -1142,7 +1145,7 @@ def test_save_draft_clears_dirty_only_after_persistence_succeeds(monkeypatch, qa
     warning = Mock()
     monkeypatch.setattr(QMessageBox, "warning", warning)
 
-    assert dialog._on_save_design() is False
+    assert dialog._save_computed_design() is False
     assert dialog._draft_is_dirty() is True
     assert dialog.save_btn.text() == "Save Draft *"
     warning.assert_called_once()
@@ -1201,7 +1204,7 @@ class _UnsavedPromptFake:
 @pytest.mark.parametrize(
     ("choice", "save_result", "expected", "expected_save_calls"),
     [
-        ("Save Draft", True, True, 1),
+        ("Save Draft", True, False, 1),
         ("Save Draft", False, False, 1),
         ("Discard Changes", True, True, 0),
         ("Cancel", True, False, 0),
@@ -1243,7 +1246,7 @@ def test_new_experiment_is_cancelled_before_replacing_an_unsaved_draft(qapp):
 
     assert dialog._on_new_experiment() is False
     dialog._confirm_unsaved_changes.assert_called_once_with(
-        "starting a new experiment"
+        "starting a new experiment", dialog._on_new_experiment
     )
     dialog.main_window.start_new_experiment_session.assert_not_called()
 

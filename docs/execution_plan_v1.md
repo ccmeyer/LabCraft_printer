@@ -234,13 +234,36 @@ evaluated row batch, even when an early match could end a scalar scan sooner.
 comparison block. These counters do not consume the existing resolution work
 allowance or change stopping decisions; paths that do not filter report zero.
 
+Editor updates and import feasibility calculations run on one dedicated Qt
+worker thread. The worker owns a detached input snapshot and computes both the
+allocation and generated reaction data. It cannot write experiment files or
+access live runtime bindings. The main thread publishes complete results only
+while the request's inputs, owner, and editing interlocks remain current.
+Design inputs and dependent actions are paused during calculation; Cancel
+retains the previous published results and leaves the edited inputs dirty.
+Save, preview, and finalize continue only after successful publication.
+
+Cancellation is cooperative, including candidate preparation, filtering,
+combined search, and reaction generation. Brief worker yields let Qt's Python
+callbacks acquire the interpreter lock; neither yielding nor cancellation
+checks change search budgets or ranking. Initial dispatch follows pending UI
+repaints, so disabling controls does not overlap worker garbage collection.
+Closing an active editor cancels and
+drains its job before completing normal unsaved-draft handling. Application
+shutdown drains the worker without forcibly terminating a thread.
+
+The synchronous model APIs remain available to calibration and non-UI callers.
+Disk persistence and machine communications retain their existing execution
+model. Background calculation is not a hard latency guarantee: qualification
+measures complete UI interactions separately from optimizer compute time.
+
 The 75 ms resolution target is diagnostic, not a wall-clock deadline. Work
 units have different costs depending on target counts and reaction structure.
 `optimizer_seed_elapsed_ms` includes seed/feasibility work outside the shared
 resolution allowance; `stock_allocation_elapsed_ms` covers resolution phases;
 `optimizer_total_elapsed_ms` covers the optimizer through result construction,
 excluding stock-update subscribers. End-to-end benchmarks additionally measure
-the complete call. The editor still runs synchronously without cancellation;
+the complete interaction, including UI preparation and result publication.
 Windows timings do not qualify Raspberry Pi responsiveness.
 
 ## Initial creation in Slice 3

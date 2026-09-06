@@ -1,3 +1,4 @@
+from tests.optimization_ui_helpers import immediate_optimization_jobs, complete_flow
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -83,6 +84,8 @@ class _FakeTimer:
 
 def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog.color_dict = {"dark_red": "#8a0303", "dark_blue": "#1b3a57"}
     dialog.model = _OptimizeModelStub(responses or [], stock_rows=stock_rows)
     dialog.status_lbl = QLabel("")
@@ -354,6 +357,8 @@ def test_dirty_domains_control_optimizer_calls_and_coalesce_stock_refresh(
 
 def test_experiment_name_change_updates_metadata_without_scheduling_optimizer(qapp):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     metadata_calls = []
     dialog.model = type(
         "Model",
@@ -372,6 +377,8 @@ def test_experiment_name_change_updates_metadata_without_scheduling_optimizer(qa
 
 def test_model_stock_updates_are_coalesced_into_one_table_refresh(qapp):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog._stock_table_refresh_scheduled = False
     refresh_calls = []
 
@@ -442,7 +449,7 @@ def test_experiment_design_optimization_busy_state_disables_controls(qapp):
         "reset_upload_btn": False,
         "add_reagent_btn": False,
     }
-    assert observed["status"] == "Optimizing test design..."
+    assert "Updating reactions" in observed["status"]
     assert all(getattr(dialog, name).isEnabled() for name in observed["buttons_enabled"])
 
 
@@ -457,12 +464,11 @@ def test_experiment_design_busy_state_restores_after_optimizer_exception(qapp):
 
     dialog.model.optimize_stock_solutions = fail_optimize
 
-    with pytest.raises(RuntimeError, match="optimizer boom"):
-        ExperimentDesignDialog._run_design_optimization_flow(
-            dialog,
-            show_failure_dialog=False,
-            busy_message="Optimizing test design...",
-        )
+    ok, result = ExperimentDesignDialog._run_design_optimization_flow(
+        dialog, show_failure_dialog=False,
+    )
+    assert not ok
+    assert result["status"] == "failed"
 
     assert all(
         getattr(dialog, name).isEnabled()
@@ -475,7 +481,7 @@ def test_experiment_design_busy_state_restores_after_optimizer_exception(qapp):
             "add_reagent_btn",
         )
     )
-    assert dialog.status_lbl.text() == "Reactions and stock solutions could not be updated."
+    assert dialog.status_lbl.text() == "optimizer boom"
 
 
 def test_auto_update_on_preserves_debounced_schedule(qapp):
@@ -840,6 +846,8 @@ def test_busy_context_uses_dedicated_failure_status_callback(qapp):
 
 def test_recompute_silent_suppresses_modal_busy_dialog(qapp):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog._uploaded_design_active = False
     calls = []
 
@@ -1216,8 +1224,8 @@ def test_import_wizard_busy_state_restores_after_report_exception(qapp):
     )
     wizard.load_design_dataframe(pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}))
 
-    with pytest.raises(RuntimeError, match="boom"):
-        wizard._recompute_report()
+    wizard._recompute_report()
+    assert wizard._report_dirty
 
     assert wizard.load_design_btn.isEnabled()
     assert wizard.load_stock_btn.isEnabled()
@@ -1225,7 +1233,7 @@ def test_import_wizard_busy_state_restores_after_report_exception(qapp):
     assert wizard.cancel_btn.isEnabled()
     assert not wizard.apply_btn.isEnabled()
     assert wizard._report_dirty is True
-    assert wizard.status_lbl.text() == "Feasibility calculation failed."
+    assert "boom" in wizard.status_lbl.text()
 
 
 def test_import_wizard_status_colors_distinguish_warnings_from_errors(qapp):
@@ -1480,6 +1488,8 @@ def test_upload_design_wizard_apply_reuses_only_unchanged_allocation(
             }
 
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog.model = _ModelStub()
     dialog.choice_groups = set()
     dialog._uploaded_design_active = False
@@ -1560,6 +1570,8 @@ def _build_finish_dialog():
             self.complete_kwargs = kwargs
 
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog.model = _FinishModel()
     dialog.main_window = _MainWindow()
     dialog._editing_locked_by_gripper = False
@@ -1585,7 +1597,7 @@ def _build_finish_dialog():
 def test_finish_reuses_clean_generated_design_without_reoptimizing(qapp):
     dialog = _build_finish_dialog()
     optimize_calls = []
-    dialog._on_optimize_and_generate = lambda **kwargs: optimize_calls.append(kwargs) or True
+    dialog._run_design_optimization_flow = lambda **kwargs: (optimize_calls.append(kwargs), complete_flow(**kwargs))[1]
 
     ExperimentDesignDialog._on_finish(dialog)
 
@@ -1599,7 +1611,7 @@ def test_finish_reuses_clean_generated_design_without_reoptimizing(qapp):
 def test_design_edit_marks_dirty_and_finish_reoptimizes(qapp):
     dialog = _build_finish_dialog()
     optimize_calls = []
-    dialog._on_optimize_and_generate = lambda **kwargs: optimize_calls.append(kwargs) or True
+    dialog._run_design_optimization_flow = lambda **kwargs: (optimize_calls.append(kwargs), complete_flow(**kwargs))[1]
 
     ExperimentDesignDialog._schedule_auto_update(dialog)
     ExperimentDesignDialog._on_finish(dialog)
@@ -1673,6 +1685,8 @@ def test_upload_design_wizard_cancel_leaves_model_unchanged(qapp, monkeypatch):
             self.upload_calls += 1
 
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog.model = _ModelStub()
     dialog.v_spin = QDoubleSpinBox()
     dialog.v_spin.setRange(1.0, 1_000_000.0)
