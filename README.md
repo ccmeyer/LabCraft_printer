@@ -125,6 +125,11 @@ Qualification requires every measured heartbeat gap to be at most 250 ms and
 cancellation to complete within one second. It reports a failed gate without
 changing optimizer work limits. Windows results do not qualify the Pi.
 
+The bounded [optimizer merge-readiness checks](docs/optimizer_merge_readiness.md)
+document the import-volume contract, dense single-stock feasibility proof,
+visible Qt walkthrough, final integration procedure, and the accepted Pi timing
+limitation. They do not relabel failed responsiveness measurements as passing.
+
 Import Apply stages the replacement design, allocation reuse and reaction
 generation in the worker. Cancel, failed computation, stale inputs or a newly
 active interlock retain the committed design and calibration history. No file
@@ -235,6 +240,8 @@ The existing wizard uses mode-default ejection volumes (9 nL for droplets),
 ignoring a stock CSV's requested 10 nL volume. The suite records this as an
 input-coverage blocker and exercises the 10 nL setting through editor controls
 after Apply. It does not override production parsing or suppress failed gates.
+The wizard now warns explicitly when a nonempty ejection-volume column is
+supplied; its displayed effective volume is the one transferred to the editor.
 
 The supervisor's external 15-minute interaction watchdog requests cooperative
 cancellation, then uses bounded cleanup only for its owned child process/group

@@ -8013,6 +8013,20 @@ class ExperimentModel(QObject):
                 break
 
         issues: List[Dict[str, Any]] = []
+        for column_key in ("droplet_volume_nl", "droplet_nl", "ejection_volume_nl"):
+            column = columns.get(column_key)
+            if column is not None and any(not _is_blank(value) for value in max_stock_df[column]):
+                issues.append({
+                    "field": "max_stock_csv",
+                    "severity": "warning",
+                    "code": "unsupported_ejection_volume_column",
+                    "message": (
+                        f"Stock CSV column '{column}' is not imported. Ejection volume "
+                        "uses the selected printing-mode default, shown in the stock table. "
+                        "To use another volume, apply the design, edit Ejection Vol (nL) "
+                        "in the editor, and recalculate stocks before saving or finalizing."
+                    ),
+                })
         if reagent_col is None or conc_col is None:
             issues.append({
                 "field": "max_stock_csv",

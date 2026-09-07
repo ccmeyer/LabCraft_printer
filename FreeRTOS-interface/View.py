@@ -13355,7 +13355,11 @@ class ExperimentImportWizard(QDialog):
             parts.append(f"{len(report['unmatched_stock_rows'])} unmatched stock row(s)")
         issues = report.get("issues", [])
         if issues:
-            parts.append(str(issues[0].get("message", "")))
+            primary = next((issue for issue in issues if issue.get("severity") == "error"), issues[0])
+            parts.append(str(primary.get("message", "")))
+            for issue in issues:
+                if issue is not primary and issue.get("code") == "unsupported_ejection_volume_column":
+                    parts.append(str(issue.get("message", "")))
         self.status_lbl.setText(". ".join(part for part in parts if part))
 
     def _on_apply_clicked(self):
