@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pandas as pd
 
 from Model import (
     EJECTION_VOLUME_HARD_MAX_NL,
@@ -483,6 +484,69 @@ def test_reset_discards_calibrated_allocation(experiment_model_factory, allocati
     stocks = em.plans_per_option[("Signal", None)]["stocks"]
     assert [s["droplet_volume_nL"] for s in stocks] == [10.0, 10.0]
     assert [s["droplets_per_target"] for s in stocks] == nominal_counts
+
+
+@pytest.mark.parametrize("allocation_state", ["active", "inactive", "absent"])
+def test_clear_import_discards_calibration_before_same_design_reimport(
+    experiment_model_factory, allocation_state,
+):
+    em = experiment_model_factory().experiment_model
+    em.set_metadata(
+        target_reaction_volume_nL=240.0, final_reaction_volume_nL=5000.0,
+        printed_volume_tolerance_nL=0.0, allow_two_stock_solutions=True,
+        fill_droplet_volume_nL=10.0,
+    )
+    design = pd.DataFrame({"Signal mM": [0.5, 1.0, 5.0, 20.0]})
+    report = em.build_import_feasibility_report(
+        design, max_stock_map={"Signal": 2000.0},
+        printed_volume_nL=240.0, final_volume_nL=5000.0,
+        printed_volume_tolerance_nL=0.0, allow_two=True,
+    )
+    assert report["ok"]
+    payload = {**report, "design_df": design}
+    assert em.prepare_import_application(payload, em.metadata)["reused"]
+    nominal_plan = copy.deepcopy(em.plans_per_option[("Signal", None)])
+    assert nominal_plan["n_stocks"] == 2
+    assert [s["droplet_volume_nL"] for s in nominal_plan["stocks"]] == [9.0, 9.0]
+    em.generate_experiment()
+    em.save_experiment()
+    stock_id = em._calibration_plan_with_stock_ids(("Signal", None))["stocks"][0]["stock_id"]
+    _apply_sequential_calibration(em, stock_id)
+    assert em.calibrated_stock_allocation["active"]
+    assert em.applied_imaging_calibrations["records"]
+    if allocation_state == "inactive":
+        em.calibrated_stock_allocation["active"] = False
+        em.calibrated_stock_allocation["stale_reason"] = "inputs_changed"
+    elif allocation_state == "absent":
+        del em.calibrated_stock_allocation
+    metadata = copy.deepcopy(em.metadata)
+    paths = (em.experiment_file_path, em.experiment_dir_path)
+    files = {p: p.read_bytes() for p in Path(paths[1]).rglob("*") if p.is_file()}
+
+    em.clear_uploaded_design()
+
+    assert em.calibrated_stock_allocation == {"schema_version": 1, "active": False}
+    assert em.calibrated_stock_allocation_status == {"active": False, "reason": "not_configured"}
+    assert em.applied_imaging_calibrations["records"] == {}
+    assert em.metadata == metadata
+    assert (em.experiment_file_path, em.experiment_dir_path) == paths
+    assert {p: p.read_bytes() for p in Path(paths[1]).rglob("*") if p.is_file()} == files
+    assert em.prepare_import_application(payload, metadata)["reused"]
+    assert em.plans_per_option[("Signal", None)] == nominal_plan
+    em.generate_experiment()
+    em.save_experiment()
+    restored = experiment_model_factory().experiment_model
+    restored.load_experiment(*paths)
+    # Serialized legs omit printing_mode; the option retains it.
+    saved_plan = copy.deepcopy(nominal_plan)
+    for stock in saved_plan["stocks"]:
+        stock.pop("printing_mode", None)
+    assert restored.plans_per_option[("Signal", None)] == saved_plan
+    assert restored.factors[0].options[0].printing_mode == em.factors[0].options[0].printing_mode
+    assert restored.applied_imaging_calibrations["records"] == {}
+    assert not restored.calibrated_stock_allocation["active"]
+    assert not restored.calibrated_stock_allocation_status["active"]
+    pd.testing.assert_frame_equal(restored.get_reactions_dataframe(), em.get_reactions_dataframe())
 
 
 def test_sequential_calibrations_preserve_two_stock_allocation(experiment_model_factory):

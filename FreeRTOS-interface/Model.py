@@ -9498,6 +9498,11 @@ class ExperimentModel(QObject):
         self.stock_prep_state = self._default_stock_prep_state()
         self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(None)
         self.calibration_volume_warning_audits = self._normalize_calibration_volume_warning_audits(None)
+        self.calibrated_stock_allocation = self._normalize_calibrated_stock_allocation(None)
+        self.calibrated_stock_allocation_status = {
+            "active": False,
+            "reason": "not_configured",
+        }
         self.manual_refuel_checks = self._normalize_manual_refuel_checks(None)
         self.unsaved_changes = True
         self.stock_updated.emit()
