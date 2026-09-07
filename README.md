@@ -178,6 +178,55 @@ simultaneous two-stock plans. The grouped design also has an explicit-import
 case. Ordinary tests separately cover 288 replicated group reactions, zero and
 absent options, and an additional control.
 
+For a bounded memory-stability check in one continuously running Qt application:
+
+```powershell
+.\env\Scripts\python.exe -B tools\benchmark_optimizer_memory.py `
+  --fixture-root "C:\LabCraftQualification\optimizer-fixtures" `
+  --output "$env:TEMP\optimizer-memory-$([guid]::NewGuid().ToString('N')).json"
+```
+
+This opt-in test keeps one worker thread throughout two warm-up rounds and six
+measured rounds. Each round uses the real 68-row recipe in both stock modes and
+the dense 384-row, ten-reagent two-stock design. Each editor applies the import,
+recalculates, cancels a second calculation after the allocation-search phase
+begins, then closes during another active calculation. It reopens for the next
+scenario. Successful outputs/counts/search evidence must repeat exactly;
+cancellation must preserve the committed allocation and calibration history.
+Real CSVs retain their hash verification. The synthetic editor uses the catalog
+10 nL setting after importing through the existing wizard mode defaults.
+
+The supervisor samples resident memory and available system memory every 100 ms
+from outside the Qt process, also recording the OS peak working set/high-water
+mark. The worker reports its PID, which the supervisor verifies belongs to its
+owned process tree; Windows virtual-environment launcher memory is not mistaken
+for application memory. Windows private committed memory and Linux process swap are recorded where
+available. Settled endpoints have no editor open and an idle persistent worker;
+they include Python allocated-block counts and normal GC statistics. The test
+does not force collection, trim allocators, disable GC, enable allocation tracing,
+or retain every result graph. Fixed input payloads, compact expected-output hashes
+and incremental diagnostic records remain resident. Validation hashing also
+contributes to the observed process peak. Sampling gaps are recorded explicitly.
+
+The campaign stops cooperatively after 30 minutes or if available RAM falls below
+the greater of 256 MiB and 10% of physical RAM. Only the owned child process/group
+may be terminated after cancellation grace; no Qt thread is forcibly terminated.
+Results, 100 ms samples, child log and process cleanup evidence use the unique
+external output prefix. Missing fixtures, failed jobs, cancellation/publication
+changes and shutdown failures are reported as failures.
+
+Memory growth is a screening result, not proof of a leak. Compare the medians of
+the first and last three measured endpoints. RSS growth beyond max(32 MiB, 5% of
+the early median), with median pairwise slope above 2 MiB/round, requires review.
+Python-block growth uses max(10,000 blocks, 5%) and 1,000 blocks/round. Large jumps
+without sustained slope, or fewer than six measured rounds, are inconclusive.
+Small growth within these allowances is reported as `stable_within_bound`, not
+an unlimited-session guarantee. Warm-up growth and allocator plateaus are retained
+in the evidence. This lane does not change the separate UI responsiveness gates.
+Use the existing Pi Status -> Sync -> Validate workflow, exact pushed revision,
+external fixture/evidence directories and read-only interpreter; finish with the
+offscreen smoke lane, final Status and protected-state comparisons.
+
 Realistic evidence uses version 2, saves completed trials incrementally, and
 reports actual selected two-stock keys, work counts, input/recipe hashes,
 coverage, timings, and blockers. Import-editor measurements include Apply and
