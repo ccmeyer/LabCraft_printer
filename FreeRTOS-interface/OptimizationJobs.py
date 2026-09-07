@@ -134,7 +134,14 @@ class _OptimizationWorker(QObject):
                 control.report("Calculating feasibility")
                 outcome.result = draft.build_import_feasibility_report(**request.options)
             else:
-                options = request.options
+                options = dict(request.options)
+                if request.kind == "import_apply":
+                    reuse = draft.prepare_import_application(options["payload"], options["metadata"])
+                    available = options.get("available_wells")
+                    if available is not None and draft.estimate_design_size().total_runs > available:
+                        raise ValueError("The imported design exceeds the available wells on the selected plate.")
+                    options.update(reuse_allocation=bool(reuse.get("reused")),
+                                   previous_result=reuse.get("result"))
                 if options.get("reuse_allocation"):
                     outcome.result = copy.deepcopy(options.get("previous_result") or {})
                     outcome.result.update(best=True, stock_allocation_reused=True)
@@ -151,7 +158,8 @@ class _OptimizationWorker(QObject):
                     draft.validate_optimization_allocation(outcome.result)
                     control.report("Generating reactions")
                     draft.generate_experiment()
-                    outcome.computed = draft.capture_optimization_outputs()
+                    outcome.computed = (draft.capture_import_application() if request.kind == "import_apply"
+                                        else draft.capture_optimization_outputs())
             control.check()
             outcome.status = "succeeded"
         except OptimizationCancelled:

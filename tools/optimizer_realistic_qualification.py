@@ -223,6 +223,28 @@ def measure(app, case, allow_two, route, *, payload=None, cancel=None, automatic
     owner = new_wizard(case, allow_two) if route == "import" else new_editor(case, allow_two)
     manager = optimization_job_manager()
     outcomes, beats, phases, activity, cancelled_at = [], [], [], [], []
+    ui_work = []
+    # Attribute pauses to actual UI stages, including synchronous Apply setup
+    # and publication. These timings are diagnostic, not optimizer decisions.
+    def observe_method(target, name):
+        original = getattr(target, name, None)
+        if original is None:
+            return
+        def measured(*args, **kwargs):
+            begin = time.monotonic()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                if len(ui_work) < 256:
+                    ui_work.append(dict(method=name, elapsed_ms=(begin-started)*1000,
+                                        duration_ms=(time.monotonic()-begin)*1000))
+        setattr(target, name, measured)
+    for name in ("_apply_uploaded_design_payload", "_load_factors_into_table",
+                 "_populate_composition_table", "_populate_stock_table",
+                 "_refresh_stock_table", "_update_summary_labels"):
+        observe_method(owner, name)
+    for name in ("install_import_application", "install_optimization_outputs"):
+        observe_method(owner.model, name)
     owner.optimization_finished.connect(lambda *args: outcomes.append(args))
     before = owner.model.capture_optimization_outputs()
     history = copy.deepcopy(owner.model.applied_imaging_calibrations)
@@ -289,7 +311,7 @@ def measure(app, case, allow_two, route, *, payload=None, cancel=None, automatic
         timer.stop()
         measurement = dict(total_ms=(ended-started)*1000,
                            max_gap_ms=max(b-a for a,b in zip(beats, beats[1:]))*1000,
-                           phases=phases, activity=activity,
+                           phases=phases, activity=activity, ui_work=ui_work,
                            heartbeat_ms=[(b-started)*1000 for b in beats],
                            input_fingerprint=input_fingerprint(snapshot),
                            allow_two=allow_two, route=route, automatic=automatic,

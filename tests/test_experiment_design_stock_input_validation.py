@@ -1412,140 +1412,36 @@ def test_import_wizard_composition_table_layout_and_formatting(qapp):
     assert wizard.composition_table.item(0, 6).text() == "7440"
 
 
-@pytest.mark.parametrize(
-    ("reuse_payload", "expected_stock_dirty"),
-    [
-        ({"fingerprint": "unchanged"}, False),
-        ({"fingerprint": "changed"}, True),
-    ],
-)
-def test_upload_design_wizard_apply_reuses_only_unchanged_allocation(
-    qapp, monkeypatch, reuse_payload, expected_stock_dirty
-):
-    design_df = pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]})
-    constructed = {}
-
-    class _FakeWizard:
+def test_upload_design_defers_apply_and_passes_complete_wizard_payload(qapp, monkeypatch):
+    from tests.test_experiment_design_reagent_headtype_integration import _build_real_dialog
+    dialog = _build_real_dialog()
+    dialog.v_spin.setValue(500)
+    dialog.volume_tolerance_spin.setValue(25)
+    payload = dict(design_df=pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}),
+                   source_path="design.csv", max_stock_by_reagent={"Reagent A": 10.0},
+                   stock_settings_by_reagent={"Reagent A": dict(max_stock_conc=10., printing_mode="stream", droplet_nL=60.)},
+                   printed_volume_nL=750., printed_volume_tolerance_nL=35., final_volume_nL=1000.,
+                   allow_two=True, stock_allocation_reuse_payload={"fingerprint": "unchanged"})
+    constructed, applied = [], []
+    class Wizard:
         def __init__(self, *args, **kwargs):
-            constructed["args"] = args
-            constructed["kwargs"] = kwargs
-
+            constructed.append(kwargs)
         def exec(self):
             return QDialog.Accepted
-
         def get_apply_payload(self):
-            return {
-                "design_df": design_df,
-                "source_path": "design.csv",
-                "max_stock_by_reagent": {"Reagent A": 10.0},
-                "stock_settings_by_reagent": {
-                    "Reagent A": {
-                        "max_stock_conc": 10.0,
-                        "printing_mode": "stream",
-                        "droplet_nL": 60.0,
-                    }
-                },
-                "printed_volume_nL": 750.0,
-                "printed_volume_tolerance_nL": 35.0,
-                "final_volume_nL": 1000.0,
-                "allow_two": True,
-                "stock_allocation_reuse_payload": reuse_payload,
-            }
-
-    class _ModelStub:
-        def __init__(self):
-            self.metadata = {}
-            self.factors = []
-            self.upload_calls = 0
-            self.metadata_calls = []
-            self.reuse_calls = []
-
-        def set_metadata(self, **kwargs):
-            self.metadata.update(kwargs)
-            self.metadata_calls.append(kwargs)
-
-        def set_uploaded_design_from_dataframe(self, df, **kwargs):
-            self.upload_calls += 1
-            self.uploaded_df = df.copy()
-            self.upload_kwargs = kwargs
-            option = type(
-                "Option",
-                (),
-                {
-                    "max_stock_conc": None,
-                    "printing_mode": "droplet",
-                    "droplet_nL": 10.0,
-                },
-            )()
-            self.factors = [type("Factor", (), {"name": "Reagent A", "kind": "additive", "options": [option]})()]
-
-        def extract_uploaded_design_well_ids_from_dataframe(self, _df):
-            return None
-
-        def install_stock_allocation_reuse_payload(self, payload):
-            self.reuse_calls.append(payload)
-            return {
-                "reused": payload == {"fingerprint": "unchanged"},
-                "result": {"best": True, "stock_allocation_reused_import_plan": True},
-            }
-
-    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
-    from PySide6.QtWidgets import QDialog
-    QDialog.__init__(dialog)
-    dialog.model = _ModelStub()
-    dialog.choice_groups = set()
-    dialog._uploaded_design_active = False
-    dialog._uploaded_design_path = None
-    dialog.v_spin = QDoubleSpinBox()
-    dialog.v_spin.setRange(1.0, 1_000_000.0)
-    dialog.v_spin.setValue(500.0)
-    dialog.final_v_spin = QDoubleSpinBox()
-    dialog.final_v_spin.setRange(1.0, 1_000_000.0)
-    dialog.final_v_spin.setValue(500.0)
-    dialog.volume_tolerance_spin = QDoubleSpinBox()
-    dialog.volume_tolerance_spin.setRange(0.0, 1_000_000.0)
-    dialog.volume_tolerance_spin.setValue(25.0)
-    dialog.allow_two_chk = QCheckBox()
-    dialog._validate_uploaded_design_well_assignments = lambda _df: True
-    dialog._load_factors_into_table = lambda: None
-    dialog._update_metadata_from_controls = lambda: None
-    run_calls = []
-    stock_dirty_before_run = []
-    dialog._design_optimization_dirty = True
-    dialog._auto_timer = _FakeTimer()
-
-    def fake_run_design_optimization_flow(**kwargs):
-        run_calls.append(kwargs)
-        stock_dirty_before_run.append(dialog._stock_allocation_dirty)
-        ExperimentDesignDialog._mark_design_optimization_clean(dialog, {"best": True})
-        return True, {"best": True}
-
-    dialog._run_design_optimization_flow = fake_run_design_optimization_flow
-
-    monkeypatch.setattr(View, "ExperimentImportWizard", _FakeWizard)
-
-    ExperimentDesignDialog._on_upload_design(dialog)
-
-    assert constructed["kwargs"]["printed_volume_nL"] == 500.0
-    assert constructed["kwargs"]["printed_volume_tolerance_nL"] == 25.0
-    assert dialog.model.upload_calls == 0
-    assert len(run_calls) == 0
-
-    qapp.processEvents()
-
-    assert dialog.model.upload_calls == 1
-    assert dialog.model.upload_kwargs["source_path"] == "design.csv"
-    assert dialog.model.factors[0].options[0].max_stock_conc == 10.0
-    assert dialog.model.factors[0].options[0].printing_mode == "stream"
-    assert dialog.model.factors[0].options[0].droplet_nL == pytest.approx(60.0)
-    assert dialog.model.metadata["target_reaction_volume_nL"] == 750.0
-    assert dialog.model.metadata["printed_volume_tolerance_nL"] == 35.0
-    assert dialog.model.metadata["final_reaction_volume_nL"] == 1000.0
-    assert dialog.model.metadata["allow_two_stock_solutions"] is True
-    assert dialog.model.reuse_calls == [reuse_payload]
-    assert stock_dirty_before_run == [expected_stock_dirty]
-    assert len(run_calls) == 1
-    assert dialog._design_optimization_dirty is False
+            return payload
+    monkeypatch.setattr(View, "ExperimentImportWizard", Wizard)
+    monkeypatch.setattr(dialog, "_apply_uploaded_design_payload", applied.append)
+    try:
+        dialog._on_upload_design()
+        assert constructed[0]["printed_volume_nL"] == 500.
+        assert constructed[0]["printed_volume_tolerance_nL"] == 25.
+        assert not applied
+        qapp.processEvents()
+        assert len(applied) == 1 and applied[0] is payload
+        assert not dialog.model.has_uploaded_design()
+    finally:
+        dialog.close()
 
 
 def _build_finish_dialog():
@@ -1652,6 +1548,7 @@ def test_load_factors_into_table_suspends_auto_update(qapp):
     dialog.choice_groups = set()
     dialog._design_optimization_dirty = False
     dialog._auto_update_suspended = False
+    dialog.reagent_table = QTableWidget(dialog)
     dialog._clear_reagent_rows = lambda: None
     dialog._sync_reagent_tables_geometry = lambda: None
     dialog._refresh_all_prior_availability = lambda: None

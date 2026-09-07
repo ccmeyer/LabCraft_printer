@@ -22,6 +22,10 @@ def immediate_optimization_jobs(monkeypatch):
                 if kind == "import":
                     outcome.result = owner.model.build_import_feasibility_report(**options)
                 else:
+                    if kind == "import_apply":
+                        reuse = owner.model.prepare_import_application(options["payload"], options["metadata"])
+                        options = dict(options, reuse_allocation=bool(reuse.get("reused")),
+                                       previous_result=reuse.get("result"))
                     if options.get("reuse_allocation"):
                         outcome.result = copy.deepcopy(options.get("previous_result") or {})
                         outcome.result.update(best=True, stock_allocation_reused=True)
