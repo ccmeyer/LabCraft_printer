@@ -17813,6 +17813,10 @@ class ExperimentDesignDialog(QDialog):
             try:
                 if outcome.status != "succeeded":
                     self._mark_design_optimization_dirty()
+                    self._set_stock_table_stale(
+                        True,
+                        "Stock results are out of date. Click Recalculate Stocks to update this design.",
+                    )
                     message = outcome.error or "Optimization canceled. Previous results retained."
                     self._set_status(message, severity="warning")
                     return False, {"reason": message, "status": outcome.status}

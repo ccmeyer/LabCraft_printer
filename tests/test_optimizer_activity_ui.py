@@ -101,6 +101,7 @@ def test_live_slow_pause_and_cancel_keep_last_allocation(qapp, real_editor, monk
         assert editor._slow_auto_update_paused is (not stale)
         assert editor.auto_update_chk.isChecked() is stale
         assert optimization_job_manager().busy
+        assert "Updating" in editor.stock_table_status_lbl.text()
         ui.cancel()
         ui.phase("Queued obsolete phase")
         ui.refresh()
@@ -113,6 +114,11 @@ def test_live_slow_pause_and_cancel_keep_last_allocation(qapp, real_editor, monk
         assert not editor.model.plans_per_option
         assert editor._design_optimization_dirty
         assert editor._slow_auto_update_paused is (not stale)
+        assert not optimization_job_manager().busy
+        assert editor._stock_table_stale_active
+        assert "Updating" not in editor.stock_table_status_lbl.text()
+        assert "Recalculate Stocks" in editor.stock_table_status_lbl.text()
+        assert "canceled" in editor.status_lbl.text().lower()
     finally:
         release.set()
 
