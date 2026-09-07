@@ -101,6 +101,12 @@ worker. Design edits pause during calculation; Cancel preserves the previous
 results. Save, preview, and finalize wait for successful publication. Calibration
 transactions and non-UI model APIs remain synchronous.
 
+After one second the busy display adds elapsed time and phase-specific activity
+counts, refreshed twice per second. Automatic stock calculations reaching three
+seconds pause future automatic updates for that design and explain how to use
+**Recalculate Stocks**. Re-enabling Auto-update honors that choice for the rest
+of the design session. The current calculation continues, with Cancel available.
+
 Run the opt-in no-hardware optimizer responsiveness qualification separately
 from ordinary tests (one warm-up and five measured runs per workload):
 
@@ -113,6 +119,8 @@ The harness uses simulated editor dependencies, renders Qt offscreen by default,
 and requires evidence outside the repository. It measures complete editor
 updates and import calculations against synchronous computation, a 20 ms UI
 heartbeat, cancellation, and phase timing.
+An additional automatic dense-target case exercises the slow-update pause and
+records whether it occurred, alongside the normal manual and import workloads.
 Qualification requires every measured heartbeat gap to be at most 250 ms and
 cancellation to complete within one second. It reports a failed gate without
 changing optimizer work limits. Windows results do not qualify the Pi.

@@ -2400,6 +2400,7 @@ class ExperimentModel(QObject):
 
         for delta in sorted(candidate_deltas):
             self._optimization_checkpoint()
+            self._optimization_activity("single-stock candidates considered", increment=1)
             stock_c = (float(delta) * final_volume_nL) / droplet_nL
             if max_stock_conc is not None and stock_c > (float(max_stock_conc) + 1e-12):
                 continue
@@ -2647,6 +2648,7 @@ class ExperimentModel(QObject):
                     if consume_work is not None and not consume_work("two_stock_pair"):
                         raise _StockAllocationWorkLimitReached
                     pairs_scanned += 1
+                    self._optimization_activity("stock pairs considered", increment=1)
                     if diagnostics is not None:
                         diagnostics["two_stock_pairs_evaluated"] = int(
                             diagnostics.get("two_stock_pairs_evaluated", 0)
@@ -2919,6 +2921,11 @@ class ExperimentModel(QObject):
         if control is not None:
             control.report(phase) if phase else control.check()
 
+    def _optimization_activity(self, label, **counts):
+        control = getattr(self, "_optimization_control", None)
+        if control is not None:
+            control.activity(label, **counts)
+
     def capture_optimization_inputs(self):
         return copy.deepcopy({name: getattr(self, name)
                               for name in self._OPTIMIZATION_INPUT_ATTRIBUTES})
@@ -3030,6 +3037,8 @@ class ExperimentModel(QObject):
             if not dominated:
                 vectors[len(retained)] = vector
                 retained.append(entry)
+            if control is not None:
+                control.activity("candidates filtered", increment=1)
         if diagnostics is not None:
             for name, value in (
                 ("stock_allocation_dominance_pairs_evaluated", pairs_evaluated),
@@ -6097,6 +6106,7 @@ class ExperimentModel(QObject):
                             stock_allocation_branches_pruned += 1
                             return
                         stock_allocation_states_evaluated += 1
+                        self._optimization_activity("allocations evaluated", increment=1)
                         tier_feasible = True
                         quality = (
                             int(total_loss),
@@ -9662,6 +9672,7 @@ class ExperimentModel(QObject):
         fill_dv = float(self.metadata.get("fill_droplet_volume_nL", self._default_fill_droplet_volume_nl()))
 
         run_specs = list(self._iter_reaction_run_specs())
+        self._optimization_activity("reactions generated", completed=0, total=len(run_specs))
         if not run_specs:
             self._reactions_df = pd.DataFrame()
             self._last_worst_nonfill_volume_nL = 0.0
@@ -9792,6 +9803,9 @@ class ExperimentModel(QObject):
                 "design_source": str(run_spec["design_source"]),
                 "additional_condition_label": str(run_spec["additional_condition_label"]),
             })
+            self._optimization_activity(
+                "reactions generated", completed=global_index + 1, total=len(run_specs)
+            )
 
         # Build stock rows cache (with totals AND per-reaction max volume)
         stock_table = []

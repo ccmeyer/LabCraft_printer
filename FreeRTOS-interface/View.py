@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QWidget, QGraphicsEllipseItem, QGraphicsScene, QGraphicsView, QGraphicsRectItem
 from PySide6.QtGui import QShortcut, QKeySequence, QPixmap, QColor, QPen, QBrush, QImage, QPainter, QIcon
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, Slot, QSignalBlocker
+from shiboken6 import isValid
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
@@ -12483,6 +12484,10 @@ class _AsyncOptimizationUi:
         self.restore = restore
         self.completed = completed
         self.close_after = None
+        self.canceling = False
+        self.finished = False
+        self.started = time.monotonic()
+        self.phase_text = "Updating…"
         inputs = owner.findChildren(QtWidgets.QWidget)
         editable_types = (QtWidgets.QAbstractButton, QtWidgets.QAbstractSpinBox,
                           QLineEdit, QComboBox, QTableWidget)
@@ -12505,21 +12510,55 @@ class _AsyncOptimizationUi:
         self.dialog.setMinimumDuration(0)
         self.dialog.canceled.connect(self.cancel)
         self.dialog.show()
+        self.timer = QTimer(owner)
+        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.setInterval(500)
+        self.timer.timeout.connect(self.refresh)
+        self.timer.start()
 
     def phase(self, text):
-        if self.close_after is None:
-            self.dialog.setLabelText(text)
-            self.status(text)
+        if not self.canceling and not self.finished:
+            self.phase_text = text
+
+    def refresh(self):
+        if self.finished or not isValid(self.dialog):
+            return
+        if self.canceling:
+            self.dialog.setLabelText("Canceling…")
+            self.dialog.show()
+            return
+        text = self.phase_text
+        elapsed = time.monotonic() - self.started
+        if elapsed >= 1.0:
+            seconds = int(elapsed)
+            detail = f"{seconds:,} {'second' if seconds == 1 else 'seconds'} elapsed"
+            activity = optimization_job_manager().activity_snapshot(self.owner)
+            if activity and activity[0] == self.phase_text:
+                _, label, count, total = activity
+                counts = f"{count:,}" if total is None else f"{count:,} of {total:,}"
+                detail = f"{counts} {label} · {detail}"
+            text += "\n" + detail
+        self.dialog.setLabelText(text)
 
     def cancel(self):
+        if self.finished or self.canceling:
+            return
+        self.canceling = True
         optimization_job_manager().cancel(self.owner)
         self.status("Canceling optimization…")
+        self.dialog.setCancelButton(None)
+        # QProgressDialog hides itself after emitting canceled. Re-show only
+        # while this job is still unwinding, without a nested event loop.
+        QTimer.singleShot(0, self.refresh)
 
     def close_when_finished(self, callback):
         self.close_after = callback
         self.cancel()
 
     def finish(self, outcome):
+        self.finished = True
+        self.timer.stop()
+        self.timer.deleteLater()
         self.dialog.blockSignals(True)
         self.dialog.close()
         self.dialog.deleteLater()
@@ -12564,8 +12603,14 @@ def _submit_optimization_ui_job(owner, kind, options, widgets, status, restore, 
         completed(outcome)
 
     ui = _AsyncOptimizationUi(owner, widgets, status, restore, publish)
+    def slow_optimizer():
+        if (kind == "design" and options.get("automatic")
+                and owner.model is source_model and session_identity() == source_session
+                and guard()
+                and input_fingerprint(source_model.capture_optimization_inputs()) == fingerprint):
+            owner._pause_slow_auto_update()
     try:
-        accepted = manager.submit(owner, request, ui.finish, ui.phase)
+        accepted = manager.submit(owner, request, ui.finish, ui.phase, slow_optimizer)
     except Exception as exc:
         ui.finish(OptimizationOutcome(request.job_id, "failed", error=str(exc)))
         return False, {"reason": str(exc)}
@@ -14374,19 +14419,32 @@ class ExperimentDesignDialog(QDialog):
         self._update_import_design_button_layout(self._uploaded_design_active)
 
         self.auto_update_chk = QCheckBox("Automatically recalculate design")
+        self._auto_update_preference = True
+        self._slow_auto_update_paused = False
+        self._slow_auto_update_override = False
         self.auto_update_chk.setChecked(True)
         self.auto_update_chk.setToolTip(
             "When enabled, edits automatically recalculate reactions and stock solutions "
             "after a short delay. Recalculation does not save the experiment. Turn this "
-            "off to make several edits before pressing Update Reactions and Stock Solutions."
+            "off to make several edits before pressing Recalculate Stocks. Slow automatic "
+            "stock calculations pause future automatic updates for this design."
         )
         self.auto_update_chk.toggled.connect(self._on_auto_update_toggled)
         self.design_tools_layout.addWidget(self.auto_update_chk, 3, 0, 1, 2)
 
-        self.run_btn = new_btn = QPushButton("Update Reactions and Stock Solutions")
+        self.slow_auto_update_notice = QLabel(
+            "Automatic updates paused because stock calculations are taking a while. "
+            "Make your changes, then click Recalculate Stocks."
+        )
+        self.slow_auto_update_notice.setWordWrap(True)
+        self.slow_auto_update_notice.hide()
+        self.design_tools_layout.addWidget(self.slow_auto_update_notice, 4, 0, 1, 2)
+
+        self.run_btn = new_btn = QPushButton("Recalculate Stocks")
+        self.run_btn.setToolTip("Recalculate stock solutions and reactions. This does not save the design.")
         self._run_btn_default_stylesheet = self.run_btn.styleSheet()
         self.run_btn.clicked.connect(self._on_optimize_and_generate)
-        self.design_tools_layout.addWidget(self.run_btn, 4, 0, 1, 2)
+        self.design_tools_layout.addWidget(self.run_btn, 5, 0, 1, 2)
         controls_col.addWidget(design_tools_group)
 
         # --- Experiment lifecycle actions ---
@@ -15506,14 +15564,19 @@ class ExperimentDesignDialog(QDialog):
             run_btn.setStyleSheet(getattr(self, "_run_btn_default_stylesheet", ""))
 
     def _on_auto_update_toggled(self, checked: bool):
+        self._auto_update_preference = bool(checked)
+        if checked:
+            if getattr(self, "_slow_auto_update_paused", False):
+                self._slow_auto_update_override = True
+            self._slow_auto_update_paused = False
+            self.slow_auto_update_notice.hide()
         timer = getattr(self, "_auto_timer", None)
         if not checked:
             if timer is not None:
                 timer.stop()
             if getattr(self, "_design_optimization_dirty", False):
                 self._set_status(
-                    "Experiment changes are pending. Press Update Reactions and Stock "
-                    "Solutions to apply them.",
+                    "Experiment changes are pending. Press Recalculate Stocks to apply them.",
                     severity="warning",
                 )
             self._update_run_button_dirty_state()
@@ -15523,6 +15586,29 @@ class ExperimentDesignDialog(QDialog):
         if getattr(self, "_design_optimization_dirty", False):
             if timer is not None:
                 timer.start()
+
+    def _pause_slow_auto_update(self):
+        if (getattr(self, "_slow_auto_update_override", False)
+                or not self._auto_update_enabled()):
+            return
+        self._slow_auto_update_paused = True
+        with QSignalBlocker(self.auto_update_chk):
+            self.auto_update_chk.setChecked(False)
+        self._auto_timer.stop()
+        self.slow_auto_update_notice.show()
+        self._update_run_button_dirty_state()
+
+    def _reset_auto_update_session(self):
+        self._slow_auto_update_paused = False
+        self._slow_auto_update_override = False
+        checkbox = getattr(self, "auto_update_chk", None)
+        if checkbox is not None:
+            with QSignalBlocker(checkbox):
+                checkbox.setChecked(getattr(self, "_auto_update_preference", True))
+        notice = getattr(self, "slow_auto_update_notice", None)
+        if notice is not None:
+            notice.hide()
+        self._update_run_button_dirty_state()
 
     def _mark_design_optimization_dirty(self, domain: str = "stock"):
         domain = str(domain or "stock").strip().casefold()
@@ -15650,8 +15736,7 @@ class ExperimentDesignDialog(QDialog):
                 timer.stop()
             if getattr(self, "_design_optimization_dirty", False):
                 self._set_status(
-                    "Experiment changes are pending. Press Update Reactions and Stock "
-                    "Solutions to apply them.",
+                    "Experiment changes are pending. Press Recalculate Stocks to apply them.",
                     severity="warning",
                 )
             self._update_run_button_dirty_state()
@@ -15663,6 +15748,8 @@ class ExperimentDesignDialog(QDialog):
             timer.start()
 
     def _recompute_silent(self):
+        if not self._auto_update_enabled():
+            return
         if (
             self._gripper_edit_lock_is_active()
             or self._model_execution_is_read_only(getattr(self, "model", None))
@@ -15674,6 +15761,7 @@ class ExperimentDesignDialog(QDialog):
         ):
             return
         self._run_design_optimization_flow(
+            automatic=True,
             show_failure_dialog=False,
             show_capacity_dialog=False,
             busy_message=(
@@ -16324,6 +16412,7 @@ class ExperimentDesignDialog(QDialog):
                 option.droplet_nL = float(droplet_nL)
 
         # Update local flags
+        self._reset_auto_update_session()
         self._uploaded_design_active = True
         self._uploaded_design_path = payload.get("source_path")
 
@@ -16423,6 +16512,7 @@ class ExperimentDesignDialog(QDialog):
         self._auto_update_suspended = True
         try:
             self.model.clear_uploaded_design()
+            self._reset_auto_update_session()
             self._uploaded_design_active = False
             self._uploaded_design_path = None
             self.choice_groups = set()
@@ -17612,6 +17702,7 @@ class ExperimentDesignDialog(QDialog):
         busy_message: str | None = None,
         show_busy_dialog: bool = True,
         on_complete=None,
+        automatic: bool = False,
     ) -> tuple[bool, dict | None]:
         if optimization_job_manager().busy:
             return False, {"best": None, "pending": True}
@@ -17707,6 +17798,7 @@ class ExperimentDesignDialog(QDialog):
 
         options = {
             "allow_two": self._allow_two_setting(),
+            "automatic": bool(automatic and not reuse_stock_allocation),
             "reuse_allocation": reuse_stock_allocation,
             "previous_result": copy.deepcopy(getattr(self, "_last_optimization_result", None)),
         }
@@ -18552,6 +18644,7 @@ class ExperimentDesignDialog(QDialog):
         if timer is not None:
             timer.stop()
 
+        self._reset_auto_update_session()
         self._uploaded_design_active = bool(self.model.has_uploaded_design())
         self._uploaded_design_path = getattr(
             self.model, "_uploaded_design_source", None
@@ -18791,6 +18884,7 @@ class ExperimentDesignDialog(QDialog):
 
         self._progress_reset_confirmed = False
         self._set_progress_protection(False)
+        self._reset_auto_update_session()
         self._uploaded_design_active = self.model.has_uploaded_design()
         self._uploaded_design_path = getattr(self.model, "_uploaded_design_source", None)
 
@@ -18860,6 +18954,7 @@ class ExperimentDesignDialog(QDialog):
             exp_dir,
             progress_reset_confirmed=progress_policy == self.PROGRESS_POLICY_RESET,
         )
+        self._reset_auto_update_session()
         read_only_getter = getattr(self.model, "is_read_only_legacy_execution", None)
         legacy_read_only = bool(callable(read_only_getter) and read_only_getter())
         execution_lock_getter = getattr(self.model, "is_execution_design_locked", None)

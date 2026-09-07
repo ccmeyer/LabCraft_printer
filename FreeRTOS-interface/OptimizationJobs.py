@@ -18,15 +18,51 @@ class OptimizationCancelled(Exception):
 
 
 class ComputationControl:
-    def __init__(self, phase_callback=None):
+    SLOW_OPTIMIZER_SECONDS = 3.0
+
+    def __init__(self, phase_callback=None, *, clock=None):
         self.cancelled = threading.Event()
         self.phase_callback = phase_callback
         self.phase = None
         self._last_yield = time.monotonic()
+        self._clock = clock or time.monotonic
+        self._optimizer_started = None
+        self._slow_reported = False
+        self.slow_callback = None
+        self._activity_lock = threading.Lock()
+        self._activity = None
+        self._counts = {}
+
+    def begin_optimizer(self):
+        self._optimizer_started = self._clock()
+
+    def end_optimizer(self):
+        self._check_slow()
+        self._optimizer_started = None
+
+    def _check_slow(self):
+        if (self._optimizer_started is not None and not self._slow_reported
+                and self._clock() - self._optimizer_started >= self.SLOW_OPTIMIZER_SECONDS):
+            self._slow_reported = True
+            if self.slow_callback:
+                self.slow_callback()
+
+    def activity(self, label, *, increment=0, completed=None, total=None):
+        """A bounded mailbox, not one queued Qt event per search candidate."""
+        self.check()
+        with self._activity_lock:
+            count = self._counts.get(label, 0) + increment if completed is None else completed
+            self._counts[label] = count
+            self._activity = (self.phase, label, count, total)
+
+    def activity_snapshot(self):
+        with self._activity_lock:
+            return self._activity
 
     def check(self):
         if self.cancelled.is_set():
             raise OptimizationCancelled()
+        self._check_slow()
         if time.monotonic() - self._last_yield >= 0.005:
             # Give Qt's Python callbacks a turn even when this worker repeatedly
             # reacquires the GIL. This affects latency, never search work/ranking.
@@ -39,6 +75,9 @@ class ComputationControl:
         self.check()
         if phase != self.phase:
             self.phase = phase
+            with self._activity_lock:
+                self._activity = None
+                self._counts.clear()
             if self.phase_callback:
                 self.phase_callback(phase)
 
@@ -75,6 +114,7 @@ class _StartOptimizationEvent(QEvent):
 class _OptimizationWorker(QObject):
     completed = Signal(object)
     phase_changed = Signal(str, str)
+    slow_optimizer = Signal(str)
 
     @Slot(object, object)
     def run(self, request, control):
@@ -83,6 +123,8 @@ class _OptimizationWorker(QObject):
         try:
             from Model import ExperimentModel
             control.phase_callback = lambda phase: self.phase_changed.emit(request.job_id, phase)
+            if request.kind == "design" and request.options.get("automatic"):
+                control.slow_callback = lambda: self.slow_optimizer.emit(request.job_id)
             control.report("Preparing inputs")
             draft = ExperimentModel()
             draft.restore_optimization_inputs(request.snapshot)
@@ -97,10 +139,14 @@ class _OptimizationWorker(QObject):
                     outcome.result = copy.deepcopy(options.get("previous_result") or {})
                     outcome.result.update(best=True, stock_allocation_reused=True)
                 else:
-                    outcome.result = draft.optimize_stock_solutions(
-                        quantum=0.1, max_refine=60, two_max_refine=40,
-                        allow_two=options["allow_two"],
-                    )
+                    control.begin_optimizer()
+                    try:
+                        outcome.result = draft.optimize_stock_solutions(
+                            quantum=0.1, max_refine=60, two_max_refine=40,
+                            allow_two=options["allow_two"],
+                        )
+                    finally:
+                        control.end_optimizer()
                 if outcome.result.get("best"):
                     draft.validate_optimization_allocation(outcome.result)
                     control.report("Generating reactions")
@@ -114,6 +160,7 @@ class _OptimizationWorker(QObject):
             outcome.error = str(exc) or type(exc).__name__
         finally:
             control.phase_callback = None
+            control.slow_callback = None
         self.completed.emit(outcome)
 
 
@@ -136,7 +183,7 @@ class OptimizationJobManager(QObject):
     def busy(self):
         return self._active is not None
 
-    def submit(self, owner, request, completed, phase_changed=None):
+    def submit(self, owner, request, completed, phase_changed=None, slow_optimizer=None):
         if self.busy or self._shutting_down:
             return False
         request = copy.deepcopy(request)
@@ -147,11 +194,12 @@ class OptimizationJobManager(QObject):
             self._dispatch.connect(self._worker.run, Qt.QueuedConnection)
             self._worker.completed.connect(self._completed, Qt.QueuedConnection)
             self._worker.phase_changed.connect(self._phase_changed, Qt.QueuedConnection)
+            self._worker.slow_optimizer.connect(self._slow_optimizer, Qt.QueuedConnection)
             self._thread.finished.connect(self._worker.deleteLater)
             self._thread.finished.connect(self._stopped)
             self._thread.start()
         control = ComputationControl()
-        self._active = (weakref.ref(owner), request.job_id, control, completed, phase_changed)
+        self._active = (weakref.ref(owner), request.job_id, control, completed, phase_changed, slow_optimizer)
         # Finish pending control repaints before worker allocations can trigger
         # a process-wide GC. Never combine both pauses in the first UI frame.
         QCoreApplication.postEvent(self, _StartOptimizationEvent(request, control),
@@ -168,10 +216,23 @@ class OptimizationJobManager(QObject):
         if self._active and (owner is None or self._active[0]() is owner):
             self._active[2].cancelled.set()
 
+    def activity_snapshot(self, owner):
+        if self._active and self._active[0]() is owner:
+            return self._active[2].activity_snapshot()
+        return None
+
+    @Slot(str)
+    def _slow_optimizer(self, job_id):
+        active = self._active
+        if (active and active[1] == job_id and active[0]() is not None
+                and isValid(active[0]()) and active[5]):
+            active[5]()
+
     @Slot(str, str)
     def _phase_changed(self, job_id, phase):
         active = self._active
-        if active and active[1] == job_id and active[0]() is not None and isValid(active[0]()) and active[4]:
+        if (active and active[1] == job_id and active[0]() is not None
+                and isValid(active[0]()) and not active[2].cancelled.is_set() and active[4]):
             active[4](phase)
             self.phase_changed.emit(job_id, phase)
 

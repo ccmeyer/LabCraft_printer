@@ -101,7 +101,8 @@ def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None
     dialog.final_v_spin.setValue(2000.0)
     dialog.auto_update_chk = QCheckBox()
     dialog.auto_update_chk.setChecked(True)
-    dialog.run_btn = QPushButton("Update Reactions and Stock Solutions")
+    dialog.slow_auto_update_notice = QLabel("")
+    dialog.run_btn = QPushButton("Recalculate Stocks")
     dialog._run_btn_default_stylesheet = dialog.run_btn.styleSheet()
     dialog.reagent_table = QTableWidget(ExperimentDesignDialog.COL_DELETE + 1, 1)
 
@@ -507,7 +508,7 @@ def test_auto_update_off_marks_dirty_without_starting_timer(qapp):
     assert dialog._auto_timer.starts == 0
     assert "background-color: #1b3a57" in dialog.run_btn.styleSheet()
     assert "color: white" in dialog.run_btn.styleSheet()
-    assert "Press Update Reactions and Stock Solutions" in dialog.status_lbl.text()
+    assert "Press Recalculate Stocks" in dialog.status_lbl.text()
 
 
 def test_auto_update_toggle_back_on_schedules_dirty_design(qapp):
@@ -861,6 +862,7 @@ def test_recompute_silent_suppresses_modal_busy_dialog(qapp):
 
     assert calls == [
         {
+            "automatic": True,
             "show_failure_dialog": False,
             "show_capacity_dialog": False,
             "busy_message": (

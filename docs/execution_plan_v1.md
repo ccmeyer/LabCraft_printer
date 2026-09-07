@@ -243,6 +243,43 @@ Design inputs and dependent actions are paused during calculation; Cancel
 retains the previous published results and leaves the edited inputs dirty.
 Save, preview, and finalize continue only after successful publication.
 
+The busy display shows the current phase immediately on its next half-second
+refresh. After one second it also shows total elapsed job time and, where
+available, one activity count: single-stock candidates considered, stock pairs
+considered, candidates filtered, complete allocations evaluated, or reactions
+generated. Search counters describe work in the current phase, not percent
+complete or a prediction of remaining time. Only reaction generation has a
+known total. A bounded shared snapshot coalesces activity; Qt refreshes the
+small busy display at most twice per second. Canceling remains visible until
+the worker's terminal outcome, and late phase updates cannot overwrite it.
+
+Automatic editor stock calculations reaching three seconds pause future
+automatic updates, without interrupting the current job. A persistent notice
+explains that the user can make several edits and click **Recalculate Stocks**.
+This action updates both stocks and reactions and does not save. The trigger
+measures the actual optimizer call, including candidate preparation, but
+excludes dispatch, exact output validation, reaction generation, publication,
+and table refresh. Manual actions, import calculations, and layout/count-only
+allocation reuse cannot trigger this policy. Threshold checks use an independent
+monotonic clock and do not consume optimizer work or affect search decisions.
+
+Re-enabling Auto-update after a slow pause explicitly opts in for the remainder
+of that design session. Successful New, Load, editable-copy creation, Import
+Apply, or Clear Imported Design resets the pause and override, restoring the
+underlying user preference; an explicit Off remains Off. Ordinary edits, saves,
+failed replacements, and canceled calculations do not reset this policy.
+These are UI session flags only, with no persisted-schema or calibration change.
+
+The implementation/validation plan for these additions is: extend the existing
+computation control with coalesced activity and one-shot timing; use it from
+actual search/generation counters; add delayed UI details and session-local
+slow-update handling; verify thresholds, stale notices, cancellation and
+preferences with deterministic tests; then qualify complete manual, automatic,
+and import interactions on Windows and the Pi with the existing 250 ms
+heartbeat and one-second cancellation gates. Evidence stays outside worktrees.
+Rollback is a revert of the feature commit followed by normal development sync;
+no experiment-data migration or calibration-history rewrite is required.
+
 Cancellation is cooperative, including candidate preparation, filtering,
 combined search, and reaction generation. Brief worker yields let Qt's Python
 callbacks acquire the interpreter lock; neither yielding nor cancellation

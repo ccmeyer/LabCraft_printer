@@ -53,8 +53,11 @@ def prepare_editor(factory):
     return editor
 
 
-def measure(app, factory, *, cancel=False):
+def measure(app, factory, *, cancel=False, automatic=False):
     editor = prepare_editor(factory)
+    if automatic:
+        editor.auto_update_chk.setChecked(True)
+        editor._auto_timer.stop()
     outcomes, beats, phases = [], [], []
     editor.optimization_finished.connect(lambda ok, result: outcomes.append((ok, result)))
     timer = QTimer()
@@ -63,7 +66,10 @@ def measure(app, factory, *, cancel=False):
     timer.start()
     started = time.monotonic()
     beats.append(started)
-    editor._run_design_optimization_flow()
+    if automatic:
+        editor._recompute_silent()
+    else:
+        editor._run_design_optimization_flow()
     snapshot = editor.model.capture_optimization_inputs()
     cancelled_at = []
     ui = getattr(editor, "_optimization_ui", None)
@@ -88,6 +94,10 @@ def measure(app, factory, *, cancel=False):
             assert cancelled_at and not outcomes[0][0], outcomes
             return {"cancel_ms": (ended - cancelled_at[0]) * 1000, "max_gap_ms": gap_ms}
         assert outcomes[0][0], outcomes
+        if automatic and outcomes[0][1].get("optimizer_total_elapsed_ms", 0) >= 3000:
+            assert editor._slow_auto_update_paused
+            assert not editor.auto_update_chk.isChecked()
+            assert not editor.slow_auto_update_notice.isHidden()
         baseline = ExperimentModel()
         baseline.restore_optimization_inputs(snapshot)
         baseline_started = time.monotonic()
@@ -98,6 +108,7 @@ def measure(app, factory, *, cancel=False):
         assert outcomes[0][1]["optimizer_selected_rank"] == expected["optimizer_selected_rank"]
         return {"total_ms": elapsed_ms, "synchronous_compute_ms": baseline_ms,
                 "max_gap_ms": gap_ms, "phases": phases,
+                "automatic": automatic, "auto_update_paused": editor._slow_auto_update_paused,
                 "heartbeat_ms": [(beat - started) * 1000 for beat in beats],
                 "rank": outcomes[0][1]["optimizer_selected_rank"]}
     finally:
@@ -109,6 +120,10 @@ def measure(app, factory, *, cancel=False):
         editor.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         app.processEvents()
+
+
+def measure_automatic(app, factory, *, cancel=False):
+    return measure(app, factory, cancel=cancel, automatic=True)
 
 
 def measure_import(app, factory, *, cancel=False):
@@ -192,6 +207,7 @@ def main():
         for name, factory, measurement in (
             [(name, factory, measure) for name, factory in workloads]
             + [("import_" + name, factory, measure_import) for name, factory in workloads]
+            + [("automatic_dense_17", _dense_target_model, measure_automatic)]
         ):
             measurement(app, factory)
             runs = [measurement(app, factory) for _ in range(args.runs)]
@@ -212,7 +228,7 @@ def main():
         pump(app, lambda: stopped)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(results, indent=2), encoding="utf-8")
-    return 0 if len(results) == 8 and all(r["summary"]["passed"] for r in results.values()) else 1
+    return 0 if len(results) == 9 and all(r["summary"]["passed"] for r in results.values()) else 1
 
 
 if __name__ == "__main__":
