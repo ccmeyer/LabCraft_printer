@@ -5,6 +5,18 @@ from pathlib import Path
 from tools import validate_release_metadata as validator
 
 
+MACHINE_DATA_CONTRACT = {
+    "preservation_contract": validator.MACHINE_DATA_CONTRACT_NAME,
+    "data_schema_version": 1,
+    "transition": "none",
+    "transition_id": None,
+}
+BRIDGE_SOURCES = ["v1.2.0-rc.6", "v1.2.0", "v1.3.0-rc.1"]
+BRIDGE_COMPATIBILITY = {
+    "schema_version": validator.UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+    "direct_legacy_sources": BRIDGE_SOURCES,
+}
+
 def _manifest(
     version: str,
     *,
@@ -15,6 +27,7 @@ def _manifest(
     validation: list[str] | None = None,
     requires_firmware=None,
     machine_data=None,
+    update_compatibility=None,
 ) -> dict:
     return {
         "schema_version": validator.RELEASE_MANIFEST_SCHEMA_VERSION,
@@ -29,6 +42,11 @@ def _manifest(
         "notes": ["Release note."] if notes is None else notes,
         "validation": ["Focused tests pass."] if validation is None else validation,
         **({"machine_data": machine_data} if machine_data is not None else {}),
+        **(
+            {"update_compatibility": update_compatibility}
+            if update_compatibility is not None
+            else {}
+        ),
     }
 
 
@@ -99,6 +117,51 @@ def _validate(root: Path, *, check_tags: bool = False, runner: FakeGitRunner | N
     )
 
 
+def _write_bridge_release_tree(
+    root: Path,
+    *,
+    pointer: str = "v1.3.0-rc.11",
+    rc11_compatibility=BRIDGE_COMPATIBILITY,
+    modern_schema: str = validator.RELEASE_MANIFEST_SCHEMA_VERSION,
+) -> None:
+    latest = {
+        "schema_version": validator.RELEASE_INDEX_SCHEMA_VERSION,
+        "stable": "v1.2.0",
+        "release_candidate": pointer,
+        "release_candidate_series": {
+            "tag_prefix": "v1.3.0-rc.",
+            "minimum": "v1.3.0-rc.1",
+        },
+        "legacy_release_candidate_sources": list(BRIDGE_SOURCES),
+        "releases": ["v1.3.0-rc.12", "v1.3.0-rc.11", "v1.2.0"],
+    }
+    manifests = {
+        "v1.2.0": _manifest("v1.2.0", channel="stable"),
+        "v1.3.0-rc.11": _manifest(
+            "v1.3.0-rc.11",
+            channel="release_candidate",
+            previous_version="v1.3.0-rc.10",
+            rollback_version="v1.2.0",
+            machine_data=MACHINE_DATA_CONTRACT,
+            update_compatibility=rc11_compatibility,
+        ),
+        "v1.3.0-rc.12": {**_manifest(
+            "v1.3.0-rc.12",
+            channel="release_candidate",
+            previous_version="v1.3.0-rc.11",
+            rollback_version="v1.2.0",
+            machine_data=MACHINE_DATA_CONTRACT,
+        ), "schema_version": modern_schema},
+    }
+    _write_release_tree(
+        root,
+        version="v1.3.0-rc.12",
+        latest=latest,
+        manifests=manifests,
+        changelog_versions=["v1.3.0-rc.12", "v1.3.0-rc.11", "v1.2.0"],
+    )
+
+
 def test_valid_stable_metadata_passes_without_existing_git_tag(tmp_path):
     _write_release_tree(tmp_path)
 
@@ -134,6 +197,98 @@ def test_valid_release_candidate_metadata_with_series_passes(tmp_path):
 
     assert result.status == validator.STATUS_VALID
     assert result.issues == ()
+
+
+def test_modern_rc_can_advance_while_exact_legacy_pointer_remains_on_bridge(tmp_path):
+    _write_bridge_release_tree(tmp_path)
+
+    result = _validate(tmp_path)
+
+    assert result.status == validator.STATUS_VALID
+    assert result.issues == ()
+
+
+def test_exact_legacy_pointer_rejects_target_without_bridge_declaration(tmp_path):
+    _write_bridge_release_tree(tmp_path, pointer="v1.3.0-rc.12")
+
+    result = _validate(tmp_path)
+
+    assert result.status == validator.STATUS_INVALID
+    assert (
+        "v1.3.0-rc.12.json must declare update_compatibility for the pinned legacy pointer."
+        in result.issues
+    )
+
+
+def test_v2_manifest_allows_modern_rc_after_pinned_rc11_bridge(tmp_path):
+    _write_bridge_release_tree(
+        tmp_path,
+        modern_schema=validator.RELEASE_MANIFEST_SCHEMA_VERSION_V2,
+    )
+
+    result = _validate(tmp_path)
+
+    assert result.status == validator.STATUS_VALID
+    assert result.issues == ()
+
+
+def test_v2_manifest_is_rejected_for_stable_release(tmp_path):
+    manifests = {
+        "v1.1.2": {
+            **_manifest("v1.1.2"),
+            "schema_version": validator.RELEASE_MANIFEST_SCHEMA_VERSION_V2,
+        }
+    }
+    _write_release_tree(tmp_path, manifests=manifests)
+
+    result = _validate(tmp_path)
+
+    assert result.status == validator.STATUS_INVALID
+    assert "v1.1.2.json schema v2 is reserved for release_candidate updates." in result.issues
+
+def test_exact_legacy_pointer_requires_every_listed_source_cohort(tmp_path):
+    incomplete = {
+        "schema_version": validator.UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+        "direct_legacy_sources": ["v1.2.0-rc.6", "v1.2.0"],
+    }
+    _write_bridge_release_tree(tmp_path, rc11_compatibility=incomplete)
+
+    result = _validate(tmp_path)
+
+    assert result.status == validator.STATUS_INVALID
+    assert (
+        "v1.3.0-rc.11.json direct_legacy_sources does not cover the pinned legacy cohorts: "
+        "v1.3.0-rc.1"
+    ) in result.issues
+
+
+def test_exact_legacy_pointer_rejects_hidden_extra_source_authority(tmp_path):
+    overbroad = {
+        "schema_version": validator.UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+        "direct_legacy_sources": [*BRIDGE_SOURCES, "v1.1.17"],
+    }
+    _write_bridge_release_tree(tmp_path, rc11_compatibility=overbroad)
+
+    result = _validate(tmp_path)
+
+    assert result.status == validator.STATUS_INVALID
+    assert (
+        "v1.3.0-rc.11.json direct_legacy_sources authorizes cohorts absent from "
+        "latest.json legacy_release_candidate_sources: v1.1.17"
+    ) in result.issues
+
+
+def test_release_manifest_rejects_malformed_bridge_declaration(tmp_path):
+    malformed = {
+        "schema_version": validator.UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+        "direct_legacy_sources": [],
+    }
+    _write_bridge_release_tree(tmp_path, rc11_compatibility=malformed)
+
+    result = _validate(tmp_path)
+
+    assert result.status == validator.STATUS_INVALID
+    assert "v1.3.0-rc.11.json direct_legacy_sources must be a nonempty list." in result.issues
 
 
 def test_rc2_and_later_require_machine_data_preservation_contract(tmp_path):

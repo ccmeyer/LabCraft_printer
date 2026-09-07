@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import stat
 import tempfile
 import zipfile
@@ -56,6 +57,7 @@ from MachineDataVerification import (
 
 
 UPDATE_CONTRACT_NAME = "labcraft.machine_data_update.v1"
+UPDATE_COMPATIBILITY_SCHEMA_VERSION = "labcraft_update_compatibility_v1"
 UPDATE_RELEASE_SCHEMA_VERSION = 1
 UPDATE_STAGE_SCHEMA_NAME = "labcraft.machine_data_update_stage"
 UPDATE_STAGE_SCHEMA_VERSION = 1
@@ -73,6 +75,9 @@ GENESIS_ENROLLMENT_VERSIONS = frozenset(
 )
 GENESIS_MIGRATION_SOURCE_VERSIONS = frozenset(
     {"v1.2.0", "v1.2.0-rc.6", "v1.3.0-rc.1"}
+)
+RELEASE_VERSION_RE = re.compile(
+    r"v[0-9]+(?:\.[0-9]+){2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?"
 )
 
 TRANSITION_NONE = "none"
@@ -211,6 +216,84 @@ def parse_release_machine_data_contract(
     elif not isinstance(transition_id, str) or not transition_id.strip():
         raise MachineDataUpdateError("target_contract_invalid", "bootstrap_recovery requires transition_id.")
     return MappingProxyType(dict(payload))
+
+
+def parse_release_update_compatibility(
+    payload: object,
+    *,
+    required: bool,
+) -> Mapping[str, object] | None:
+    """Validate a release manifest's explicit direct-legacy bridge authority."""
+
+    if payload in (None, ""):
+        if required:
+            raise MachineDataUpdateError(
+                "target_compatibility_missing",
+                "This release is not explicitly authorized as a direct legacy-update bridge.",
+                recovery_required=True,
+            )
+        return None
+    if not isinstance(payload, Mapping):
+        raise MachineDataUpdateError(
+            "target_compatibility_invalid",
+            "Release update_compatibility must be an object.",
+            recovery_required=True,
+        )
+    expected = {"schema_version", "direct_legacy_sources"}
+    if set(payload) != expected:
+        raise MachineDataUpdateError(
+            "target_compatibility_invalid",
+            "Release update_compatibility fields differ from the v1 contract.",
+            recovery_required=True,
+        )
+    if payload.get("schema_version") != UPDATE_COMPATIBILITY_SCHEMA_VERSION:
+        raise MachineDataUpdateError(
+            "target_compatibility_invalid",
+            "Release update_compatibility has an unsupported schema_version.",
+            recovery_required=True,
+        )
+    raw_sources = payload.get("direct_legacy_sources")
+    if not isinstance(raw_sources, (list, tuple)) or not raw_sources:
+        raise MachineDataUpdateError(
+            "target_compatibility_invalid",
+            "Release direct_legacy_sources must be a nonempty list.",
+            recovery_required=True,
+        )
+    sources: list[str] = []
+    for raw_source in raw_sources:
+        if not isinstance(raw_source, str):
+            raise MachineDataUpdateError(
+                "target_compatibility_invalid",
+                "Release direct_legacy_sources entries must be version strings.",
+                recovery_required=True,
+            )
+        source = raw_source.strip()
+        if (
+            not source
+            or source != raw_source
+            or "/" in source
+            or "\\" in source
+            or ".." in source
+            or RELEASE_VERSION_RE.fullmatch(source) is None
+        ):
+            raise MachineDataUpdateError(
+                "target_compatibility_invalid",
+                f"Unsupported direct legacy source version: {raw_source!r}.",
+                recovery_required=True,
+            )
+        if source in sources:
+            raise MachineDataUpdateError(
+                "target_compatibility_invalid",
+                f"Release direct_legacy_sources lists {source} more than once.",
+                recovery_required=True,
+            )
+        sources.append(source)
+    return MappingProxyType(
+        {
+            "schema_version": UPDATE_COMPATIBILITY_SCHEMA_VERSION,
+            "direct_legacy_sources": tuple(sources),
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -828,13 +911,17 @@ def _validate_genesis_enrollment_evidence(
     *,
     app_version: str,
     app_commit: str,
+    update_compatibility: Mapping[str, object] | None,
 ) -> None:
-    if app_version not in GENESIS_ENROLLMENT_VERSIONS:
-        raise MachineDataUpdateError(
-            "deployment_anchor_missing",
-            "Only a reviewed rc.2, rc.3, or rc.8 first-start deployment may create a genesis anchor.",
-            recovery_required=True,
+    if app_version in GENESIS_ENROLLMENT_VERSIONS:
+        authorized_sources = GENESIS_MIGRATION_SOURCE_VERSIONS
+    else:
+        compatibility = parse_release_update_compatibility(
+            update_compatibility,
+            required=True,
         )
+        assert compatibility is not None
+        authorized_sources = frozenset(compatibility["direct_legacy_sources"])
     try:
         migration = load_migration_receipt(paths.migration_receipt_path)
         activation = load_activation_receipt(paths.activation_receipt_path)
@@ -852,6 +939,12 @@ def _validate_genesis_enrollment_evidence(
         raise MachineDataUpdateError(
             "deployment_anchor_missing",
             "Genesis enrollment source release is not an approved legacy migration cohort.",
+            recovery_required=True,
+        )
+    if migration.source_version not in authorized_sources:
+        raise MachineDataUpdateError(
+            "deployment_anchor_missing",
+            f"Release {app_version} is not authorized for a direct migration from {migration.source_version}.",
             recovery_required=True,
         )
     if (
@@ -978,6 +1071,7 @@ def validate_or_enroll_deployment(
     app_version: str,
     app_commit: str,
     release_contract: Mapping[str, object] | None,
+    update_compatibility: Mapping[str, object] | None = None,
     allow_genesis_enrollment: bool = False,
     io: DurableFileOps | None = None,
     clock: Callable[[], str] = utc_now,
@@ -1033,6 +1127,7 @@ def validate_or_enroll_deployment(
         active,
         app_version=app_version,
         app_commit=app_commit,
+        update_compatibility=update_compatibility,
     )
     operations = io or DurableFileOps()
     payload = _anchor_payload(
@@ -1133,6 +1228,21 @@ def load_current_release_machine_data_contract(
     if not isinstance(payload, dict) or payload.get("version") != app_version:
         return None
     return parse_release_machine_data_contract(payload.get("machine_data"), required=False)
+
+
+def load_current_release_update_compatibility(
+    repo_root: Path,
+    app_version: str,
+) -> Mapping[str, object] | None:
+    manifest_path = Path(repo_root) / "releases" / f"{app_version}.json"
+    if not manifest_path.is_file():
+        return None
+    payload = _read_json(manifest_path, "current release manifest")
+    if not isinstance(payload, dict) or payload.get("version") != app_version:
+        return None
+    return parse_release_update_compatibility(
+        payload.get("update_compatibility"), required=False
+    )
 
 
 @dataclass
@@ -1516,6 +1626,7 @@ __all__ = [
     "ProtectedSnapshot",
     "TRANSITION_BOOTSTRAP_RECOVERY",
     "TRANSITION_NONE",
+    "UPDATE_COMPATIBILITY_SCHEMA_VERSION",
     "UPDATE_CONTRACT_NAME",
     "UpdateLaunchBinding",
     "UpdateTarget",
@@ -1527,8 +1638,10 @@ __all__ = [
     "create_update_backup",
     "inspect_deployment_gate",
     "load_current_release_machine_data_contract",
+    "load_current_release_update_compatibility",
     "load_deployment_anchor",
     "parse_release_machine_data_contract",
+    "parse_release_update_compatibility",
     "validate_deployment_anchor",
     "commit_identities_match",
     "validate_or_enroll_deployment",

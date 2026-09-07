@@ -1,10 +1,16 @@
 {
-  "release_candidate": "v1.3.0-rc.10",
+  "release_candidate": "v1.3.0-rc.11",
   "release_candidate_series": {
     "minimum": "v1.3.0-rc.1",
     "tag_prefix": "v1.3.0-rc."
   },
+  "legacy_release_candidate_sources": [
+    "v1.2.0-rc.6",
+    "v1.2.0",
+    "v1.3.0-rc.1"
+  ],
   "releases": [
+    "v1.3.0-rc.11",
     "v1.3.0-rc.10",
     "v1.3.0-rc.9",
     "v1.3.0-rc.8",

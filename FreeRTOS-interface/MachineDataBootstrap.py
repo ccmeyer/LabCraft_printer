@@ -84,6 +84,8 @@ from MachineDataUpdate import (
     MachineDataUpdateError,
     inspect_deployment_gate,
     load_current_release_machine_data_contract,
+    load_current_release_update_compatibility,
+    parse_release_update_compatibility,
     validate_or_enroll_deployment,
 )
 
@@ -243,6 +245,7 @@ class MachineDataBootstrap:
         uuid_factory: Callable[[], object] = uuid4,
         io: DurableFileOps | None = None,
         release_contract: Mapping[str, object] | None = None,
+        update_compatibility: Mapping[str, object] | None = None,
         deployment_gate_enabled: bool = True,
     ) -> None:
         self.base = base
@@ -263,11 +266,20 @@ class MachineDataBootstrap:
             )
         self.deployment_gate_enabled = deployment_gate_enabled
         self.release_contract = None
+        self.update_compatibility = None
         if deployment_gate_enabled:
             self.release_contract = (
                 release_contract
                 if release_contract is not None
                 else load_current_release_machine_data_contract(
+                    Path(__file__).resolve().parents[1],
+                    self.app_version,
+                )
+            )
+            self.update_compatibility = (
+                parse_release_update_compatibility(update_compatibility, required=False)
+                if update_compatibility is not None
+                else load_current_release_update_compatibility(
                     Path(__file__).resolve().parents[1],
                     self.app_version,
                 )
@@ -947,6 +959,7 @@ class MachineDataBootstrap:
                     app_version=self.app_version,
                     app_commit=self.app_commit,
                     release_contract=self.release_contract,
+                    update_compatibility=self.update_compatibility,
                     allow_genesis_enrollment=True,
                     io=self.io,
                     clock=self.clock,

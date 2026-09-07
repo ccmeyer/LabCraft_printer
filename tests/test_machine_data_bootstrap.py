@@ -1,4 +1,5 @@
 import json
+import zipfile
 
 import pytest
 
@@ -267,6 +268,59 @@ def test_completed_m2_workspace_absence_can_resume_activation(tmp_path):
     try:
         assert context.paths == paths
         assert bootstrap.inspect().state is MachineDataBootstrap.BootstrapState.READY
+    finally:
+        context.close()
+
+
+def test_legacy_bundle_remnants_are_backed_up_archive_only_and_allow_activation(tmp_path):
+    bundle_text = "synthetic legacy bridge bundle\n"
+    manifest_text = '{"release_version":"v1.3.0-rc.11"}\n'
+    wrapper, local_root = write_wrapper(
+        tmp_path / "source",
+        custom_camera=True,
+        extra_files={
+            "LABCRAFTUPDATES/bridge.bundle": bundle_text,
+            "LabCraftUpdates/nested/bridge.json": manifest_text,
+        },
+    )
+    candidate = inspect_wrapper(wrapper)
+    base, _unused = machine_data_paths(tmp_path)
+    bootstrap = _bootstrap(base, uuid_values=(MIGRATION_ID,))
+
+    context = bootstrap.bootstrap_from_candidate(
+        MachineDataBootstrap.BootstrapSubmission(
+            selection=MachineDataMigration.CandidateSelection(
+                MachineDataMigration.CandidateSourceKind.OPERATOR_SELECTED_WRAPPER,
+                wrapper,
+            ),
+            machine_id=MACHINE_ID,
+            machine_uuid=MACHINE_UUID,
+            activation_id=ACTIVATION_ID,
+            operator="Operator",
+            source_reason="Preserved source with legacy bundle remnants",
+            camera_confirmation=candidate.safety_snapshot["locations"]["camera"],
+        )
+    )
+    try:
+        decisions = {
+            item.relative_path.casefold(): item
+            for item in context.verification.ownership_decisions
+        }
+        assert decisions["labcraftupdates/bridge.bundle"].classification.value == "archive_only"
+        assert decisions["labcraftupdates/nested/bridge.json"].classification.value == "archive_only"
+        assert not (context.paths.machine_root / "LabCraftUpdates").exists()
+        assert not (context.paths.machine_root / "LABCRAFTUPDATES").exists()
+        with zipfile.ZipFile(context.migration.backup.archive_path) as archive:
+            names = {name.casefold(): name for name in archive.namelist()}
+            bundle_name = names["source/local/labcraftupdates/bridge.bundle"]
+            manifest_name = names["source/local/labcraftupdates/nested/bridge.json"]
+            assert archive.read(bundle_name) == (
+                local_root / "LABCRAFTUPDATES" / "bridge.bundle"
+            ).read_bytes()
+            assert archive.read(manifest_name) == (
+                local_root / "LABCRAFTUPDATES" / "nested" / "bridge.json"
+            ).read_bytes()
+        assert (local_root / "LABCRAFTUPDATES" / "bridge.bundle").read_text() == bundle_text
     finally:
         context.close()
 

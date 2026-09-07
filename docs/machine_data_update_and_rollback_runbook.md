@@ -27,11 +27,30 @@ After the main app closes, the updater:
 Only the final receipt enables normal relaunch. Fetching tags may happen
 before the backup; merging or resetting Git may not.
 
-The first update from `v1.2.0-rc.6`, `v1.2.0`, or `v1.3.0-rc.1` to rc.2 is
-the one exception: those old updaters cannot run future M6 code. That move is
-protected by the Milestone 0 off-device copy and the M2/M3 first-start
-migration. The first valid rc.2 start creates the one permitted genesis
-deployment anchor. Every later update requires M6 evidence.
+Historical rc.2, rc.3, and rc.8 first-start enrollment remains grandfathered
+for their immutable releases. The current direct bridge from `v1.2.0-rc.6`,
+`v1.2.0`, and `v1.3.0-rc.1` is `v1.3.0-rc.11`. Its release manifest explicitly
+lists those exact sources. A missing, malformed, or nonmatching declaration
+blocks before either `deployment_anchor.json` or `active_machine.json` is
+written. New bridge releases do not inherit this authority automatically.
+
+Legacy discovery uses the exact `release_candidate` pointer pinned to rc.11.
+Modern clients retain series discovery. Post-rc.11 release candidates use
+manifest schema v2, which immutable pre-rc.11 updaters cannot select; they skip
+those tags and fall back to the exact rc.11 pointer. Moving that pointer requires
+a repeated compatibility declaration and a new complete software campaign.
+
+During first-start migration, every case variation of the
+`LabCraftUpdates/` prefix is classified `archive_only`. Bundle files, matching
+JSON files, and nested content remain byte-for-byte in the verified migration
+backup but are never copied into canonical configuration. Every unrelated
+unknown or prohibited path still blocks activation. This preservation rule
+does not enable, generate, discover, or change the operator workflow for
+offline updates; those changes remain deferred.
+
+The rc.11 bridge is software-qualified only. Pi/physical qualification remains
+pending until an attended machine is available, and the first such machine is
+the rollout canary.
 
 ## Exact configuration restore after rc.4
 

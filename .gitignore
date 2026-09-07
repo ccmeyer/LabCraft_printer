@@ -22,7 +22,10 @@ MVC-interface/Presets/Settings.json
 FreeRTOS-interface/*.ipynb
 FreeRTOS-interface/Images/*
 FreeRTOS-interface/Logs/*
-FreeRTOS-interface/Experiments
+FreeRTOS-interface/Experiments/*
+!FreeRTOS-interface/Experiments/CSV_upload_examples/
+FreeRTOS-interface/Experiments/CSV_upload_examples/*
+!FreeRTOS-interface/Experiments/CSV_upload_examples/sample_target_concentrations.csv
 
 # Firmware host test build outputs
 firmware/tests_host/build/

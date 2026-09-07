@@ -8,6 +8,13 @@
       "pattern": "update_logs/",
       "reason": "Legacy updater result logs are diagnostic evidence, not active machine configuration.",
       "rule_id": "legacy-update-logs-v1"
+    },
+    {
+      "classification": "archive_only",
+      "match_kind": "prefix",
+      "pattern": "LabCraftUpdates/",
+      "reason": "Legacy offline update bundles are retained backup evidence, not active machine configuration.",
+      "rule_id": "legacy-offline-update-bundles-v1"
     }
   ]
 }

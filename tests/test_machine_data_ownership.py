@@ -21,12 +21,16 @@ def _write_catalog(path, rules):
 def test_default_policy_classifies_updater_logs_and_blocks_unknown_paths():
     policy = MachineDataOwnership.MachineDataOwnershipPolicy.load()
 
-    known = policy.classify("update_logs/latest_update_result.json")
+    updater_log = policy.classify("update_logs/latest_update_result.json")
+    legacy_bundle = policy.classify("labcraftupdates/nested/v1.3.0-rc.11.bundle")
     unknown = policy.classify("mystery/camera_override.json")
 
-    assert known.classification is MachineDataOwnership.OwnershipClassification.ARCHIVE_ONLY
-    assert known.activation_allowed is True
-    assert known.rule_id == "legacy-update-logs-v1"
+    assert updater_log.classification is MachineDataOwnership.OwnershipClassification.ARCHIVE_ONLY
+    assert updater_log.activation_allowed is True
+    assert updater_log.rule_id == "legacy-update-logs-v1"
+    assert legacy_bundle.classification is MachineDataOwnership.OwnershipClassification.ARCHIVE_ONLY
+    assert legacy_bundle.activation_allowed is True
+    assert legacy_bundle.rule_id == "legacy-offline-update-bundles-v1"
     assert unknown.classification is MachineDataOwnership.OwnershipClassification.UNCLASSIFIED
     assert unknown.activation_allowed is False
 
