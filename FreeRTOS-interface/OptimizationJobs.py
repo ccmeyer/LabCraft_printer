@@ -134,7 +134,14 @@ class _OptimizationWorker(QObject):
                 control.report("Calculating feasibility")
                 outcome.result = draft.build_import_feasibility_report(**request.options)
             else:
-                options = request.options
+                options = dict(request.options)
+                if request.kind == "import_apply":
+                    reuse = draft.prepare_import_application(options["payload"], options["metadata"])
+                    available = options.get("available_wells")
+                    if available is not None and draft.estimate_design_size().total_runs > available:
+                        raise ValueError("The imported design exceeds the available wells on the selected plate.")
+                    options.update(reuse_allocation=bool(reuse.get("reused")),
+                                   previous_result=reuse.get("result"))
                 if options.get("reuse_allocation"):
                     outcome.result = copy.deepcopy(options.get("previous_result") or {})
                     outcome.result.update(best=True, stock_allocation_reused=True)
@@ -151,7 +158,8 @@ class _OptimizationWorker(QObject):
                     draft.validate_optimization_allocation(outcome.result)
                     control.report("Generating reactions")
                     draft.generate_experiment()
-                    outcome.computed = draft.capture_optimization_outputs()
+                    outcome.computed = (draft.capture_import_application() if request.kind == "import_apply"
+                                        else draft.capture_optimization_outputs())
             control.check()
             outcome.status = "succeeded"
         except OptimizationCancelled:
@@ -172,16 +180,28 @@ class OptimizationJobManager(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._application = QApplication.instance()
         self._thread = None
         self._worker = None
         self._active = None
+        self._publication_pending = False
         self._shutting_down = False
         self._quit_pending = False
         self._shutdown_callbacks = []
 
     @property
     def busy(self):
-        return self._active is not None
+        return self._active is not None or self._publication_pending
+
+    def begin_publication(self):
+        """Keep submission/shutdown interlocks through queued UI completion."""
+        self._publication_pending = True
+
+    def finish_publication(self):
+        self._publication_pending = False
+        self.settled.emit()
+        if self._shutting_down and self._thread is not None:
+            self._thread.quit()
 
     def submit(self, owner, request, completed, phase_changed=None, slow_optimizer=None):
         if self.busy or self._shutting_down:
@@ -248,9 +268,10 @@ class OptimizationJobManager(QObject):
             if active[0]() is not None and isValid(active[0]()):
                 active[3](outcome)
         finally:
-            self.settled.emit()
-            if self._shutting_down:
-                self._thread.quit()
+            if not self._publication_pending:
+                self.settled.emit()
+                if self._shutting_down:
+                    self._thread.quit()
 
     def shutdown(self, completed=None):
         self._shutting_down = True
@@ -264,6 +285,9 @@ class OptimizationJobManager(QObject):
 
     @Slot()
     def _stopped(self):
+        if self._publication_pending:
+            QTimer.singleShot(1, self._stopped)
+            return
         # finished is emitted before all native thread-local cleanup completes.
         # Poll without blocking the UI before allowing QApplication teardown.
         if self._thread is not None and not self._thread.wait(0):
@@ -279,6 +303,10 @@ class OptimizationJobManager(QObject):
             QTimer.singleShot(0, QApplication.instance().quit)
 
     def eventFilter(self, watched, event):
+        # An application filter also receives every widget/style event. Avoid
+        # decoding their types in Python: only application Quit needs handling.
+        if watched is not self._application:
+            return False
         if event.type() == QEvent.Quit and self._thread is not None:
             self._quit_pending = True
             self.shutdown()
