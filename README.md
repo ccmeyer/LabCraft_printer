@@ -254,6 +254,11 @@ For external fixture integrity tests, set `LABCRAFT_OPTIMIZER_FIXTURE_ROOT` to
 the same external directory and run `tests/test_optimizer_realistic_qualification.py`.
 Without that environment variable only its three real-file checks are skipped;
 synthetic correctness, UI routes, failure handling, and supervisor tests still run.
+The six legacy recipe tests in `test_experiment_forced_stock_preview.py` also use
+this explicit external-data lane. Their original assertions are unchanged;
+requested qualifications fail on missing or mismatched bytes. In addition to
+the six catalog CSVs, provide the two files listed under `additional_files` in
+the manifest. No test falls back to ignored experiment folders in the checkout.
 
 An isolated compiled-kernel investigation is available through
 `tools/experiment_optimizer_native.py`. See

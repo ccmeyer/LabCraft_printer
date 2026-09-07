@@ -79,6 +79,11 @@ invoke the production application or install packages to make this check pass.
 ## Integration and accepted limitations
 
 Run the Windows full suite on the final candidate incorporating fetched `main`.
+Set `LABCRAFT_OPTIMIZER_FIXTURE_ROOT` to the external, hash-verified fixture root
+for qualification, including the manifest's two `additional_files`. Six legacy
+recipe tests previously depended on ignored checkout-local experiments; they now
+use this explicit lane. Without the variable they are separately reported as
+skipped; with it, absent or mismatched files fail rather than silently skipping.
 Pi integration covers optimizer/worker/editor/import, calibration persistence,
 execution-plan revisions, interlocks, and virtual-workflow assertions. Review
 snapshot isolation, stale-result rejection, post-publication continuations,
@@ -97,3 +102,8 @@ cleanup tuning remain deferred. Do not claim full realistic timing qualification
 Rollback the warning/check commit with a normal revert and synchronize the
 development checkout through the wrapper. No data migration, calibration-history
 rewrite, firmware update or production-environment change is required.
+This is distinct from rolling back the entire feature branch after creating new
+execution-calibration files: the branch writes schema v3 and reads v1/v2/v3,
+whereas the older `main` reader rejects v3. Preserve original history and use a
+compatible reader for those experiments; do not strip audit fields or rewrite
+calibration files to force an older application to load them.

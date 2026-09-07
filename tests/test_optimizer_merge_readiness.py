@@ -1,5 +1,6 @@
 """Bounded checks for the import contract, feasibility and warning visibility."""
 from fractions import Fraction
+import hashlib
 
 import pandas as pd
 import pytest
@@ -45,6 +46,25 @@ def test_empty_optional_volume_column_does_not_warn():
     parsed = ExperimentModel()._parse_import_max_stock_dataframe(pd.DataFrame([
         dict(reagent="Signal", stock_conc=1000, droplet_volume_nL=None)]))
     assert not parsed["issues"]
+
+
+def test_legacy_fixtures_require_exact_external_bytes(tmp_path, monkeypatch):
+    from tests import optimizer_qualification_cases as catalog
+    data = b"reagent,stock_conc\nSignal,1000\n"
+    monkeypatch.setitem(catalog.MANIFEST, "additional_files", {"sample.csv": hashlib.sha256(data).hexdigest()})
+    path = tmp_path / "sample.csv"
+    path.write_bytes(data)
+    assert catalog.read_legacy_optimizer_csv("sample.csv", tmp_path).iloc[0].stock_conc == 1000
+    path.write_bytes(b"modified recipe")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        catalog.read_legacy_optimizer_csv("sample.csv", tmp_path)
+    path.unlink()
+    with pytest.raises(FileNotFoundError):
+        catalog.read_legacy_optimizer_csv("sample.csv", tmp_path)
+    with pytest.raises(ValueError, match="Unknown optimizer fixture"):
+        catalog.read_legacy_optimizer_csv("../sample.csv", tmp_path)
+    with pytest.raises(ValueError, match="outside every Git worktree"):
+        catalog.read_legacy_optimizer_csv("sample.csv", catalog.ROOT)
 
 
 def test_wizard_shows_effective_volume_and_preserves_it_through_apply(qapp, real_editor):

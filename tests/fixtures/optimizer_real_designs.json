@@ -1,6 +1,10 @@
 {
   "schema_version": 1,
   "source_revision": "597f6eedeb1f44b770a220402bc9939be5283d82",
+  "additional_files": {
+    "bnext_260513_rep2/reagents.csv": "9a9ee62be9a04b01bfb3751345fdc5377697889d43dea7f0fc44d7a3f4427dae",
+    "bnext_large_design/stock_solutions.csv": "d42becf29ef950bea7a344540021d03e4970c52afb1a286adb53d209b9e0198f"
+  },
   "cases": {
     "real_25": {"directory": "bnext_large_design", "design": "samples_titration_labcraft.csv", "design_sha256": "07c42aa3d24cecf034dc70ee5add866fa747df07f513aa00a34c8ae780f2fd22", "stocks": "reagents.csv", "stocks_sha256": "eeb9edbf968eb3269d48154763a24e3ddd2eb92d4cbc07be3dd541398172476e", "rows": 25, "printed_nL": 6700, "tolerance_nL": 50},
     "real_68": {"directory": "bnext_260513", "design": "samples_titration_labcraft.csv", "design_sha256": "82071d4810ad44882bb0844a3ca8de0d6caabf09463136115d961175b7b74852", "stocks": "reagents.csv", "stocks_sha256": "0d66ca6054f6787281fc0c4ab9e0ecf188f8bc3e40055064c3b328f403611596", "rows": 68, "printed_nL": 5827, "tolerance_nL": 50},

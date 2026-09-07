@@ -1,6 +1,7 @@
 import copy
 import gc
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,15 @@ from Model import (
     StockSolutionManager,
     TwoStockPlan,
 )
+
+
+@pytest.fixture
+def legacy_optimizer_csv():
+    root = os.environ.get("LABCRAFT_OPTIMIZER_FIXTURE_ROOT")
+    if not root:
+        pytest.skip("Explicit external-data lane: set LABCRAFT_OPTIMIZER_FIXTURE_ROOT")
+    from tests.optimizer_qualification_cases import read_legacy_optimizer_csv
+    return lambda relative_path: read_legacy_optimizer_csv(relative_path, root)
 
 
 def _make_model(*, target_volume_nl=5000.0, final_volume_nl=5000.0, printed_volume_tolerance_nl=0.0):
@@ -3123,9 +3133,9 @@ def test_import_feasibility_report_blocks_volume_overage_beyond_tolerance():
     assert any(issue["severity"] == "error" for issue in report["issues"])
 
 
-def test_import_max_stock_parser_accepts_labcraft_reagents_csv():
+def test_import_max_stock_parser_accepts_labcraft_reagents_csv(legacy_optimizer_csv):
     em = _make_model(target_volume_nl=6700.0, final_volume_nl=10000.0)
-    max_df = pd.read_csv("FreeRTOS-interface/Experiments/bnext_large_design/reagents.csv")
+    max_df = legacy_optimizer_csv("bnext_large_design/reagents.csv")
 
     payload = em._parse_import_max_stock_dataframe(max_df)
 
@@ -3137,9 +3147,9 @@ def test_import_max_stock_parser_accepts_labcraft_reagents_csv():
     assert "polyphosphate" in stocks_by_name["polyp"]["tokens"]
 
 
-def test_import_max_stock_parser_reads_print_modes_from_reagents_csv():
+def test_import_max_stock_parser_reads_print_modes_from_reagents_csv(legacy_optimizer_csv):
     em = _make_model(target_volume_nl=5827.0, final_volume_nl=10000.0)
-    max_df = pd.read_csv("FreeRTOS-interface/Experiments/bnext_260513_rep2/reagents.csv")
+    max_df = legacy_optimizer_csv("bnext_260513_rep2/reagents.csv")
 
     payload = em._parse_import_max_stock_dataframe(max_df)
 
@@ -3205,9 +3215,9 @@ def test_import_feasibility_report_uses_imported_stream_mode_and_canonical_match
     assert report["stock_settings_by_reagent"]["[PolyP]"]["droplet_nL"] == pytest.approx(60.0)
 
 
-def test_bnext_260513_refinement_preserves_nominal_fit_when_available():
-    design = pd.read_csv("FreeRTOS-interface/Experiments/bnext_260513/samples_titration_labcraft.csv")
-    max_df = pd.read_csv("FreeRTOS-interface/Experiments/bnext_260513/reagents.csv")
+def test_bnext_260513_refinement_preserves_nominal_fit_when_available(legacy_optimizer_csv):
+    design = legacy_optimizer_csv("bnext_260513/samples_titration_labcraft.csv")
+    max_df = legacy_optimizer_csv("bnext_260513/reagents.csv")
 
     def report_for(tolerance_nl: float) -> dict:
         em = _make_model(target_volume_nl=5827.0, final_volume_nl=10000.0)
@@ -3243,11 +3253,11 @@ def test_bnext_260513_refinement_preserves_nominal_fit_when_available():
     assert stocks_100 == pytest.approx(stocks_50)
 
 
-def test_bnext_basis_rep1_total_volume_tolerance_accepts_stream_quantization_overage():
-    design = pd.read_csv(
-        "FreeRTOS-interface/Experiments/bnext_basis_rep1/LABCRAFT_intermediate-mix-volume-fractions.csv"
+def test_bnext_basis_rep1_total_volume_tolerance_accepts_stream_quantization_overage(legacy_optimizer_csv):
+    design = legacy_optimizer_csv(
+        "bnext_basis_rep1/LABCRAFT_intermediate-mix-volume-fractions.csv"
     )
-    max_df = pd.read_csv("FreeRTOS-interface/Experiments/bnext_basis_rep1/reagents_intermediate_info.csv")
+    max_df = legacy_optimizer_csv("bnext_basis_rep1/reagents_intermediate_info.csv")
     em = _make_model(target_volume_nl=10000.0, final_volume_nl=10000.0)
 
     report = em.build_import_feasibility_report(
@@ -3277,9 +3287,9 @@ def test_bnext_basis_rep1_total_volume_tolerance_accepts_stream_quantization_ove
     assert issue["effective_allowed_volume_nL"] == pytest.approx(10150.0)
 
 
-def test_import_feasibility_report_accepts_labcraft_reagents_csv_for_bnext_design():
-    design = pd.read_csv("FreeRTOS-interface/Experiments/bnext_large_design/samples_titration_labcraft.csv")
-    max_df = pd.read_csv("FreeRTOS-interface/Experiments/bnext_large_design/reagents.csv")
+def test_import_feasibility_report_accepts_labcraft_reagents_csv_for_bnext_design(legacy_optimizer_csv):
+    design = legacy_optimizer_csv("bnext_large_design/samples_titration_labcraft.csv")
+    max_df = legacy_optimizer_csv("bnext_large_design/reagents.csv")
     em = _make_model(target_volume_nl=6700.0, final_volume_nl=10000.0)
 
     report = em.build_import_feasibility_report(
@@ -3297,9 +3307,9 @@ def test_import_feasibility_report_accepts_labcraft_reagents_csv_for_bnext_desig
     assert report["max_stock_by_reagent"]["[Amino Acids]"] == pytest.approx(6.0)
 
 
-def test_bnext_large_design_polyp_500_mm_is_single_stock_feasible():
-    design = pd.read_csv("FreeRTOS-interface/Experiments/bnext_large_design/samples_titration_labcraft.csv")
-    stocks = pd.read_csv("FreeRTOS-interface/Experiments/bnext_large_design/stock_solutions.csv")
+def test_bnext_large_design_polyp_500_mm_is_single_stock_feasible(legacy_optimizer_csv):
+    design = legacy_optimizer_csv("bnext_large_design/samples_titration_labcraft.csv")
+    stocks = legacy_optimizer_csv("bnext_large_design/stock_solutions.csv")
 
     em = ExperimentModel(prof=CURRENT_PROFILE)
     report = em.build_import_feasibility_report(

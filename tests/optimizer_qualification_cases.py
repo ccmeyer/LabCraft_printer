@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from itertools import product
 from collections import Counter
 import hashlib
+import io
 import json
 import math
 from pathlib import Path
@@ -32,6 +33,24 @@ def require_external(path):
     if any(resolved.is_relative_to(root) for root in roots):
         raise ValueError("Qualification fixtures and evidence must be outside every Git worktree")
     return resolved
+
+
+def read_legacy_optimizer_csv(relative_path, fixture_root):
+    """Read an explicit, manifest-verified legacy fixture without checkout fallback."""
+    root = require_external(fixture_root)
+    expected = dict(MANIFEST.get("additional_files", {}))
+    for spec in MANIFEST["cases"].values():
+        for kind in ("design", "stocks"):
+            expected[f"{spec['directory']}/{spec[kind]}"] = spec[kind + "_sha256"]
+    if relative_path not in expected:
+        raise ValueError(f"Unknown optimizer fixture: {relative_path}")
+    path = (root / relative_path).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError("Optimizer fixture escapes its external root")
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != expected[relative_path]:
+        raise ValueError(f"Fixture hash mismatch: {relative_path}")
+    return pd.read_csv(io.BytesIO(data))
 
 
 @dataclass
