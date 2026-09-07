@@ -12493,8 +12493,18 @@ class _AsyncOptimizationUi:
                           QLineEdit, QComboBox, QTableWidget)
         controls = list(widgets) + [w for w in inputs if isinstance(w, editable_types)]
         close_button = getattr(owner, "cancel_btn", None)
-        self.states = [(w, w.isEnabled()) for w in dict.fromkeys(controls)
-                       if w is not None and w is not close_button]
+        controls = list(dict.fromkeys(w for w in controls if w is not None and w is not close_button))
+        control_set = set(controls)
+        def covered_by_parent(widget):
+            parent = widget.parentWidget()
+            while parent is not None:
+                if parent in control_set:
+                    return True
+                parent = parent.parentWidget()
+            return False
+        # Disabling a table already disables its cell editors. Changing every
+        # child separately triggers redundant style/layout work on the Pi.
+        self.states = [(w, w.isEnabled()) for w in controls if not covered_by_parent(w)]
         self.previous_suspend = getattr(owner, "_auto_update_suspended", False)
         owner._auto_update_suspended = True
         owner._optimization_ui = self
@@ -12560,16 +12570,37 @@ class _AsyncOptimizationUi:
         self.timer.stop()
         self.timer.deleteLater()
         self.dialog.blockSignals(True)
-        self.dialog.close()
-        self.dialog.deleteLater()
-        for widget, enabled in self.states:
-            widget.setEnabled(enabled)
-        self.owner._optimization_ui = None
-        self.owner._auto_update_suspended = self.previous_suspend
-        self.restore()
-        self.completed(outcome)
-        if self.close_after:
-            QTimer.singleShot(0, self.close_after)
+        self.dialog.setCancelButton(None)
+        self.dialog.setLabelText("Finishing display update…")
+        manager = optimization_job_manager()
+        manager.begin_publication()
+        try:
+            result = self.completed(outcome)
+        except Exception as exc:
+            result = (False, {"reason": str(exc), "status": "failed"})
+            self.status(str(exc))
+        # Let Qt paint the completed table before enabling its child controls.
+        # Combining both style/layout passes can exceed one UI frame on the Pi.
+        QTimer.singleShot(1, lambda: self._restore_after_publication(result, manager))
+
+    def _restore_after_publication(self, result, manager):
+        try:
+            if not isValid(self.owner):
+                return
+            self.dialog.close()
+            self.dialog.deleteLater()
+            for widget, enabled in self.states:
+                if isValid(widget):
+                    widget.setEnabled(enabled)
+            self.owner._optimization_ui = None
+            self.owner._auto_update_suspended = self.previous_suspend
+            self.restore()
+            if result is not None:
+                self.owner.optimization_finished.emit(*result)
+            if self.close_after:
+                QTimer.singleShot(0, self.close_after)
+        finally:
+            manager.finish_publication()
 
 
 def _submit_optimization_ui_job(owner, kind, options, widgets, status, restore, completed, guard):
@@ -12590,17 +12621,27 @@ def _submit_optimization_ui_job(owner, kind, options, widgets, status, restore, 
     request = OptimizationRequest(snapshot, kind=kind, options=copy.deepcopy(options))
 
     def publish(outcome):
+        if ui.canceling:
+            outcome = OptimizationOutcome(request.job_id, "cancelled")
         if outcome.status == "succeeded":
             try:
                 if owner.model is not source_model or session_identity() != source_session or not guard():
                     raise ValueError("The experiment is no longer available for this update.")
                 if input_fingerprint(source_model.capture_optimization_inputs()) != fingerprint:
                     raise ValueError("The experiment changed during optimization.")
-                if kind == "design" and outcome.result.get("best"):
-                    source_model.install_optimization_outputs(outcome.computed, fingerprint)
+                if outcome.result.get("best"):
+                    if kind == "design":
+                        source_model.install_optimization_outputs(outcome.computed, fingerprint)
+                    elif kind == "import_apply":
+                        available, _ = owner._available_wells_for_selected_plate(
+                            imported_well_ids=outcome.computed["_uploaded_well_ids"] or [],
+                        )
+                        if available is not None and len(outcome.computed["_reactions_df"]) > available:
+                            raise ValueError("The imported design exceeds the available wells.")
+                        source_model.install_import_application(outcome.computed, fingerprint)
             except Exception as exc:
                 outcome = OptimizationOutcome(request.job_id, "failed", error=str(exc))
-        completed(outcome)
+        return completed(outcome)
 
     ui = _AsyncOptimizationUi(owner, widgets, status, restore, publish)
     def slow_optimizer():
@@ -13058,14 +13099,13 @@ class ExperimentImportWizard(QDialog):
                     or input_fingerprint(self._feasibility_job_options()) != fingerprint
                     or ExperimentDesignDialog._model_execution_is_read_only(self.model)):
                 self._mark_report_dirty(outcome.error or "Calculation canceled or inputs changed. Previous report retained.")
-                self.optimization_finished.emit(False, outcome.result)
-                return
+                return False, outcome.result
             self.report = outcome.result
             self._populate_composition_table(self.report)
             self._populate_stock_table(self.report)
             self._update_status()
             self._mark_report_clean()
-            self.optimization_finished.emit(True, self.report)
+            return True, self.report
 
         self._mark_report_dirty("Calculating feasibility…")
         return _submit_optimization_ui_job(
@@ -13176,7 +13216,8 @@ class ExperimentImportWizard(QDialog):
             self._populating_tables = False
 
     def _apply_composition_table_layout(self, reagent_count: int):
-        self.composition_table.resizeColumnsToContents()
+        # Reagent cells have a fixed two-line presentation. Measuring every
+        # cell only to overwrite those widths stalls large imported designs.
         header = self.composition_table.horizontalHeader()
         header.setFixedHeight(self.COMPOSITION_HEADER_HEIGHT)
 
@@ -13197,10 +13238,9 @@ class ExperimentImportWizard(QDialog):
         for col, width in trailing:
             if col < self.composition_table.columnCount():
                 header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
-                self.composition_table.setColumnWidth(col, max(width, self.composition_table.columnWidth(col)))
+                self.composition_table.setColumnWidth(col, width)
 
-        for row in range(self.composition_table.rowCount()):
-            self.composition_table.setRowHeight(row, self.COMPOSITION_ROW_HEIGHT)
+        self.composition_table.verticalHeader().setDefaultSectionSize(self.COMPOSITION_ROW_HEIGHT)
 
     def _populate_stock_table(self, report: Dict[str, Any] | None):
         self._populating_tables = True
@@ -14126,7 +14166,9 @@ class ExperimentDesignDialog(QDialog):
         self.reagent_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.reagent_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.reagent_table.horizontalHeader().setMinimumSectionSize(self.REAGENT_COLUMN_MINIMUM_WIDTH)
-        self.reagent_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # Size explicitly after edits; automatic content sizing repeats during
+        # every child-widget style/polish event when a large import is shown.
+        self.reagent_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.reagent_table.verticalHeader().setMinimumSectionSize(28)
         self.reagent_table.verticalHeader().setMinimumWidth(155)
         self.reagent_table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -14674,6 +14716,8 @@ class ExperimentDesignDialog(QDialog):
         )
 
     def _update_reagent_column_widths(self):
+        if getattr(self, "_loading_reagent_table", False):
+            return
         table = getattr(self, "reagent_table", None)
         if table is None:
             return
@@ -14750,6 +14794,8 @@ class ExperimentDesignDialog(QDialog):
                     yield row, logical_col, widget
 
     def _sync_reagent_tables_geometry(self):
+        if getattr(self, "_loading_reagent_table", False):
+            return
         table = getattr(self, "reagent_table", None)
         if table is not None:
             table.resizeRowsToContents()
@@ -14759,8 +14805,7 @@ class ExperimentDesignDialog(QDialog):
         self._sync_reagent_tables_geometry()
 
     def _sync_all_reagent_row_heights(self):
-        for row in range(self._reagent_row_count()):
-            self._sync_reagent_row_height(row)
+        self._sync_reagent_tables_geometry()
 
     def _sync_frozen_reagent_scroll(self, value: int):
         return
@@ -15414,7 +15459,6 @@ class ExperimentDesignDialog(QDialog):
         actions_layout.addWidget(delete_btn)
         self._set_reagent_cell_widget(row, self.COL_ACTIONS, actions_widget)
 
-        self._sync_reagent_row_height(row)
         self._refresh_prior_availability_for_row(row)
         self._sync_reagent_tables_geometry()
         if schedule_update:
@@ -16078,6 +16122,8 @@ class ExperimentDesignDialog(QDialog):
         """Populate the reagent table from the model's current factors (if any)."""
         previous_suspended = getattr(self, "_auto_update_suspended", False)
         self._auto_update_suspended = True
+        self._loading_reagent_table = True
+        self.reagent_table.setUpdatesEnabled(False)
         try:
             self._clear_reagent_rows()
             # Additives
@@ -16119,10 +16165,11 @@ class ExperimentDesignDialog(QDialog):
                             intended_head_type_display_name=getattr(o, "intended_head_type_display_name", None),
                             printing_mode=getattr(o, "printing_mode", None),
                         )
-            self._sync_reagent_tables_geometry()
-            self._refresh_all_prior_availability()
         finally:
+            self._loading_reagent_table = False
+            self.reagent_table.setUpdatesEnabled(True)
             self._auto_update_suspended = previous_suspended
+        self._sync_reagent_tables_geometry()
 
     def _design_busy_widgets(self) -> list[Any]:
         return [
@@ -16358,104 +16405,52 @@ class ExperimentDesignDialog(QDialog):
         if df is None or df.empty:
             return
 
-        with (
-            QSignalBlocker(self.v_spin),
-            QSignalBlocker(self.final_v_spin),
-            QSignalBlocker(self.volume_tolerance_spin),
-            QSignalBlocker(self.allow_two_chk),
-        ):
-            self.v_spin.setValue(float(payload.get("printed_volume_nL", self.v_spin.value())))
-            self.final_v_spin.setValue(float(payload.get("final_volume_nL", self.final_v_spin.value())))
-            self.volume_tolerance_spin.setValue(float(
-                payload.get("printed_volume_tolerance_nL", self.volume_tolerance_spin.value())
-            ))
-            self.allow_two_chk.setChecked(bool(payload.get("allow_two", self.allow_two_chk.isChecked())))
-
-        self.model.set_metadata(
-            target_reaction_volume_nL=float(self.v_spin.value()),
-            printed_volume_tolerance_nL=float(self.volume_tolerance_spin.value()),
-            final_reaction_volume_nL=float(self.final_v_spin.value()),
-            allow_two_stock_solutions=bool(self.allow_two_chk.isChecked()),
+        if (optimization_job_manager().busy or self._gripper_edit_lock_is_active()
+                or self._model_execution_is_read_only(self.model)):
+            return False, {"reason": "The experiment is unavailable for import."}
+        metadata = self._metadata_options_from_controls()
+        metadata.update(
+            target_reaction_volume_nL=float(payload.get("printed_volume_nL", self.v_spin.value())),
+            final_reaction_volume_nL=float(payload.get("final_volume_nL", self.final_v_spin.value())),
+            printed_volume_tolerance_nL=float(payload.get("printed_volume_tolerance_nL", self.volume_tolerance_spin.value())),
+            allow_two_stock_solutions=bool(payload.get("allow_two", self.allow_two_chk.isChecked())),
         )
-
-        self.model.set_uploaded_design_from_dataframe(
-            df,
-            units_default="",                    # user units come from header; blank defaults to "arb"
-            droplet_nL_default=printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET),
-            starting_conc_default=0.0,
-            source_path=payload.get("source_path"),
+        available, _ = self._available_wells_for_selected_plate(
+            imported_well_ids=self.model.extract_uploaded_design_well_ids_from_dataframe(df) or [],
         )
+        self._set_stock_table_stale(True, "Applying imported formulations…")
 
-        max_stock_by_reagent = dict(payload.get("max_stock_by_reagent") or {})
-        stock_settings_by_reagent = dict(payload.get("stock_settings_by_reagent") or {})
-        for factor in getattr(self.model, "factors", []) or []:
-            if not getattr(factor, "options", None):
-                continue
-            factor_name = getattr(factor, "name", "")
-            option = factor.options[0]
-            settings = stock_settings_by_reagent.get(factor_name) or {}
-            value = settings.get("max_stock_conc", max_stock_by_reagent.get(factor_name))
-            if value is not None:
-                option.max_stock_conc = float(value)
-            if settings:
-                mode = normalize_printing_mode(
-                    settings.get("printing_mode"),
-                    fallback=getattr(option, "printing_mode", PRINTING_MODE_DROPLET),
-                )
-                option.printing_mode = mode
-                try:
-                    droplet_nL = float(settings.get("droplet_nL"))
-                except Exception:
-                    droplet_nL = printing_mode_default_ejection_volume_nl(mode)
-                if not math.isfinite(droplet_nL) or droplet_nL <= 0:
-                    droplet_nL = printing_mode_default_ejection_volume_nl(mode)
-                option.droplet_nL = float(droplet_nL)
-
-        # Update local flags
-        self._reset_auto_update_session()
-        self._uploaded_design_active = True
-        self._uploaded_design_path = payload.get("source_path")
-
-        # Rebuild UI from the model's new factors
-        self.choice_groups = set(
-            f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
-        )
-        self._load_factors_into_table()
-        self._update_unique_conditions_button_label()
-        self._update_metadata_from_controls()
-        self._mark_draft_dirty()
-
-        reuse_attempt = {"reused": False, "reason": "reuse_not_supported"}
-        installer = getattr(
-            self.model, "install_stock_allocation_reuse_payload", None
-        )
-        if callable(installer):
-            reuse_attempt = installer(
-                payload.get("stock_allocation_reuse_payload")
+        def finished(outcome):
+            if outcome.status != "succeeded" or not outcome.result.get("best"):
+                self._mark_design_optimization_dirty()
+                message = outcome.error or outcome.result.get("reason") or "Import canceled. Previous design retained."
+                self._set_status(message, severity="warning")
+                return False, {"reason": message, "status": outcome.status}
+            self._reset_auto_update_session()
+            self._uploaded_design_active = True
+            self._uploaded_design_path = payload.get("source_path")
+            with (QSignalBlocker(self.v_spin), QSignalBlocker(self.final_v_spin),
+                  QSignalBlocker(self.volume_tolerance_spin), QSignalBlocker(self.allow_two_chk)):
+                self.v_spin.setValue(metadata["target_reaction_volume_nL"])
+                self.final_v_spin.setValue(metadata["final_reaction_volume_nL"])
+                self.volume_tolerance_spin.setValue(metadata["printed_volume_tolerance_nL"])
+                self.allow_two_chk.setChecked(metadata["allow_two_stock_solutions"])
+            self.choice_groups = set()
+            self._load_factors_into_table()
+            self._update_unique_conditions_button_label()
+            self._mark_draft_dirty()
+            ok, result = self._complete_design_optimization_flow(
+                outcome.result, refresh_lock_states=True,
             )
-        if reuse_attempt.get("reused"):
-            self._stock_allocation_dirty = False
-            self._reaction_layout_dirty = True
-            self._stock_amounts_dirty = True
-            self._design_optimization_dirty = True
-            self._last_optimization_result = copy.deepcopy(
-                reuse_attempt.get("result") or {"best": True}
-            )
-        else:
-            self._mark_design_optimization_dirty("stock")
+            return ok, result
 
-        # Generate immediately. An unchanged, exactly validated wizard plan is
-        # reused; any mismatch follows the normal full optimization path.
-        self._run_design_optimization_flow(
-            show_failure_dialog=True,
-            failure_title="Could not update reactions and stock solutions",
-            failure_prefix="Could not calculate stock solutions for the imported formulations:\n",
-            show_capacity_dialog=False,
-            refresh_lock_states=True,
-            busy_message=(
-                "Applying imported formulations and updating reactions and stock "
-                "solutions... this may take a moment on Raspberry Pi."
-            ),
+        return _submit_optimization_ui_job(
+            self, "import_apply", dict(payload=payload, metadata=metadata,
+                                       allow_two=metadata["allow_two_stock_solutions"],
+                                       available_wells=available),
+            self._design_busy_widgets(), self._set_status, self._refresh_all_lock_states,
+            finished, lambda: not self._gripper_edit_lock_is_active()
+                              and not self._model_execution_is_read_only(self.model),
         )
 
     def _validate_uploaded_design_well_assignments(self, df) -> bool:
@@ -17270,6 +17265,9 @@ class ExperimentDesignDialog(QDialog):
                                             intended_head_type_display_name=r_head_type_display)
         
     def _update_metadata_from_controls(self):
+        self.model.set_metadata(**self._metadata_options_from_controls())
+
+    def _metadata_options_from_controls(self):
         # If randomize is checked and no seed yet, create a fresh one
         randomize = self.randomize_chk.isChecked()
         seed = int(self.random_seed_spin.value())
@@ -17299,7 +17297,7 @@ class ExperimentDesignDialog(QDialog):
             plate_rows = None
             plate_columns = None
 
-        self.model.set_metadata(
+        return dict(
             name=self.exp_name_edit.text().strip() or "Untitled",
             replicates=int(self.rep_spin.value()),
             target_reaction_volume_nL=float(self.v_spin.value()),
@@ -17323,7 +17321,6 @@ class ExperimentDesignDialog(QDialog):
             plate_rows=plate_rows,
             plate_columns=plate_columns,
         )
-        print(f"[ExperimentDesignDialog] metadata updated: {self.model.metadata}")
 
     def _persist_design_identity_registry_entries(self):
         runtime_model = self._bridge_get_runtime_model()
@@ -17811,7 +17808,6 @@ class ExperimentDesignDialog(QDialog):
                     self._mark_design_optimization_dirty()
                     message = outcome.error or "Optimization canceled. Previous results retained."
                     self._set_status(message, severity="warning")
-                    self.optimization_finished.emit(False, {"reason": message, "status": outcome.status})
                     return False, {"reason": message, "status": outcome.status}
                 ok, res = self._complete_design_optimization_flow(
                     res, size_estimate=size_estimate,
@@ -17822,8 +17818,7 @@ class ExperimentDesignDialog(QDialog):
             except Exception as exc:
                 self._mark_design_optimization_dirty()
                 self._set_status(str(exc), severity="error")
-                self.optimization_finished.emit(False, {"reason": str(exc)})
-                return
+                return False, {"reason": str(exc)}
             if ok and on_complete is not None:
                 try:
                     if on_complete() is False:
@@ -17832,7 +17827,6 @@ class ExperimentDesignDialog(QDialog):
                     ok = False
                     self._mark_draft_dirty()
                     self._set_status(str(exc), severity="error")
-            self.optimization_finished.emit(ok, res)
             return ok, res
 
         return _submit_optimization_ui_job(
@@ -18103,7 +18097,7 @@ class ExperimentDesignDialog(QDialog):
         self._schedule_auto_update(dirty_domain="layout")
         self._refresh_all_lock_states()
 
-    def _available_wells_for_selected_plate(self) -> tuple[int, str]:
+    def _available_wells_for_selected_plate(self, *, imported_well_ids=None) -> tuple[int, str]:
         """
         Compute assignable wells for the selected plate using the same gating inputs
         as runtime assignment (manual wells, reaction wells, start offset, exclusions).
@@ -18138,9 +18132,12 @@ class ExperimentDesignDialog(QDialog):
                     out.add(f"{row_label}{int(col_1)}")
             return out
 
-        if self._manual_assignments_active():
+        manual_active = (self._manual_assignments_active() if imported_well_ids is None
+                         else bool(imported_well_ids))
+        if manual_active:
             get_manual = getattr(self.model, "get_explicit_well_assignments", None)
-            manual_well_ids = get_manual() if callable(get_manual) else getattr(self.model, "_uploaded_well_ids", None)
+            manual_well_ids = (imported_well_ids if imported_well_ids is not None else
+                               get_manual() if callable(get_manual) else getattr(self.model, "_uploaded_well_ids", None))
             if not manual_well_ids:
                 return 0, plate_name
             normalized = wp.validate_explicit_well_ids(
