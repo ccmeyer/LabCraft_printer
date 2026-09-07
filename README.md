@@ -125,6 +125,21 @@ Qualification requires every measured heartbeat gap to be at most 250 ms and
 cancellation to complete within one second. It reports a failed gate without
 changing optimizer work limits. Windows results do not qualify the Pi.
 
+Import Apply stages the replacement design, allocation reuse and reaction
+generation in the worker. Cancel, failed computation, stale inputs or a newly
+active interlock retain the committed design and calibration history. No file
+is saved by Apply. Inputs stay disabled through publication and table refresh.
+Bulk reagent loading performs one final table layout; the import composition
+table uses fixed initial widths without measuring every cell. Columns remain
+manually resizable.
+
+To rerun the import responsiveness regression, select
+`--suite realistic --case groups_import --case dense_384_10 --runs 5` with a
+unique external `--output`. Evidence includes `ui_work` timings for Apply setup,
+publication and table refresh, alongside worker phases and heartbeat gaps.
+This focused run does not certify the full realistic workload matrix. Existing
+input-volume limitations and infeasible cases remain reported as blockers.
+
 For Pi qualification, commit/push the feature branch and use the documented
 `Status -> Sync -> Validate` development workflow below. Run the same harness
 and focused optimizer/UI tests from the exact validated development checkout,

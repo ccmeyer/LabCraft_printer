@@ -2903,7 +2903,7 @@ class ExperimentModel(QObject):
     _OPTIMIZATION_INPUT_ATTRIBUTES = (
         "factors", "additional_conditions", "metadata", "legacy_mode",
         "_stock_allocation_resolution_policy_source", "_uploaded_reactions",
-        "_uploaded_well_ids", "applied_imaging_calibrations",
+        "_uploaded_well_ids", "_uploaded_design_source", "applied_imaging_calibrations",
         "calibration_volume_warning_audits", "calibrated_stock_allocation",
         "calibrated_stock_allocation_status", "plans_per_option",
         "_stock_rows_cache", "_fill_row_cache", "_target_preview_map",
@@ -2915,6 +2915,52 @@ class ExperimentModel(QObject):
         "_last_worst_nonfill_volume_nL", "calibrated_stock_allocation",
         "calibrated_stock_allocation_status",
     )
+    _IMPORT_DESIGN_ATTRIBUTES = (
+        "factors", "metadata", "_stock_allocation_resolution_policy_source",
+        "_uploaded_reactions", "_uploaded_well_ids", "_uploaded_design_source",
+    )
+
+    def prepare_import_application(self, payload, metadata):
+        """Stage an import on the detached computation model, never the editor."""
+        self._optimization_checkpoint("Preparing imported formulations")
+        self.set_metadata(**metadata)
+        self.set_uploaded_design_from_dataframe(
+            payload["design_df"], units_default="",
+            droplet_nL_default=printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET),
+            starting_conc_default=0.0, source_path=payload.get("source_path"),
+        )
+        bounds = payload.get("max_stock_by_reagent") or {}
+        stock_settings = payload.get("stock_settings_by_reagent") or {}
+        for factor in self.factors:
+            self._optimization_checkpoint()
+            option = factor.options[0]
+            settings = stock_settings.get(factor.name) or {}
+            bound = settings.get("max_stock_conc", bounds.get(factor.name))
+            if bound is not None:
+                option.max_stock_conc = float(bound)
+            if settings:
+                mode = normalize_printing_mode(settings.get("printing_mode"), fallback=option.printing_mode)
+                option.printing_mode = mode
+                try:
+                    volume = float(settings.get("droplet_nL"))
+                except (ValueError, TypeError):
+                    volume = printing_mode_default_ejection_volume_nl(mode)
+                if not math.isfinite(volume) or volume <= 0:
+                    volume = printing_mode_default_ejection_volume_nl(mode)
+                option.droplet_nL = volume
+        self.validate_design_size(self.estimate_design_size())
+        self._optimization_checkpoint("Checking imported allocation")
+        return self.install_stock_allocation_reuse_payload(payload.get("stock_allocation_reuse_payload"))
+
+    def capture_import_application(self):
+        names = self._IMPORT_DESIGN_ATTRIBUTES + self._OPTIMIZATION_OUTPUT_ATTRIBUTES
+        return copy.deepcopy({name: getattr(self, name) for name in names})
+
+    def install_import_application(self, computed, expected_fingerprint):
+        self._install_computed_state(
+            computed, expected_fingerprint,
+            self._IMPORT_DESIGN_ATTRIBUTES + self._OPTIMIZATION_OUTPUT_ATTRIBUTES,
+        )
 
     def _optimization_checkpoint(self, phase=None):
         control = getattr(self, "_optimization_control", None)
@@ -2961,16 +3007,19 @@ class ExperimentModel(QObject):
         self._optimization_checkpoint()
 
     def install_optimization_outputs(self, computed, expected_fingerprint):
+        self._install_computed_state(computed, expected_fingerprint, self._OPTIMIZATION_OUTPUT_ATTRIBUTES)
+
+    def _install_computed_state(self, computed, expected_fingerprint, attributes):
         if self.is_execution_design_locked():
             raise ValueError("The experiment is now locked.")
         if input_fingerprint(self.capture_optimization_inputs()) != expected_fingerprint:
             raise ValueError("The experiment changed during optimization.")
-        if set(computed) != set(self._OPTIMIZATION_OUTPUT_ATTRIBUTES):
+        if set(computed) != set(attributes):
             raise ValueError("Incomplete optimization result.")
-        previous = self.capture_optimization_outputs()
+        previous = {name: getattr(self, name) for name in attributes}
         replacement = copy.deepcopy(computed)
         try:
-            for name in self._OPTIMIZATION_OUTPUT_ATTRIBUTES:
+            for name in attributes:
                 setattr(self, name, replacement[name])
         except Exception:
             for name, value in previous.items():
@@ -9484,6 +9533,7 @@ class ExperimentModel(QObject):
         # -------- 1) Parse reagent columns → (name, units) --------
         col_specs: list[tuple[str, str, str]] = []   # (col_name, reagent_name, units)
         for col in df_in.columns:
+            self._optimization_checkpoint()
             raw = str(col).strip()
             if not raw:
                 continue
@@ -9537,6 +9587,7 @@ class ExperimentModel(QObject):
         for col_name, reagent_name, _units in col_specs:
             vals: list[float] = []
             for v in df_in[col_name].tolist():
+                self._optimization_checkpoint()
                 if v is None or (isinstance(v, float) and pd.isna(v)):
                     vals.append(0.0)
                 else:
@@ -9560,6 +9611,7 @@ class ExperimentModel(QObject):
         uploaded_reactions: list[dict[tuple[str, Optional[str]], float]] = []
 
         for i in range(n_rows):
+            self._optimization_checkpoint()
             rxn: dict[tuple[str, Optional[str]], float] = {}
             for reagent_name, vals in col_values.items():
                 v = float(vals[i]) if i < len(vals) else 0.0

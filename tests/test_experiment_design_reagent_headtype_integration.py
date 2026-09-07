@@ -21,6 +21,7 @@ from Model import (
     Model,
     PrinterHead,
     StockSolution,
+    WellPlate,
     printing_mode_default_ejection_volume_nl,
 )
 from View import ExperimentDesignDialog
@@ -114,6 +115,10 @@ class _SignalStub:
 
 class _WellPlateStub:
     excluded_wells = set()
+    validate_explicit_well_ids = WellPlate.validate_explicit_well_ids
+    _normalize_well_id = staticmethod(WellPlate._normalize_well_id)
+    _format_well_id_examples = staticmethod(WellPlate._format_well_id_examples)
+    _normalize_excluded_wells_for_plate = WellPlate._normalize_excluded_wells_for_plate
 
     def get_all_plate_names(self):
         return ["shallow-384_well_plate"]
@@ -122,7 +127,7 @@ class _WellPlateStub:
         return "shallow-384_well_plate"
 
     def get_plate_data_by_name(self, _name):
-        return {"rows": 16, "columns": 24}
+        return {"name": "shallow-384_well_plate", "rows": 16, "columns": 24}
 
 
 def _configure_local_calibration_memory(monkeypatch, tmp_path):
@@ -248,7 +253,7 @@ def _build_dialog_stub(runtime_model):
     return dialog
 
 
-def _build_real_dialog():
+def _build_real_dialog(experiment_model=None):
     runtime_model = _RuntimeModelStub()
     runtime_model.well_plate = _WellPlateStub()
     runtime_model.rack_model = SimpleNamespace(
@@ -265,7 +270,10 @@ def _build_real_dialog():
         },
         profile=SimpleNamespace(name="modern"),
     )
-    dialog = ExperimentDesignDialog(ExperimentModel(prof=CURRENT_PROFILE), main_window)
+    dialog = ExperimentDesignDialog(
+        experiment_model if experiment_model is not None else ExperimentModel(prof=CURRENT_PROFILE),
+        main_window,
+    )
     # Most layout/integration tests close the dialog as fixture cleanup. Tests
     # exercising the unsaved prompt explicitly restore this to False.
     dialog._allow_close_without_prompt = True
