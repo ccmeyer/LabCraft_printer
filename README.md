@@ -184,6 +184,13 @@ the same external directory and run `tests/test_optimizer_realistic_qualificatio
 Without that environment variable only its three real-file checks are skipped;
 synthetic correctness, UI routes, failure handling, and supervisor tests still run.
 
+An isolated compiled-kernel investigation is available through
+`tools/experiment_optimizer_native.py`. See
+[the native optimizer experiment](docs/optimizer_native_experiment.md) for
+profiling, external builds, full-result/cancellation comparisons, and the exact
+Windows/Pi procedure. It does not enable native code in the application or
+change the shared Pi environment.
+
 The full Python suite commonly takes 3-8 minutes on Windows and in agent sandboxes.
 Automation should use a process timeout of at least 15 minutes (`900000` ms) to avoid killing a valid run and paying collection/startup cost again.
 Pytest is configured in `pytest.ini` to collect from `tests/`, and its optional cache provider is disabled to avoid `.pytest_cache` permission warnings in OneDrive/sandboxed runs. That only disables pytest cache conveniences such as `--last-failed`; it does not affect normal validation.
