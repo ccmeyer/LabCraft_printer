@@ -209,6 +209,56 @@ def test_real_editor_cancel_clears_pending_save(qapp, real_editor):
     assert dialog._design_optimization_dirty
 
 
+def test_real_editor_rejects_inconsistent_single_stock_counts_before_publication(
+    qapp, real_editor, monkeypatch, tmp_path,
+):
+    editor = real_editor
+    editor.model.factors.clear()
+    editor.model.set_metadata(
+        target_reaction_volume_nL=100.0, final_reaction_volume_nL=1000.0,
+        printed_volume_tolerance_nL=0.0,
+    )
+    editor.model.add_additive("Signal", [1.0], "mM", 10.0, forced_stock_conc=50.0)
+    editor._sync_controls_from_model(recompute=False)
+    editor._load_factors_into_table()
+    outcomes, continuations, notifications = [], [], []
+    editor.optimization_finished.connect(lambda *args: outcomes.append(args))
+    editor._run_design_optimization_flow()
+    wait_for(qapp, lambda: outcomes)
+    assert outcomes.pop()[0]
+    before = editor.model.capture_optimization_outputs()
+    history = copy.deepcopy(editor.model.applied_imaging_calibrations)
+    path = tmp_path / "design.json"
+    path.write_bytes(b"previous saved design")
+    editor.model.experiment_file_path = str(path)
+    original = ExperimentModel.optimize_stock_solutions
+    def corrupt(draft, **kwargs):
+        result = original(draft, **kwargs)
+        stock = draft.plans_per_option[("Signal", None)]["stocks"][0]
+        assert stock["droplets_per_target"][1.0] == 2
+        stock["droplets_per_target"][1.0] = 1
+        return result
+    monkeypatch.setattr(ExperimentModel, "optimize_stock_solutions", corrupt)
+    editor.model.stock_updated.connect(lambda: notifications.append("stocks"))
+    editor.model.experiment_generated.connect(lambda *_: notifications.append("reactions"))
+    editor._mark_design_optimization_dirty()
+    editor._run_design_optimization_flow(on_complete=lambda: continuations.append(True))
+    wait_for(qapp, lambda: outcomes)
+
+    assert len(outcomes) == 1 and not outcomes[0][0]
+    assert "validation" in outcomes[0][1]["reason"].lower()
+    assert not notifications and not continuations
+    assert editor._design_optimization_dirty
+    assert editor.model.applied_imaging_calibrations == history
+    assert path.read_bytes() == b"previous saved design"
+    after = editor.model.capture_optimization_outputs()
+    for name, value in before.items():
+        if isinstance(value, pd.DataFrame):
+            pd.testing.assert_frame_equal(after[name], value)
+        else:
+            assert after[name] == value, name
+
+
 def test_real_editor_rejects_external_changes(qapp, real_editor):
     dialog = real_editor
     outcomes = []

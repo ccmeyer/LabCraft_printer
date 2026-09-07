@@ -3079,6 +3079,46 @@ def test_import_reuse_exact_validation_rejects_missing_mapping_and_restores_stat
     }
 
 
+@pytest.mark.parametrize("starting", [0.0, 0.25])
+@pytest.mark.parametrize("target_key,wrong_count", [(1.0, 1), (1.0, 3), (0.0, 1)])
+def test_single_stock_reuse_rejects_counts_inconsistent_with_preview(
+    starting, target_key, wrong_count,
+):
+    model = _make_model(target_volume_nl=100.0, final_volume_nl=1000.0)
+    model.add_additive(
+        "Signal", [starting, starting + 1.0, starting + 1.1], "mM", 10.0,
+        starting_conc=starting, forced_stock_conc=50.0,
+    )
+    result = model.optimize_stock_solutions(allow_two=False)
+    assert result["best"]
+    model.generate_experiment()
+    payload = model.export_stock_allocation_reuse_payload(result)
+    assert model.install_stock_allocation_reuse_payload(payload)["reused"]
+    # Approximate targets remain valid: 1.1 mM above starting concentration
+    # rounds to two drops and achieves 1.0 mM above starting concentration.
+    rows = model.get_target_preview_map()[("Signal", None)]
+    assert [r["droplets"] for r in rows] == [0, 2, 2]
+    assert rows[-1]["achieved_final"] == pytest.approx(starting + 1.0)
+    before = model.capture_optimization_outputs()
+    payload["plans_per_option"][("Signal", None)]["stocks"][0]["droplets_per_target"][target_key] = wrong_count
+    # A matching checksum does not establish physical correctness.
+    payload["plan_fingerprint"] = model._canonical_payload_sha256(
+        model._stock_allocation_plan_document(payload["plans_per_option"], payload["stock_rows"])
+    )
+
+    reused = model.install_stock_allocation_reuse_payload(payload)
+
+    assert not reused["reused"]
+    assert reused["reason"] == "stock_plan_validation_failed"
+    assert "single-stock counts" in reused["detail"]
+    after = model.capture_optimization_outputs()
+    for name, value in before.items():
+        if isinstance(value, pd.DataFrame):
+            pd.testing.assert_frame_equal(after[name], value)
+        else:
+            assert after[name] == value, name
+
+
 def test_import_feasibility_report_marks_selected_overage_as_near_budget():
     em = _make_model(target_volume_nl=958.0, final_volume_nl=1008.0)
     df = pd.DataFrame({"well_id": ["B3"], "Reagent A mM": [5.0], "Reagent B mM": [5.0]})

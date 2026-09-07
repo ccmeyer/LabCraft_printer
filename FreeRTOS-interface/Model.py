@@ -8853,11 +8853,21 @@ class ExperimentModel(QObject):
                             f'Reusable plan does not have exact target mappings '
                             f'for {key!r}.'
                         )
-                for target in targets:
+                for target, preview in zip(targets, rows):
                     self._optimization_checkpoint()
                     adjusted = self._normalize_target_key(
                         max(0.0, float(target) - starting)
                     )
+                    # Single-stock previews round afresh; generation consumes
+                    # the stored mapping. Both must describe the same dispense.
+                    if plan.get("n_stocks", 1) == 1 and (
+                        plan["stocks"][0]["droplets_per_target"][adjusted]
+                        != preview["droplets"]
+                    ):
+                        raise ValueError(
+                            f"Reusable single-stock counts disagree with the "
+                            f"achieved-concentration preview for {key!r}, target {target!r}."
+                        )
                     for stock in plan.get("stocks") or []:
                         matches = [
                             int(drops)
