@@ -243,14 +243,25 @@ Design inputs and dependent actions are paused during calculation; Cancel
 retains the previous published results and leaves the edited inputs dirty.
 Save, preview, and finalize continue only after successful publication.
 
-The busy display shows the current phase immediately on its next half-second
+Automatic calculation is deferred for the entire input editing session: pauses
+within a target list and Tab between cells do not submit a job. Edits immediately
+mark results dirty. Leaving the design inputs starts the existing 350 ms
+debounce; returning to an input stops it. Opening another dialog or switching
+applications does not commit an unfinished edit. Explicit Recalculate Stocks,
+Save, preview, and finalize actions retain their validation and continuation
+paths. Cancellation consumes the pending automatic request and does not restart
+it without another edit or explicit request.
+
+An inline progress strip in the editor or import wizard shows the current phase on its next half-second
 refresh. After one second it also shows total elapsed job time and, where
 available, one activity count: single-stock candidates considered, stock pairs
 considered, candidates filtered, complete allocations evaluated, or reactions
 generated. Search counters describe work in the current phase, not percent
 complete or a prediction of remaining time. Only reaction generation has a
 known total. A bounded shared snapshot coalesces activity; Qt refreshes the
-small busy display at most twice per second. Canceling remains visible until
+progress strip at most twice per second. It never opens or activates a separate
+window; design inputs remain locked only while the submitted job and publication
+are active. Canceling remains visible until
 the worker's terminal outcome, and late phase updates cannot overwrite it.
 
 Automatic editor stock calculations reaching three seconds pause future

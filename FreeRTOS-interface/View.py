@@ -12476,6 +12476,97 @@ class _BusyUiContext:
         return False
 
 
+class _OptimizationProgress(QWidget):
+    """Inline job feedback; never creates or activates a separate window."""
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.setObjectName("optimization_progress")
+        layout = QVBoxLayout(self)
+        self.label = QLabel("Updating…", self)
+        self.label.setWordWrap(True)
+        self.label.setMinimumHeight(self.label.fontMetrics().lineSpacing() * 2)
+        layout.addWidget(self.label)
+        actions = QHBoxLayout()
+        self.bar = QtWidgets.QProgressBar(self)
+        self.bar.setRange(0, 0)
+        self.bar.setTextVisible(False)
+        actions.addWidget(self.bar, 1)
+        self.cancel_button = QPushButton("Cancel calculation", self)
+        self.cancel_button.setAutoDefault(False)
+        actions.addWidget(self.cancel_button)
+        layout.addLayout(actions)
+        owner._optimization_progress_layout.addWidget(self)
+
+
+class _DesignEditGuard(QtCore.QObject):
+    """Defer automatic work across a sequence of edits, including Tab navigation."""
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self.pending = False
+        app = QApplication.instance()
+        app.focusChanged.connect(self._focus_changed)
+        app.installEventFilter(self)
+
+    def _is_input(self, widget):
+        if widget is None or not self.owner.isAncestorOf(widget):
+            return False
+        while widget is not self.owner:
+            if (isinstance(widget, (QLineEdit, QtWidgets.QAbstractSpinBox, QComboBox))
+                    or widget is self.owner.reagent_table):
+                return True
+            widget = widget.parentWidget()
+        return False
+
+    def editing(self):
+        app = QApplication.instance()
+        # Opening another dialog, a combo popup, or switching applications is
+        # not a commitment of the current edit.
+        return (self._is_input(app.focusWidget())
+                or app.activePopupWidget() is not None
+                or app.activeModalWidget() not in (None, self.owner)
+                or (self.owner.isVisible() and not self.owner.isActiveWindow()))
+
+    def defer_if_editing(self):
+        self.pending = self.editing()
+        if self.pending:
+            self.owner._auto_timer.stop()
+        return self.pending
+
+    def consume(self):
+        self.pending = False
+        self.owner._auto_timer.stop()
+
+    def _focus_changed(self, _old, new):
+        owner = self.owner
+        if (not owner.isVisible() or owner._auto_update_suspended
+                or not owner._auto_update_enabled()):
+            return
+        if self._is_input(new) and owner._auto_timer.isActive():
+            self.pending = True
+            owner._auto_timer.stop()
+        elif self.pending and not self.editing():
+            if owner._design_optimization_dirty:
+                owner._schedule_auto_update(mark_dirty=False)
+            else:
+                self.pending = False
+
+    def eventFilter(self, watched, event):
+        if watched is self.owner and event.type() == QtCore.QEvent.Type.Hide:
+            # QDialog.reject() can hide without invoking closeEvent().
+            self.consume()
+        if (event.type() == QtCore.QEvent.Type.MouseButtonPress
+                and isinstance(watched, QWidget) and watched.window() is self.owner
+                and self._is_input(QApplication.focusWidget())
+                and not self._is_input(watched)):
+            # Labels and empty background need not accept keyboard focus.
+            # Clicking them still explicitly leaves the design inputs.
+            self.owner.setFocus(Qt.MouseFocusReason)
+        return False
+
+
 class _AsyncOptimizationUi:
     """Nonblocking busy state shared by the editor and import wizard."""
     def __init__(self, owner, widgets, status, restore, completed):
@@ -12513,13 +12604,9 @@ class _AsyncOptimizationUi:
             timer.stop()
         for widget, _ in self.states:
             widget.setEnabled(False)
-        self.dialog = QtWidgets.QProgressDialog("Updating…", "Cancel", 0, 0, owner)
-        self.dialog.setWindowModality(Qt.NonModal)
-        self.dialog.setAutoClose(False)
-        self.dialog.setAutoReset(False)
-        self.dialog.setMinimumDuration(0)
-        self.dialog.canceled.connect(self.cancel)
-        self.dialog.show()
+        self.progress = _OptimizationProgress(owner)
+        self.progress.cancel_button.clicked.connect(self.cancel)
+        self.progress.show()
         self.timer = QTimer(owner)
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.setInterval(500)
@@ -12531,11 +12618,10 @@ class _AsyncOptimizationUi:
             self.phase_text = text
 
     def refresh(self):
-        if self.finished or not isValid(self.dialog):
+        if self.finished or not isValid(self.progress):
             return
         if self.canceling:
-            self.dialog.setLabelText("Canceling…")
-            self.dialog.show()
+            self.progress.label.setText("Canceling…")
             return
         text = self.phase_text
         elapsed = time.monotonic() - self.started
@@ -12548,7 +12634,7 @@ class _AsyncOptimizationUi:
                 counts = f"{count:,}" if total is None else f"{count:,} of {total:,}"
                 detail = f"{counts} {label} · {detail}"
             text += "\n" + detail
-        self.dialog.setLabelText(text)
+        self.progress.label.setText(text)
 
     def cancel(self):
         if self.finished or self.canceling:
@@ -12556,10 +12642,8 @@ class _AsyncOptimizationUi:
         self.canceling = True
         optimization_job_manager().cancel(self.owner)
         self.status("Canceling optimization…")
-        self.dialog.setCancelButton(None)
-        # QProgressDialog hides itself after emitting canceled. Re-show only
-        # while this job is still unwinding, without a nested event loop.
-        QTimer.singleShot(0, self.refresh)
+        self.progress.cancel_button.setEnabled(False)
+        self.refresh()
 
     def close_when_finished(self, callback):
         self.close_after = callback
@@ -12569,9 +12653,8 @@ class _AsyncOptimizationUi:
         self.finished = True
         self.timer.stop()
         self.timer.deleteLater()
-        self.dialog.blockSignals(True)
-        self.dialog.setCancelButton(None)
-        self.dialog.setLabelText("Finishing display update…")
+        self.progress.cancel_button.setEnabled(False)
+        self.progress.label.setText("Finishing display update…")
         manager = optimization_job_manager()
         manager.begin_publication()
         try:
@@ -12587,8 +12670,8 @@ class _AsyncOptimizationUi:
         try:
             if not isValid(self.owner):
                 return
-            self.dialog.close()
-            self.dialog.deleteLater()
+            self.progress.hide()
+            self.progress.deleteLater()
             for widget, enabled in self.states:
                 if isValid(widget):
                     widget.setEnabled(enabled)
@@ -12784,6 +12867,7 @@ class ExperimentImportWizard(QDialog):
         self.status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.status_lbl.setStyleSheet("color:#666; font-style: italic;")
         left.addWidget(self.status_lbl)
+        self._optimization_progress_layout = left
         left.addStretch(1)
 
         self.calculate_btn = QPushButton("Calculate Feasibility")
@@ -14120,6 +14204,7 @@ class ExperimentDesignDialog(QDialog):
         # Root layout: lifecycle banner over LEFT (organized controls) | RIGHT (wide tables)
         # -------------------------
         outer_root = QVBoxLayout(self)
+        self._optimization_progress_layout = outer_root
         self.lifecycle_banner = QLabel("")
         self.lifecycle_banner.setObjectName("experiment_lifecycle_banner")
         self.lifecycle_banner.setWordWrap(True)
@@ -14473,8 +14558,9 @@ class ExperimentDesignDialog(QDialog):
         self._slow_auto_update_override = False
         self.auto_update_chk.setChecked(True)
         self.auto_update_chk.setToolTip(
-            "When enabled, edits automatically recalculate reactions and stock solutions "
-            "after a short delay. Recalculation does not save the experiment. Turn this "
+            "When enabled, reactions and stock solutions recalculate after you leave "
+            "the design inputs and a short delay. Typing and Tab between input cells "
+            "do not start a calculation. Recalculation does not save the experiment. Turn this "
             "off to make several edits before pressing Recalculate Stocks. Slow automatic "
             "stock calculations pause future automatic updates for this design."
         )
@@ -14679,6 +14765,7 @@ class ExperimentDesignDialog(QDialog):
         self._gripper_lock_connection = self.main_window.model.rack_model.gripper_updated.connect(
             self._refresh_all_lock_states
         )
+        self._auto_edit_guard = _DesignEditGuard(self)
 
 
     # -----------------------------
@@ -15793,6 +15880,14 @@ class ExperimentDesignDialog(QDialog):
             self._update_run_button_dirty_state()
             return
 
+        guard = getattr(self, "_auto_edit_guard", None)
+        if guard is not None and guard.defer_if_editing():
+            message = "Changes pending. Leave the design inputs or click Recalculate Stocks."
+            # Avoid restyling every stock-table cell on each keystroke.
+            if self.stock_table_status_lbl.text() != message:
+                self._set_stock_table_stale(True, message)
+            return
+
         # Debounce rapid edits
         timer = getattr(self, "_auto_timer", None)
         if timer is not None:
@@ -15800,6 +15895,9 @@ class ExperimentDesignDialog(QDialog):
 
     def _recompute_silent(self):
         if not self._auto_update_enabled():
+            return
+        guard = getattr(self, "_auto_edit_guard", None)
+        if guard is not None and guard.defer_if_editing():
             return
         if (
             self._gripper_edit_lock_is_active()
@@ -17710,6 +17808,9 @@ class ExperimentDesignDialog(QDialog):
     ) -> tuple[bool, dict | None]:
         if optimization_job_manager().busy:
             return False, {"best": None, "pending": True}
+        guard = getattr(self, "_auto_edit_guard", None)
+        if guard is not None:
+            guard.consume()
         if self._gripper_edit_lock_is_active():
             message = self.GRIPPER_LOCK_STATUS
             self._set_status(message, severity="warning")

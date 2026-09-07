@@ -101,7 +101,14 @@ worker. Design edits pause during calculation; Cancel preserves the previous
 results. Save, preview, and finalize wait for successful publication. Calibration
 transactions and non-UI model APIs remain synchronous.
 
-After one second the busy display adds elapsed time and phase-specific activity
+Automatic updates wait while you type or Tab between design inputs, including
+pauses within a comma-separated target list. Leaving the inputs starts a short
+debounce; **Recalculate Stocks** commits the current inputs and calculates
+immediately. Pending edits mark stock results as out of date. Turning automatic
+updates off still allows several edits before explicit recalculation.
+
+Calculation progress appears inside the editor or import wizard, without a
+separate window taking focus. After one second it adds elapsed time and phase-specific activity
 counts, refreshed twice per second. Automatic stock calculations reaching three
 seconds pause future automatic updates for that design and explain how to use
 **Recalculate Stocks**. Re-enabling Auto-update honors that choice for the rest

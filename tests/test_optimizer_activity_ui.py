@@ -105,8 +105,8 @@ def test_live_slow_pause_and_cancel_keep_last_allocation(qapp, real_editor, monk
         ui.cancel()
         ui.phase("Queued obsolete phase")
         ui.refresh()
-        assert ui.dialog.labelText() == "Canceling…"
-        assert ui.dialog.isVisible()
+        assert ui.progress.label.text() == "Canceling…"
+        assert not ui.progress.isHidden()
         release.set()
         wait_for(qapp, lambda: outcomes)
         assert ui.finished and (not isValid(ui.timer) or not ui.timer.isActive())
@@ -158,19 +158,19 @@ def test_progress_details_delayed_and_updates_coalesced(qapp, real_editor, monke
         assert ui.timer.interval() == 500
         ui.phase("Preparing candidates")
         # Phase signals only update the mailbox, never repaint each candidate.
-        assert ui.dialog.labelText() == "Updating…"
+        assert ui.progress.label.text() == "Updating…"
         clock[0] = 100.99
         ui.refresh()
-        assert ui.dialog.labelText() == "Preparing candidates"
+        assert ui.progress.label.text() == "Preparing candidates"
         monkeypatch.setattr(optimization_job_manager(), "activity_snapshot",
                             lambda owner: ("Preparing candidates", "stock pairs considered", 2400, None))
         clock[0] = 101
         ui.refresh()
-        assert "2,400 stock pairs considered" in ui.dialog.labelText()
-        assert "1 second elapsed" in ui.dialog.labelText()
+        assert "2,400 stock pairs considered" in ui.progress.label.text()
+        assert "1 second elapsed" in ui.progress.label.text()
         ui.phase("Generating reactions")
         ui.refresh()
-        assert "stock pairs" not in ui.dialog.labelText()
+        assert "stock pairs" not in ui.progress.label.text()
     finally:
         ui.finish(None)
 
