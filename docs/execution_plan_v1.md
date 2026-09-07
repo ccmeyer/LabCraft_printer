@@ -280,6 +280,27 @@ heartbeat and one-second cancellation gates. Evidence stays outside worktrees.
 Rollback is a revert of the feature commit followed by normal development sync;
 no experiment-data migration or calibration-history rewrite is required.
 
+Optimizer qualification now distinguishes sparse regression inputs from dense
+mixtures and manual group designs. The shared qualification catalog records
+authored and unique compositions, active and varying reagents, target counts,
+groups, volumes, and fixture hashes. Real experimental CSVs remain external.
+Both stock modes are checked against their synchronous counterpart and, where
+single-stock optimization succeeds, against its complete result rank. Separate
+arithmetic checks verify counts, concentrations, fill, exact uploaded row/well
+ordering, and independent manual Cartesian/choice compositions. A dedicated
+64-reaction fixture requires three simultaneous two-stock allocations and zero
+lost levels; merely enabling two-stock mode is not evidence of pair exploration.
+
+The opt-in realistic benchmark records measured outcomes and input limitations,
+including the import wizard's mode-default ejection volumes. Five measured
+interactions follow one warm-up; early cancellation and observed candidate-phase
+cancellation have separate evidence. Unobserved short phases are explicitly
+identified rather than credited as exercised. Timing gates remain 250 ms per
+heartbeat gap and one second for cancellation. A failed fixture, comparison,
+input-coverage check, or responsiveness gate blocks qualification; this test-only
+extension does not change production search decisions. README documents the
+external fixture layout, selectors, evidence, watchdog, and Pi workflow.
+
 Cancellation is cooperative, including candidate preparation, filtering,
 combined search, and reaction generation. Brief worker yields let Qt's Python
 callbacks acquire the interpreter lock; neither yielding nor cancellation

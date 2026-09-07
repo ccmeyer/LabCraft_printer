@@ -191,12 +191,34 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True)
     parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument("--suite", choices=("baseline", "realistic", "all"), default="baseline")
+    parser.add_argument("--fixture-root", help="External root containing the hash-verified real-design directories")
+    parser.add_argument("--case", action="append", help="Realistic workload ID; repeat to select cases")
+    parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.runs < 1:
+        parser.error("--runs must be positive")
+    if args.case and args.suite == "baseline":
+        parser.error("--case requires --suite realistic or all")
     output = Path(args.output).resolve()
     if output.is_relative_to(ROOT):
         parser.error("Evidence must be outside the repository")
+    from tests.optimizer_qualification_cases import require_external
+    require_external(output)
+    if args.suite != "baseline":
+        from tools.optimizer_realistic_qualification import run_suite, supervise, configure_watchdog
+        if not args.worker:
+            return supervise(args)
+        configure_watchdog(output)
     app = QApplication.instance() or QApplication([])
     app.setQuitOnLastWindowClosed(False)
+    if args.suite == "realistic":
+        try:
+            return run_suite(app, args)
+        finally:
+            stopped = []
+            optimization_job_manager().shutdown(lambda: stopped.append(True))
+            pump(app, lambda: stopped)
     results = {}
     try:
         workloads = (
@@ -227,8 +249,30 @@ def main():
         optimization_job_manager().shutdown(lambda: stopped.append(True))
         pump(app, lambda: stopped)
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(results, indent=2), encoding="utf-8")
-    return 0 if len(results) == 9 and all(r["summary"]["passed"] for r in results.values()) else 1
+        baseline_output = output if args.suite == "baseline" else output.with_suffix(".baseline.json")
+        baseline_output.write_text(json.dumps(results, indent=2), encoding="utf-8")
+    passed = len(results) == 9 and all(r["summary"]["passed"] for r in results.values())
+    if args.suite == "all":
+        # Baseline drained its service; install a fresh application-owned manager.
+        old = app._optimization_job_manager
+        app.removeEventFilter(old)
+        app._optimization_job_manager = None
+        old.deleteLater()
+        try:
+            realistic_exit = run_suite(app, args)
+            combined = json.loads(output.read_text(encoding="utf-8"))
+            combined["baseline"] = {"path": str(baseline_output), "passed": passed}
+            combined["qualified"] = bool(combined.get("qualified") and passed)
+            if not passed:
+                combined["blockers"].append({"case": "baseline", "error": "Baseline qualification failed"})
+            from tools.optimizer_realistic_qualification import save_evidence
+            save_evidence(output, combined)
+            return 0 if passed and realistic_exit == 0 else 1
+        finally:
+            stopped = []
+            optimization_job_manager().shutdown(lambda: stopped.append(True))
+            pump(app, lambda: stopped)
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

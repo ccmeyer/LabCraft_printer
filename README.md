@@ -132,6 +132,58 @@ using its bound shared interpreter read-only, `PYTHONDONTWRITEBYTECODE=1`, and
 external output/pytest temporary directories. Use the existing offscreen
 no-hardware `Launch` lane for application smoke testing and collect final
 read-only status. Do not run against the production checkout or install packages.
+
+The default `--suite baseline` retains the original nine regression benchmarks.
+Its 88-row and 384-row synthetic designs are sparse (at most one nonzero reagent
+per row); they do not represent dense mixtures of eight or twelve reagents.
+Use the realistic qualification suite for dense explicit mixtures and manual
+designs with additive and choice groups:
+
+```powershell
+.\env\Scripts\python.exe tools\benchmark_optimizer_async.py `
+  --suite all --fixture-root "C:\LabCraftQualification\optimizer-fixtures" `
+  --output "$env:TEMP\optimizer-realistic-$([guid]::NewGuid().ToString('N')).json"
+```
+
+The fixture root must be outside all Git worktrees and contain the three
+directories listed in `tests/fixtures/optimizer_real_designs.json`, with their
+exact design and stock CSV bytes. Recipes are not committed to Git. Missing or
+hash-mismatched fixtures fail the requested suite before calculation. A focused
+rerun can use `--suite realistic --case real_68` (repeat `--case` as needed).
+Both stock modes and all applicable routes are selected automatically. The
+full realistic matrix contains 49 route/mode cases, including an automatic
+ten-reagent case, and may take substantially longer than the baseline suite.
+
+The real cases have 25, 68, and 60 rows with nine reagent/mix columns. Synthetic
+explicit cases cover 96/384 rows with 5/8/10 reagents all present together and
+3–8 positive targets per reagent. Manual cases cover 243 reactions with five
+varying additives, 256 with four varying plus four fixed additives, 144 with
+two independent choice groups and six additives, and 64 requiring three
+simultaneous two-stock plans. The grouped design also has an explicit-import
+case. Ordinary tests separately cover 288 replicated group reactions, zero and
+absent options, and an additional control.
+
+Realistic evidence uses version 2, saves completed trials incrementally, and
+reports actual selected two-stock keys, work counts, input/recipe hashes,
+coverage, timings, and blockers. Import-editor measurements include Apply and
+forced recalculation; the preceding feasibility report is measured separately.
+The existing wizard uses mode-default ejection volumes (9 nL for droplets),
+ignoring a stock CSV's requested 10 nL volume. The suite records this as an
+input-coverage blocker and exercises the 10 nL setting through editor controls
+after Apply. It does not override production parsing or suppress failed gates.
+
+The supervisor's external 15-minute interaction watchdog requests cooperative
+cancellation, then uses bounded cleanup only for its owned child process/group
+if it cannot unwind. `.process.json`, `.worker.log`, and `.watchdog.json`
+sidecars stay beside the unique external output. No running Qt thread is
+forcibly terminated inside the application. A nonzero exit with completed
+evidence means qualification found blockers, not that they have been fixed.
+
+For external fixture integrity tests, set `LABCRAFT_OPTIMIZER_FIXTURE_ROOT` to
+the same external directory and run `tests/test_optimizer_realistic_qualification.py`.
+Without that environment variable only its three real-file checks are skipped;
+synthetic correctness, UI routes, failure handling, and supervisor tests still run.
+
 The full Python suite commonly takes 3-8 minutes on Windows and in agent sandboxes.
 Automation should use a process timeout of at least 15 minutes (`900000` ms) to avoid killing a valid run and paying collection/startup cost again.
 Pytest is configured in `pytest.ini` to collect from `tests/`, and its optional cache provider is disabled to avoid `.pytest_cache` permission warnings in OneDrive/sandboxed runs. That only disables pytest cache conveniences such as `--last-failed`; it does not affect normal validation.
