@@ -621,3 +621,32 @@ Starting **New Experiment** is also non-destructive. It requires an idle array
 runner, an empty command queue, and no printer head in the gripper, then detaches
 the previous folder unchanged and clears only in-memory runtime/execution state
 before creating the fresh design folder.
+
+## Import publication and table responsiveness
+
+Import Apply prepares factors, explicit rows, stock settings and validated
+allocation reuse on the detached optimizer model. It publishes those inputs
+and generated outputs together only while the original editor session, input
+fingerprint, execution/gripper interlocks and available wells still permit the
+replacement. Cancellation (including immediately before publication), worker
+failure or rejected publication retains the previous design, calibration
+history and saved files. Apply does not save files. The UI remains busy through
+publication and display refresh, and a canceled import does not restart itself.
+Once the atomic publication begins, the dialog briefly says "Finishing display
+update" and removes Cancel. Control restoration runs on the next event-loop
+turn; the job remains busy and shutdown waits until that step finishes.
+Final reagent sizing runs in that later step too. If it fails after publication,
+the valid computed design is kept, controls are restored and the design is
+marked dirty for retry; no successful UI completion is announced.
+
+Bulk reagent loading defers full-table sizing until all reagents are present.
+The wizard composition table starts with fixed, manually resizable columns and
+uniform row heights, avoiding a full content-sizing pass. The qualification
+harness records main-thread Apply, publication and table timings separately
+from worker phases. The existing 250 ms heartbeat and one-second cancellation
+gates remain unchanged. Native acceleration remains an opt-in experiment and
+is not part of this application path.
+
+Rollback is a revert of the import/UI fix followed by the normal development
+synchronization workflow. No experiment or calibration-history migration is
+needed.

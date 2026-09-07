@@ -158,8 +158,7 @@ def test_computation_failure_is_terminal_and_does_not_publish(qapp, manager, mon
 @pytest.fixture
 def real_editor(qapp):
     from tests.test_experiment_design_reagent_headtype_integration import _build_real_dialog
-    dialog = _build_real_dialog()
-    dialog.model = _dense_target_model()
+    dialog = _build_real_dialog(_dense_target_model())
     dialog._auto_timer.stop()
     dialog._sync_controls_from_model(recompute=False)
     dialog._load_factors_into_table()
