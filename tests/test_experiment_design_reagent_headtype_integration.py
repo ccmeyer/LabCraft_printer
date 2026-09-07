@@ -1,5 +1,5 @@
+from tests.optimization_ui_helpers import immediate_optimization_jobs, complete_flow
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -21,6 +21,7 @@ from Model import (
     Model,
     PrinterHead,
     StockSolution,
+    WellPlate,
     printing_mode_default_ejection_volume_nl,
 )
 from View import ExperimentDesignDialog
@@ -114,6 +115,10 @@ class _SignalStub:
 
 class _WellPlateStub:
     excluded_wells = set()
+    validate_explicit_well_ids = WellPlate.validate_explicit_well_ids
+    _normalize_well_id = staticmethod(WellPlate._normalize_well_id)
+    _format_well_id_examples = staticmethod(WellPlate._format_well_id_examples)
+    _normalize_excluded_wells_for_plate = WellPlate._normalize_excluded_wells_for_plate
 
     def get_all_plate_names(self):
         return ["shallow-384_well_plate"]
@@ -122,7 +127,7 @@ class _WellPlateStub:
         return "shallow-384_well_plate"
 
     def get_plate_data_by_name(self, _name):
-        return {"rows": 16, "columns": 24}
+        return {"name": "shallow-384_well_plate", "rows": 16, "columns": 24}
 
 
 def _configure_local_calibration_memory(monkeypatch, tmp_path):
@@ -183,6 +188,8 @@ def _bind_dialog_method(dialog, name):
 
 def _build_dialog_stub(runtime_model):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog.runtime_model = runtime_model
     dialog.main_window = SimpleNamespace(model=runtime_model)
     dialog.model = ExperimentModel(prof=CURRENT_PROFILE)
@@ -246,7 +253,7 @@ def _build_dialog_stub(runtime_model):
     return dialog
 
 
-def _build_real_dialog():
+def _build_real_dialog(experiment_model=None):
     runtime_model = _RuntimeModelStub()
     runtime_model.well_plate = _WellPlateStub()
     runtime_model.rack_model = SimpleNamespace(
@@ -263,7 +270,10 @@ def _build_real_dialog():
         },
         profile=SimpleNamespace(name="modern"),
     )
-    dialog = ExperimentDesignDialog(ExperimentModel(prof=CURRENT_PROFILE), main_window)
+    dialog = ExperimentDesignDialog(
+        experiment_model if experiment_model is not None else ExperimentModel(prof=CURRENT_PROFILE),
+        main_window,
+    )
     # Most layout/integration tests close the dialog as fixture cleanup. Tests
     # exercising the unsaved prompt explicitly restore this to False.
     dialog._allow_close_without_prompt = True
@@ -1135,7 +1145,7 @@ def test_save_draft_clears_dirty_only_after_persistence_succeeds(monkeypatch, qa
     dialog.model.save_experiment = Mock()
     dialog._mark_draft_dirty()
 
-    assert dialog._on_save_design() is True
+    assert dialog._save_computed_design() is True
     assert dialog._draft_is_dirty() is False
 
     dialog.model.save_experiment = Mock(side_effect=OSError("disk unavailable"))
@@ -1143,7 +1153,7 @@ def test_save_draft_clears_dirty_only_after_persistence_succeeds(monkeypatch, qa
     warning = Mock()
     monkeypatch.setattr(QMessageBox, "warning", warning)
 
-    assert dialog._on_save_design() is False
+    assert dialog._save_computed_design() is False
     assert dialog._draft_is_dirty() is True
     assert dialog.save_btn.text() == "Save Draft *"
     warning.assert_called_once()
@@ -1202,7 +1212,7 @@ class _UnsavedPromptFake:
 @pytest.mark.parametrize(
     ("choice", "save_result", "expected", "expected_save_calls"),
     [
-        ("Save Draft", True, True, 1),
+        ("Save Draft", True, False, 1),
         ("Save Draft", False, False, 1),
         ("Discard Changes", True, True, 0),
         ("Cancel", True, False, 0),
@@ -1244,7 +1254,7 @@ def test_new_experiment_is_cancelled_before_replacing_an_unsaved_draft(qapp):
 
     assert dialog._on_new_experiment() is False
     dialog._confirm_unsaved_changes.assert_called_once_with(
-        "starting a new experiment"
+        "starting a new experiment", dialog._on_new_experiment
     )
     dialog.main_window.start_new_experiment_session.assert_not_called()
 
@@ -1501,6 +1511,55 @@ def test_sync_controls_from_model_can_skip_recompute(qapp):
     dialog.close()
 
 
+def test_advanced_grouping_control_persists_resets_and_marks_design_dirty(qapp):
+    dialog = _build_real_dialog()
+    checkbox = dialog.allow_avoidable_grouping_chk
+
+    assert checkbox.isChecked() is False
+    assert "Unavoidable grouping is always allowed and reported" in checkbox.toolTip()
+    assert any(
+        label.text() == "Allow avoidable target-level grouping"
+        for label in dialog.advanced_settings_panel.findChildren(QLabel)
+    )
+
+    dialog._design_optimization_dirty = False
+    dialog._last_optimization_result = {"best": True}
+    checkbox.setChecked(True)
+    assert dialog._design_optimization_dirty is True
+    assert dialog._auto_timer.isActive() is True
+    dialog._auto_timer.stop()
+
+    dialog._update_metadata_from_controls()
+    assert dialog.model.metadata["allow_avoidable_target_grouping"] is True
+
+    checkbox.setChecked(False)
+    dialog.model.metadata["allow_avoidable_target_grouping"] = True
+    dialog._sync_controls_from_model(recompute=False)
+    assert checkbox.isChecked() is True
+
+    dialog.model.reset_experiment_model()
+    dialog._sync_controls_from_model(recompute=False)
+    assert checkbox.isChecked() is False
+
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
+def test_advanced_grouping_control_obeys_execution_design_lock(qapp):
+    dialog = _build_real_dialog()
+    assert dialog.allow_avoidable_grouping_chk.isEnabled() is True
+
+    dialog.model._execution_plan_snapshot = SimpleNamespace(
+        state=ExecutionPlanState.PREPARED
+    )
+    dialog.model._execution_plan_reload_read_only = True
+    dialog._apply_execution_edit_lock_state()
+
+    assert dialog.allow_avoidable_grouping_chk.isEnabled() is False
+    dialog._allow_close_without_prompt = True
+    dialog.close()
+
+
 @pytest.mark.parametrize("dialog_size", [(1760, 900), (1560, 840)])
 def test_long_design_message_scrolls_without_resizing_editor_sections(qapp, dialog_size):
     dialog = _build_real_dialog()
@@ -1656,17 +1715,194 @@ def test_optimization_guidance_does_not_replace_success_status(qapp):
     dialog.close()
 
 
+def test_two_stock_status_explains_stock_specific_calibration_requirements(qapp):
+    dialog = _build_real_dialog()
+    dialog.model.plans_per_option = {("Reagent A", None): {"n_stocks": 2}}
+    dialog.model.get_target_preview_map = lambda: {}
+
+    dialog._update_optimization_status(
+        {"best": True, "two_stock_search_limited_keys": []}
+    )
+
+    assert "Two stock solutions are required for: Reagent A." in dialog.status_lbl.text()
+    assert (
+        "Each stock leg requires its own identified printer head. A measured calibration "
+        "can be applied before either leg or the fill stock dispenses."
+    ) in dialog.status_lbl.text()
+    assert dialog.status_heading_lbl.text() == "Warning"
+    dialog.close()
+
+
+@pytest.mark.parametrize(("change_stock_input", "expected_optimize_calls"), [(False, 0), (True, 1)])
+def test_import_apply_reuses_validated_plan_or_reoptimizes_on_fingerprint_mismatch(
+    qapp, monkeypatch, change_stock_input, expected_optimize_calls
+):
+    dialog = _build_real_dialog()
+    monkeypatch.setattr(view_module.QMessageBox, "warning", lambda *_args: None)
+    design = pd.DataFrame({"R mM": [0.1, 0.2]})
+    stocks = pd.DataFrame(
+        {"reagent": ["R"], "stock_conc": [10.0], "units": ["mM"]}
+    )
+    report = dialog.model.build_import_feasibility_report(
+        design,
+        max_stock_df=stocks,
+        printed_volume_nL=9.0,
+        printed_volume_tolerance_nL=0.0,
+        final_volume_nL=450.0,
+        allow_two=True,
+    )
+    max_stock = 11.0 if change_stock_input else 10.0
+    payload = {
+        "design_df": design,
+        "source_path": "two-stock.csv",
+        "max_stock_by_reagent": {"R": max_stock},
+        "stock_settings_by_reagent": {
+            "R": {
+                "max_stock_conc": max_stock,
+                "printing_mode": "droplet",
+                "droplet_nL": 9.0,
+            }
+        },
+        "printed_volume_nL": 9.0,
+        "printed_volume_tolerance_nL": 0.0,
+        "final_volume_nL": 450.0,
+        "allow_two": True,
+        "stock_allocation_reuse_payload": report["stock_allocation_reuse_payload"],
+    }
+    optimize_calls = []
+    original_optimize = dialog.model.optimize_stock_solutions
+
+    def counted_optimize(**kwargs):
+        optimize_calls.append(dict(kwargs))
+        return original_optimize(**kwargs)
+
+    dialog.model.optimize_stock_solutions = counted_optimize
+
+    dialog._apply_uploaded_design_payload(payload)
+
+    assert len(optimize_calls) == expected_optimize_calls
+    assert dialog.model.plans_per_option[("R", None)]["n_stocks"] == 2
+    assert dialog.model.get_number_of_reactions() == 2
+    assert dialog._stock_allocation_dirty is False
+    dialog.close()
+
+
+def test_optimization_status_distinguishes_time_and_state_limits(qapp):
+    dialog = _build_real_dialog()
+    dialog.model.plans_per_option = {}
+    dialog.model.get_target_preview_map = lambda: {}
+
+    dialog._update_optimization_status(
+        {
+            "best": True,
+            "two_stock_search_limited_keys": [],
+            "stock_allocation_search_limited": True,
+            "stock_allocation_limit_reasons": ["time_budget"],
+            "stock_allocation_time_budget_ms": 75.0,
+            "optimizer_seed_distinct_level_loss": 4,
+            "optimizer_selected_rank": {"total_distinct_level_loss": 4},
+            "stock_allocation_improved_seed": False,
+        }
+    )
+    assert (
+        "No better level resolution was found within 75 ms; the "
+        "concentration-first plan was retained."
+    ) in dialog.status_lbl.text()
+
+    dialog._update_optimization_status(
+        {
+            "best": True,
+            "two_stock_search_limited_keys": [],
+            "stock_allocation_search_limited": True,
+            "stock_allocation_limit_reasons": ["state_cap"],
+            "optimizer_seed_distinct_level_loss": 4,
+            "optimizer_selected_rank": {"total_distinct_level_loss": 4},
+            "stock_allocation_improved_seed": False,
+        }
+    )
+    assert "allocation-state limit without finding better" in dialog.status_lbl.text()
+
+    dialog._update_optimization_status(
+        {
+            "best": True,
+            "two_stock_search_limited_keys": [],
+            "stock_allocation_search_limited": True,
+            "stock_allocation_limit_reasons": ["time_budget"],
+            "stock_allocation_time_budget_ms": 75.0,
+            "optimizer_seed_distinct_level_loss": 4,
+            "optimizer_selected_rank": {"total_distinct_level_loss": 1},
+            "stock_allocation_improved_seed": True,
+            "stock_allocation_time_to_best_ms": 42.0,
+        }
+    )
+    assert "reduced grouped levels from 4 to 1 before its 75 ms limit" in (
+        dialog.status_lbl.text()
+    )
+    assert "secondary optimality was not proven" in dialog.status_lbl.text()
+
+    dialog._update_optimization_status(
+        {
+            "best": True,
+            "two_stock_search_limited_keys": [],
+            "stock_allocation_search_limited": False,
+            "optimizer_seed_distinct_level_loss": 1,
+            "optimizer_selected_rank": {"total_distinct_level_loss": 0},
+            "stock_allocation_improved_seed": True,
+            "stock_allocation_time_to_best_ms": 11.25,
+            "stock_allocation_stop_reason": "search_exhausted",
+        }
+    )
+    assert "reduced grouped levels from 1 to 0 in 11.2 ms" in (
+        dialog.status_lbl.text()
+    )
+    dialog.close()
+
+
+
+def test_optimization_status_shows_nonblocking_performance_warning(qapp):
+    dialog = _build_real_dialog()
+    dialog.model.plans_per_option = {}
+    dialog.model.get_target_preview_map = lambda: {}
+    dialog.run_btn.setEnabled(True)
+    dialog.save_btn.setEnabled(True)
+    dialog.finish_btn.setEnabled(True)
+
+    dialog._update_optimization_status(
+        {
+            "best": True,
+            "two_stock_search_limited_keys": [],
+            "stock_allocation_search_limited": False,
+            "stock_allocation_time_budget_exceeded": True,
+            "stock_allocation_elapsed_ms": 81.25,
+            "stock_allocation_time_budget_ms": 75.0,
+            "optimizer_seed_distinct_level_loss": 0,
+            "optimizer_selected_rank": {"total_distinct_level_loss": 0},
+            "stock_allocation_improved_seed": False,
+            "stock_allocation_stop_reason": "search_exhausted",
+        }
+    )
+
+    assert (
+        "Resolution-first completed deterministically in 81.2 ms, above its "
+        "75 ms performance target."
+    ) in dialog.status_lbl.text()
+    assert dialog.status_heading_lbl.text() == "Warning"
+    assert dialog.run_btn.isEnabled() is True
+    assert dialog.save_btn.isEnabled() is True
+    assert dialog.finish_btn.isEnabled() is True
+    dialog.close()
+
 def test_clear_imported_design_returns_to_an_empty_manual_editor(monkeypatch, qapp):
     dialog = _build_real_dialog()
-    sample_design = (
-        Path(__file__).resolve().parents[1]
-        / "FreeRTOS-interface"
-        / "Experiments"
-        / "CSV_upload_examples"
-        / "sample_target_concentrations.csv"
+    sample_design = pd.DataFrame(
+        {
+            "well": ["A1", "A2"],
+            "[tRNA] mM": [0.0, 1.0],
+        }
     )
     dialog.model.set_uploaded_design_from_dataframe(
-        pd.read_csv(sample_design), source_path=str(sample_design)
+        sample_design,
+        source_path="synthetic_clear_import.csv",
     )
     dialog.model.set_additional_conditions(
         [{"label": "Control", "replicates": 2, "targets": {("tRNA", None): 0.0}}]

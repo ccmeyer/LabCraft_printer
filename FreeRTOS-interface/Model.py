@@ -2,18 +2,19 @@ import pandas as pd
 import numpy as np
 
 import copy
+import hashlib
 from dataclasses import dataclass, field, replace
 from math import gcd
 from numbers import Integral, Real
-from functools import reduce
-from typing import List, Dict, Tuple, Optional, Any, Set, Iterable
+from functools import cmp_to_key, reduce
+from typing import List, Dict, Tuple, Optional, Any, Set, Iterable, Mapping, Callable
 
 from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread
+from OptimizationJobs import OptimizationCancelled, input_fingerprint
 from PySide6.QtStateMachine import QStateMachine, QState, QFinalState, QSignalTransition
 import json
 import tempfile
-import heapq
 import os
 import csv
 import cv2
@@ -40,7 +41,11 @@ import matplotlib.pyplot as plt
 from enum import Enum
 import CalibrationClasses
 from CalibrationMemoryStore import CalibrationMemoryStore
-from ExperimentAuditLog import ExperimentAuditLog
+from ExperimentAuditLog import (
+    ExperimentAuditLog,
+    build_calibration_volume_warning_audit_intent,
+    normalize_calibration_volume_warning_audit_intent,
+)
 from ExecutionPlan import (
     ExecutionPlanState,
     ProgressExecutionReference,
@@ -64,6 +69,7 @@ from InitialExecutionPlan import (
     build_initial_execution_plan,
     initial_execution_content_matches,
 )
+from StockIdentity import stock_id_for_parts, stock_id_for_row
 from ExecutionPlanRevision import (
     REVISION_DIRECTORY_NAME,
     build_calibrated_revision,
@@ -488,12 +494,39 @@ class TwoStockPlan:
     max_volume_nL: float
     conc_sum: float
     n_stocks: int = 2
+    target_rows: Dict[float, Dict[str, Any]] = field(default_factory=dict)
+    fits_nominal_volume: bool = True
+    lost_levels: int = 0
+    worst_abs_error: float = 0.0
+    mean_abs_error: float = 0.0
+    error_sum: float = 0.0
+    target_count: int = 0
+
+
+class _StockAllocationDeadlineReached(RuntimeError):
+    """Internal control flow used to retain bounded two-stock work."""
+
+
+class _StockAllocationWorkLimitReached(RuntimeError):
+    """Internal control flow used to retain deterministic bounded work."""
 
 
 @dataclass(frozen=True)
 class _PlanAccuracyScore:
     worst_abs_error: float
     mean_abs_error: float
+    concentration_burden: float
+    max_volume_nL: float
+
+
+@dataclass(frozen=True)
+class _PlanResolutionScore:
+    lost_levels: int
+    n_stocks: int
+    worst_abs_error: float
+    mean_abs_error: float
+    error_sum: float
+    target_count: int
     concentration_burden: float
     max_volume_nL: float
 
@@ -506,8 +539,19 @@ class ExperimentModel(QObject):
     MAX_GENERATED_REACTIONS = 10_000
     MAX_SUBSET_SOURCE_COMBINATIONS = 10_000
     MAX_SUBSET_INTERMEDIATE_ROWS = 10_000
+    MAX_STOCK_ALLOCATION_STATES = 12_000
+    MAX_STOCK_ALLOCATION_WORK_UNITS = 12_000
+    MAX_STOCK_ALLOCATION_SECONDS = 0.075
+    ZERO_LOSS_POLISH_SECONDS = 0.010
+    ZERO_LOSS_POLISH_WORK_UNITS = 256
     STOCK_PREP_SCHEMA_NAME = "labcraft.stock_prep"
     STOCK_PREP_SCHEMA_VERSION = 1
+    STOCK_RESOLUTION_POLICY_METADATA_KEY = "allow_avoidable_target_grouping"
+    STOCK_RESOLUTION_POLICY_RESOLUTION_FIRST = "resolution_first"
+    STOCK_RESOLUTION_POLICY_CONCENTRATION_FIRST = "concentration_first"
+    STOCK_RESOLUTION_POLICY_SOURCE_NEW_DEFAULT = "new_default"
+    STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT = "explicit"
+    STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING = "legacy_missing"
 
     # Signals to mirror the classic API
     stock_updated = Signal()
@@ -518,6 +562,7 @@ class ExperimentModel(QObject):
 
     def __init__(self, prof=None, *, experiments_root=None):
         super().__init__()
+        self._optimization_control = None
         # Factors (additive & choice groups)
         self.factors: List[FactorSpec] = []
         self.additional_conditions: List[AdditionalConditionSpec] = []
@@ -543,6 +588,7 @@ class ExperimentModel(QObject):
             "replicates": 1,
             "use_subset_design": False,
             "allow_two_stock_solutions": False,
+            "allow_avoidable_target_grouping": False,
             "reduction_factor": 1,  # reserved; current generate is full factorial
             "target_reaction_volume_nL": 2000.0, # PRINTED volume budget
             "printed_volume_tolerance_nL": 50.0,
@@ -556,6 +602,9 @@ class ExperimentModel(QObject):
             "start_col": 0,
             "well_selection": self._default_well_selection(),
         }
+        self._stock_allocation_resolution_policy_source = (
+            self.STOCK_RESOLUTION_POLICY_SOURCE_NEW_DEFAULT
+        )
         self.calibration_storage_policy: CalibrationStoragePolicy = (
             new_experiment_policy()
         )
@@ -567,6 +616,18 @@ class ExperimentModel(QObject):
         self.applied_imaging_calibrations: Dict[str, Any] = {
             "schema_version": 1,
             "records": {},
+        }
+        self.calibration_volume_warning_audits: Dict[str, Any] = {
+            "schema_version": 1,
+            "events": {},
+        }
+        self.calibrated_stock_allocation: Dict[str, Any] = {
+            "schema_version": 1,
+            "active": False,
+        }
+        self.calibrated_stock_allocation_status: Dict[str, Any] = {
+            "active": False,
+            "reason": "not_configured",
         }
         self.manual_refuel_checks: Dict[str, Any] = {
             "schema_version": 1,
@@ -632,6 +693,9 @@ class ExperimentModel(QObject):
         # runtime context provided by Model for progress/key creation
         self._runtime_well_plate = None
         self._runtime_reaction_collection = None
+        self._runtime_stock_solution_manager = None
+        self._mutable_calibration_stage_active = False
+        self._mutable_calibration_runtime_strict = False
 
         # --- uploaded design support ---
         # If not None: a list of dicts representing explicit reactions
@@ -725,6 +789,57 @@ class ExperimentModel(QObject):
         )
     def set_metadata(self, **kwargs):
         self.metadata.update(kwargs)
+
+    def get_stock_allocation_resolution_policy(self) -> Dict[str, object]:
+        """Return the effective design-time target-resolution policy.
+
+        Older editable designs did not persist the grouping setting. Their
+        historical optimizer was concentration-first, so absence is normalized
+        to the opt-in grouping behavior instead of silently changing the plan.
+        The source is intentionally transient; the existing boolean remains the
+        only persisted policy field.
+        """
+        key = self.STOCK_RESOLUTION_POLICY_METADATA_KEY
+        metadata = self.metadata if isinstance(self.metadata, dict) else {}
+        if key not in metadata:
+            metadata[key] = True
+            self._stock_allocation_resolution_policy_source = (
+                self.STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING
+            )
+
+        allow_grouping = bool(metadata.get(key))
+        source = getattr(
+            self,
+            "_stock_allocation_resolution_policy_source",
+            self.STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT,
+        )
+        if source == self.STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING:
+            # Clearing the inferred setting explicitly opts into resolution-first.
+            if not allow_grouping:
+                source = self.STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT
+        elif source == self.STOCK_RESOLUTION_POLICY_SOURCE_NEW_DEFAULT:
+            # Direct model callers may update metadata without set_metadata().
+            if allow_grouping:
+                source = self.STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT
+        elif source not in {
+            self.STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT,
+            self.STOCK_RESOLUTION_POLICY_SOURCE_NEW_DEFAULT,
+        }:
+            source = self.STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT
+        self._stock_allocation_resolution_policy_source = source
+
+        mode = (
+            self.STOCK_RESOLUTION_POLICY_CONCENTRATION_FIRST
+            if allow_grouping
+            else self.STOCK_RESOLUTION_POLICY_RESOLUTION_FIRST
+        )
+        return {
+            "mode": mode,
+            "source": source,
+            "allow_avoidable_target_grouping": allow_grouping,
+            "inferred": source
+            == self.STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING,
+        }
 
     @staticmethod
     def _default_well_selection() -> Dict[str, object]:
@@ -1422,11 +1537,111 @@ class ExperimentModel(QObject):
     def _allow_two_from_metadata(self) -> bool:
         return bool(self.metadata.get("allow_two_stock_solutions", False))
 
+    def _stock_optimizer_monotonic(self) -> float:
+        """Clock hook kept separate so deadline behavior can be tested deterministically."""
+        return time.perf_counter()
+
     def _normalize_target_key(self, value: float) -> float:
         value = float(value)
         if abs(value) <= 1e-12:
             return 0.0
         return float(f"{value:.12g}")
+
+    def _summarize_target_resolution_rows(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        requested_rows: Dict[float, Dict[str, Any]] = {}
+        for raw_row in rows or []:
+            row = dict(raw_row or {})
+            requested = self._normalize_target_key(
+                float(row.get("requested_final", 0.0) or 0.0)
+            )
+            requested_rows.setdefault(requested, row)
+
+        achieved_groups: Dict[float, List[Tuple[float, Dict[str, Any]]]] = {}
+        for requested, row in requested_rows.items():
+            achieved = self._normalize_target_key(
+                float(row.get("achieved_final", 0.0) or 0.0)
+            )
+            achieved_groups.setdefault(achieved, []).append((requested, row))
+
+        collapsed_groups: List[Dict[str, Any]] = []
+        for achieved, entries in sorted(achieved_groups.items()):
+            if len(entries) <= 1:
+                continue
+            ordered = sorted(entries, key=lambda item: item[0])
+            collapsed_groups.append({
+                "achieved_final": float(achieved),
+                "requested_targets": [float(requested) for requested, _row in ordered],
+                "droplet_assignments": [
+                    copy.deepcopy(row.get("droplets", 0))
+                    for _requested, row in ordered
+                ],
+            })
+
+        requested_count = len(requested_rows)
+        achieved_count = len(achieved_groups)
+        return {
+            "requested_level_count": int(requested_count),
+            "achieved_level_count": int(achieved_count),
+            "lost_level_count": int(max(0, requested_count - achieved_count)),
+            "collapsed_groups": collapsed_groups,
+        }
+
+    def _evaluate_plan_resolution(
+        self,
+        opt: OptionSpec,
+        plan: SingleStockPlan | TwoStockPlan,
+        *,
+        final_volume_nL: float,
+        targets_final: Iterable[float],
+    ) -> Tuple[_PlanResolutionScore, List[Dict[str, Any]], Dict[str, Any]]:
+        target_values = sorted({
+            self._normalize_target_key(float(value))
+            for value in (targets_final or [])
+        })
+        starting = float(getattr(opt, "starting_conc", 0.0) or 0.0)
+
+        if isinstance(plan, SingleStockPlan):
+            rows = [
+                self._evaluate_single_forced_target(
+                    t_final=float(target),
+                    starting_conc=starting,
+                    forced_stock_conc=float(plan.stock_concentration),
+                    droplet_nL=float(plan.droplet_nL),
+                    final_volume_nL=float(final_volume_nL),
+                    units=str(plan.units or getattr(opt, "units", "")),
+                )
+                for target in target_values
+            ]
+            concentration_burden = float(plan.stock_concentration)
+            n_stocks = 1
+        else:
+            rows = self._evaluate_two_stock_plan_rows(
+                plan,
+                target_values=target_values,
+                starting_conc=starting,
+                final_volume_nL=float(final_volume_nL),
+                units=str(plan.units or getattr(opt, "units", "")),
+            )
+            concentration_burden = float(plan.conc_sum)
+            n_stocks = 2
+
+        summary = self._summarize_target_resolution_rows(rows)
+        errors = [abs(float(row.get("abs_error", 0.0) or 0.0)) for row in rows]
+        error_sum = float(sum(errors))
+        score = _PlanResolutionScore(
+            lost_levels=int(summary["lost_level_count"]),
+            n_stocks=int(n_stocks),
+            worst_abs_error=float(max(errors, default=0.0)),
+            mean_abs_error=float(error_sum / len(errors)) if errors else 0.0,
+            error_sum=error_sum,
+            target_count=len(errors),
+            concentration_burden=concentration_burden,
+            max_volume_nL=float(plan.max_volume_nL),
+        )
+        return score, rows, summary
 
     def _evaluate_single_forced_target(
         self,
@@ -1498,7 +1713,16 @@ class ExperimentModel(QObject):
         droplet_nL: float,
         final_volume_nL: float,
         units: str,
+        droplet_volumes_nL: Optional[Tuple[float, float]] = None,
+        max_total_drops: Optional[int] = None,
+        droplets_override: Optional[Tuple[int, int]] = None,
+        deadline_reached: Optional[Callable[[], bool]] = None,
+        diagnostics: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        if diagnostics is not None:
+            diagnostics["two_stock_target_evaluations"] = int(
+                diagnostics.get("two_stock_target_evaluations", 0)
+            ) + 1
         requested_final = float(t_final)
         starting = float(starting_conc or 0.0)
         requested_adjusted = max(0.0, requested_final - starting)
@@ -1506,9 +1730,14 @@ class ExperimentModel(QObject):
             requested_adjusted = 0.0
 
         c1, c2 = float(stock_concentrations[0]), float(stock_concentrations[1])
+        if droplet_volumes_nL is None:
+            volume1 = volume2 = float(droplet_nL)
+        else:
+            volume1 = float(droplet_volumes_nL[0])
+            volume2 = float(droplet_volumes_nL[1])
         if float(final_volume_nL) > 0.0:
-            d1 = c1 * float(droplet_nL) / float(final_volume_nL)
-            d2 = c2 * float(droplet_nL) / float(final_volume_nL)
+            d1 = c1 * volume1 / float(final_volume_nL)
+            d2 = c2 * volume2 / float(final_volume_nL)
         else:
             d1 = d2 = 0.0
 
@@ -1521,7 +1750,19 @@ class ExperimentModel(QObject):
             reachable = True
             reason = "nearest_achievable"
         elif d1 > 0.0 and d2 > 0.0:
-            a, b, err = self._nearest_two_stock(requested_adjusted, d1, d2)
+            if droplets_override is None:
+                a, b, err = self._nearest_two_stock(
+                    requested_adjusted,
+                    d1,
+                    d2,
+                    max_total_drops=max_total_drops,
+                    deadline_reached=deadline_reached,
+                    diagnostics=diagnostics,
+                )
+            else:
+                a = max(0, int(droplets_override[0]))
+                b = max(0, int(droplets_override[1]))
+                err = abs(a * d1 + b * d2 - requested_adjusted)
             droplets = (int(a), int(b))
             achieved_adjusted = float(a * d1 + b * d2)
             tol = 0.5 * min(d1, d2) + 1e-12
@@ -1544,6 +1785,9 @@ class ExperimentModel(QObject):
             "achieved_adjusted": achieved_adjusted,
             "droplets": droplets,
             "delta_per_drop": (float(d1), float(d2)),
+            "printed_volume_nL": float(
+                int(droplets[0]) * volume1 + int(droplets[1]) * volume2
+            ),
             "abs_error": float(abs_error),
             "signed_error": float(signed_error),
             "reachable": bool(reachable),
@@ -1636,25 +1880,69 @@ class ExperimentModel(QObject):
         final_volume_nL: float,
         units: str,
     ) -> _PlanAccuracyScore:
-        rows = [
-            self._evaluate_two_stock_target(
-                t_final=float(t_final),
-                starting_conc=float(starting_conc),
-                stock_concentrations=(
-                    float(plan.stock_concs[0]),
-                    float(plan.stock_concs[1]),
-                ),
-                droplet_nL=float(plan.droplet_nL),
-                final_volume_nL=float(final_volume_nL),
-                units=str(units),
-            )
-            for t_final in target_values
-        ]
+        rows = self._evaluate_two_stock_plan_rows(
+            plan,
+            target_values=target_values,
+            starting_conc=float(starting_conc),
+            final_volume_nL=float(final_volume_nL),
+            units=str(units),
+        )
         return self._summarize_plan_accuracy_rows(
             rows,
             concentration_burden=float(plan.conc_sum),
             max_volume_nL=float(plan.max_volume_nL),
         )
+
+    def _evaluate_two_stock_plan_rows(
+        self,
+        plan: TwoStockPlan,
+        *,
+        target_values: Iterable[float],
+        starting_conc: float,
+        final_volume_nL: float,
+        units: str,
+    ) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        starting = float(starting_conc)
+        for target_final in target_values:
+            target_adjusted = self._normalize_target_key(
+                max(0.0, float(target_final) - starting)
+            )
+            cached_row = plan.target_rows.get(target_adjusted)
+            if cached_row is not None:
+                row = dict(cached_row)
+                row["requested_final"] = float(target_final)
+                row["requested_adjusted"] = float(target_adjusted)
+                row["starting_conc"] = starting
+                row["achieved_final"] = starting + float(
+                    row.get("achieved_adjusted", 0.0)
+                )
+                row["signed_error"] = float(row["achieved_final"]) - float(
+                    target_final
+                )
+                row["abs_error"] = abs(float(row["signed_error"]))
+                rows.append(row)
+                continue
+            droplets = plan.droplets_per_target.get(target_adjusted)
+            rows.append(
+                self._evaluate_two_stock_target(
+                    t_final=float(target_final),
+                    starting_conc=starting,
+                    stock_concentrations=(
+                        float(plan.stock_concs[0]),
+                        float(plan.stock_concs[1]),
+                    ),
+                    droplet_nL=float(plan.droplet_nL),
+                    final_volume_nL=float(final_volume_nL),
+                    units=str(units),
+                    droplets_override=(
+                        (int(droplets[0]), int(droplets[1]))
+                        if droplets is not None
+                        else None
+                    ),
+                )
+            )
+        return rows
 
     def _score_two_stock_plan(
         self,
@@ -1686,7 +1974,9 @@ class ExperimentModel(QObject):
 
         deltas: Set[float] = set()
         for t in xs:
+            self._optimization_checkpoint()
             for k in range(1, max_refine + 1):
+                self._optimization_checkpoint()
                 delta = float(t) / float(k)
                 if delta >= min_delta:
                     deltas.add(self._normalize_target_key(delta))
@@ -1976,9 +2266,19 @@ class ExperimentModel(QObject):
             else:
                 st1, st2 = plan["stocks"]
                 for t_final in self._effective_targets_for_key(key, opt):
+                    starting = float(
+                        getattr(opt, "starting_conc", 0.0) or 0.0
+                    )
+                    target_adjusted = max(0.0, float(t_final) - starting)
+                    k1, _, un1, _ = self._resolve_drops_for_target(
+                        st1, target_adjusted
+                    )
+                    k2, _, un2, _ = self._resolve_drops_for_target(
+                        st2, target_adjusted
+                    )
                     row = self._evaluate_two_stock_target(
                         t_final=t_final,
-                        starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
+                        starting_conc=starting,
                         stock_concentrations=(
                             float(st1["stock_concentration"]),
                             float(st2["stock_concentration"]),
@@ -1986,7 +2286,15 @@ class ExperimentModel(QObject):
                         droplet_nL=float(st1["droplet_volume_nL"]),
                         final_volume_nL=V_final,
                         units=st1.get("units", opt.units),
+                        droplet_volumes_nL=(
+                            float(st1["droplet_volume_nL"]),
+                            float(st2["droplet_volume_nL"]),
+                        ),
+                        droplets_override=(int(k1), int(k2)),
                     )
+                    if un1 or un2:
+                        row["reachable"] = False
+                        row["reason"] = "missing_target_mapping"
                     row["plan_mode"] = "auto"
                     rows.append(row)
 
@@ -2082,19 +2390,24 @@ class ExperimentModel(QObject):
             if max_delta >= min_delta and math.isfinite(max_delta):
                 candidate_deltas.add(self._normalize_target_key(max_delta))
                 for target in (t for t in xs if t > 1e-12):
+                    self._optimization_checkpoint()
                     drops_at_max = max(1, int(math.ceil(float(target) / max_delta)))
                     for drops in (drops_at_max, drops_at_max + 1):
+                        self._optimization_checkpoint()
                         delta = float(target) / float(drops)
                         if delta >= min_delta and delta <= max_delta + 1e-12:
                             candidate_deltas.add(self._normalize_target_key(delta))
 
         for delta in sorted(candidate_deltas):
+            self._optimization_checkpoint()
+            self._optimization_activity("single-stock candidates considered", increment=1)
             stock_c = (float(delta) * final_volume_nL) / droplet_nL
             if max_stock_conc is not None and stock_c > (float(max_stock_conc) + 1e-12):
                 continue
             drops: Dict[float, int] = {}
             feasible = True
             for t in xs:
+                self._optimization_checkpoint()
                 row = self._evaluate_single_forced_target(
                     t_final=float(t),
                     starting_conc=0.0,
@@ -2132,16 +2445,39 @@ class ExperimentModel(QObject):
         *,
         final_volume_nL: float,
         volume_budget_nL: float,
+        nominal_volume_budget_nL: Optional[float] = None,
         quantum: float = 0.1,
         max_refine: int = 30,
-        kmax_multiples: int = 12,
         max_pairs: int = 12000,
         max_stock_conc: float | None = None,
+        resolution_first: bool = False,
+        limit_reasons: Optional[Set[str]] = None,
+        diagnostics: Optional[Dict[str, Any]] = None,
+        candidate_callback: Optional[Callable[[TwoStockPlan], bool]] = None,
+        stop_requested: Optional[Callable[[], bool]] = None,
+        consume_work: Optional[Callable[[str, int], bool]] = None,
     ) -> Tuple[List[TwoStockPlan], bool]:
         xs = sorted({self._normalize_target_key(max(0.0, float(t))) for t in targets})
         xs_pos = [t for t in xs if t > 1e-12]
         if not xs_pos:
             return [], False
+        if float(droplet_nL) <= 0.0:
+            return [], False
+        maximum_total_drops = max(
+            0,
+            int(
+                math.floor(
+                    (float(volume_budget_nL) + 1e-6) / float(droplet_nL)
+                )
+            ),
+        )
+        if maximum_total_drops <= 0:
+            return [], False
+        nominal_budget = (
+            float(volume_budget_nL)
+            if nominal_volume_budget_nL is None
+            else min(float(nominal_volume_budget_nL), float(volume_budget_nL))
+        )
 
         deltas = self._candidate_single_stock_deltas(xs_pos, max_refine=max_refine, min_delta=1e-6)
         if max_stock_conc is not None:
@@ -2154,106 +2490,381 @@ class ExperimentModel(QObject):
         # when single-stock planning cannot meet the printed-volume budget.
         deltas = sorted((float(d) for d in deltas), reverse=True)
 
-        pairs: List[TwoStockPlan] = []
+        # Deduplicate mappings as they are generated. This keeps partial work
+        # useful when the shared deterministic work cap interrupts a pair scan.
+        pairs_by_mapping: Dict[Tuple[Any, ...], TwoStockPlan] = {}
+        # Count pairs are immutable and shared across candidates. Keeping one
+        # copy per distinct pair avoids retaining a tuple per target per plan.
+        count_pairs: Dict[Tuple[int, int], Tuple[int, int]] = {}
         pairs_scanned = 0
         pair_limit_hit = False
-        for i in range(len(deltas)):
-            for j in range(i + 1, len(deltas)):
-                if max_pairs and pairs_scanned >= int(max_pairs):
-                    pair_limit_hit = True
-                    break
-                pairs_scanned += 1
+        callback_stop = False
 
-                d1 = float(deltas[i])
-                d2 = float(deltas[j])
-                if d1 <= 0.0 or d2 <= 0.0:
+        def _candidate_rank(plan: TwoStockPlan) -> Tuple[Any, ...]:
+            common = (
+                not bool(plan.fits_nominal_volume),
+                float(plan.worst_abs_error),
+                float(plan.mean_abs_error),
+                float(plan.conc_sum),
+                float(plan.max_volume_nL),
+                tuple(float(value) for value in plan.deltas),
+            )
+            if not resolution_first:
+                return common
+            return (
+                not bool(plan.fits_nominal_volume),
+                int(plan.lost_levels),
+                float(plan.worst_abs_error),
+                float(plan.mean_abs_error),
+                float(plan.conc_sum),
+                float(plan.max_volume_nL),
+                tuple(float(value) for value in plan.deltas),
+            )
+
+        def _resolution_probe_indices(primary_index: int) -> List[int]:
+            primary_delta = float(deltas[primary_index])
+            minimum_companion_delta = 0.0
+            for target in xs_pos:
+                self._optimization_checkpoint()
+                primary_drops = min(
+                    maximum_total_drops,
+                    max(
+                        0,
+                        int(math.floor(float(target) / primary_delta + 1e-12)),
+                    ),
+                )
+                residual = max(
+                    0.0,
+                    float(target) - primary_drops * primary_delta,
+                )
+                if residual <= 1e-12:
                     continue
-
-                c1 = (d1 * final_volume_nL) / droplet_nL
-                c2 = (d2 * final_volume_nL) / droplet_nL
-                if max_stock_conc is not None and (c1 > float(max_stock_conc) + 1e-12 or c2 > float(max_stock_conc) + 1e-12):
-                    continue
-
-                drops_map: Dict[float, Tuple[int, int]] = {}
-                max_drops = 0
-                feasible = True
-                for t_real in xs:
-                    row = self._evaluate_two_stock_target(
-                        t_final=float(t_real),
-                        starting_conc=0.0,
-                        stock_concentrations=(c1, c2),
-                        droplet_nL=droplet_nL,
-                        final_volume_nL=final_volume_nL,
-                        units=units,
+                remaining_drops = maximum_total_drops - primary_drops
+                if remaining_drops > 0:
+                    minimum_companion_delta = max(
+                        minimum_companion_delta,
+                        residual / remaining_drops,
                     )
-                    if not row["reachable"]:
+
+            def _companion_probe_rank(index: int) -> Tuple[Any, ...]:
+                companion_delta = float(deltas[index])
+                errors: List[float] = []
+                feasible = True
+                for target in xs_pos:
+                    self._optimization_checkpoint()
+                    primary_drops = min(
+                        maximum_total_drops,
+                        max(
+                            0,
+                            int(
+                                math.floor(
+                                    float(target) / primary_delta + 1e-12
+                                )
+                            ),
+                        ),
+                    )
+                    residual = max(
+                        0.0,
+                        float(target) - primary_drops * primary_delta,
+                    )
+                    companion_drops = max(
+                        0,
+                        int(math.floor(residual / companion_delta + 0.5)),
+                    )
+                    if companion_drops > maximum_total_drops - primary_drops:
                         feasible = False
                         break
-                    a, b = row["droplets"]
-                    drops_map[self._normalize_target_key(float(t_real))] = (int(a), int(b))
-                    max_drops = max(max_drops, int(a) + int(b))
+                    achieved = (
+                        primary_drops * primary_delta
+                        + companion_drops * companion_delta
+                    )
+                    errors.append(abs(float(target) - achieved))
+                return (
+                    not feasible,
+                    max(errors, default=math.inf),
+                    sum(errors) / len(errors) if errors else math.inf,
+                    companion_delta < minimum_companion_delta - 1e-12,
+                    abs(companion_delta - minimum_companion_delta),
+                    companion_delta,
+                )
 
-                if not feasible:
-                    continue
+            # Keep only the best two companions while scanning so the rescue
+            # prelude stays deterministic without an unchecked full sort.
+            ranked: List[Tuple[Tuple[Any, ...], int]] = []
+            for secondary_index in range(primary_index + 1, len(deltas)):
+                self._optimization_checkpoint()
+                if consume_work is not None and not consume_work("two_stock_probe"):
+                    raise _StockAllocationWorkLimitReached
+                ranked.append(
+                    (_companion_probe_rank(secondary_index), secondary_index)
+                )
+                ranked.sort(key=lambda item: (item[0], item[1]))
+                if len(ranked) > 2:
+                    ranked.pop()
+            return [secondary_index for _rank, secondary_index in ranked]
 
-                if max_drops * float(droplet_nL) > float(volume_budget_nL) + 1e-6:
-                    continue
+        def _pair_groups():
+            probed: Set[Tuple[int, int]] = set()
+            if resolution_first:
+                # Give several concentrated primary legs a small deterministic
+                # rescue probe before any one primary consumes the polish
+                # window. The historical full traversal follows unchanged.
+                if max_stock_conc is not None:
+                    primary_probe_count = min(1, max(0, len(deltas) - 1))
+                else:
+                    primary_probe_count = min(
+                        len(xs_pos) + 1,
+                        max(0, len(deltas) - 1),
+                    )
+                for primary_index in range(primary_probe_count):
+                    self._optimization_checkpoint()
+                    probe_indices = _resolution_probe_indices(primary_index)
+                    probed.update(
+                        (primary_index, secondary_index)
+                        for secondary_index in probe_indices
+                    )
+                    yield primary_index, probe_indices
+            for primary_index in range(len(deltas)):
+                self._optimization_checkpoint()
+                yield primary_index, (
+                    secondary_index
+                    for secondary_index in range(primary_index + 1, len(deltas))
+                    if (primary_index, secondary_index) not in probed
+                )
 
-                all_a_zero = all(ab[0] == 0 for ab in drops_map.values())
-                all_b_zero = all(ab[1] == 0 for ab in drops_map.values())
-                if all_a_zero or all_b_zero:
-                    continue
+        try:
+            for i, secondary_indices in _pair_groups():
+                self._optimization_checkpoint()
+                for j in secondary_indices:
+                    self._optimization_checkpoint()
+                    if stop_requested is not None and stop_requested():
+                        callback_stop = True
+                        break
+                    if max_pairs and pairs_scanned >= int(max_pairs):
+                        pair_limit_hit = True
+                        if limit_reasons is not None:
+                            limit_reasons.add("state_cap")
+                        break
+                    if consume_work is not None and not consume_work("two_stock_pair"):
+                        raise _StockAllocationWorkLimitReached
+                    pairs_scanned += 1
+                    self._optimization_activity("stock pairs considered", increment=1)
+                    if diagnostics is not None:
+                        diagnostics["two_stock_pairs_evaluated"] = int(
+                            diagnostics.get("two_stock_pairs_evaluated", 0)
+                        ) + 1
 
-                conc_sum = c1 + c2
-                max_vol = max_drops * droplet_nL
+                    d1 = float(deltas[i])
+                    d2 = float(deltas[j])
+                    if d1 <= 0.0 or d2 <= 0.0:
+                        continue
 
-                pairs.append(TwoStockPlan(
-                    deltas=(d1, d2),
-                    stock_concs=(c1, c2),
-                    droplet_nL=droplet_nL,
-                    units=units,
-                    droplets_per_target=drops_map,
-                    max_volume_nL=max_vol,
-                    conc_sum=conc_sum,
-                    n_stocks=2
-                ))
-            if pair_limit_hit:
-                break
+                    c1 = (d1 * final_volume_nL) / droplet_nL
+                    c2 = (d2 * final_volume_nL) / droplet_nL
+                    if max_stock_conc is not None and (
+                        c1 > float(max_stock_conc) + 1e-12
+                        or c2 > float(max_stock_conc) + 1e-12
+                    ):
+                        continue
 
+                    drops_map: Dict[float, Tuple[int, int]] = {}
+                    target_rows: Dict[float, Dict[str, Any]] = {}
+                    # All targets share these immutable pair values. Avoid
+                    # retaining two extra tuples per target: large candidate
+                    # pools otherwise cause long process-wide GC pauses.
+                    pair_concentrations = (c1, c2)
+                    pair_deltas = None
+                    max_drops = 0
+                    feasible = True
+                    for t_real in xs:
+                        self._optimization_checkpoint()
+                        row = self._evaluate_two_stock_target(
+                            t_final=float(t_real),
+                            starting_conc=0.0,
+                            stock_concentrations=pair_concentrations,
+                            droplet_nL=droplet_nL,
+                            final_volume_nL=final_volume_nL,
+                            units=units,
+                            max_total_drops=maximum_total_drops,
+                            diagnostics=diagnostics,
+                        )
+                        if not row["reachable"]:
+                            feasible = False
+                            break
+                        a, b = row["droplets"]
+                        row["droplets"] = count_pairs.setdefault(row["droplets"], row["droplets"])
+                        row["stock_concentration"] = pair_concentrations
+                        if pair_deltas is None:
+                            pair_deltas = row["delta_per_drop"]
+                        row["delta_per_drop"] = pair_deltas
+                        target_key = self._normalize_target_key(float(t_real))
+                        drops_map[target_key] = row["droplets"]
+                        target_rows[target_key] = dict(row)
+                        max_drops = max(max_drops, int(a) + int(b))
+
+                    if not feasible:
+                        continue
+
+                    max_vol = max_drops * float(droplet_nL)
+                    if max_vol > float(volume_budget_nL) + 1e-6:
+                        continue
+                    if all(ab[0] == 0 for ab in drops_map.values()) or all(
+                        ab[1] == 0 for ab in drops_map.values()
+                    ):
+                        continue
+
+                    summary = self._summarize_target_resolution_rows(
+                        target_rows.values()
+                    )
+                    errors = [
+                        abs(float(row.get("abs_error", 0.0) or 0.0))
+                        for row in target_rows.values()
+                    ]
+                    error_sum = float(sum(errors))
+                    plan = TwoStockPlan(
+                        deltas=(d1, d2),
+                        stock_concs=pair_concentrations,
+                        droplet_nL=droplet_nL,
+                        units=units,
+                        droplets_per_target=drops_map,
+                        max_volume_nL=max_vol,
+                        conc_sum=c1 + c2,
+                        n_stocks=2,
+                        target_rows=target_rows,
+                        fits_nominal_volume=(max_vol <= nominal_budget + 1e-6),
+                        lost_levels=int(summary["lost_level_count"]),
+                        worst_abs_error=float(max(errors, default=0.0)),
+                        mean_abs_error=(
+                            float(error_sum / len(errors)) if errors else 0.0
+                        ),
+                        error_sum=error_sum,
+                        target_count=len(errors),
+                    )
+                    if diagnostics is not None:
+                        diagnostics["two_stock_candidates_generated"] = int(
+                            diagnostics.get("two_stock_candidates_generated", 0)
+                        ) + 1
+                    # Every feasible candidate covers the same sorted targets.
+                    # Reuse its immutable count pairs instead of allocating a
+                    # second target/count tuple for every target of every pair.
+                    mapping_signature = tuple(drops_map[target] for target in xs)
+                    incumbent = pairs_by_mapping.get(mapping_signature)
+                    if incumbent is not None and _candidate_rank(incumbent) <= _candidate_rank(plan):
+                        if diagnostics is not None:
+                            diagnostics["two_stock_candidates_deduplicated"] = int(
+                                diagnostics.get("two_stock_candidates_deduplicated", 0)
+                            ) + 1
+                        continue
+                    if incumbent is not None and diagnostics is not None:
+                        diagnostics["two_stock_candidates_deduplicated"] = int(
+                            diagnostics.get("two_stock_candidates_deduplicated", 0)
+                        ) + 1
+                    pairs_by_mapping[mapping_signature] = plan
+                    if (
+                        candidate_callback is not None
+                        and stop_requested is not None
+                        and stop_requested()
+                    ):
+                        callback_stop = True
+                        break
+                    if (
+                        candidate_callback is not None
+                        and consume_work is not None
+                        and not consume_work("global_search")
+                    ):
+                        raise _StockAllocationWorkLimitReached
+                    if candidate_callback is not None and candidate_callback(plan):
+                        callback_stop = True
+                        break
+                if pair_limit_hit or callback_stop:
+                    break
+        except _StockAllocationWorkLimitReached:
+            pair_limit_hit = True
+            if limit_reasons is not None:
+                limit_reasons.add("work_cap")
+
+        pairs = list(pairs_by_mapping.values())
+        if diagnostics is not None:
+            diagnostics["two_stock_candidates_retained"] = int(
+                diagnostics.get("two_stock_candidates_retained", 0)
+            ) + len(pairs)
         if not pairs:
             return [], pair_limit_hit
+
+        # At a hard bound, return every retained mapping immediately. The
+        # optimizer may already have validated an incremental improvement via
+        # candidate_callback, and must never lose that work to post-processing.
+        if pair_limit_hit:
+            pairs.sort(key=_candidate_rank)
+            return pairs[:max_pairs], True
+        if callback_stop:
+            pairs.sort(key=_candidate_rank)
+            return pairs[:max_pairs], False
 
         # Preserve the historical concentration/volume frontier, plus the
         # most accurate candidate at every feasible printed-volume tier. The
         # latter is required because the final selection refines accuracy only
         # after this bounded enumeration step.
-        pairs.sort(key=lambda p: (p.conc_sum, p.max_volume_nL))
+        pairs.sort(
+            key=lambda p: (
+                not bool(p.fits_nominal_volume),
+                p.conc_sum,
+                p.max_volume_nL,
+            )
+        )
         pruned: List[TwoStockPlan] = []
         best_vol = float("inf")
         for p in pairs:
+            self._optimization_checkpoint()
             if p.max_volume_nL + 1e-12 < best_vol:
                 pruned.append(p)
                 best_vol = p.max_volume_nL
 
         accuracy_by_volume: Dict[float, Tuple[TwoStockPlan, _PlanAccuracyScore]] = {}
+        resolution_by_volume: Dict[float, Tuple[TwoStockPlan, Tuple[Any, ...]]] = {}
         for p in pairs:
+            self._optimization_checkpoint()
             volume_key = round(float(p.max_volume_nL), 12)
-            score = self._score_two_stock_targets(
-                p,
-                target_values=xs,
-                starting_conc=0.0,
-                final_volume_nL=float(final_volume_nL),
-                units=str(units),
+            accuracy_score = _PlanAccuracyScore(
+                worst_abs_error=float(p.worst_abs_error),
+                mean_abs_error=float(p.mean_abs_error),
+                concentration_burden=float(p.conc_sum),
+                max_volume_nL=float(p.max_volume_nL),
             )
-            incumbent = accuracy_by_volume.get(volume_key)
-            if incumbent is None or self._plan_accuracy_score_is_better(score, incumbent[1]):
-                accuracy_by_volume[volume_key] = (p, score)
+            accuracy_incumbent = accuracy_by_volume.get(volume_key)
+            if accuracy_incumbent is None or self._plan_accuracy_score_is_better(
+                accuracy_score, accuracy_incumbent[1]
+            ):
+                accuracy_by_volume[volume_key] = (p, accuracy_score)
+
+            if resolution_first:
+                score = (
+                    int(p.lost_levels),
+                    float(p.worst_abs_error),
+                    float(p.mean_abs_error),
+                    float(p.conc_sum),
+                    float(p.max_volume_nL),
+                )
+                resolution_incumbent = resolution_by_volume.get(volume_key)
+                if resolution_incumbent is None or score < resolution_incumbent[1]:
+                    resolution_by_volume[volume_key] = (p, score)
 
         for p, _score in accuracy_by_volume.values():
+            self._optimization_checkpoint()
+            if p not in pruned:
+                pruned.append(p)
+        for p, _score in resolution_by_volume.values():
+            self._optimization_checkpoint()
             if p not in pruned:
                 pruned.append(p)
 
-        pruned.sort(key=lambda p: (p.conc_sum, p.max_volume_nL))
+        pruned.sort(
+            key=lambda p: (
+                not bool(p.fits_nominal_volume),
+                p.conc_sum,
+                p.max_volume_nL,
+            )
+        )
 
         return pruned[:max_pairs], pair_limit_hit
 
@@ -2265,11 +2876,12 @@ class ExperimentModel(QObject):
         *,
         final_volume_nL: float,
         volume_budget_nL: float,
+        nominal_volume_budget_nL: Optional[float] = None,
         quantum: float = 0.1,
         max_refine: int = 30,
-        kmax_multiples: int = 12,
         max_pairs: int = 12000,
         max_stock_conc: float | None = None,
+        resolution_first: bool = False,
     ) -> List[TwoStockPlan]:
         pairs, _pair_limit_hit = self._enumerate_two_stock_candidates_with_meta(
             targets,
@@ -2277,15 +2889,214 @@ class ExperimentModel(QObject):
             units,
             final_volume_nL=final_volume_nL,
             volume_budget_nL=volume_budget_nL,
+            nominal_volume_budget_nL=nominal_volume_budget_nL,
             quantum=quantum,
             max_refine=max_refine,
-            kmax_multiples=kmax_multiples,
             max_pairs=max_pairs,
             max_stock_conc=max_stock_conc,
+            resolution_first=resolution_first,
         )
         return pairs
 
     # ------------- Optimization -------------
+
+    _OPTIMIZATION_INPUT_ATTRIBUTES = (
+        "factors", "additional_conditions", "metadata", "legacy_mode",
+        "_stock_allocation_resolution_policy_source", "_uploaded_reactions",
+        "_uploaded_well_ids", "_uploaded_design_source", "applied_imaging_calibrations",
+        "calibration_volume_warning_audits", "calibrated_stock_allocation",
+        "calibrated_stock_allocation_status", "plans_per_option",
+        "_stock_rows_cache", "_fill_row_cache", "_target_preview_map",
+        "_unreachable_preview_map", "_last_worst_nonfill_volume_nL",
+    )
+    _OPTIMIZATION_OUTPUT_ATTRIBUTES = (
+        "plans_per_option", "_stock_rows_cache", "_fill_row_cache",
+        "_target_preview_map", "_unreachable_preview_map", "_reactions_df",
+        "_last_worst_nonfill_volume_nL", "calibrated_stock_allocation",
+        "calibrated_stock_allocation_status",
+    )
+    _IMPORT_DESIGN_ATTRIBUTES = (
+        "factors", "metadata", "_stock_allocation_resolution_policy_source",
+        "_uploaded_reactions", "_uploaded_well_ids", "_uploaded_design_source",
+    )
+
+    def prepare_import_application(self, payload, metadata):
+        """Stage an import on the detached computation model, never the editor."""
+        self._optimization_checkpoint("Preparing imported formulations")
+        self.set_metadata(**metadata)
+        self.set_uploaded_design_from_dataframe(
+            payload["design_df"], units_default="",
+            droplet_nL_default=printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET),
+            starting_conc_default=0.0, source_path=payload.get("source_path"),
+        )
+        bounds = payload.get("max_stock_by_reagent") or {}
+        stock_settings = payload.get("stock_settings_by_reagent") or {}
+        for factor in self.factors:
+            self._optimization_checkpoint()
+            option = factor.options[0]
+            settings = stock_settings.get(factor.name) or {}
+            bound = settings.get("max_stock_conc", bounds.get(factor.name))
+            if bound is not None:
+                option.max_stock_conc = float(bound)
+            if settings:
+                mode = normalize_printing_mode(settings.get("printing_mode"), fallback=option.printing_mode)
+                option.printing_mode = mode
+                try:
+                    volume = float(settings.get("droplet_nL"))
+                except (ValueError, TypeError):
+                    volume = printing_mode_default_ejection_volume_nl(mode)
+                if not math.isfinite(volume) or volume <= 0:
+                    volume = printing_mode_default_ejection_volume_nl(mode)
+                option.droplet_nL = volume
+        self.validate_design_size(self.estimate_design_size())
+        self._optimization_checkpoint("Checking imported allocation")
+        return self.install_stock_allocation_reuse_payload(payload.get("stock_allocation_reuse_payload"))
+
+    def capture_import_application(self):
+        names = self._IMPORT_DESIGN_ATTRIBUTES + self._OPTIMIZATION_OUTPUT_ATTRIBUTES
+        return copy.deepcopy({name: getattr(self, name) for name in names})
+
+    def install_import_application(self, computed, expected_fingerprint):
+        self._install_computed_state(
+            computed, expected_fingerprint,
+            self._IMPORT_DESIGN_ATTRIBUTES + self._OPTIMIZATION_OUTPUT_ATTRIBUTES,
+        )
+
+    def _optimization_checkpoint(self, phase=None):
+        control = getattr(self, "_optimization_control", None)
+        if control is not None:
+            control.report(phase) if phase else control.check()
+
+    def _optimization_activity(self, label, **counts):
+        control = getattr(self, "_optimization_control", None)
+        if control is not None:
+            control.activity(label, **counts)
+
+    def capture_optimization_inputs(self):
+        return copy.deepcopy({name: getattr(self, name)
+                              for name in self._OPTIMIZATION_INPUT_ATTRIBUTES})
+
+    def restore_optimization_inputs(self, snapshot):
+        if set(snapshot) != set(self._OPTIMIZATION_INPUT_ATTRIBUTES):
+            raise ValueError("Incomplete optimization input snapshot.")
+        for name, value in snapshot.items():
+            setattr(self, name, copy.deepcopy(value))
+
+    def capture_optimization_outputs(self):
+        return copy.deepcopy({name: getattr(self, name)
+                              for name in self._OPTIMIZATION_OUTPUT_ATTRIBUTES})
+
+    def validate_optimization_allocation(self, result):
+        """Check detached results with the exact reuse validator, without normalization."""
+        self._optimization_checkpoint("Validating allocation")
+        previous = self.capture_optimization_outputs()
+        payload = self.export_stock_allocation_reuse_payload(result)
+        calibrated = self.calibrated_stock_allocation or {}
+        options = {}
+        if calibrated.get("active"):
+            payload["calibrated_independent_volumes"] = True
+            options = dict(reuse_context="calibration",
+                           expected_calibrated_stock_id=calibrated.get("calibrated_stock_id"))
+        try:
+            validation = self.install_stock_allocation_reuse_payload(payload, **options)
+            if not validation.get("reused"):
+                raise ValueError(f"Computed allocation failed validation: {validation.get('reason')}")
+        finally:
+            for name, value in previous.items():
+                setattr(self, name, value)
+        self._optimization_checkpoint()
+
+    def install_optimization_outputs(self, computed, expected_fingerprint):
+        self._install_computed_state(computed, expected_fingerprint, self._OPTIMIZATION_OUTPUT_ATTRIBUTES)
+
+    def _install_computed_state(self, computed, expected_fingerprint, attributes):
+        if self.is_execution_design_locked():
+            raise ValueError("The experiment is now locked.")
+        if input_fingerprint(self.capture_optimization_inputs()) != expected_fingerprint:
+            raise ValueError("The experiment changed during optimization.")
+        if set(computed) != set(attributes):
+            raise ValueError("Incomplete optimization result.")
+        previous = {name: getattr(self, name) for name in attributes}
+        replacement = copy.deepcopy(computed)
+        try:
+            for name in attributes:
+                setattr(self, name, replacement[name])
+        except Exception:
+            for name, value in previous.items():
+                setattr(self, name, value)
+            raise
+        self.stock_updated.emit()
+        self.experiment_generated.emit(
+            len(self._reactions_df), float(self._last_worst_nonfill_volume_nL or 0.0),
+        )
+
+    @staticmethod
+    def _filter_resolution_candidate_entries(
+        entries: List[Dict[str, Any]],
+        *,
+        forced: bool = False,
+        diagnostics: Optional[Dict[str, Any]] = None,
+        control=None,
+    ) -> List[Dict[str, Any]]:
+        """Preserve sequential dominance decisions using bounded NumPy blocks."""
+        if forced or len(entries) < 2:
+            return list(entries)
+        criterion_count = 6 + len(entries[0]["level_volumes"])
+        # Only retained vectors are filled. Storage is linear in pool size;
+        # no candidate-by-candidate comparison matrix is materialized.
+        vectors = np.empty((len(entries), criterion_count), dtype=np.float64)
+        retained = []
+        pairs_evaluated = blocks_evaluated = max_block_elements = 0
+        for entry in entries:
+            if control is not None:
+                control.check()
+            score = entry["score"]
+            vector = np.asarray((
+                int(score.lost_levels), int(score.n_stocks),
+                float(score.worst_abs_error), float(score.error_sum),
+                float(score.concentration_burden), float(score.max_volume_nL),
+                *entry["level_volumes"],
+            ), dtype=np.float64)
+            if len(vector) != criterion_count:
+                raise ValueError("Candidate filtering requires matching target criteria.")
+            upper = vector + 1e-12
+            lower = vector - 1e-12
+            dominated = False
+            for start in range(0, len(retained), 256):
+                if control is not None:
+                    control.check()
+                block = vectors[start:min(start + 256, len(retained))]
+                pairs_evaluated += len(block)
+                no_worse = np.ones(len(block), dtype=bool)
+                strictly_better = np.zeros(len(block), dtype=bool)
+                for column in range(0, criterion_count, 256):
+                    stop = min(column + 256, criterion_count)
+                    values = block[:, column:stop]
+                    blocks_evaluated += 1
+                    max_block_elements = max(max_block_elements, values.size)
+                    # Keep the original > / < predicates (including their
+                    # tolerance), rather than replacing them with <= or >=.
+                    no_worse &= ~np.any(values > upper[column:stop], axis=1)
+                    strictly_better |= np.any(values < lower[column:stop], axis=1)
+                    if not np.any(no_worse):
+                        break
+                if np.any(no_worse & strictly_better):
+                    dominated = True
+                    break
+            if not dominated:
+                vectors[len(retained)] = vector
+                retained.append(entry)
+            if control is not None:
+                control.activity("candidates filtered", increment=1)
+        if diagnostics is not None:
+            for name, value in (
+                ("stock_allocation_dominance_pairs_evaluated", pairs_evaluated),
+                ("stock_allocation_dominance_blocks_evaluated", blocks_evaluated),
+            ):
+                diagnostics[name] = int(diagnostics.get(name, 0)) + value
+            name = "stock_allocation_dominance_max_block_elements"
+            diagnostics[name] = max(int(diagnostics.get(name, 0)), max_block_elements)
+        return retained
 
     def optimize_stock_solutions(
         self,
@@ -2304,7 +3115,122 @@ class ExperimentModel(QObject):
                 ),
                 "issues_by_key": {},
                 "read_only": True,
+                "optimizer_seed_distinct_level_loss": None,
+                "optimizer_seed_worst_level_loss": None,
+                "optimizer_seed_rank": None,
+                "optimizer_selected_rank": None,
+                "stock_allocation_baseline_rank": None,
+                "stock_allocation_baseline_work": 0,
+                "stock_allocation_combined_work": 0,
+                "stock_allocation_pair_work_by_key": {},
+                "stock_allocation_dominance_pairs_evaluated": 0,
+                "stock_allocation_dominance_blocks_evaluated": 0,
+                "stock_allocation_dominance_max_block_elements": 0,
+                "stock_allocation_improved_seed": False,
+                "stock_allocation_time_to_first_improvement_ms": None,
+                "stock_allocation_time_to_best_ms": None,
+                "stock_allocation_work_units_evaluated": 0,
+                "stock_allocation_work_limit": int(
+                    self.MAX_STOCK_ALLOCATION_WORK_UNITS
+                ),
+                "stock_allocation_work_units_by_kind": {
+                    "two_stock_probe": 0,
+                    "two_stock_pair": 0,
+                    "candidate_pool": 0,
+                    "global_search": 0,
+                },
+                "stock_allocation_zero_loss_polish_work_limit": int(
+                    self.ZERO_LOSS_POLISH_WORK_UNITS
+                ),
+                "stock_allocation_zero_loss_polish_work_used": 0,
+                "stock_allocation_time_budget_exceeded": False,
+                "stock_allocation_time_budget_overshoot_ms": 0.0,
+                "stock_allocation_deadline_overshoot_ms": 0.0,
+                "two_stock_pairs_evaluated": 0,
+                "two_stock_target_evaluations": 0,
+                "two_stock_solver_iterations": 0,
+                "two_stock_candidates_generated": 0,
+                "two_stock_candidates_retained": 0,
+                "two_stock_candidates_deduplicated": 0,
+                "two_stock_target_row_cache_reuses": 0,
+                "stock_allocation_stop_reason": "not_run",
             }
+
+        self._optimization_checkpoint("Preparing candidates")
+        calibrated_allocation = self._normalize_calibrated_stock_allocation(
+            getattr(self, "calibrated_stock_allocation", None)
+        )
+        if bool(calibrated_allocation.get("active")):
+            allocation_payload = calibrated_allocation.get("allocation")
+            expected_fingerprint = self.stock_allocation_input_fingerprint()
+            stored_fingerprint = (
+                str((allocation_payload or {}).get("input_fingerprint") or "")
+                if isinstance(allocation_payload, Mapping)
+                else ""
+            )
+            if stored_fingerprint == expected_fingerprint:
+                restored = self.install_stock_allocation_reuse_payload(
+                    allocation_payload,
+                    reuse_context='calibration',
+                    expected_calibrated_stock_id=calibrated_allocation.get(
+                        'calibrated_stock_id'
+                    ),
+                )
+                if restored.get("reused"):
+                    calibrated_allocation['allocation']['optimization_result'] = (
+                        copy.deepcopy(restored.get('result') or {})
+                    )
+                    self.calibrated_stock_allocation = calibrated_allocation
+                    self.calibrated_stock_allocation_status = {
+                        "active": True,
+                        "reason": "reused",
+                    }
+                    return copy.deepcopy(restored.get("result") or {})
+            calibrated_allocation["active"] = False
+            calibrated_allocation["stale_reason"] = (
+                "stock_input_fingerprint_mismatch"
+                if stored_fingerprint != expected_fingerprint
+                else str(restored.get("reason") or "validation_failed")
+            )
+            self.calibrated_stock_allocation = calibrated_allocation
+            self.calibrated_stock_allocation_status = {
+                "active": False,
+                "reason": calibrated_allocation["stale_reason"],
+            }
+
+        optimizer_clock = self._stock_optimizer_monotonic
+        optimizer_started_at = optimizer_clock()
+        published_optimizer_state = {
+            "plans_per_option": copy.deepcopy(self.plans_per_option),
+            "stock_rows_cache": copy.deepcopy(self._stock_rows_cache),
+            "fill_row_cache": copy.deepcopy(self._fill_row_cache),
+            "target_preview_map": copy.deepcopy(self._target_preview_map),
+            "unreachable_preview_map": copy.deepcopy(
+                self._unreachable_preview_map
+            ),
+            "last_worst_nonfill_volume_nL": self._last_worst_nonfill_volume_nL,
+        }
+
+        def _restore_published_optimizer_state() -> None:
+            self.plans_per_option.clear()
+            self.plans_per_option.update(
+                copy.deepcopy(published_optimizer_state["plans_per_option"])
+            )
+            self._stock_rows_cache = copy.deepcopy(
+                published_optimizer_state["stock_rows_cache"]
+            )
+            self._fill_row_cache = copy.deepcopy(
+                published_optimizer_state["fill_row_cache"]
+            )
+            self._target_preview_map = copy.deepcopy(
+                published_optimizer_state["target_preview_map"]
+            )
+            self._unreachable_preview_map = copy.deepcopy(
+                published_optimizer_state["unreachable_preview_map"]
+            )
+            self._last_worst_nonfill_volume_nL = published_optimizer_state[
+                "last_worst_nonfill_volume_nL"
+            ]
 
         def _adj_targets(opt) -> List[float]:
             s = float(getattr(opt, "starting_conc", 0.0) or 0.0)
@@ -2318,6 +3244,8 @@ class ExperimentModel(QObject):
         V_final = float(self.metadata.get("final_reaction_volume_nL", V_print))
         try:
             V_tolerance = float(self.metadata.get("printed_volume_tolerance_nL", 50.0))
+        except OptimizationCancelled:
+            raise
         except Exception:
             V_tolerance = 0.0
         if not math.isfinite(V_tolerance) or V_tolerance < 0.0:
@@ -2331,6 +3259,62 @@ class ExperimentModel(QObject):
             float(V_final) + float(V_tolerance),
             float(V_print) + float(V_tolerance),
         )
+        resolution_policy = self.get_stock_allocation_resolution_policy()
+        allow_avoidable_grouping = bool(
+            resolution_policy["allow_avoidable_target_grouping"]
+        )
+        optimizer_strategy_used = str(resolution_policy["mode"])
+        optimizer_fallback_reason: Optional[str] = None
+        stock_allocation_search_limited = False
+        stock_allocation_states_evaluated = 0
+        stock_allocation_work_units_evaluated = 0
+        stock_allocation_baseline_rank = None
+        stock_allocation_baseline_work = 0
+        stock_allocation_combined_work = 0
+        stock_allocation_pair_work_by_key = {}
+        dominance_diagnostics = {
+            "stock_allocation_dominance_pairs_evaluated": 0,
+            "stock_allocation_dominance_blocks_evaluated": 0,
+            "stock_allocation_dominance_max_block_elements": 0,
+        }
+        stock_allocation_work_units_by_kind: Dict[str, int] = {
+            "two_stock_probe": 0,
+            "two_stock_pair": 0,
+            "candidate_pool": 0,
+            "global_search": 0,
+        }
+        stock_allocation_zero_loss_polish_work_used = 0
+        zero_loss_polish_started_at_work: Optional[int] = None
+        optimizer_seed_elapsed_ms = 0.0
+        stock_allocation_elapsed_ms = 0.0
+        stock_allocation_limit_reasons: Set[str] = set()
+        stock_allocation_candidates_generated = 0
+        stock_allocation_candidates_retained = 0
+        stock_allocation_candidates_pruned = 0
+        stock_allocation_candidates_deduplicated = 0
+        stock_allocation_candidates_dominated = 0
+        stock_allocation_branches_pruned = 0
+        stock_allocation_loss_tiers_evaluated = 0
+        optimizer_seed_distinct_level_loss: Optional[int] = None
+        optimizer_seed_worst_level_loss: Optional[int] = None
+        optimizer_seed_rank: Optional[Dict[str, Any]] = None
+        optimizer_selected_rank: Optional[Dict[str, Any]] = None
+        stock_allocation_improved_seed = False
+        stock_allocation_time_to_first_improvement_ms: Optional[float] = None
+        stock_allocation_time_to_best_ms: Optional[float] = None
+        stock_allocation_time_budget_exceeded = False
+        stock_allocation_time_budget_overshoot_ms = 0.0
+        stock_allocation_deadline_overshoot_ms = 0.0
+        stock_allocation_stop_reason = "not_run"
+        two_stock_diagnostics: Dict[str, Any] = {
+            "two_stock_pairs_evaluated": 0,
+            "two_stock_target_evaluations": 0,
+            "two_stock_solver_iterations": 0,
+            "two_stock_candidates_generated": 0,
+            "two_stock_candidates_retained": 0,
+            "two_stock_candidates_deduplicated": 0,
+            "two_stock_target_row_cache_reuses": 0,
+        }
 
         # Build candidate lists + handle forced stocks
         self._unreachable_preview_map = {}
@@ -2352,6 +3336,7 @@ class ExperimentModel(QObject):
                 for target in (getattr(opt, "targets", []) or [])
             }
             for target in additional_targets_by_key.get(key, []):
+                self._optimization_checkpoint()
                 values.add(self._normalize_target_key(float(target)))
             return sorted(values)
 
@@ -2366,6 +3351,25 @@ class ExperimentModel(QObject):
             units = getattr(opt, "units", "") or ""
             suffix = f" {units}".rstrip()
             return f" within max stock {float(max_stock):.6g}{suffix}"
+
+        def _canonical_resolution_key(
+            key: Tuple[str, Optional[str]],
+        ) -> Tuple[str, str, str, str]:
+            factor = str(key[0])
+            option = "" if key[1] in (None, "") else str(key[1])
+            return (factor.casefold(), factor, option.casefold(), option)
+
+        def _resolution_phase_diagnostics() -> Dict[str, Any]:
+            return {
+                **dominance_diagnostics,
+                "stock_allocation_baseline_rank": copy.deepcopy(stock_allocation_baseline_rank),
+                "stock_allocation_baseline_work": int(stock_allocation_baseline_work),
+                "stock_allocation_combined_work": int(stock_allocation_combined_work),
+                "stock_allocation_pair_work_by_key": {
+                    json.dumps(key): dict(stock_allocation_pair_work_by_key[key])
+                    for key in sorted(stock_allocation_pair_work_by_key, key=_canonical_resolution_key)
+                },
+            }
 
         def _mark_two_stock_search_limited(key: Tuple[str, Optional[str]]):
             if key not in two_stock_search_limited_keys:
@@ -2397,6 +3401,10 @@ class ExperimentModel(QObject):
             return issue
 
         def _failure(reason: str) -> Dict[str, Any]:
+            _restore_published_optimizer_state()
+            elapsed_ms = max(
+                0.0, (optimizer_clock() - optimizer_started_at) * 1000.0
+            )
             return {
                 "best": None,
                 "reason": reason,
@@ -2405,6 +3413,97 @@ class ExperimentModel(QObject):
                 "effective_printed_volume_limit_nL": float(V_accept),
                 "issues_by_key": _copy_issues(),
                 "two_stock_search_limited_keys": list(two_stock_search_limited_keys),
+                "distinct_level_loss": 0,
+                "collapsed_target_keys": [],
+                "optimizer_strategy_used": optimizer_strategy_used,
+                "optimizer_fallback_reason": optimizer_fallback_reason,
+                "stock_allocation_search_limited": bool(stock_allocation_search_limited),
+                "stock_allocation_states_evaluated": int(stock_allocation_states_evaluated),
+                "stock_allocation_work_units_evaluated": int(
+                    stock_allocation_work_units_evaluated
+                ),
+                "stock_allocation_work_limit": int(
+                    self.MAX_STOCK_ALLOCATION_WORK_UNITS
+                ),
+                "stock_allocation_work_units_by_kind": copy.deepcopy(
+                    stock_allocation_work_units_by_kind
+                ),
+                "stock_allocation_zero_loss_polish_work_limit": int(
+                    self.ZERO_LOSS_POLISH_WORK_UNITS
+                ),
+                "stock_allocation_zero_loss_polish_work_used": int(
+                    stock_allocation_zero_loss_polish_work_used
+                ),
+                "optimizer_seed_elapsed_ms": float(
+                    optimizer_seed_elapsed_ms or elapsed_ms
+                ),
+                "stock_allocation_elapsed_ms": float(stock_allocation_elapsed_ms),
+                "optimizer_total_elapsed_ms": float(elapsed_ms),
+                "stock_allocation_time_budget_ms": float(
+                    self.MAX_STOCK_ALLOCATION_SECONDS * 1000.0
+                ),
+                "stock_allocation_zero_loss_polish_budget_ms": float(
+                    self.ZERO_LOSS_POLISH_SECONDS * 1000.0
+                ),
+                "stock_allocation_limit_reasons": sorted(stock_allocation_limit_reasons),
+                "stock_allocation_candidates_generated": int(
+                    stock_allocation_candidates_generated
+                ),
+                "stock_allocation_candidates_retained": int(
+                    stock_allocation_candidates_retained
+                ),
+                "stock_allocation_candidates_pruned": int(
+                    stock_allocation_candidates_pruned
+                ),
+                "stock_allocation_candidates_deduplicated": int(
+                    stock_allocation_candidates_deduplicated
+                ),
+                "stock_allocation_candidates_dominated": int(
+                    stock_allocation_candidates_dominated
+                ),
+                "stock_allocation_branches_pruned": int(
+                    stock_allocation_branches_pruned
+                ),
+                "stock_allocation_loss_tiers_evaluated": int(
+                    stock_allocation_loss_tiers_evaluated
+                ),
+                "optimizer_seed_distinct_level_loss": (
+                    int(optimizer_seed_distinct_level_loss)
+                    if optimizer_seed_distinct_level_loss is not None
+                    else None
+                ),
+                "optimizer_seed_worst_level_loss": (
+                    int(optimizer_seed_worst_level_loss)
+                    if optimizer_seed_worst_level_loss is not None
+                    else None
+                ),
+                "optimizer_seed_rank": copy.deepcopy(optimizer_seed_rank),
+                "optimizer_selected_rank": copy.deepcopy(optimizer_selected_rank),
+                **_resolution_phase_diagnostics(),
+                "stock_allocation_improved_seed": bool(
+                    stock_allocation_improved_seed
+                ),
+                "stock_allocation_time_to_first_improvement_ms": (
+                    float(stock_allocation_time_to_first_improvement_ms)
+                    if stock_allocation_time_to_first_improvement_ms is not None
+                    else None
+                ),
+                "stock_allocation_time_to_best_ms": (
+                    float(stock_allocation_time_to_best_ms)
+                    if stock_allocation_time_to_best_ms is not None
+                    else None
+                ),
+                "stock_allocation_time_budget_exceeded": bool(
+                    stock_allocation_time_budget_exceeded
+                ),
+                "stock_allocation_time_budget_overshoot_ms": float(
+                    stock_allocation_time_budget_overshoot_ms
+                ),
+                "stock_allocation_deadline_overshoot_ms": float(
+                    stock_allocation_deadline_overshoot_ms
+                ),
+                **copy.deepcopy(two_stock_diagnostics),
+                "stock_allocation_stop_reason": str(stock_allocation_stop_reason),
             }
 
         def _add_design_issue(
@@ -2427,9 +3526,13 @@ class ExperimentModel(QObject):
 
         unknown_additional_targets: List[Dict[str, Any]] = []
         for row in additional_condition_rows:
+            self._optimization_checkpoint()
             for key, target in (row.get("reaction") or {}).items():
+                self._optimization_checkpoint()
                 try:
                     target_value = float(target)
+                except OptimizationCancelled:
+                    raise
                 except Exception:
                     target_value = 0.0
                 if abs(target_value) <= 1e-12:
@@ -2520,6 +3623,7 @@ class ExperimentModel(QObject):
             dp: Dict[float, int] = {}
 
             for t_final in _effective_targets_for_opt(key, opt):
+                self._optimization_checkpoint()
                 row = self._evaluate_single_forced_target(
                     t_final=t_final,
                     starting_conc=float(getattr(opt, "starting_conc", 0.0) or 0.0),
@@ -2554,6 +3658,7 @@ class ExperimentModel(QObject):
             )
 
         for f in self.factors:
+            self._optimization_checkpoint()
             if f.kind == "additive":
                 o = f.options[0]
                 additive_option_map[f.name] = o
@@ -2613,9 +3718,12 @@ class ExperimentModel(QObject):
                             return _failure(reason)
                         twos, search_limited = self._enumerate_two_stock_candidates_with_meta(
                             t_adj, o.droplet_nL, o.units,
-                            final_volume_nL=V_final, volume_budget_nL=V_print,
+                            final_volume_nL=V_final, volume_budget_nL=V_accept,
+                            nominal_volume_budget_nL=V_print,
                             quantum=quantum, max_refine=two_max_refine,
                             max_stock_conc=max_stock,
+                            resolution_first=not allow_avoidable_grouping,
+                            diagnostics=two_stock_diagnostics,
                         )
                         if search_limited:
                             _mark_two_stock_search_limited((f.name, None))
@@ -2642,6 +3750,7 @@ class ExperimentModel(QObject):
             else:
                 bucket = []
                 for opt in f.options:
+                    self._optimization_checkpoint()
                     choice_option_map[(f.name, opt.name)] = opt
                     t_adj = _adj_targets_for_opt((f.name, opt.name), opt)
                     forced = getattr(opt, "forced_stock_conc", None)
@@ -2699,9 +3808,12 @@ class ExperimentModel(QObject):
                                 return _failure(reason)
                             twos, search_limited = self._enumerate_two_stock_candidates_with_meta(
                                 t_adj, opt.droplet_nL, opt.units,
-                                final_volume_nL=V_final, volume_budget_nL=V_print,
+                                final_volume_nL=V_final, volume_budget_nL=V_accept,
+                                nominal_volume_budget_nL=V_print,
                                 quantum=quantum, max_refine=two_max_refine,
                                 max_stock_conc=max_stock,
+                                resolution_first=not allow_avoidable_grouping,
+                                diagnostics=two_stock_diagnostics,
                             )
                             if search_limited:
                                 _mark_two_stock_search_limited((f.name, opt.name))
@@ -2729,6 +3841,7 @@ class ExperimentModel(QObject):
 
         def _ensure_additive_twos(name: str) -> List[TwoStockPlan]:
             for idx, (entry_name, singles, twos) in enumerate(additives):
+                self._optimization_checkpoint()
                 if entry_name != name:
                     continue
                 if twos is not None:
@@ -2740,10 +3853,13 @@ class ExperimentModel(QObject):
                     opt.droplet_nL,
                     opt.units,
                     final_volume_nL=V_final,
-                    volume_budget_nL=V_print,
+                    volume_budget_nL=V_accept,
+                    nominal_volume_budget_nL=V_print,
                     quantum=quantum,
                     max_refine=two_max_refine,
                     max_stock_conc=getattr(opt, "max_stock_conc", None),
+                    resolution_first=not allow_avoidable_grouping,
+                    diagnostics=two_stock_diagnostics,
                 )
                 if search_limited:
                     _mark_two_stock_search_limited((name, None))
@@ -2754,6 +3870,7 @@ class ExperimentModel(QObject):
         def _ensure_choice_twos(gname: str, oname: str) -> List[TwoStockPlan]:
             bucket = choice_groups.get(gname, [])
             for idx, (entry_name, singles, twos) in enumerate(bucket):
+                self._optimization_checkpoint()
                 if entry_name != oname:
                     continue
                 if twos is not None:
@@ -2765,10 +3882,13 @@ class ExperimentModel(QObject):
                     opt.droplet_nL,
                     opt.units,
                     final_volume_nL=V_final,
-                    volume_budget_nL=V_print,
+                    volume_budget_nL=V_accept,
+                    nominal_volume_budget_nL=V_print,
                     quantum=quantum,
                     max_refine=two_max_refine,
                     max_stock_conc=getattr(opt, "max_stock_conc", None),
+                    resolution_first=not allow_avoidable_grouping,
+                    diagnostics=two_stock_diagnostics,
                 )
                 if search_limited:
                     _mark_two_stock_search_limited((gname, oname))
@@ -2822,13 +3942,16 @@ class ExperimentModel(QObject):
         add_idx = {name: 0 for name, singles, _ in additives if singles}
         ch_idx: Dict[Tuple[str, str], int] = {}
         for gname, bucket in choice_groups.items():
+            self._optimization_checkpoint()
             for oname, singles, _ in bucket:
+                self._optimization_checkpoint()
                 if singles:
                     ch_idx[(gname, oname)] = 0
 
         # Two-stock selections (index into twos), None means single-stock
         add_two_idx: Dict[str, Optional[int]] = {}
         for name, singles, twos in additives:
+            self._optimization_checkpoint()
             if not singles:
                 resolved = twos if twos is not None else _ensure_additive_twos(name)
                 add_two_idx[name] = 0 if resolved else None
@@ -2837,7 +3960,9 @@ class ExperimentModel(QObject):
 
         ch_two_idx: Dict[Tuple[str, str], Optional[int]] = {}
         for gname, bucket in choice_groups.items():
+            self._optimization_checkpoint()
             for oname, singles, twos in bucket:
+                self._optimization_checkpoint()
                 if not singles:
                     resolved = twos if twos is not None else _ensure_choice_twos(gname, oname)
                     ch_two_idx[(gname, oname)] = 0 if resolved else None
@@ -2853,12 +3978,16 @@ class ExperimentModel(QObject):
         uploaded_reactions = list(getattr(self, "_uploaded_reactions", None) or [])
         uploaded_targets_by_key: Dict[Tuple[str, Optional[str]], List[Tuple[int, float]]] = {}
         for row_index, rxn in enumerate(uploaded_reactions):
+            self._optimization_checkpoint()
             for key, target in (rxn or {}).items():
+                self._optimization_checkpoint()
                 uploaded_targets_by_key.setdefault(key, []).append((int(row_index), float(target)))
         additional_row_targets_by_key: Dict[Tuple[str, Optional[str]], List[Tuple[int, float]]] = {}
         for row in additional_condition_rows:
+            self._optimization_checkpoint()
             row_index = int(row.get("row_index", 0))
             for key, target in (row.get("reaction") or {}).items():
+                self._optimization_checkpoint()
                 additional_row_targets_by_key.setdefault(key, []).append((row_index, float(target)))
         uploaded_row_totals_cache: Optional[List[float]] = None
         uploaded_key_volume_cache: Dict[Tuple[str, Optional[str]], List[float]] = {}
@@ -2881,6 +4010,7 @@ class ExperimentModel(QObject):
                 return
 
             for key in changed_keys:
+                self._optimization_checkpoint()
                 selected_plan_cache.pop(key, None)
                 if uploaded_row_totals_cache is None:
                     uploaded_key_volume_cache.pop(key, None)
@@ -2888,12 +4018,14 @@ class ExperimentModel(QObject):
                     old_volumes = uploaded_key_volume_cache.pop(key, None)
                     if old_volumes is not None:
                         for index, volume in enumerate(old_volumes):
+                            self._optimization_checkpoint()
                             uploaded_row_totals_cache[index] -= float(volume)
 
                     if key in uploaded_targets_by_key:
                         new_volumes = _uploaded_key_row_volumes(key)
                         uploaded_key_volume_cache[key] = new_volumes
                         for index, volume in enumerate(new_volumes):
+                            self._optimization_checkpoint()
                             uploaded_row_totals_cache[index] += float(volume)
 
                 if additional_row_totals_cache is None:
@@ -2903,6 +4035,7 @@ class ExperimentModel(QObject):
                 old_volumes = additional_key_volume_cache.pop(key, None)
                 if old_volumes is not None:
                     for index, volume in enumerate(old_volumes):
+                        self._optimization_checkpoint()
                         additional_row_totals_cache[index] -= float(volume)
 
                 if key not in additional_row_targets_by_key:
@@ -2910,12 +4043,14 @@ class ExperimentModel(QObject):
                 new_volumes = _additional_key_row_volumes(key)
                 additional_key_volume_cache[key] = new_volumes
                 for index, volume in enumerate(new_volumes):
+                    self._optimization_checkpoint()
                     additional_row_totals_cache[index] += float(volume)
 
         def selection_counts() -> Tuple[int, float]:
             tot_stocks = 0
             sum_conc = 0.0
             for name, singles, twos in additives:
+                self._optimization_checkpoint()
                 if add_two_idx[name] is not None:
                     resolved_twos = twos if twos is not None else _ensure_additive_twos(name)
                     p2 = resolved_twos[add_two_idx[name]]
@@ -2926,7 +4061,9 @@ class ExperimentModel(QObject):
                     tot_stocks += 1
                     sum_conc += p1.stock_concentration
             for gname, bucket in choice_groups.items():
+                self._optimization_checkpoint()
                 for oname, singles, twos in bucket:
+                    self._optimization_checkpoint()
                     if ch_two_idx[(gname, oname)] is not None:
                         resolved_twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
                         p2 = resolved_twos[ch_two_idx[(gname, oname)]]
@@ -2946,6 +4083,7 @@ class ExperimentModel(QObject):
             plan = None
             if option_name in (None, ""):
                 for name, singles, twos in additives:
+                    self._optimization_checkpoint()
                     if name != factor_name:
                         continue
                     if add_two_idx[name] is not None:
@@ -2960,6 +4098,7 @@ class ExperimentModel(QObject):
 
             bucket = choice_groups.get(factor_name, [])
             for oname, singles, twos in bucket:
+                self._optimization_checkpoint()
                 if oname != option_name:
                     continue
                 if ch_two_idx[(factor_name, oname)] is not None:
@@ -3048,6 +4187,7 @@ class ExperimentModel(QObject):
         def _uploaded_key_row_volumes(key: Tuple[str, Optional[str]]) -> List[float]:
             volumes = [0.0] * len(uploaded_reactions)
             for row_index, target in uploaded_targets_by_key.get(key, []):
+                self._optimization_checkpoint()
                 volume_nL, _contributor = _selected_plan_volume_for_target(
                     key,
                     float(target),
@@ -3059,6 +4199,7 @@ class ExperimentModel(QObject):
         def _additional_key_row_volumes(key: Tuple[str, Optional[str]]) -> List[float]:
             volumes = [0.0] * len(additional_condition_rows)
             for row_index, target in additional_row_targets_by_key.get(key, []):
+                self._optimization_checkpoint()
                 volume_nL, _contributor = _selected_plan_volume_for_target(
                     key,
                     float(target),
@@ -3077,9 +4218,11 @@ class ExperimentModel(QObject):
             uploaded_key_volume_cache.clear()
             totals = [0.0] * len(uploaded_reactions)
             for key in uploaded_targets_by_key.keys():
+                self._optimization_checkpoint()
                 volumes = _uploaded_key_row_volumes(key)
                 uploaded_key_volume_cache[key] = volumes
                 for index, volume in enumerate(volumes):
+                    self._optimization_checkpoint()
                     totals[index] += float(volume)
             uploaded_row_totals_cache = totals
             return uploaded_row_totals_cache
@@ -3094,9 +4237,11 @@ class ExperimentModel(QObject):
             additional_key_volume_cache.clear()
             totals = [0.0] * len(additional_condition_rows)
             for key in additional_row_targets_by_key.keys():
+                self._optimization_checkpoint()
                 volumes = _additional_key_row_volumes(key)
                 additional_key_volume_cache[key] = volumes
                 for index, volume in enumerate(volumes):
+                    self._optimization_checkpoint()
                     totals[index] += float(volume)
             additional_row_totals_cache = totals
             return additional_row_totals_cache
@@ -3148,6 +4293,7 @@ class ExperimentModel(QObject):
             rxn = uploaded_reactions[row_index] if 0 <= row_index < len(uploaded_reactions) else {}
             contributors: List[Dict[str, Any]] = []
             for key, target in (rxn or {}).items():
+                self._optimization_checkpoint()
                 _volume_nL, contributor = _selected_plan_volume_for_target(
                     key,
                     float(target),
@@ -3169,6 +4315,7 @@ class ExperimentModel(QObject):
             row = additional_condition_rows[row_index] if 0 <= row_index < len(additional_condition_rows) else {}
             contributors: List[Dict[str, Any]] = []
             for key, target in (row.get("reaction") or {}).items():
+                self._optimization_checkpoint()
                 _volume_nL, contributor = _selected_plan_volume_for_target(
                     key,
                     float(target),
@@ -3297,14 +4444,17 @@ class ExperimentModel(QObject):
 
             total = 0.0
             for name, singles, twos in additives:
+                self._optimization_checkpoint()
                 if add_two_idx[name] is not None:
                     resolved_twos = twos if twos is not None else _ensure_additive_twos(name)
                     total += resolved_twos[add_two_idx[name]].max_volume_nL
                 else:
                     total += singles[add_idx[name]].max_volume_nL
             for gname, bucket in choice_groups.items():
+                self._optimization_checkpoint()
                 m = 0.0
                 for oname, singles, twos in bucket:
+                    self._optimization_checkpoint()
                     if ch_two_idx[(gname, oname)] is not None:
                         resolved_twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
                         v = resolved_twos[ch_two_idx[(gname, oname)]].max_volume_nL
@@ -3335,6 +4485,7 @@ class ExperimentModel(QObject):
             # current volumes for each option
             vols: List[Tuple[str, float]] = []
             for n, singles, twos in bucket:
+                self._optimization_checkpoint()
                 v = (twos[ch_two_idx[(gname, n)]].max_volume_nL
                     if ch_two_idx[(gname, n)] is not None
                     else singles[ch_idx[(gname, n)]].max_volume_nL)
@@ -3375,6 +4526,7 @@ class ExperimentModel(QObject):
                 # still sharing by tie_count.
                 k = i + 1
                 while k < len(singles_this) and singles_this[k].max_volume_nL >= cur_max - 1e-9:
+                    self._optimization_checkpoint()
                     k += 1
                 if k < len(singles_this):
                     ahead_drop = max(0.0, cur.max_volume_nL - singles_this[k].max_volume_nL)
@@ -3387,6 +4539,7 @@ class ExperimentModel(QObject):
             # Unique argmax but next step still above others_max: look ahead to first k < others_max
             k = i + 1
             while k < len(singles_this) and singles_this[k].max_volume_nL >= others_max - 1e-9:
+                self._optimization_checkpoint()
                 k += 1
             if k < len(singles_this):
                 drop = max(0.0, cur_max - max(others_max, singles_this[k].max_volume_nL))
@@ -3416,31 +4569,47 @@ class ExperimentModel(QObject):
                 return False
             singles_this = None
             for g, bucket in choice_groups.items():
+                self._optimization_checkpoint()
                 if g == gname:
                     for n, s, _ in bucket:
+                        self._optimization_checkpoint()
                         if n == oname:
                             singles_this = s
                             break
             return singles_this is not None and (ch_idx[(gname, oname)] + 1 < len(singles_this))
 
-        def _refine_single_selection(
+        def _accuracy_candidate_compare(
+            left: Tuple[int, _PlanAccuracyScore],
+            right: Tuple[int, _PlanAccuracyScore],
+        ) -> int:
+            if self._plan_accuracy_score_is_better(left[1], right[1]):
+                return -1
+            if self._plan_accuracy_score_is_better(right[1], left[1]):
+                return 1
+            return (left[0] > right[0]) - (left[0] < right[0])
+
+        def _refine_single_candidates(
             key: Tuple[str, Optional[str]],
             opt: OptionSpec,
             singles: List[SingleStockPlan],
             current_index: int,
-        ) -> int:
+        ) -> List[int]:
             current_plan = singles[current_index]
-            volume_limit = float(current_plan.max_volume_nL)
-            best_index = int(current_index)
+            local_volume_limit = float(current_plan.max_volume_nL)
             targets_final = _effective_targets_for_opt(key, opt)
-            best_score = self._score_single_stock_plan(
+            current_score = self._score_single_stock_plan(
                 opt,
                 current_plan,
                 final_volume_nL=V_final,
                 targets_final=targets_final,
             )
+            candidates: List[Tuple[int, _PlanAccuracyScore]] = []
             for idx, candidate in enumerate(singles):
-                if float(candidate.max_volume_nL) > volume_limit + 1e-12:
+                self._optimization_checkpoint()
+                if (
+                    idx == current_index
+                    or float(candidate.max_volume_nL) > local_volume_limit + 1e-12
+                ):
                     continue
                 candidate_score = self._score_single_stock_plan(
                     opt,
@@ -3448,29 +4617,35 @@ class ExperimentModel(QObject):
                     final_volume_nL=V_final,
                     targets_final=targets_final,
                 )
-                if self._plan_accuracy_score_is_better(candidate_score, best_score):
-                    best_index = idx
-                    best_score = candidate_score
-            return best_index
+                if self._plan_accuracy_score_is_better(
+                    candidate_score, current_score
+                ):
+                    candidates.append((idx, candidate_score))
+            candidates.sort(key=cmp_to_key(_accuracy_candidate_compare))
+            return [idx for idx, _score in candidates]
 
-        def _refine_two_selection(
+        def _refine_two_candidates(
             key: Tuple[str, Optional[str]],
             opt: OptionSpec,
             twos: List[TwoStockPlan],
             current_index: int,
-        ) -> int:
+        ) -> List[int]:
             current_plan = twos[current_index]
-            volume_limit = float(current_plan.max_volume_nL)
-            best_index = int(current_index)
+            local_volume_limit = float(current_plan.max_volume_nL)
             targets_final = _effective_targets_for_opt(key, opt)
-            best_score = self._score_two_stock_plan(
+            current_score = self._score_two_stock_plan(
                 opt,
                 current_plan,
                 final_volume_nL=V_final,
                 targets_final=targets_final,
             )
+            candidates: List[Tuple[int, _PlanAccuracyScore]] = []
             for idx, candidate in enumerate(twos):
-                if float(candidate.max_volume_nL) > volume_limit + 1e-12:
+                self._optimization_checkpoint()
+                if (
+                    idx == current_index
+                    or float(candidate.max_volume_nL) > local_volume_limit + 1e-12
+                ):
                     continue
                 candidate_score = self._score_two_stock_plan(
                     opt,
@@ -3478,15 +4653,18 @@ class ExperimentModel(QObject):
                     final_volume_nL=V_final,
                     targets_final=targets_final,
                 )
-                if self._plan_accuracy_score_is_better(candidate_score, best_score):
-                    best_index = idx
-                    best_score = candidate_score
-            return best_index
+                if self._plan_accuracy_score_is_better(
+                    candidate_score, current_score
+                ):
+                    candidates.append((idx, candidate_score))
+            candidates.sort(key=cmp_to_key(_accuracy_candidate_compare))
+            return [idx for idx, _score in candidates]
 
         # -----------------------------
         # Step 1: single-stock only
         # -----------------------------
         while True:
+            self._optimization_checkpoint()
             worst = worst_case_nonfill_volume()
             if worst <= V_print + 1e-6:
                 break
@@ -3498,6 +4676,7 @@ class ExperimentModel(QObject):
 
             # Additives
             for name, singles, _ in additives:
+                self._optimization_checkpoint()
                 if not can_bump_add(name):
                     continue
                 vol_red, conc_inc = bump_gain_add(name)
@@ -3511,7 +4690,9 @@ class ExperimentModel(QObject):
 
             # Choice options (tie-aware)
             for gname, bucket in choice_groups.items():
+                self._optimization_checkpoint()
                 for oname, singles, _ in bucket:
+                    self._optimization_checkpoint()
                     if not can_bump_opt(gname, oname):
                         continue
                     vol_red_eff, conc_eff = bump_gain_opt(gname, oname)
@@ -3537,8 +4718,10 @@ class ExperimentModel(QObject):
         # -----------------------------
         # Step 2: two-stock switches
         # -----------------------------
-        if worst_case_nonfill_volume() > V_print + 1e-6 and allow_two:
+        feasibility_limit = V_print if allow_avoidable_grouping else V_accept
+        if worst_case_nonfill_volume() > feasibility_limit + 1e-6 and allow_two:
             while True:
+                self._optimization_checkpoint()
                 worst = worst_case_nonfill_volume()
                 if worst <= V_print + 1e-6:
                     break
@@ -3549,11 +4732,13 @@ class ExperimentModel(QObject):
 
                 # Additives
                 for name, singles, twos in additives:
+                    self._optimization_checkpoint()
                     twos = twos if twos is not None else _ensure_additive_twos(name)
                     if not twos:
                         continue
                     cur_v = singles[add_idx[name]].max_volume_nL if add_two_idx[name] is None else twos[add_two_idx[name]].max_volume_nL
                     for i2, p2 in enumerate(twos):
+                        self._optimization_checkpoint()
                         if add_two_idx[name] is not None and add_two_idx[name] == i2:
                             continue
                         vol_red_local = max(0.0, cur_v - p2.max_volume_nL)
@@ -3570,8 +4755,10 @@ class ExperimentModel(QObject):
                 best_tie_gain = 0.0
                 best_tie_penalty = float("inf")
                 for gname, bucket in choice_groups.items():
+                    self._optimization_checkpoint()
                     vols = []
                     for oname, singles, twos in bucket:
+                        self._optimization_checkpoint()
                         twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
                         v = twos[ch_two_idx[(gname, oname)]].max_volume_nL if ch_two_idx[(gname, oname)] is not None else singles[ch_idx[(gname, oname)]].max_volume_nL
                         vols.append((oname, v))
@@ -3580,6 +4767,7 @@ class ExperimentModel(QObject):
                     others_max = {oname: (max(x for n, x in vols if n != oname) if len(vols) > 1 else 0.0) for oname, _ in vols}
 
                     for oname, singles, twos in bucket:
+                        self._optimization_checkpoint()
                         twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
                         if not twos:
                             continue
@@ -3587,6 +4775,7 @@ class ExperimentModel(QObject):
                         is_argmax = abs(cur_v - cur_group_max) <= 1e-9
 
                         for i2, p2 in enumerate(twos):
+                            self._optimization_checkpoint()
                             if ch_two_idx[(gname, oname)] is not None and ch_two_idx[(gname, oname)] == i2:
                                 continue
                             new_group_max = max(others_max[oname], p2.max_volume_nL) if is_argmax else cur_group_max
@@ -3619,6 +4808,7 @@ class ExperimentModel(QObject):
                     if aggregate_issue is None:
                         aggregate_issue = additional_issue
                     for name, singles, twos in additives:
+                        self._optimization_checkpoint()
                         if add_two_idx[name] is not None:
                             continue
                         opt = additive_option_map[name]
@@ -3631,7 +4821,9 @@ class ExperimentModel(QObject):
                             )
                             _record_volume_budget_issue((name, None), opt, required_volume_nL=selected.max_volume_nL, code=code)
                     for gname, bucket in choice_groups.items():
+                        self._optimization_checkpoint()
                         for oname, singles, twos in bucket:
+                            self._optimization_checkpoint()
                             key = (gname, oname)
                             if ch_two_idx[key] is not None:
                                 continue
@@ -3677,6 +4869,7 @@ class ExperimentModel(QObject):
 
         # Additives
         for idx, (name, singles, twos) in enumerate(additives):
+            self._optimization_checkpoint()
             if add_two_idx.get(name) is None:
                 continue
             twos = twos if twos is not None else _ensure_additive_twos(name)
@@ -3710,6 +4903,7 @@ class ExperimentModel(QObject):
             saved_two = add_two_idx[name]
             best_i = None
             for i, p1 in enumerate(singles):
+                self._optimization_checkpoint()
                 add_two_idx[name] = None
                 add_idx[name] = i
                 _invalidate_selected_volume_cache((name, None))
@@ -3722,8 +4916,10 @@ class ExperimentModel(QObject):
 
         # Choice groups
         for gname, bucket in list(choice_groups.items()):
+            self._optimization_checkpoint()
             new_bucket = []
             for oname, singles, twos in bucket:
+                self._optimization_checkpoint()
                 key = (gname, oname)
                 if ch_two_idx.get(key) is None:
                     new_bucket.append((oname, singles, twos))
@@ -3757,6 +4953,7 @@ class ExperimentModel(QObject):
                     saved_two = ch_two_idx[key]
                     best_i = None
                     for i, p1 in enumerate(singles):
+                        self._optimization_checkpoint()
                         ch_two_idx[key] = None
                         ch_idx[key] = i
                         _invalidate_selected_volume_cache(key)
@@ -3773,12 +4970,15 @@ class ExperimentModel(QObject):
         if worst_case_nonfill_volume() <= V_print + 1e-6:
             changed = True
             while changed:
+                self._optimization_checkpoint()
                 changed = False
                 for name, singles, _ in additives:
+                    self._optimization_checkpoint()
                     if add_two_idx[name] is not None:
                         continue
                     i = add_idx[name]
                     while i > 0:
+                        self._optimization_checkpoint()
                         prev_i = i - 1
                         add_idx[name] = prev_i
                         _invalidate_selected_volume_cache((name, None))
@@ -3790,12 +4990,15 @@ class ExperimentModel(QObject):
                             _invalidate_selected_volume_cache((name, None))
                             break
                 for gname, bucket in choice_groups.items():
+                    self._optimization_checkpoint()
                     for oname, singles, _ in bucket:
+                        self._optimization_checkpoint()
                         key = (gname, oname)
                         if ch_two_idx[key] is not None:
                             continue
                         i = ch_idx[key]
                         while i > 0:
+                            self._optimization_checkpoint()
                             prev_i = i - 1
                             ch_idx[key] = prev_i
                             _invalidate_selected_volume_cache(key)
@@ -3807,30 +5010,1462 @@ class ExperimentModel(QObject):
                                 _invalidate_selected_volume_cache(key)
                                 break
 
-        # Improve target matching without increasing local printed-volume demand.
+        # Improve target matching only when the exact global reaction rows remain
+        # feasible. Keep the last feasible selection immutable while each
+        # substitution is tested.
+        pre_refinement_snapshot = {
+            "add_idx": dict(add_idx),
+            "add_two_idx": dict(add_two_idx),
+            "ch_idx": dict(ch_idx),
+            "ch_two_idx": dict(ch_two_idx),
+        }
+        pre_refinement_worst = worst_case_nonfill_volume()
+        refinement_volume_limit = (
+            V_print if pre_refinement_worst <= V_print + 1e-6 else V_accept
+        )
+
         for name, singles, twos in additives:
+            self._optimization_checkpoint()
             opt = additive_option_map[name]
             if getattr(opt, "forced_stock_conc", None) not in (None, 0.0):
                 continue
             if add_two_idx[name] is not None:
-                if twos:
-                    add_two_idx[name] = _refine_two_selection((name, None), opt, twos, add_two_idx[name])
+                resolved_twos = twos if twos is not None else _ensure_additive_twos(name)
+                current_index = int(add_two_idx[name])
+                for candidate_index in _refine_two_candidates(
+                    (name, None), opt, resolved_twos, current_index
+                ):
+                    self._optimization_checkpoint()
+                    add_two_idx[name] = candidate_index
+                    _invalidate_selected_volume_cache((name, None))
+                    if worst_case_nonfill_volume() <= refinement_volume_limit + 1e-6:
+                        break
+                    add_two_idx[name] = current_index
+                    _invalidate_selected_volume_cache((name, None))
             else:
-                add_idx[name] = _refine_single_selection((name, None), opt, singles, add_idx[name])
-        _invalidate_selected_volume_cache()
+                current_index = int(add_idx[name])
+                for candidate_index in _refine_single_candidates(
+                    (name, None), opt, singles, current_index
+                ):
+                    self._optimization_checkpoint()
+                    add_idx[name] = candidate_index
+                    _invalidate_selected_volume_cache((name, None))
+                    if worst_case_nonfill_volume() <= refinement_volume_limit + 1e-6:
+                        break
+                    add_idx[name] = current_index
+                    _invalidate_selected_volume_cache((name, None))
 
         for gname, bucket in choice_groups.items():
+            self._optimization_checkpoint()
             for oname, singles, twos in bucket:
+                self._optimization_checkpoint()
                 key = (gname, oname)
                 opt = choice_option_map[key]
                 if getattr(opt, "forced_stock_conc", None) not in (None, 0.0):
                     continue
                 if ch_two_idx[key] is not None:
-                    if twos:
-                        ch_two_idx[key] = _refine_two_selection(key, opt, twos, ch_two_idx[key])
+                    resolved_twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
+                    current_index = int(ch_two_idx[key])
+                    for candidate_index in _refine_two_candidates(
+                        key, opt, resolved_twos, current_index
+                    ):
+                        self._optimization_checkpoint()
+                        ch_two_idx[key] = candidate_index
+                        _invalidate_selected_volume_cache(key)
+                        if worst_case_nonfill_volume() <= refinement_volume_limit + 1e-6:
+                            break
+                        ch_two_idx[key] = current_index
+                        _invalidate_selected_volume_cache(key)
                 else:
-                    ch_idx[key] = _refine_single_selection(key, opt, singles, ch_idx[key])
+                    current_index = int(ch_idx[key])
+                    for candidate_index in _refine_single_candidates(
+                        key, opt, singles, current_index
+                    ):
+                        self._optimization_checkpoint()
+                        ch_idx[key] = candidate_index
+                        _invalidate_selected_volume_cache(key)
+                        if worst_case_nonfill_volume() <= refinement_volume_limit + 1e-6:
+                            break
+                        ch_idx[key] = current_index
+                        _invalidate_selected_volume_cache(key)
         _invalidate_selected_volume_cache()
+
+        if worst_case_nonfill_volume() > refinement_volume_limit + 1e-6:
+            add_idx.clear()
+            add_idx.update(pre_refinement_snapshot["add_idx"])
+            add_two_idx.clear()
+            add_two_idx.update(pre_refinement_snapshot["add_two_idx"])
+            ch_idx.clear()
+            ch_idx.update(pre_refinement_snapshot["ch_idx"])
+            ch_two_idx.clear()
+            ch_two_idx.update(pre_refinement_snapshot["ch_two_idx"])
+            _invalidate_selected_volume_cache()
+
+        # The historical selector above is the immutable feasible seed for the
+        # resolution-first pass. Candidate enumeration is shared; the bounded
+        # pass only runs when that seed actually merges requested levels.
+        def _capture_selection_snapshot() -> Dict[str, Dict[Any, Any]]:
+            return {
+                "add_idx": dict(add_idx),
+                "add_two_idx": dict(add_two_idx),
+                "ch_idx": dict(ch_idx),
+                "ch_two_idx": dict(ch_two_idx),
+            }
+
+        def _restore_selection_snapshot(snapshot: Mapping[str, Mapping[Any, Any]]):
+            add_idx.clear()
+            add_idx.update(snapshot["add_idx"])
+            add_two_idx.clear()
+            add_two_idx.update(snapshot["add_two_idx"])
+            ch_idx.clear()
+            ch_idx.update(snapshot["ch_idx"])
+            ch_two_idx.clear()
+            ch_two_idx.update(snapshot["ch_two_idx"])
+            _invalidate_selected_volume_cache()
+
+        resolution_evaluation_cache: Dict[
+            Tuple[Tuple[str, Optional[str]], int],
+            Tuple[_PlanResolutionScore, List[Dict[str, Any]], Dict[str, Any]],
+        ] = {}
+
+        def _resolution_evaluation(
+            key: Tuple[str, Optional[str]],
+            plan: SingleStockPlan | TwoStockPlan,
+        ):
+            cache_key = (key, id(plan))
+            cached = resolution_evaluation_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            opt = option_by_key[key]
+            cached = self._evaluate_plan_resolution(
+                opt,
+                plan,
+                final_volume_nL=V_final,
+                targets_final=_effective_targets_for_opt(key, opt),
+            )
+            resolution_evaluation_cache[cache_key] = cached
+            return cached
+
+        def _selection_resolution_details() -> Dict[str, Any]:
+            evaluations: Dict[Tuple[str, Optional[str]], Dict[str, Any]] = {}
+            total_lost = 0
+            max_lost = 0
+            extra_stocks = 0
+            worst_error = 0.0
+            error_sum = 0.0
+            target_count = 0
+            concentration_burden = 0.0
+            for key in sorted(option_by_key, key=_canonical_resolution_key):
+                self._optimization_checkpoint()
+                plan = _selected_plan_for_key(key)
+                if plan is None:
+                    continue
+                plan_score, rows, summary = _resolution_evaluation(key, plan)
+                evaluations[key] = {
+                    "plan": plan,
+                    "score": plan_score,
+                    "rows": rows,
+                    "summary": summary,
+                }
+                total_lost += int(plan_score.lost_levels)
+                max_lost = max(max_lost, int(plan_score.lost_levels))
+                extra_stocks += max(0, int(plan_score.n_stocks) - 1)
+                worst_error = max(worst_error, float(plan_score.worst_abs_error))
+                error_sum += float(plan_score.error_sum)
+                target_count += int(plan_score.target_count)
+                concentration_burden += float(plan_score.concentration_burden)
+
+            worst_volume = float(worst_case_nonfill_volume())
+            mean_error = error_sum / target_count if target_count else 0.0
+            quality = (
+                int(total_lost),
+                int(max_lost),
+                int(extra_stocks),
+                float(worst_error),
+                float(mean_error),
+                float(concentration_burden),
+                float(worst_volume),
+            )
+            return {
+                "quality": quality,
+                "rank": quality,
+                "tie_break": _selection_tie_break(evaluations),
+                "worst_volume_nL": worst_volume,
+                "evaluations": evaluations,
+            }
+
+        def _resolution_rank_payload(
+            details: Optional[Mapping[str, Any]],
+        ) -> Optional[Dict[str, Any]]:
+            if not details:
+                return None
+            quality = tuple(details.get("quality") or details.get("rank") or ())
+            if len(quality) != 7:
+                raise ValueError("Resolution rank must contain seven components.")
+            evaluation_count = len(details.get("evaluations", {}))
+            return {
+                "total_distinct_level_loss": int(quality[0]),
+                "worst_reagent_level_loss": int(quality[1]),
+                "stock_solution_count": int(evaluation_count + int(quality[2])),
+                "worst_abs_error": float(quality[3]),
+                "mean_abs_error": float(quality[4]),
+                "concentration_burden": float(quality[5]),
+                "printed_volume_nL": float(quality[6]),
+            }
+
+        def _validate_selected_resolution_allocation(details: Mapping[str, Any]):
+            worst_volume = float(details.get("worst_volume_nL", math.inf))
+            if not math.isfinite(worst_volume) or worst_volume > V_accept + 1e-6:
+                raise ValueError(
+                    "Resolution allocation exceeds the effective printed-volume limit."
+                )
+
+            for key, evaluation in details.get("evaluations", {}).items():
+                self._optimization_checkpoint()
+                plan = evaluation["plan"]
+                opt = option_by_key[key]
+                if isinstance(plan, SingleStockPlan):
+                    concentrations = (float(plan.stock_concentration),)
+                    mapped_drops = {
+                        self._normalize_target_key(float(target)): int(drops)
+                        for target, drops in plan.droplets_per_target.items()
+                    }
+                else:
+                    concentrations = tuple(float(value) for value in plan.stock_concs)
+                    mapped_drops = {
+                        self._normalize_target_key(float(target)): (
+                            int(drops[0]),
+                            int(drops[1]),
+                        )
+                        for target, drops in plan.droplets_per_target.items()
+                    }
+
+                if any(not math.isfinite(value) or value <= 0.0 for value in concentrations):
+                    raise ValueError(f"Resolution allocation has an invalid stock for {key!r}.")
+                max_stock = getattr(opt, "max_stock_conc", None)
+                if max_stock is not None and any(
+                    value > float(max_stock) + 1e-9 for value in concentrations
+                ):
+                    raise ValueError(f"Resolution allocation exceeds the stock bound for {key!r}.")
+                forced_stock = getattr(opt, "forced_stock_conc", None)
+                if forced_stock not in (None, 0.0) and (
+                    len(concentrations) != 1
+                    or not math.isclose(
+                        concentrations[0],
+                        float(forced_stock),
+                        rel_tol=1e-9,
+                        abs_tol=1e-9,
+                    )
+                ):
+                    raise ValueError(f"Resolution allocation changed the fixed stock for {key!r}.")
+
+                exact_max_volume_nL = 0.0
+                for row in evaluation.get("rows", []):
+                    # A fixed user-provided stock can legitimately leave a target
+                    # unreachable; generated candidates may not introduce that state.
+                    self._optimization_checkpoint()
+                    if not bool(row.get("reachable")) and forced_stock in (None, 0.0):
+                        raise ValueError(
+                            f"Resolution allocation cannot reach a target for {key!r}."
+                        )
+                    adjusted = self._normalize_target_key(
+                        float(row.get("requested_adjusted", 0.0) or 0.0)
+                    )
+                    if adjusted not in mapped_drops:
+                        raise ValueError(
+                            f"Resolution allocation is missing a target mapping for {key!r}."
+                        )
+                    expected_drops = mapped_drops[adjusted]
+                    actual_drops = row.get("droplets", 0)
+                    if isinstance(expected_drops, tuple):
+                        actual_drops = tuple(int(value) for value in actual_drops)
+                        row_drop_count = sum(actual_drops)
+                    else:
+                        actual_drops = int(actual_drops)
+                        row_drop_count = actual_drops
+                    if actual_drops != expected_drops:
+                        raise ValueError(
+                            f"Resolution allocation has an inconsistent target mapping for {key!r}."
+                        )
+                    exact_max_volume_nL = max(
+                        exact_max_volume_nL,
+                        float(row_drop_count) * float(plan.droplet_nL),
+                    )
+                if not math.isclose(
+                    exact_max_volume_nL,
+                    float(plan.max_volume_nL),
+                    rel_tol=1e-9,
+                    abs_tol=1e-6,
+                ):
+                    raise ValueError(
+                        f"Resolution allocation has an inconsistent row volume for {key!r}."
+                    )
+
+        def _candidate_lists_for_key(key: Tuple[str, Optional[str]]):
+            factor_name, option_name = key
+            if option_name in (None, ""):
+                for idx, (name, singles, twos) in enumerate(additives):
+                    self._optimization_checkpoint()
+                    if name == factor_name:
+                        return "add", idx, singles, twos
+            else:
+                bucket = choice_groups.get(factor_name, [])
+                for idx, (name, singles, twos) in enumerate(bucket):
+                    self._optimization_checkpoint()
+                    if name == option_name:
+                        return "choice", idx, singles, twos
+            raise KeyError(key)
+
+        def _replace_twos_for_key(
+            key: Tuple[str, Optional[str]],
+            twos: List[TwoStockPlan],
+        ):
+            kind, idx, singles, _current_twos = _candidate_lists_for_key(key)
+            if kind == "add":
+                name = additives[idx][0]
+                additives[idx] = (name, singles, twos)
+            else:
+                factor_name, option_name = key
+                bucket = choice_groups[factor_name]
+                bucket[idx] = (option_name, singles, twos)
+                choice_groups[factor_name] = bucket
+
+        def _two_plan_signature(plan: TwoStockPlan) -> Tuple[Any, ...]:
+            return (
+                tuple(round(float(value), 12) for value in plan.deltas),
+                tuple(round(float(value), 12) for value in plan.stock_concs),
+                round(float(plan.max_volume_nL), 12),
+                tuple(
+                    sorted(
+                        (
+                            round(float(target), 12),
+                            int(drops[0]),
+                            int(drops[1]),
+                        )
+                        for target, drops in plan.droplets_per_target.items()
+                    )
+                ),
+            )
+
+        def _plan_semantic_signature(
+            plan: SingleStockPlan | TwoStockPlan,
+        ) -> Tuple[Any, ...]:
+            if isinstance(plan, SingleStockPlan):
+                return (
+                    "single",
+                    1,
+                    round(float(plan.droplet_nL), 12),
+                    round(float(plan.stock_concentration), 12),
+                    round(float(plan.delta_per_drop), 12),
+                    round(float(plan.max_volume_nL), 12),
+                    tuple(
+                        sorted(
+                            (
+                                round(float(target), 12),
+                                int(drops),
+                            )
+                            for target, drops in plan.droplets_per_target.items()
+                        )
+                    ),
+                )
+            return (
+                "two",
+                2,
+                round(float(plan.droplet_nL), 12),
+                *_two_plan_signature(plan),
+            )
+
+        def _selection_tie_break(
+            evaluations: Mapping[Tuple[str, Optional[str]], Mapping[str, Any]],
+        ) -> Tuple[Any, ...]:
+            return tuple(
+                (
+                    _canonical_resolution_key(key),
+                    _plan_semantic_signature(evaluations[key]["plan"]),
+                )
+                for key in sorted(evaluations, key=_canonical_resolution_key)
+            )
+
+        def _resolution_details_order(
+            details: Mapping[str, Any],
+        ) -> Tuple[Any, ...]:
+            return (
+                tuple(details["rank"]),
+                tuple(details.get("tie_break") or ()),
+            )
+
+        resolution_two_keys: Set[Tuple[str, Optional[str]]] = set()
+        resolution_started_at: Optional[float] = None
+        zero_loss_polish_completed = False
+        resolution_search_exhausted = False
+        resolution_metrics_prepared = False
+        resolution_target_levels: Dict[Tuple[str, Optional[str]], Tuple[float, ...]] = {}
+        resolution_uploaded_level_indices: Dict[
+            Tuple[str, Optional[str]], np.ndarray
+        ] = {}
+        resolution_additional_level_indices: Dict[
+            Tuple[str, Optional[str]], np.ndarray
+        ] = {}
+        resolution_candidate_entry_cache: Dict[
+            Tuple[Tuple[str, Optional[str]], int], Dict[str, Any]
+        ] = {}
+
+        def _resolution_work_limit_reached() -> bool:
+            if (
+                stock_allocation_work_units_evaluated
+                < int(self.MAX_STOCK_ALLOCATION_WORK_UNITS)
+            ):
+                return False
+            stock_allocation_limit_reasons.add("work_cap")
+            return True
+
+        def _consume_resolution_work(kind: str, units: int = 1) -> bool:
+            nonlocal stock_allocation_work_units_evaluated
+            nonlocal stock_allocation_zero_loss_polish_work_used
+            units = int(units)
+            if units <= 0:
+                raise ValueError("Stock-allocation work units must be positive.")
+            if (
+                stock_allocation_work_units_evaluated + units
+                > int(self.MAX_STOCK_ALLOCATION_WORK_UNITS)
+            ):
+                stock_allocation_limit_reasons.add("work_cap")
+                return False
+            if kind not in stock_allocation_work_units_by_kind:
+                raise ValueError(f"Unknown stock-allocation work kind: {kind}")
+            stock_allocation_work_units_evaluated += units
+            stock_allocation_work_units_by_kind[kind] += units
+            if zero_loss_polish_started_at_work is not None:
+                stock_allocation_zero_loss_polish_work_used = max(
+                    0,
+                    stock_allocation_work_units_evaluated
+                    - zero_loss_polish_started_at_work,
+                )
+            return True
+
+        def _start_zero_loss_polish() -> None:
+            nonlocal zero_loss_polish_started_at_work
+            if zero_loss_polish_started_at_work is None:
+                zero_loss_polish_started_at_work = (
+                    stock_allocation_work_units_evaluated
+                )
+
+        def _zero_loss_polish_exhausted() -> bool:
+            nonlocal zero_loss_polish_completed
+            nonlocal stock_allocation_zero_loss_polish_work_used
+            if zero_loss_polish_started_at_work is None:
+                return False
+            stock_allocation_zero_loss_polish_work_used = max(
+                0,
+                stock_allocation_work_units_evaluated
+                - zero_loss_polish_started_at_work,
+            )
+            if (
+                stock_allocation_zero_loss_polish_work_used
+                < int(self.ZERO_LOSS_POLISH_WORK_UNITS)
+            ):
+                return False
+            zero_loss_polish_completed = True
+            return True
+
+        def _ensure_resolution_twos_for_key(
+            key: Tuple[str, Optional[str]],
+        ) -> bool:
+            nonlocal best_snapshot
+            nonlocal best_details
+            nonlocal stock_allocation_time_to_first_improvement_ms
+            nonlocal stock_allocation_time_to_best_ms
+            if key in resolution_two_keys or _resolution_work_limit_reached():
+                return False
+            resolution_two_keys.add(key)
+            opt = option_by_key[key]
+            if getattr(opt, "forced_stock_conc", None) not in (None, 0.0):
+                return False
+            _kind, _idx, _singles, existing = _candidate_lists_for_key(key)
+            # Feasibility fallback candidates were already resolution-aware and
+            # can be reused without another pair scan.
+            if existing is not None:
+                return False
+            quota = stock_allocation_pair_work_by_key[key]
+            if quota["limit"] == 0:
+                quota["quota_exhausted"] = True
+                stock_allocation_limit_reasons.add("pair_quota")
+                _mark_two_stock_search_limited(key)
+                return False
+            incremental_twos: List[TwoStockPlan] = []
+            incremental_signatures: Set[Tuple[Any, ...]] = set()
+
+            def _consume_pair_work(kind: str) -> bool:
+                quota = stock_allocation_pair_work_by_key[key]
+                if quota["used"] >= quota["limit"]:
+                    quota["quota_exhausted"] = True
+                    stock_allocation_limit_reasons.add("pair_quota")
+                    return False
+                if not _consume_resolution_work(kind):
+                    return False
+                quota["used"] += 1
+                return True
+
+            def _incremental_stop_requested() -> bool:
+                return (
+                    _zero_loss_polish_exhausted()
+                    or _resolution_work_limit_reached()
+                )
+
+            def _consider_generated_plan(plan: TwoStockPlan) -> bool:
+                """Validate a useful partial candidate before more pair scanning."""
+                nonlocal best_snapshot
+                nonlocal best_details
+                nonlocal stock_allocation_time_to_first_improvement_ms
+                nonlocal stock_allocation_time_to_best_ms
+                signature = _two_plan_signature(plan)
+                if signature not in incremental_signatures:
+                    incremental_signatures.add(signature)
+                    incremental_twos.append(plan)
+                    _replace_twos_for_key(key, incremental_twos)
+                incumbent_score = best_details["evaluations"][key]["score"]
+                if int(plan.lost_levels) > int(incumbent_score.lost_levels) or (
+                    int(plan.lost_levels) == int(incumbent_score.lost_levels)
+                    and zero_loss_polish_started_at_work is None
+                ):
+                    return False
+                two_stock_diagnostics["two_stock_target_row_cache_reuses"] = int(
+                    two_stock_diagnostics.get(
+                        "two_stock_target_row_cache_reuses", 0
+                    )
+                ) + len(plan.target_rows)
+
+                _restore_selection_snapshot(best_snapshot)
+                kind, _idx, _singles, current_twos = _candidate_lists_for_key(key)
+                plan_index = next(
+                    index
+                    for index, candidate in enumerate(current_twos or [])
+                    if candidate is plan
+                )
+                if kind == "add":
+                    add_two_idx[key[0]] = int(plan_index)
+                else:
+                    ch_two_idx[(key[0], key[1])] = int(plan_index)
+                _invalidate_selected_volume_cache()
+                try:
+                    candidate_details = _selection_resolution_details()
+                    if (
+                        _resolution_details_order(candidate_details)
+                        >= _resolution_details_order(best_details)
+                    ):
+                        _restore_selection_snapshot(best_snapshot)
+                        return False
+                    _validate_selected_resolution_allocation(candidate_details)
+                    found_at = optimizer_clock()
+                    found_elapsed_ms = max(
+                        0.0, (found_at - float(resolution_started_at)) * 1000.0
+                    )
+                    candidate_details["found_elapsed_ms"] = found_elapsed_ms
+                    if stock_allocation_time_to_first_improvement_ms is None:
+                        stock_allocation_time_to_first_improvement_ms = found_elapsed_ms
+                    stock_allocation_time_to_best_ms = found_elapsed_ms
+                    best_details = candidate_details
+                    best_snapshot = _capture_selection_snapshot()
+                    if int(best_details["quality"][0]) == 0:
+                        _start_zero_loss_polish()
+                    return False
+                except ValueError:
+                    _restore_selection_snapshot(best_snapshot)
+                    return False
+
+            pair_limit_reasons: Set[str] = set()
+            resolved, search_limited = self._enumerate_two_stock_candidates_with_meta(
+                _adj_targets_for_opt(key, opt),
+                opt.droplet_nL,
+                opt.units,
+                final_volume_nL=V_final,
+                volume_budget_nL=V_accept,
+                nominal_volume_budget_nL=V_print,
+                quantum=quantum,
+                max_refine=two_max_refine,
+                max_stock_conc=getattr(opt, "max_stock_conc", None),
+                resolution_first=True,
+                limit_reasons=pair_limit_reasons,
+                diagnostics=two_stock_diagnostics,
+                candidate_callback=_consider_generated_plan,
+                stop_requested=_incremental_stop_requested,
+                consume_work=_consume_pair_work,
+            )
+            if stock_allocation_pair_work_by_key[key]["quota_exhausted"]:
+                pair_limit_reasons.discard("work_cap")
+                pair_limit_reasons.add("pair_quota")
+            stock_allocation_limit_reasons.update(pair_limit_reasons)
+            if search_limited or (
+                {"work_cap", "state_cap"} & stock_allocation_limit_reasons
+            ):
+                _mark_two_stock_search_limited(key)
+            _kind, _idx, _singles, existing = _candidate_lists_for_key(key)
+            merged = list(existing or [])
+            signatures = {_two_plan_signature(plan) for plan in merged}
+            for plan in resolved:
+                self._optimization_checkpoint()
+                signature = _two_plan_signature(plan)
+                if signature not in signatures:
+                    signatures.add(signature)
+                    merged.append(plan)
+            # Do not reorder this list after an incremental candidate has been
+            # validated: selection snapshots intentionally store stable indices.
+            _replace_twos_for_key(key, merged)
+            return bool(merged)
+
+        def _prepare_resolution_volume_indices() -> bool:
+            nonlocal resolution_metrics_prepared
+            if resolution_metrics_prepared:
+                return True
+            for key in sorted(option_by_key, key=_canonical_resolution_key):
+                self._optimization_checkpoint()
+                opt = option_by_key[key]
+                levels = tuple(_effective_targets_for_opt(key, opt))
+                level_lookup = {
+                    self._normalize_target_key(float(target)): index
+                    for index, target in enumerate(levels)
+                }
+                resolution_target_levels[key] = levels
+
+                uploaded_indices = np.full(
+                    len(uploaded_reactions), len(levels), dtype=np.int32
+                )
+                for row_index, target in uploaded_targets_by_key.get(key, []):
+                    self._optimization_checkpoint()
+                    target_key = self._normalize_target_key(float(target))
+                    if target_key not in level_lookup:
+                        raise ValueError(
+                            f"Uploaded target {target!r} is missing from metrics for {key!r}."
+                        )
+                    uploaded_indices[int(row_index)] = int(level_lookup[target_key])
+                resolution_uploaded_level_indices[key] = uploaded_indices
+
+                additional_indices = np.full(
+                    len(additional_condition_rows), len(levels), dtype=np.int32
+                )
+                for row_index, target in additional_row_targets_by_key.get(key, []):
+                    self._optimization_checkpoint()
+                    target_key = self._normalize_target_key(float(target))
+                    if target_key not in level_lookup:
+                        raise ValueError(
+                            f"Additional target {target!r} is missing from metrics for {key!r}."
+                        )
+                    additional_indices[int(row_index)] = int(level_lookup[target_key])
+                resolution_additional_level_indices[key] = additional_indices
+            resolution_metrics_prepared = True
+            return True
+
+        def _resolution_candidate_entry(
+            key: Tuple[str, Optional[str]],
+            plan: SingleStockPlan | TwoStockPlan,
+            *,
+            mode: str,
+            index: int,
+        ) -> Dict[str, Any]:
+            cache_key = (key, id(plan))
+            cached = resolution_candidate_entry_cache.get(cache_key)
+            if cached is None:
+                if isinstance(plan, TwoStockPlan):
+                    two_stock_diagnostics["two_stock_target_row_cache_reuses"] = int(
+                        two_stock_diagnostics.get(
+                            "two_stock_target_row_cache_reuses", 0
+                        )
+                    ) + sum(
+                        1
+                        for target in resolution_target_levels.get(key, ())
+                        if self._normalize_target_key(
+                            max(
+                                0.0,
+                                float(target)
+                                - float(
+                                    getattr(option_by_key[key], "starting_conc", 0.0)
+                                    or 0.0
+                                ),
+                            )
+                        )
+                        in plan.target_rows
+                    )
+                score, rows, summary = _resolution_evaluation(key, plan)
+                rows_by_target = {
+                    self._normalize_target_key(
+                        float(row.get("requested_final", 0.0) or 0.0)
+                    ): row
+                    for row in rows
+                }
+                droplet_signature: List[Any] = []
+                level_volumes: List[float] = []
+                for target in resolution_target_levels[key]:
+                    self._optimization_checkpoint()
+                    target_key = self._normalize_target_key(float(target))
+                    row = rows_by_target.get(target_key)
+                    if row is None:
+                        raise ValueError(
+                            f"Candidate is missing target metrics for {key!r} at {target!r}."
+                        )
+                    droplets = row.get("droplets", 0)
+                    if isinstance(droplets, (tuple, list)):
+                        frozen_drops = tuple(int(value) for value in droplets)
+                        drop_count = sum(frozen_drops)
+                    else:
+                        frozen_drops = int(droplets)
+                        drop_count = int(droplets)
+                    droplet_signature.append((target_key, frozen_drops))
+                    level_volumes.append(
+                        float(drop_count) * float(plan.droplet_nL)
+                    )
+                padded_volumes = np.asarray(
+                    level_volumes + [0.0], dtype=np.float64
+                )
+                cached = {
+                    "plan": plan,
+                    "score": score,
+                    "rows": rows,
+                    "summary": summary,
+                    "droplet_signature": tuple(droplet_signature),
+                    "level_volumes": tuple(float(value) for value in level_volumes),
+                    "level_volumes_padded": padded_volumes,
+                }
+                resolution_candidate_entry_cache[cache_key] = cached
+            entry = dict(cached)
+            entry["mode"] = str(mode)
+            entry["index"] = int(index)
+            score = entry["score"]
+            entry["semantic_signature"] = _plan_semantic_signature(plan)
+            entry["local_rank"] = (
+                int(score.lost_levels),
+                int(score.n_stocks),
+                float(score.worst_abs_error),
+                float(score.error_sum),
+                float(score.concentration_burden),
+                float(score.max_volume_nL),
+                entry["semantic_signature"],
+            )
+            return entry
+
+        def _build_resolution_candidate_pools(
+            *,
+            include_twos: bool,
+            incumbent_details: Mapping[str, Any],
+        ):
+            nonlocal stock_allocation_candidates_generated
+            nonlocal stock_allocation_candidates_retained
+            nonlocal stock_allocation_candidates_pruned
+            nonlocal stock_allocation_candidates_deduplicated
+            nonlocal stock_allocation_candidates_dominated
+            if not _prepare_resolution_volume_indices():
+                return None, None
+
+            keys = sorted(option_by_key, key=_canonical_resolution_key)
+            incumbent_plan_ids = {
+                key: id(evaluation["plan"])
+                for key, evaluation in incumbent_details.get("evaluations", {}).items()
+            }
+            pools: Dict[Tuple[str, Optional[str]], List[Dict[str, Any]]] = {}
+            generated_total = 0
+            deduplicated_total = 0
+            dominated_total = 0
+
+            def _publish_counts(retained_total: int):
+                nonlocal stock_allocation_candidates_generated
+                nonlocal stock_allocation_candidates_retained
+                nonlocal stock_allocation_candidates_pruned
+                nonlocal stock_allocation_candidates_deduplicated
+                nonlocal stock_allocation_candidates_dominated
+                stock_allocation_candidates_generated += int(generated_total)
+                stock_allocation_candidates_retained += int(retained_total)
+                stock_allocation_candidates_deduplicated += int(deduplicated_total)
+                stock_allocation_candidates_dominated += int(dominated_total)
+                stock_allocation_candidates_pruned += max(
+                    0, int(generated_total - retained_total)
+                )
+
+            for key in keys:
+                self._optimization_checkpoint()
+                if _resolution_work_limit_reached():
+                    _publish_counts(sum(len(value) for value in pools.values()))
+                    return None, None
+                _kind, _idx, singles, twos = _candidate_lists_for_key(key)
+                entries: List[Dict[str, Any]] = []
+                for index, plan in enumerate(singles):
+                    self._optimization_checkpoint()
+                    if not _consume_resolution_work("candidate_pool"):
+                        _publish_counts(sum(len(value) for value in pools.values()))
+                        return None, None
+                    entries.append(
+                        _resolution_candidate_entry(
+                            key, plan, mode="single", index=index
+                        )
+                    )
+                    generated_total += 1
+                for index, plan in enumerate(twos or []):
+                    self._optimization_checkpoint()
+                    if not include_twos and id(plan) != incumbent_plan_ids.get(key):
+                        continue
+                    if not _consume_resolution_work("candidate_pool"):
+                        _publish_counts(sum(len(value) for value in pools.values()))
+                        return None, None
+                    entries.append(
+                        _resolution_candidate_entry(
+                            key, plan, mode="two", index=index
+                        )
+                    )
+                    generated_total += 1
+                entries.sort(key=lambda entry: entry["local_rank"])
+
+                deduplicated: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+                for entry in entries:
+                    self._optimization_checkpoint()
+                    signature = entry["droplet_signature"]
+                    incumbent = deduplicated.get(signature)
+                    if incumbent is None or entry["local_rank"] < incumbent["local_rank"]:
+                        deduplicated[signature] = entry
+                unique_entries = sorted(
+                    deduplicated.values(), key=lambda entry: entry["local_rank"]
+                )
+                deduplicated_total += len(entries) - len(unique_entries)
+
+                opt = option_by_key[key]
+                forced = getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
+                retained = self._filter_resolution_candidate_entries(
+                    unique_entries, forced=forced, diagnostics=dominance_diagnostics,
+                    **({"control": self._optimization_control}
+                       if getattr(self, "_optimization_control", None) is not None else {}),
+                )
+                dominated_total += len(unique_entries) - len(retained)
+                retained.sort(key=lambda entry: (
+                    int(entry["score"].lost_levels),
+                    float(entry["score"].max_volume_nL),
+                    int(entry["score"].n_stocks),
+                    float(entry["score"].worst_abs_error),
+                    float(entry["score"].error_sum),
+                    float(entry["score"].concentration_burden),
+                    entry["semantic_signature"],
+                ))
+                pools[key] = retained
+
+            retained_total = sum(len(value) for value in pools.values())
+            _publish_counts(retained_total)
+            return keys, pools
+
+        def _apply_resolution_state(
+            state: Mapping[Tuple[str, Optional[str]], Mapping[str, Any]],
+        ):
+            for key, entry in state.items():
+                self._optimization_checkpoint()
+                factor_name, option_name = key
+                if option_name in (None, ""):
+                    if entry["mode"] == "single":
+                        add_two_idx[factor_name] = None
+                        add_idx[factor_name] = int(entry["index"])
+                    else:
+                        add_two_idx[factor_name] = int(entry["index"])
+                else:
+                    choice_key = (factor_name, option_name)
+                    if entry["mode"] == "single":
+                        ch_two_idx[choice_key] = None
+                        ch_idx[choice_key] = int(entry["index"])
+                    else:
+                        ch_two_idx[choice_key] = int(entry["index"])
+            _invalidate_selected_volume_cache()
+
+        def _achievable_loss_tiers(keys, pools, seed_tier):
+            tiers: Set[Tuple[int, int]] = {(0, 0)}
+            for key in keys:
+                self._optimization_checkpoint()
+                losses = {
+                    int(entry["score"].lost_levels) for entry in pools[key]
+                }
+                next_tiers: Set[Tuple[int, int]] = set()
+                for total_loss, worst_loss in tiers:
+                    self._optimization_checkpoint()
+                    for local_loss in losses:
+                        self._optimization_checkpoint()
+                        tier = (
+                            int(total_loss + local_loss),
+                            int(max(worst_loss, local_loss)),
+                        )
+                        if tier < seed_tier or tier == seed_tier:
+                            next_tiers.add(tier)
+                tiers = next_tiers
+                if not tiers:
+                    return []
+            return sorted(tiers)
+
+        def _run_bounded_resolution_search(
+            *,
+            include_twos: bool,
+            incumbent_details: Mapping[str, Any],
+        ):
+            nonlocal stock_allocation_states_evaluated
+            nonlocal stock_allocation_branches_pruned
+            nonlocal stock_allocation_loss_tiers_evaluated
+            nonlocal zero_loss_polish_completed
+            nonlocal resolution_search_exhausted
+            if _resolution_work_limit_reached() or _zero_loss_polish_exhausted():
+                return None, None
+            if stock_allocation_states_evaluated >= self.MAX_STOCK_ALLOCATION_STATES:
+                stock_allocation_limit_reasons.add("state_cap")
+                return None, None
+
+            keys, pools = _build_resolution_candidate_pools(
+                include_twos=include_twos,
+                incumbent_details=incumbent_details,
+            )
+            if keys is None or pools is None:
+                return None, None
+            if not keys or any(not pools[key] for key in keys):
+                raise ValueError("Resolution search has an empty candidate pool.")
+
+            collapsed_keys = [
+                key
+                for key, evaluation in incumbent_details["evaluations"].items()
+                if int(evaluation["score"].lost_levels) > 0
+            ]
+            collapsed_keys.sort(
+                key=lambda key: (
+                    -int(incumbent_details["evaluations"][key]["score"].lost_levels),
+                    _canonical_resolution_key(key),
+                )
+            )
+            donor_reductions: List[Tuple[float, Tuple[str, Optional[str]]]] = []
+            for key in keys:
+                self._optimization_checkpoint()
+                if key in collapsed_keys:
+                    continue
+                seed_volume = float(
+                    incumbent_details["evaluations"][key]["score"].max_volume_nL
+                )
+                minimum_volume = min(
+                    float(entry["score"].max_volume_nL) for entry in pools[key]
+                )
+                reduction = max(0.0, seed_volume - minimum_volume)
+                if reduction > 1e-12:
+                    donor_reductions.append((reduction, key))
+            donor_reductions.sort(
+                key=lambda item: (-item[0], _canonical_resolution_key(item[1]))
+            )
+            donor_keys = [key for _reduction, key in donor_reductions]
+            remaining_keys = sorted(
+                (
+                    key
+                    for key in keys
+                    if key not in collapsed_keys and key not in donor_keys
+                ),
+                key=_canonical_resolution_key,
+            )
+            ordered_keys = collapsed_keys + donor_keys + remaining_keys
+
+            seed_tier = (
+                int(incumbent_details["quality"][0]),
+                int(incumbent_details["quality"][1]),
+            )
+            tiers = _achievable_loss_tiers(ordered_keys, pools, seed_tier)
+            if tiers is None:
+                return None, None
+
+            key_count = len(ordered_keys)
+            uploaded_count = len(uploaded_reactions)
+            additional_count = len(additional_condition_rows)
+            minimum_uploaded_by_key: Dict[Any, np.ndarray] = {}
+            minimum_additional_by_key: Dict[Any, np.ndarray] = {}
+            minimum_base_by_key: Dict[Any, float] = {}
+            for key in ordered_keys:
+                self._optimization_checkpoint()
+                level_count = len(resolution_target_levels[key])
+                minimum_levels = [math.inf] * level_count
+                for entry in pools[key]:
+                    self._optimization_checkpoint()
+                    for level_index, volume in enumerate(entry["level_volumes"]):
+                        self._optimization_checkpoint()
+                        minimum_levels[level_index] = min(
+                            minimum_levels[level_index], float(volume)
+                        )
+                padded = np.asarray(
+                    [0.0 if not math.isfinite(value) else value for value in minimum_levels]
+                    + [0.0],
+                    dtype=np.float64,
+                )
+                minimum_uploaded_by_key[key] = np.take(
+                    padded, resolution_uploaded_level_indices[key]
+                )
+                minimum_additional_by_key[key] = np.take(
+                    padded, resolution_additional_level_indices[key]
+                )
+                minimum_base_by_key[key] = min(
+                    float(entry["score"].max_volume_nL) for entry in pools[key]
+                )
+
+            suffix_uploaded = [np.zeros(uploaded_count, dtype=np.float64) for _ in range(key_count + 1)]
+            suffix_additional = [np.zeros(additional_count, dtype=np.float64) for _ in range(key_count + 1)]
+            suffix_min_loss = [0] * (key_count + 1)
+            suffix_max_loss = [0] * (key_count + 1)
+            suffix_loss_values: List[Set[int]] = [set() for _ in range(key_count + 1)]
+            suffix_extra_stocks = [0] * (key_count + 1)
+            suffix_error_sum = [0.0] * (key_count + 1)
+            suffix_concentration = [0.0] * (key_count + 1)
+            suffix_worst_error = [0.0] * (key_count + 1)
+            for position in range(key_count - 1, -1, -1):
+                self._optimization_checkpoint()
+                key = ordered_keys[position]
+                entries = pools[key]
+                suffix_uploaded[position] = (
+                    suffix_uploaded[position + 1] + minimum_uploaded_by_key[key]
+                )
+                suffix_additional[position] = (
+                    suffix_additional[position + 1] + minimum_additional_by_key[key]
+                )
+                losses = [int(entry["score"].lost_levels) for entry in entries]
+                suffix_min_loss[position] = suffix_min_loss[position + 1] + min(losses)
+                suffix_max_loss[position] = suffix_max_loss[position + 1] + max(losses)
+                suffix_loss_values[position] = set(suffix_loss_values[position + 1])
+                suffix_loss_values[position].update(losses)
+                suffix_extra_stocks[position] = suffix_extra_stocks[position + 1] + min(
+                    max(0, int(entry["score"].n_stocks) - 1) for entry in entries
+                )
+                suffix_error_sum[position] = suffix_error_sum[position + 1] + min(
+                    float(entry["score"].error_sum) for entry in entries
+                )
+                suffix_concentration[position] = suffix_concentration[position + 1] + min(
+                    float(entry["score"].concentration_burden) for entry in entries
+                )
+                suffix_worst_error[position] = max(
+                    suffix_worst_error[position + 1],
+                    min(float(entry["score"].worst_abs_error) for entry in entries),
+                )
+
+            total_target_count = sum(
+                int(pools[key][0]["score"].target_count) for key in ordered_keys
+            )
+            additive_keys = [
+                key for key in ordered_keys if key[1] in (None, "")
+            ]
+            choice_keys_by_group: Dict[str, List[Tuple[str, Optional[str]]]] = {}
+            for key in ordered_keys:
+                self._optimization_checkpoint()
+                if key[1] not in (None, ""):
+                    choice_keys_by_group.setdefault(key[0], []).append(key)
+
+            selected_entries: Dict[Any, Mapping[str, Any]] = {}
+            uploaded_totals = np.zeros(uploaded_count, dtype=np.float64)
+            additional_totals = np.zeros(additional_count, dtype=np.float64)
+            incumbent_rank = tuple(incumbent_details["rank"])
+            best_rank = incumbent_rank
+            best_tie_break = tuple(incumbent_details.get("tie_break") or ())
+            best_state = None
+            best_details = None
+            branch_iterations = 0
+            search_aborted = False
+
+            def _search_stop_reached() -> bool:
+                return (
+                    _resolution_work_limit_reached()
+                    or _zero_loss_polish_exhausted()
+                )
+
+            def _manual_volume_lower_bound() -> float:
+                additive_total = sum(
+                    float(selected_entries[key]["score"].max_volume_nL)
+                    if key in selected_entries
+                    else float(minimum_base_by_key[key])
+                    for key in additive_keys
+                )
+                choice_total = 0.0
+                for group_keys in choice_keys_by_group.values():
+                    self._optimization_checkpoint()
+                    choice_total += max(
+                        (
+                            float(selected_entries[key]["score"].max_volume_nL)
+                            if key in selected_entries
+                            else float(minimum_base_by_key[key])
+                        )
+                        for key in group_keys
+                    )
+                return float(additive_total + choice_total)
+
+            def _volume_lower_bound(position: int) -> float:
+                if uploaded_count:
+                    uploaded_bound = float(
+                        np.max(uploaded_totals + suffix_uploaded[position], initial=0.0)
+                    )
+                else:
+                    uploaded_bound = _manual_volume_lower_bound()
+                additional_bound = float(
+                    np.max(
+                        additional_totals + suffix_additional[position], initial=0.0
+                    )
+                ) if additional_count else 0.0
+                return max(uploaded_bound, additional_bound)
+
+            for target_tier in tiers:
+                self._optimization_checkpoint()
+                if search_aborted or _search_stop_reached():
+                    break
+                stock_allocation_loss_tiers_evaluated += 1
+                tier_feasible = False
+
+                def _search_tier(
+                    position: int,
+                    total_loss: int,
+                    worst_loss: int,
+                    extra_stocks: int,
+                    worst_error: float,
+                    error_sum: float,
+                    concentration_burden: float,
+                ):
+                    nonlocal best_rank, best_tie_break, best_state, best_details
+                    nonlocal branch_iterations, search_aborted, tier_feasible
+                    nonlocal stock_allocation_states_evaluated
+                    nonlocal stock_allocation_branches_pruned
+                    if search_aborted:
+                        return
+                    if not _consume_resolution_work("global_search"):
+                        search_aborted = True
+                        return
+                    branch_iterations += 1
+                    if _zero_loss_polish_exhausted():
+                        search_aborted = True
+                        return
+                    if stock_allocation_states_evaluated >= self.MAX_STOCK_ALLOCATION_STATES:
+                        stock_allocation_limit_reasons.add("state_cap")
+                        search_aborted = True
+                        return
+
+                    volume_bound = _volume_lower_bound(position)
+                    if volume_bound > V_accept + 1e-6:
+                        stock_allocation_branches_pruned += 1
+                        return
+                    secondary_bound = (
+                        int(target_tier[0]),
+                        int(target_tier[1]),
+                        int(extra_stocks + suffix_extra_stocks[position]),
+                        float(max(worst_error, suffix_worst_error[position])),
+                        float(
+                            (error_sum + suffix_error_sum[position])
+                            / total_target_count
+                        ) if total_target_count else 0.0,
+                        float(concentration_burden + suffix_concentration[position]),
+                        float(volume_bound),
+                    )
+                    if secondary_bound > best_rank:
+                        stock_allocation_branches_pruned += 1
+                        return
+
+                    if position >= key_count:
+                        if (total_loss, worst_loss) != target_tier:
+                            stock_allocation_branches_pruned += 1
+                            return
+                        stock_allocation_states_evaluated += 1
+                        self._optimization_activity("allocations evaluated", increment=1)
+                        tier_feasible = True
+                        quality = (
+                            int(total_loss),
+                            int(worst_loss),
+                            int(extra_stocks),
+                            float(worst_error),
+                            float(error_sum / total_target_count)
+                            if total_target_count else 0.0,
+                            float(concentration_burden),
+                            float(volume_bound),
+                        )
+                        candidate_evaluations = {
+                            key: {
+                                "plan": entry["plan"],
+                                "score": entry["score"],
+                                "rows": entry["rows"],
+                                "summary": entry["summary"],
+                            }
+                            for key, entry in selected_entries.items()
+                        }
+                        candidate_tie_break = _selection_tie_break(
+                            candidate_evaluations
+                        )
+                        if (
+                            quality,
+                            candidate_tie_break,
+                        ) < (
+                            best_rank,
+                            best_tie_break,
+                        ):
+                            found_at = optimizer_clock()
+                            best_rank = quality
+                            best_tie_break = candidate_tie_break
+                            best_state = dict(selected_entries)
+                            best_details = {
+                                "quality": quality,
+                                "rank": quality,
+                                "tie_break": candidate_tie_break,
+                                "worst_volume_nL": float(volume_bound),
+                                "evaluations": candidate_evaluations,
+                                "found_elapsed_ms": (
+                                    max(
+                                        0.0,
+                                        (found_at - resolution_started_at) * 1000.0,
+                                    )
+                                    if resolution_started_at is not None
+                                    else None
+                                ),
+                            }
+                            if int(total_loss) == 0:
+                                _validate_selected_resolution_allocation(best_details)
+                                _start_zero_loss_polish()
+                        return
+
+                    key = ordered_keys[position]
+                    for entry in pools[key]:
+                        self._optimization_checkpoint()
+                        score = entry["score"]
+                        local_loss = int(score.lost_levels)
+                        next_total = total_loss + local_loss
+                        next_worst = max(worst_loss, local_loss)
+                        if next_total > target_tier[0] or next_worst > target_tier[1]:
+                            stock_allocation_branches_pruned += 1
+                            continue
+                        if (
+                            next_total + suffix_min_loss[position + 1] > target_tier[0]
+                            or next_total + suffix_max_loss[position + 1] < target_tier[0]
+                        ):
+                            stock_allocation_branches_pruned += 1
+                            continue
+                        if (
+                            next_worst < target_tier[1]
+                            and target_tier[1] not in suffix_loss_values[position + 1]
+                        ):
+                            stock_allocation_branches_pruned += 1
+                            continue
+
+                        selected_entries[key] = entry
+                        uploaded_vector = np.take(
+                            entry["level_volumes_padded"],
+                            resolution_uploaded_level_indices[key],
+                        )
+                        additional_vector = np.take(
+                            entry["level_volumes_padded"],
+                            resolution_additional_level_indices[key],
+                        )
+                        if uploaded_count:
+                            uploaded_totals[:] += uploaded_vector
+                        if additional_count:
+                            additional_totals[:] += additional_vector
+                        _search_tier(
+                            position + 1,
+                            next_total,
+                            next_worst,
+                            extra_stocks + max(0, int(score.n_stocks) - 1),
+                            max(worst_error, float(score.worst_abs_error)),
+                            error_sum + float(score.error_sum),
+                            concentration_burden + float(score.concentration_burden),
+                        )
+                        if uploaded_count:
+                            uploaded_totals[:] -= uploaded_vector
+                        if additional_count:
+                            additional_totals[:] -= additional_vector
+                        selected_entries.pop(key, None)
+                        if search_aborted:
+                            return
+
+                try:
+                    _search_tier(0, 0, 0, 0, 0.0, 0.0, 0.0)
+                finally:
+                    # The recursive closure otherwise retains candidate pools
+                    # from completed searches until a process-wide full GC.
+                    # Release it on success, failure and cancellation alike.
+                    _search_tier = None
+                if tier_feasible or search_aborted:
+                    break
+
+            if not search_aborted:
+                resolution_search_exhausted = True
+            return best_state, best_details
+
+        def _accept_resolution_state(
+            state,
+            candidate_details,
+            incumbent_snapshot,
+            incumbent_details,
+        ):
+            nonlocal stock_allocation_time_to_first_improvement_ms
+            nonlocal stock_allocation_time_to_best_ms
+            if state is None or candidate_details is None:
+                _restore_selection_snapshot(incumbent_snapshot)
+                return incumbent_snapshot, incumbent_details
+            # Validate the compact candidate result before changing the live
+            # selection. The second validation below independently checks the
+            # exact model-backed row totals after application.
+            _validate_selected_resolution_allocation(candidate_details)
+            _apply_resolution_state(state)
+            exact_details = _selection_resolution_details()
+            if (
+                _resolution_details_order(exact_details)
+                >= _resolution_details_order(incumbent_details)
+            ):
+                _restore_selection_snapshot(incumbent_snapshot)
+                return incumbent_snapshot, incumbent_details
+            _validate_selected_resolution_allocation(exact_details)
+            found_elapsed_ms = candidate_details.get("found_elapsed_ms")
+            if (
+                stock_allocation_time_to_first_improvement_ms is None
+                and found_elapsed_ms is not None
+            ):
+                stock_allocation_time_to_first_improvement_ms = float(
+                    found_elapsed_ms
+                )
+            stock_allocation_time_to_best_ms = (
+                float(found_elapsed_ms) if found_elapsed_ms is not None else None
+            )
+            return _capture_selection_snapshot(), exact_details
+
+        seed_snapshot = _capture_selection_snapshot()
+        seed_details = _selection_resolution_details()
+        seed_finished_at = optimizer_clock()
+        optimizer_seed_elapsed_ms = max(
+            0.0, (seed_finished_at - optimizer_started_at) * 1000.0
+        )
+        optimizer_seed_distinct_level_loss = int(seed_details["quality"][0])
+        optimizer_seed_worst_level_loss = int(seed_details["quality"][1])
+        optimizer_seed_rank = _resolution_rank_payload(seed_details)
+        best_snapshot = seed_snapshot
+        best_details = seed_details
+        stock_allocation_baseline_rank = _resolution_rank_payload(seed_details)
+
+        if allow_avoidable_grouping:
+            stock_allocation_stop_reason = "grouping_allowed"
+        elif optimizer_seed_distinct_level_loss == 0:
+            stock_allocation_stop_reason = "seed_zero_loss"
+
+        if not allow_avoidable_grouping and int(seed_details["quality"][0]) > 0:
+            self._optimization_checkpoint("Optimizing allocations")
+            resolution_started_at = optimizer_clock()
+            try:
+                # Both modes complete exactly the same single-stock search before
+                # optional pair exploration can spend any resolution work.
+                try:
+                    state, candidate_details = _run_bounded_resolution_search(
+                        include_twos=False,
+                        incumbent_details=best_details,
+                    )
+                finally:
+                    stock_allocation_baseline_work = stock_allocation_work_units_evaluated
+                best_snapshot, best_details = _accept_resolution_state(
+                    state, candidate_details, best_snapshot, best_details,
+                )
+                stock_allocation_baseline_rank = _resolution_rank_payload(best_details)
+
+                if (
+                    allow_two
+                    and int(best_details["quality"][0]) > 0
+                    and not _resolution_work_limit_reached()
+                    and stock_allocation_states_evaluated < self.MAX_STOCK_ALLOCATION_STATES
+                ):
+                    self._optimization_checkpoint("Exploring two-stock allocations")
+                    # Reserve at least half the remaining work for combining
+                    # candidates. A difficult first reagent cannot starve peers.
+                    eligible_keys = [
+                        key for key, evaluation in best_details["evaluations"].items()
+                        if getattr(option_by_key[key], "forced_stock_conc", None) in (None, 0.0)
+                        and (
+                            int(evaluation["score"].lost_levels) > 0
+                            or float(evaluation["score"].max_volume_nL) > 0.0
+                        )
+                        and _candidate_lists_for_key(key)[3] is None
+                    ]
+                    eligible_keys.sort(key=_canonical_resolution_key)
+                    remaining = max(
+                        0, self.MAX_STOCK_ALLOCATION_WORK_UNITS
+                        - stock_allocation_work_units_evaluated,
+                    )
+                    pair_budget = remaining // 2
+                    quota, remainder = divmod(pair_budget, len(eligible_keys) or 1)
+                    for index, key in enumerate(eligible_keys):
+                        self._optimization_checkpoint()
+                        stock_allocation_pair_work_by_key[key] = {
+                            "limit": quota + int(index < remainder),
+                            "used": 0,
+                            "quota_exhausted": False,
+                        }
+                    processing_keys = sorted(
+                        eligible_keys,
+                        key=lambda key: (
+                            int(best_details["evaluations"][key]["score"].lost_levels) == 0,
+                            _canonical_resolution_key(key),
+                        ),
+                    )
+                    resolution_search_exhausted = False
+                    for key in processing_keys:
+                        self._optimization_checkpoint()
+                        if _zero_loss_polish_exhausted() or _resolution_work_limit_reached():
+                            break
+                        _ensure_resolution_twos_for_key(key)
+
+                    combined_started_at_work = stock_allocation_work_units_evaluated
+                    try:
+                        state, candidate_details = _run_bounded_resolution_search(
+                            include_twos=True,
+                            incumbent_details=best_details,
+                        )
+                        best_snapshot, best_details = _accept_resolution_state(
+                            state, candidate_details, best_snapshot, best_details,
+                        )
+                    finally:
+                        stock_allocation_combined_work = (
+                            stock_allocation_work_units_evaluated - combined_started_at_work
+                        )
+            except OptimizationCancelled:
+                raise
+            except Exception as exc:
+                # Pair exploration must never discard a validated baseline or
+                # an improvement already accepted by the incremental callback.
+                _restore_selection_snapshot(best_snapshot)
+                optimizer_strategy_used = "legacy_fallback"
+                optimizer_fallback_reason = f"{type(exc).__name__}: {exc}"
+            finally:
+                resolution_finished_at = optimizer_clock()
+                stock_allocation_elapsed_ms = max(
+                    0.0, (resolution_finished_at - resolution_started_at) * 1000.0
+                )
+                time_budget_ms = float(
+                    self.MAX_STOCK_ALLOCATION_SECONDS * 1000.0
+                )
+                stock_allocation_time_budget_overshoot_ms = max(
+                    0.0,
+                    stock_allocation_elapsed_ms - time_budget_ms,
+                )
+                stock_allocation_time_budget_exceeded = bool(
+                    stock_allocation_elapsed_ms > time_budget_ms + 1e-9
+                )
+                stock_allocation_deadline_overshoot_ms = (
+                    stock_allocation_time_budget_overshoot_ms
+                )
+                _zero_loss_polish_exhausted()
+                stock_allocation_search_limited = bool(
+                    stock_allocation_limit_reasons
+                )
+                if optimizer_strategy_used == "legacy_fallback":
+                    stock_allocation_stop_reason = "legacy_fallback"
+                elif {"work_cap", "state_cap"} <= stock_allocation_limit_reasons:
+                    stock_allocation_stop_reason = "work_and_state_cap"
+                elif "work_cap" in stock_allocation_limit_reasons:
+                    stock_allocation_stop_reason = "work_cap"
+                elif "state_cap" in stock_allocation_limit_reasons:
+                    stock_allocation_stop_reason = "state_cap"
+                elif (
+                    zero_loss_polish_completed
+                    and int(best_details["quality"][0]) == 0
+                ):
+                    stock_allocation_stop_reason = "zero_loss_polish_complete"
+                elif "pair_quota" in stock_allocation_limit_reasons:
+                    stock_allocation_stop_reason = "pair_quota"
+                else:
+                    stock_allocation_stop_reason = "search_exhausted"
+
+        _restore_selection_snapshot(best_snapshot)
+        optimizer_selected_rank = _resolution_rank_payload(best_details)
+        stock_allocation_improved_seed = bool(
+            _resolution_details_order(best_details)
+            < _resolution_details_order(seed_details)
+        )
+        if not stock_allocation_improved_seed:
+            stock_allocation_time_to_first_improvement_ms = None
+            stock_allocation_time_to_best_ms = None
 
         final_worst = worst_case_nonfill_volume()
         if final_worst > V_accept + 1e-6:
@@ -3843,6 +6478,7 @@ class ExperimentModel(QObject):
             if aggregate_issue is None:
                 aggregate_issue = additional_issue
             for name, singles, twos in additives:
+                self._optimization_checkpoint()
                 if add_two_idx[name] is not None:
                     continue
                 opt = additive_option_map[name]
@@ -3855,7 +6491,9 @@ class ExperimentModel(QObject):
                     )
                     _record_volume_budget_issue((name, None), opt, required_volume_nL=selected.max_volume_nL, code=code)
             for gname, bucket in choice_groups.items():
+                self._optimization_checkpoint()
                 for oname, singles, twos in bucket:
+                    self._optimization_checkpoint()
                     key = (gname, oname)
                     if ch_two_idx[key] is not None:
                         continue
@@ -3885,6 +6523,7 @@ class ExperimentModel(QObject):
         stock_rows = []
 
         for name, singles, twos in additives:
+            self._optimization_checkpoint()
             if add_two_idx[name] is not None:
                 twos = twos if twos is not None else _ensure_additive_twos(name)
                 p2 = twos[add_two_idx[name]]
@@ -3932,7 +6571,7 @@ class ExperimentModel(QObject):
                     "n_stocks": 1,
                     "stocks": [
                         {
-                            "delta_per_drop": p1.delta_per_drop, 
+                            "delta_per_drop": p1.delta_per_drop,
                             "stock_concentration": p1.stock_concentration,
                             "droplet_volume_nL": p1.droplet_nL,
                             "units": p1.units,
@@ -3951,7 +6590,9 @@ class ExperimentModel(QObject):
                 ))
 
         for gname, bucket in choice_groups.items():
+            self._optimization_checkpoint()
             for oname, singles, twos in bucket:
+                self._optimization_checkpoint()
                 key = (gname, oname)
                 if ch_two_idx[key] is not None:
                     twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
@@ -4022,6 +6663,159 @@ class ExperimentModel(QObject):
         self._fill_row_cache = None
         self._refresh_plan_preview_maps()
         self._last_worst_nonfill_volume_nL = worst_case_nonfill_volume()
+        distinct_level_loss = 0
+        collapsed_target_keys: List[Tuple[str, Optional[str]]] = []
+        for key, rows in self._target_preview_map.items():
+            self._optimization_checkpoint()
+            resolution_summary = self._summarize_target_resolution_rows(rows)
+            lost_level_count = int(resolution_summary["lost_level_count"])
+            if lost_level_count <= 0:
+                continue
+            distinct_level_loss += lost_level_count
+            collapsed_target_keys.append(key)
+            opt = self._get_option_for_key(key)
+            units = str(getattr(opt, "units", "") or "") if opt is not None else ""
+            label = key[0] if key[1] in (None, "") else f"{key[0]}/{key[1]}"
+            requested_targets = sorted({
+                float(target)
+                for group in resolution_summary["collapsed_groups"]
+                for target in group["requested_targets"]
+            })
+            _add_issue(
+                key,
+                field="target_resolution",
+                severity="warning",
+                code="collapsed_target_levels",
+                message=(
+                    f"{label} loses {lost_level_count} requested concentration "
+                    f"level{'s' if lost_level_count != 1 else ''} because multiple targets "
+                    "map to the same dispensed concentration."
+                ),
+                units=units,
+                requested_targets=requested_targets,
+                requested_level_count=int(resolution_summary["requested_level_count"]),
+                achieved_level_count=int(resolution_summary["achieved_level_count"]),
+                lost_level_count=lost_level_count,
+                collapsed_groups=copy.deepcopy(resolution_summary["collapsed_groups"]),
+            )
+
+        if stock_allocation_search_limited:
+            limit_reasons = sorted(stock_allocation_limit_reasons)
+            time_budget_ms = float(self.MAX_STOCK_ALLOCATION_SECONDS * 1000.0)
+            seed_loss = int(optimizer_seed_distinct_level_loss or 0)
+            selected_loss = int(best_details["quality"][0])
+            if selected_loss < seed_loss:
+                improvement_description = (
+                    f"reduced grouped levels from {seed_loss} to {selected_loss}"
+                )
+            else:
+                improvement_description = (
+                    "improved secondary stock criteria without changing the "
+                    f"{seed_loss} grouped levels"
+                )
+            if limit_reasons == ["work_cap"]:
+                if stock_allocation_improved_seed:
+                    bounded_message = (
+                        f"Resolution-first {improvement_description} before reaching "
+                        "its deterministic work limit; secondary optimality was not "
+                        "proven."
+                    )
+                else:
+                    bounded_message = (
+                        "Resolution-first reached its deterministic work limit without "
+                        "finding better level resolution; the concentration-first plan "
+                        "was retained."
+                    )
+            elif limit_reasons == ["state_cap"]:
+                if stock_allocation_improved_seed:
+                    bounded_message = (
+                        f"Resolution-first {improvement_description} before reaching "
+                        "its complete-allocation state limit; secondary optimality was "
+                        "not proven."
+                    )
+                else:
+                    bounded_message = (
+                        "Resolution-first reached its complete-allocation state limit "
+                        "without finding better level resolution; the concentration-first "
+                        "plan was retained."
+                    )
+            elif set(limit_reasons) == {"work_cap", "state_cap"}:
+                if stock_allocation_improved_seed:
+                    bounded_message = (
+                        f"Resolution-first {improvement_description} before reaching "
+                        "its deterministic work and state limits; secondary optimality "
+                        "was not proven."
+                    )
+                else:
+                    bounded_message = (
+                        "Resolution-first reached its deterministic work and state "
+                        "limits without finding better level resolution; the "
+                        "concentration-first plan was retained."
+                    )
+            else:
+                bounded_message = (
+                    "Resolution-first reached a bounded search limit; secondary "
+                    "optimality was not proven."
+                )
+            _add_issue(
+                ("__stock_allocation__", None),
+                field="stock_allocation",
+                severity="warning",
+                code="bounded_stock_allocation_search",
+                message=bounded_message,
+                states_evaluated=int(stock_allocation_states_evaluated),
+                state_limit=int(self.MAX_STOCK_ALLOCATION_STATES),
+                work_units_evaluated=int(stock_allocation_work_units_evaluated),
+                work_limit=int(self.MAX_STOCK_ALLOCATION_WORK_UNITS),
+                work_units_by_kind=copy.deepcopy(
+                    stock_allocation_work_units_by_kind
+                ),
+                elapsed_ms=float(stock_allocation_elapsed_ms),
+                time_budget_ms=time_budget_ms,
+                limit_reasons=limit_reasons,
+                seed_distinct_level_loss=seed_loss,
+                selected_distinct_level_loss=selected_loss,
+                improved_seed=bool(stock_allocation_improved_seed),
+                time_to_best_ms=(
+                    float(stock_allocation_time_to_best_ms)
+                    if stock_allocation_time_to_best_ms is not None
+                    else None
+                ),
+                stop_reason=str(stock_allocation_stop_reason),
+            )
+
+        if stock_allocation_time_budget_exceeded:
+            _add_issue(
+                ("__stock_allocation__", None),
+                field="stock_allocation",
+                severity="warning",
+                code="stock_allocation_performance_target_exceeded",
+                message=(
+                    "Resolution-first completed deterministically in "
+                    f"{stock_allocation_elapsed_ms:.1f} ms, above its "
+                    f"{self.MAX_STOCK_ALLOCATION_SECONDS * 1000.0:.0f} ms "
+                    "performance target."
+                ),
+                elapsed_ms=float(stock_allocation_elapsed_ms),
+                performance_target_ms=float(
+                    self.MAX_STOCK_ALLOCATION_SECONDS * 1000.0
+                ),
+                overshoot_ms=float(stock_allocation_time_budget_overshoot_ms),
+            )
+
+        if optimizer_fallback_reason:
+            _add_issue(
+                ("__stock_allocation__", None),
+                field="stock_allocation",
+                severity="warning",
+                code="legacy_optimizer_fallback",
+                message=(
+                    "Further resolution-first stock allocation could not be validated; "
+                    "the best previously validated plan was retained."
+                ),
+                fallback_reason=str(optimizer_fallback_reason),
+            )
+
         _record_uploaded_selected_volume_budget_issue(
             "selected_plan_volume_budget_within_tolerance",
             severity="warning",
@@ -4032,6 +6826,7 @@ class ExperimentModel(QObject):
         )
 
         for key in two_stock_search_limited_keys:
+            self._optimization_checkpoint()
             opt = self._get_option_for_key(key)
             if opt is None:
                 continue
@@ -4053,6 +6848,7 @@ class ExperimentModel(QObject):
             )
 
         for key, rows in self._target_preview_map.items():
+            self._optimization_checkpoint()
             opt = self._get_option_for_key(key)
             if opt is None or getattr(opt, "forced_stock_conc", None) in (None, 0.0):
                 continue
@@ -4072,13 +6868,308 @@ class ExperimentModel(QObject):
                 unreachable_targets=[float(row.get("requested_final", 0.0)) for row in unreachable_rows],
             )
 
-        self.stock_updated.emit()
+        # Independently validate the materialized result before publishing it.
+        # Candidate generation and allocation are deliberately separate from this
+        # fail-closed gate so an optimizer defect cannot become a zero-drop plan.
+        expected_options: Dict[Tuple[str, Optional[str]], OptionSpec] = {
+            (name, None): opt for name, opt in additive_option_map.items()
+        }
+        expected_options.update(choice_option_map)
+        materialized_mappings_valid = True
+
+        def _explicit_mapping_value(
+            stock: Mapping[str, Any], target_adjusted: float
+        ) -> Optional[int]:
+            normalized_target = self._normalize_target_key(target_adjusted)
+            if abs(normalized_target) <= 1e-12:
+                return 0
+            matches = [
+                value
+                for raw_target, value in (
+                    stock.get("droplets_per_target", {}) or {}
+                ).items()
+                if self._normalize_target_key(float(raw_target))
+                == normalized_target
+            ]
+            if len(matches) != 1:
+                return None
+            try:
+                value = int(matches[0])
+            except (TypeError, ValueError):
+                return None
+            return value if value >= 0 else None
+
+        for key, opt in expected_options.items():
+            self._optimization_checkpoint()
+            plan = self.plans_per_option.get(key)
+            label = self._design_key_label(key)
+            if not isinstance(plan, Mapping):
+                materialized_mappings_valid = False
+                _add_issue(
+                    key,
+                    field="stock_plan",
+                    severity="error",
+                    code="missing_materialized_stock_plan",
+                    message=f"No materialized stock plan exists for {label}.",
+                )
+                continue
+
+            stocks = list(plan.get("stocks") or [])
+            try:
+                n_stocks = int(plan.get("n_stocks", len(stocks)))
+            except (TypeError, ValueError):
+                n_stocks = 0
+            if n_stocks not in (1, 2) or len(stocks) != n_stocks:
+                materialized_mappings_valid = False
+                _add_issue(
+                    key,
+                    field="stock_plan",
+                    severity="error",
+                    code="invalid_materialized_stock_count",
+                    message=(
+                        f"The materialized stock plan for {label} has an invalid "
+                        "number of stock solutions."
+                    ),
+                    n_stocks=n_stocks,
+                    stock_rows=len(stocks),
+                )
+                continue
+
+            forced_stock = getattr(opt, "forced_stock_conc", None)
+            if forced_stock not in (None, 0.0) and (
+                n_stocks != 1
+                or not math.isclose(
+                    float(stocks[0].get("stock_concentration", float("nan"))),
+                    float(forced_stock),
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ):
+                materialized_mappings_valid = False
+                _add_issue(
+                    key,
+                    field="fixed_stock",
+                    severity="error",
+                    code="fixed_stock_not_preserved",
+                    message=(
+                        f"The materialized plan for {label} does not preserve its "
+                        "fixed stock concentration."
+                    ),
+                    fixed_stock_conc=float(forced_stock),
+                )
+
+            max_stock = getattr(opt, "max_stock_conc", None)
+            for stock_index, stock in enumerate(stocks):
+                self._optimization_checkpoint()
+                try:
+                    concentration = float(stock.get("stock_concentration"))
+                    droplet_volume = float(stock.get("droplet_volume_nL"))
+                except (TypeError, ValueError):
+                    concentration = float("nan")
+                    droplet_volume = float("nan")
+                if (
+                    not math.isfinite(concentration)
+                    or concentration <= 0.0
+                    or not math.isfinite(droplet_volume)
+                    or droplet_volume <= 0.0
+                    or (
+                        max_stock is not None
+                        and concentration > float(max_stock) + 1e-12
+                    )
+                ):
+                    materialized_mappings_valid = False
+                    _add_issue(
+                        key,
+                        field="stock_plan",
+                        severity="error",
+                        code="materialized_stock_out_of_bounds",
+                        message=(
+                            f"Stock leg {stock_index + 1} for {label} violates its "
+                            "concentration or droplet-volume bounds."
+                        ),
+                        stock_index=stock_index,
+                        stock_concentration=concentration,
+                        droplet_volume_nL=droplet_volume,
+                        max_stock_conc=(
+                            float(max_stock) if max_stock is not None else None
+                        ),
+                    )
+
+            starting = float(getattr(opt, "starting_conc", 0.0) or 0.0)
+            preview_by_target = {
+                self._normalize_target_key(float(row["requested_final"])): row
+                for row in self._target_preview_map.get(key, [])
+            }
+            for requested_final in _effective_targets_for_opt(key, opt):
+                self._optimization_checkpoint()
+                requested_key = self._normalize_target_key(requested_final)
+                target_adjusted = max(0.0, float(requested_final) - starting)
+                stored_drops = [
+                    _explicit_mapping_value(stock, target_adjusted)
+                    for stock in stocks
+                ]
+                preview_row = preview_by_target.get(requested_key)
+                expected_drops = (
+                    preview_row.get("droplets")
+                    if isinstance(preview_row, Mapping)
+                    else None
+                )
+                if (
+                    preview_row is None
+                    or not bool(preview_row.get("reachable"))
+                    or any(value is None for value in stored_drops)
+                    or (
+                        target_adjusted > 1e-12
+                        and sum(int(value or 0) for value in stored_drops) <= 0
+                    )
+                    or (
+                        n_stocks == 1
+                        and expected_drops is not None
+                        and int(stored_drops[0] or 0) != int(expected_drops)
+                    )
+                    or (
+                        n_stocks == 2
+                        and expected_drops is not None
+                        and tuple(int(value or 0) for value in stored_drops)
+                        != tuple(int(value) for value in expected_drops)
+                    )
+                ):
+                    materialized_mappings_valid = False
+                    if not (
+                        forced_stock not in (None, 0.0)
+                        and preview_row is not None
+                        and not bool(preview_row.get("reachable"))
+                    ):
+                        _add_issue(
+                            key,
+                            field="stock_plan",
+                            severity="error",
+                            code="unreachable_materialized_target",
+                            message=(
+                                f"The materialized stock plan for {label} has no "
+                                f"reachable explicit mapping for target "
+                                f"{float(requested_final):.6g} {opt.units}."
+                            ),
+                            requested_target=float(requested_final),
+                            requested_adjusted=float(target_adjusted),
+                            stored_droplets=stored_drops,
+                        )
+
+        if materialized_mappings_valid:
+            for run_spec in self._iter_unique_reaction_constraint_specs():
+                self._optimization_checkpoint()
+                row_volume_nL = 0.0
+                for key, target in run_spec["reaction"].items():
+                    self._optimization_checkpoint()
+                    opt = expected_options.get(key)
+                    plan = self.plans_per_option.get(key)
+                    if opt is None or not isinstance(plan, Mapping):
+                        materialized_mappings_valid = False
+                        break
+                    target_adjusted = max(
+                        0.0,
+                        float(target)
+                        - float(getattr(opt, "starting_conc", 0.0) or 0.0),
+                    )
+                    for stock in plan.get("stocks") or []:
+                        self._optimization_checkpoint()
+                        drops = _explicit_mapping_value(stock, target_adjusted)
+                        if drops is None:
+                            materialized_mappings_valid = False
+                            break
+                        row_volume_nL += int(drops) * float(
+                            stock["droplet_volume_nL"]
+                        )
+                    if not materialized_mappings_valid:
+                        break
+                if not materialized_mappings_valid:
+                    break
+                if row_volume_nL > V_accept + 1e-6:
+                    materialized_mappings_valid = False
+                    _add_issue(
+                        ("__stock_allocation__", None),
+                        field="volume_budget",
+                        severity="error",
+                        code="materialized_row_volume_budget_exceeded",
+                        message=(
+                            "The independently validated stock plan exceeds the "
+                            f"effective printed-volume limit: {row_volume_nL:.6g} nL "
+                            f"is required but only {V_accept:.6g} nL is allowed."
+                        ),
+                        design_source=str(run_spec.get("design_source", "base")),
+                        reaction_index=int(run_spec.get("reaction_index", 0)),
+                        replicate=int(run_spec.get("replicate", 1)),
+                        required_volume_nL=float(row_volume_nL),
+                        effective_allowed_volume_nL=float(V_accept),
+                    )
+                    break
+
+        runtime_identity_rows = list(stock_rows) + [
+            {
+                "factor_name": str(
+                    self.metadata.get("fill_reagent_name", "Water") or "Water"
+                ),
+                "option_name": "",
+                "stock_concentration": 1.0,
+                "units": "--",
+            }
+        ]
+        rows_by_runtime_id: Dict[str, Dict[str, Any]] = {}
+        for row in runtime_identity_rows:
+            self._optimization_checkpoint()
+            try:
+                runtime_stock_id = stock_id_for_row(row)
+            except ValueError as exc:
+                _add_issue(
+                    ("__stock_identity__", None),
+                    field="stock_plan",
+                    severity="error",
+                    code="invalid_runtime_stock_identity",
+                    message=str(exc),
+                    stock_row=dict(row),
+                )
+                continue
+            previous = rows_by_runtime_id.get(runtime_stock_id)
+            if previous is None:
+                rows_by_runtime_id[runtime_stock_id] = dict(row)
+                continue
+            _add_issue(
+                ("__stock_identity__", None),
+                field="stock_plan",
+                severity="error",
+                code="duplicate_runtime_stock_id",
+                message=(
+                    f"Two calculated stock solutions map to runtime stock ID "
+                    f"{runtime_stock_id!r}. Adjust the stock constraints so their "
+                    "display concentrations remain distinct."
+                ),
+                stock_id=runtime_stock_id,
+                stock_rows=[previous, dict(row)],
+            )
+
+        error_issues = [
+            issue
+            for issue_list in issues_by_key.values()
+            for issue in issue_list
+            if str(issue.get("severity", "")).lower() == "error"
+        ]
+        if error_issues:
+            return _failure(
+                str(
+                    error_issues[0].get("message")
+                    or "The calculated stock plan failed final validation."
+                )
+            )
+
+        optimizer_total_elapsed_ms = max(
+            0.0, (optimizer_clock() - optimizer_started_at) * 1000.0
+        )
         preview_rows = [row for rows in self._target_preview_map.values() for row in rows]
         two_stock_keys = [
             key for key, plan in self.plans_per_option.items()
             if plan.get("n_stocks", 1) == 2
         ]
-        return {
+        result = {
             "best": True,
             "stocks": selection_counts()[0],
             "sum_conc": selection_counts()[1],
@@ -4089,6 +7180,95 @@ class ExperimentModel(QObject):
             "two_stock_keys": list(two_stock_keys),
             "two_stock_search_limited_keys": list(two_stock_search_limited_keys),
             "issues_by_key": _copy_issues(),
+            "distinct_level_loss": int(distinct_level_loss),
+            "collapsed_target_keys": list(collapsed_target_keys),
+            "optimizer_strategy_used": optimizer_strategy_used,
+            "optimizer_fallback_reason": optimizer_fallback_reason,
+            "stock_allocation_search_limited": bool(stock_allocation_search_limited),
+            "stock_allocation_states_evaluated": int(stock_allocation_states_evaluated),
+            "stock_allocation_work_units_evaluated": int(
+                stock_allocation_work_units_evaluated
+            ),
+            "stock_allocation_work_limit": int(
+                self.MAX_STOCK_ALLOCATION_WORK_UNITS
+            ),
+            "stock_allocation_work_units_by_kind": copy.deepcopy(
+                stock_allocation_work_units_by_kind
+            ),
+            "stock_allocation_zero_loss_polish_work_limit": int(
+                self.ZERO_LOSS_POLISH_WORK_UNITS
+            ),
+            "stock_allocation_zero_loss_polish_work_used": int(
+                stock_allocation_zero_loss_polish_work_used
+            ),
+            "optimizer_seed_elapsed_ms": float(optimizer_seed_elapsed_ms),
+            "stock_allocation_elapsed_ms": float(stock_allocation_elapsed_ms),
+            "optimizer_total_elapsed_ms": float(optimizer_total_elapsed_ms),
+            "stock_allocation_time_budget_ms": float(
+                self.MAX_STOCK_ALLOCATION_SECONDS * 1000.0
+            ),
+            "stock_allocation_zero_loss_polish_budget_ms": float(
+                self.ZERO_LOSS_POLISH_SECONDS * 1000.0
+            ),
+            "stock_allocation_limit_reasons": sorted(stock_allocation_limit_reasons),
+            "stock_allocation_candidates_generated": int(
+                stock_allocation_candidates_generated
+            ),
+            "stock_allocation_candidates_retained": int(
+                stock_allocation_candidates_retained
+            ),
+            "stock_allocation_candidates_pruned": int(
+                stock_allocation_candidates_pruned
+            ),
+            "stock_allocation_candidates_deduplicated": int(
+                stock_allocation_candidates_deduplicated
+            ),
+            "stock_allocation_candidates_dominated": int(
+                stock_allocation_candidates_dominated
+            ),
+            "stock_allocation_branches_pruned": int(
+                stock_allocation_branches_pruned
+            ),
+            "stock_allocation_loss_tiers_evaluated": int(
+                stock_allocation_loss_tiers_evaluated
+            ),
+            "optimizer_seed_distinct_level_loss": (
+                int(optimizer_seed_distinct_level_loss)
+                if optimizer_seed_distinct_level_loss is not None
+                else None
+            ),
+            "optimizer_seed_worst_level_loss": (
+                int(optimizer_seed_worst_level_loss)
+                if optimizer_seed_worst_level_loss is not None
+                else None
+            ),
+            "optimizer_seed_rank": copy.deepcopy(optimizer_seed_rank),
+            "optimizer_selected_rank": copy.deepcopy(optimizer_selected_rank),
+            **_resolution_phase_diagnostics(),
+            "stock_allocation_improved_seed": bool(
+                stock_allocation_improved_seed
+            ),
+            "stock_allocation_time_to_first_improvement_ms": (
+                float(stock_allocation_time_to_first_improvement_ms)
+                if stock_allocation_time_to_first_improvement_ms is not None
+                else None
+            ),
+            "stock_allocation_time_to_best_ms": (
+                float(stock_allocation_time_to_best_ms)
+                if stock_allocation_time_to_best_ms is not None
+                else None
+            ),
+            "stock_allocation_time_budget_exceeded": bool(
+                stock_allocation_time_budget_exceeded
+            ),
+            "stock_allocation_time_budget_overshoot_ms": float(
+                stock_allocation_time_budget_overshoot_ms
+            ),
+            "stock_allocation_deadline_overshoot_ms": float(
+                stock_allocation_deadline_overshoot_ms
+            ),
+            **copy.deepcopy(two_stock_diagnostics),
+            "stock_allocation_stop_reason": str(stock_allocation_stop_reason),
             "approximate_targets": sum(
                 1
                 for row in preview_rows
@@ -4098,6 +7278,8 @@ class ExperimentModel(QObject):
                 1 for row in preview_rows if not bool(row.get("reachable"))
             ),
         }
+        self.stock_updated.emit()
+        return result
 
     # ------------- Generation & summaries -------------
 
@@ -4416,6 +7598,7 @@ class ExperimentModel(QObject):
 
                 # Additives
                 for f in additives:
+                    self._optimization_checkpoint()
                     opt = f.options[0]
                     levels = sorted(set(float(t) for t in opt.targets))
                     facs.append({
@@ -4426,13 +7609,18 @@ class ExperimentModel(QObject):
 
                 # Choice groups
                 for f in choices:
+                    self._optimization_checkpoint()
                     lvls = []
                     for opt in f.options:
+                        self._optimization_checkpoint()
                         if not self._choice_option_contributes_to_base_design(opt):
                             continue
                         for t in opt.targets:
+                            self._optimization_checkpoint()
                             try:
                                 value = float(t)
+                            except OptimizationCancelled:
+                                raise
                             except Exception:
                                 continue
                             if math.isfinite(value):
@@ -4470,8 +7658,10 @@ class ExperimentModel(QObject):
 
                 reactions: List[Dict] = []
                 for row in design:
+                    self._optimization_checkpoint()
                     sel = {}
                     for fd, idx in zip(facs, row.tolist()):
+                        self._optimization_checkpoint()
                         if fd["kind"] == "additive":
                             t = fd["levels"][int(idx)]
                             sel[fd["key"]] = t
@@ -4484,6 +7674,8 @@ class ExperimentModel(QObject):
                 return reactions
 
             except DesignSizeLimitError:
+                raise
+            except OptimizationCancelled:
                 raise
             except Exception as e:
                 raise DesignSizeLimitError(
@@ -4503,6 +7695,7 @@ class ExperimentModel(QObject):
         add_target_lists = []
         add_keys = []
         for f in additives_list:
+            self._optimization_checkpoint()
             opt = f.options[0]
             add_target_lists.append(opt.targets)
             add_keys.append((f.name, None))
@@ -4512,8 +7705,10 @@ class ExperimentModel(QObject):
         # For choices, each group contributes a sum over options (option, target) tuples
         choice_lists = []
         for f in choices_list:
+            self._optimization_checkpoint()
             tuples = []  # ( (group, option), targets list )
             for opt in f.options:
+                self._optimization_checkpoint()
                 if not self._choice_option_contributes_to_base_design(opt):
                     continue
                 tuples.append(((f.name, opt.name), opt.targets))
@@ -4523,25 +7718,33 @@ class ExperimentModel(QObject):
         # Build per-group choice sets
         per_group_choices: List[List[Tuple[Tuple[str, str], float]]] = []
         for tuples in choice_lists:
+            self._optimization_checkpoint()
             one_group = []
             for key, tlist in tuples:
+                self._optimization_checkpoint()
                 for t in tlist:
+                    self._optimization_checkpoint()
                     one_group.append((key, t))
             per_group_choices.append(one_group)
 
         reactions = []
         for add_selection in add_combos:
+            self._optimization_checkpoint()
             if not per_group_choices:
                 selections = {}
                 for k, t in zip(add_keys, add_selection):
+                    self._optimization_checkpoint()
                     selections[k] = t
                 reactions.append(selections)
             else:
                 for picks in itertools.product(*per_group_choices):
+                    self._optimization_checkpoint()
                     selections = {}
                     for k, t in zip(add_keys, add_selection):
+                        self._optimization_checkpoint()
                         selections[k] = t
                     for (g, o), t in picks:
+                        self._optimization_checkpoint()
                         if not any(key[0] == g for key in selections.keys() if key[1] is not None):
                             selections[(g, o)] = t
                     reactions.append(selections)
@@ -4810,6 +8013,20 @@ class ExperimentModel(QObject):
                 break
 
         issues: List[Dict[str, Any]] = []
+        for column_key in ("droplet_volume_nl", "droplet_nl", "ejection_volume_nl"):
+            column = columns.get(column_key)
+            if column is not None and any(not _is_blank(value) for value in max_stock_df[column]):
+                issues.append({
+                    "field": "max_stock_csv",
+                    "severity": "warning",
+                    "code": "unsupported_ejection_volume_column",
+                    "message": (
+                        f"Stock CSV column '{column}' is not imported. Ejection volume "
+                        "uses the selected printing-mode default, shown in the stock table. "
+                        "To use another volume, apply the design, edit Ejection Vol (nL) "
+                        "in the editor, and recalculate stocks before saving or finalizing."
+                    ),
+                })
         if reagent_col is None or conc_col is None:
             issues.append({
                 "field": "max_stock_csv",
@@ -4898,6 +8115,842 @@ class ExperimentModel(QObject):
 
         return {"stocks": rows, "issues": issues}
 
+    @staticmethod
+    def _stock_fingerprint_number(value: Any) -> Any:
+        if value is None:
+            return None
+        number = float(value)
+        if not math.isfinite(number):
+            return str(number)
+        return number
+
+    @staticmethod
+    def _canonical_payload_sha256(payload: Mapping[str, Any]) -> str:
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _stock_allocation_input_document(self) -> Dict[str, Any]:
+        number = self._stock_fingerprint_number
+        factors: List[Dict[str, Any]] = []
+        for factor in self.factors:
+            options = []
+            for option in factor.options:
+                key = (
+                    str(factor.name),
+                    None if factor.kind == "additive" else str(option.name),
+                )
+                options.append({
+                    "key": [key[0], key[1]],
+                    "targets": [
+                        number(target)
+                        for target in self._effective_targets_for_key(key, option)
+                    ],
+                    "units": str(getattr(option, "units", "") or ""),
+                    "droplet_nL": number(getattr(option, "droplet_nL", 0.0)),
+                    "printing_mode": normalize_printing_mode(
+                        getattr(option, "printing_mode", None)
+                    ),
+                    "starting_conc": number(
+                        getattr(option, "starting_conc", 0.0) or 0.0
+                    ),
+                    "forced_stock_conc": number(
+                        getattr(option, "forced_stock_conc", None)
+                    ),
+                    "max_stock_conc": number(
+                        getattr(option, "max_stock_conc", None)
+                    ),
+                })
+            factors.append({
+                "name": str(factor.name),
+                "kind": str(factor.kind),
+                "options": options,
+            })
+
+        def _reaction_document(reaction: Mapping[Any, Any]) -> List[Dict[str, Any]]:
+            return [
+                {
+                    "key": [str(key[0]), key[1]],
+                    "target": number(target),
+                }
+                for key, target in sorted(
+                    (reaction or {}).items(), key=lambda item: str(item[0])
+                )
+            ]
+
+        return {
+            "schema": "labcraft.stock_allocation_inputs.v1",
+            "metadata": {
+                "target_reaction_volume_nL": number(
+                    self.metadata.get("target_reaction_volume_nL", 2000.0)
+                ),
+                "printed_volume_tolerance_nL": number(
+                    self.metadata.get("printed_volume_tolerance_nL", 50.0)
+                ),
+                "final_reaction_volume_nL": number(
+                    self.metadata.get(
+                        "final_reaction_volume_nL",
+                        self.metadata.get("target_reaction_volume_nL", 2000.0),
+                    )
+                ),
+                "allow_two_stock_solutions": bool(
+                    self.metadata.get("allow_two_stock_solutions", False)
+                ),
+                "allow_avoidable_target_grouping": bool(
+                    self.get_stock_allocation_resolution_policy()[
+                        "allow_avoidable_target_grouping"
+                    ]
+                ),
+            },
+            "factors": factors,
+            "uploaded_reactions": [
+                _reaction_document(reaction)
+                for reaction in (self._uploaded_reactions or [])
+            ],
+            "additional_condition_rows": [
+                _reaction_document(condition.targets)
+                for condition in self.additional_conditions
+            ],
+        }
+
+    def stock_allocation_input_fingerprint(self) -> str:
+        return self._canonical_payload_sha256(
+            self._stock_allocation_input_document()
+        )
+
+    def _stock_allocation_plan_document(
+        self,
+        plans: Mapping[Tuple[str, Optional[str]], Mapping[str, Any]],
+        stock_rows: Iterable[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        number = self._stock_fingerprint_number
+        plan_rows = []
+        for key, plan in sorted(plans.items(), key=lambda item: str(item[0])):
+            stocks = []
+            for stock in plan.get("stocks") or []:
+                stocks.append({
+                    "stock_concentration": number(stock.get("stock_concentration")),
+                    "delta_per_drop": number(stock.get("delta_per_drop")),
+                    "droplet_volume_nL": number(stock.get("droplet_volume_nL")),
+                    "units": str(stock.get("units", "") or ""),
+                    "quantum": number(stock.get("quantum", 0.1)),
+                    "droplets_per_target": [
+                        [number(target), int(drops)]
+                        for target, drops in sorted(
+                            (stock.get("droplets_per_target") or {}).items(),
+                            key=lambda item: float(item[0]),
+                        )
+                    ],
+                })
+            plan_rows.append({
+                "key": [str(key[0]), key[1]],
+                "n_stocks": int(plan.get("n_stocks", len(stocks))),
+                "stocks": stocks,
+            })
+        identity_rows = [
+            {
+                "factor_name": str(row.get("factor_name", "")),
+                "option_name": str(row.get("option_name", "") or ""),
+                "stock_concentration": number(row.get("stock_concentration")),
+                "delta_per_drop": number(row.get("delta_per_drop")),
+                "units": str(row.get("units", "") or ""),
+                "droplet_volume_nL": number(row.get("droplet_volume_nL")),
+                "printing_mode": str(row.get("printing_mode", "") or ""),
+            }
+            for row in stock_rows
+        ]
+        return {
+            "schema": "labcraft.stock_allocation_plan.v1",
+            "plans": plan_rows,
+            "stock_rows": identity_rows,
+        }
+
+    def export_stock_allocation_reuse_payload(
+        self, optimization_result: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        if not optimization_result.get("best") or not self.plans_per_option:
+            raise ValueError("Only a validated successful stock allocation can be reused.")
+        plans = copy.deepcopy(self.plans_per_option)
+        stock_rows = copy.deepcopy(self._stock_rows_cache)
+        plan_document = self._stock_allocation_plan_document(plans, stock_rows)
+        return {
+            "schema": "labcraft.import_stock_allocation_reuse.v1",
+            "input_fingerprint": self.stock_allocation_input_fingerprint(),
+            "plan_fingerprint": self._canonical_payload_sha256(plan_document),
+            "plans_per_option": plans,
+            "stock_rows": stock_rows,
+            "optimization_result": copy.deepcopy(dict(optimization_result)),
+        }
+
+    def _current_stock_allocation_volume_evidence(self) -> Dict[str, Any]:
+        '''Recalculate exact reaction volumes for the currently installed plan.'''
+        printed, final, warning_threshold = self._calibration_volume_basis()
+        tolerance = warning_threshold - printed
+        fill_volume = float(
+            self.metadata.get(
+                'fill_droplet_volume_nL',
+                self._default_fill_droplet_volume_nl(),
+            )
+        )
+        fill_mode = self._resolve_fill_printing_mode(
+            self.metadata.get('fill_printing_mode'),
+            fill_volume,
+        )
+        fill_volume = validate_ejection_volume_for_mode(
+            fill_volume,
+            fill_mode,
+            label='Fill ejection volume',
+        )
+        fill_is_calibrated = 'intended_fill_droplet_volume_nL' in self.metadata
+
+        rows: List[Dict[str, Any]] = []
+        worst_nonfill = 0.0
+        for index, run_spec in enumerate(self._iter_reaction_run_specs()):
+            nonfill = 0.0
+            for key, target in dict(run_spec.get('reaction') or {}).items():
+                plan = self.plans_per_option.get(key)
+                if plan is None:
+                    raise ValueError(
+                        f'Reusable plan is missing {self._design_key_label(key)}.'
+                    )
+                counts = self._counts_for_plan_target(key, float(target), plan)
+                stocks = list(plan.get('stocks') or [])
+                if len(counts) != len(stocks):
+                    raise ValueError(
+                        f'Reusable plan has inconsistent counts for {key!r}.'
+                    )
+                nonfill += sum(
+                    int(count) * float(stock['droplet_volume_nL'])
+                    for count, stock in zip(counts, stocks)
+                )
+            worst_nonfill = max(worst_nonfill, nonfill)
+            fill_count = self._calibration_fill_count(
+                target_printed_volume_nL=printed,
+                warning_threshold_nL=warning_threshold,
+                nonfill_volume_nL=nonfill,
+                fill_volume_nL=fill_volume,
+                fill_is_calibrated=fill_is_calibrated,
+            )
+            reaction_id = f'R{index + 1}'
+            rows.append({
+                'row_id': reaction_id,
+                'well_id': None,
+                'reaction_id': reaction_id,
+                'nonfill_volume_nL': float(nonfill),
+                'fill_drops': int(fill_count),
+                'total_volume_nL': float(nonfill + fill_count * fill_volume),
+            })
+
+        warning = self._build_calibration_volume_warning(
+            rows,
+            target_printed_volume_nL=printed,
+            design_optimization_tolerance_nL=tolerance,
+            final_reaction_volume_nL=final,
+        )
+        return {
+            'target_printed_volume_nL': float(printed),
+            'design_optimization_tolerance_nL': float(tolerance),
+            'warning_threshold_nL': float(warning_threshold),
+            'final_reaction_volume_nL': float(final),
+            'fill_volume_nL': float(fill_volume),
+            'fill_printing_mode': str(fill_mode),
+            'worst_nonfill_nL': float(worst_nonfill),
+            'rows': rows,
+            'volume_warning': warning,
+        }
+
+    def _current_stock_allocation_result(
+        self,
+        *,
+        reuse_context: str,
+        expected_fingerprint: str,
+        base_result: Mapping[str, Any] | None = None,
+        volume_evidence: Mapping[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        '''Return a complete optimizer-result contract for the installed plan.'''
+        evidence = dict(
+            volume_evidence or self._current_stock_allocation_volume_evidence()
+        )
+        preview_rows = [
+            row
+            for rows in self._target_preview_map.values()
+            for row in rows
+        ]
+        losses_by_key: Dict[Tuple[str, Optional[str]], int] = {}
+        for key, rows in self._target_preview_map.items():
+            summary = self._summarize_target_resolution_rows(rows)
+            losses_by_key[key] = int(summary['lost_level_count'])
+
+        stock_count = sum(
+            len(list(plan.get('stocks') or []))
+            for plan in self.plans_per_option.values()
+        )
+        concentration_sum = sum(
+            float(stock['stock_concentration'])
+            for plan in self.plans_per_option.values()
+            for stock in list(plan.get('stocks') or [])
+        )
+        total_loss = sum(losses_by_key.values())
+        worst_loss = max(losses_by_key.values(), default=0)
+        errors = [
+            abs(float(row.get('abs_error', 0.0) or 0.0))
+            for row in preview_rows
+        ]
+        worst_error = max(errors, default=0.0)
+        mean_error = sum(errors) / len(errors) if errors else 0.0
+        worst_nonfill = float(evidence.get('worst_nonfill_nL', 0.0))
+        rank = {
+            'total_distinct_level_loss': int(total_loss),
+            'worst_reagent_level_loss': int(worst_loss),
+            'stock_solution_count': int(stock_count),
+            'worst_abs_error': float(worst_error),
+            'mean_abs_error': float(mean_error),
+            'concentration_burden': float(concentration_sum),
+            'printed_volume_nL': float(worst_nonfill),
+        }
+        two_stock_keys = [
+            key
+            for key, plan in self.plans_per_option.items()
+            if int(plan.get('n_stocks', 1)) == 2
+        ]
+        collapsed_target_keys = [
+            key for key in self.plans_per_option if losses_by_key.get(key, 0) > 0
+        ]
+        target = min(
+            float(evidence['target_printed_volume_nL']),
+            float(evidence['final_reaction_volume_nL']),
+        )
+        tolerance = float(evidence['design_optimization_tolerance_nL'])
+        effective_limit = min(
+            float(evidence['final_reaction_volume_nL']) + tolerance,
+            target + tolerance,
+        )
+
+        result = copy.deepcopy(dict(base_result or {}))
+        result.update({
+            'best': True,
+            'stocks': int(stock_count),
+            'sum_conc': float(concentration_sum),
+            'worst_nonfill_nL': float(worst_nonfill),
+            'printed_volume_nL': float(target),
+            'printed_volume_tolerance_nL': float(tolerance),
+            'effective_printed_volume_limit_nL': float(effective_limit),
+            'two_stock_keys': list(two_stock_keys),
+            'distinct_level_loss': int(total_loss),
+            'collapsed_target_keys': list(collapsed_target_keys),
+            'approximate_targets': sum(
+                1
+                for row in preview_rows
+                if bool(row.get('reachable'))
+                and abs(float(row.get('abs_error', 0.0) or 0.0)) > 1e-12
+            ),
+            'unreachable_targets': sum(
+                1 for row in preview_rows if not bool(row.get('reachable'))
+            ),
+            'stock_allocation_reused_import_plan': True,
+            'stock_allocation_reuse_fingerprint': expected_fingerprint,
+            'volume_warning': copy.deepcopy(evidence.get('volume_warning')),
+        })
+
+        standard_defaults = {
+            'two_stock_search_limited_keys': [],
+            'issues_by_key': {},
+            'optimizer_strategy_used': 'calibration_requantization',
+            'optimizer_fallback_reason': None,
+            'stock_allocation_search_limited': False,
+            'stock_allocation_states_evaluated': 0,
+            'stock_allocation_work_units_evaluated': 0,
+            'stock_allocation_work_limit': int(
+                self.MAX_STOCK_ALLOCATION_WORK_UNITS
+            ),
+            'stock_allocation_work_units_by_kind': {
+                'two_stock_probe': 0,
+                'two_stock_pair': 0,
+                'candidate_pool': 0,
+                'global_search': 0,
+            },
+            'stock_allocation_zero_loss_polish_work_limit': int(
+                self.ZERO_LOSS_POLISH_WORK_UNITS
+            ),
+            'stock_allocation_zero_loss_polish_work_used': 0,
+            'optimizer_seed_elapsed_ms': 0.0,
+            'stock_allocation_elapsed_ms': 0.0,
+            'optimizer_total_elapsed_ms': 0.0,
+            'stock_allocation_time_budget_ms': float(
+                self.MAX_STOCK_ALLOCATION_SECONDS * 1000.0
+            ),
+            'stock_allocation_zero_loss_polish_budget_ms': float(
+                self.ZERO_LOSS_POLISH_SECONDS * 1000.0
+            ),
+            'stock_allocation_limit_reasons': [],
+            'stock_allocation_candidates_generated': 0,
+            'stock_allocation_candidates_retained': 0,
+            'stock_allocation_candidates_pruned': 0,
+            'stock_allocation_candidates_deduplicated': 0,
+            'stock_allocation_candidates_dominated': 0,
+            'stock_allocation_branches_pruned': 0,
+            'stock_allocation_loss_tiers_evaluated': 0,
+            'optimizer_seed_distinct_level_loss': int(total_loss),
+            'optimizer_seed_worst_level_loss': int(worst_loss),
+            'optimizer_seed_rank': copy.deepcopy(rank),
+            'optimizer_selected_rank': copy.deepcopy(rank),
+            'stock_allocation_baseline_rank': None,
+            'stock_allocation_baseline_work': 0,
+            'stock_allocation_combined_work': 0,
+            'stock_allocation_pair_work_by_key': {},
+            'stock_allocation_dominance_pairs_evaluated': 0,
+            'stock_allocation_dominance_blocks_evaluated': 0,
+            'stock_allocation_dominance_max_block_elements': 0,
+            'stock_allocation_improved_seed': False,
+            'stock_allocation_time_to_first_improvement_ms': None,
+            'stock_allocation_time_to_best_ms': None,
+            'stock_allocation_time_budget_exceeded': False,
+            'stock_allocation_time_budget_overshoot_ms': 0.0,
+            'stock_allocation_deadline_overshoot_ms': 0.0,
+            'two_stock_pairs_evaluated': 0,
+            'two_stock_target_evaluations': 0,
+            'two_stock_solver_iterations': 0,
+            'two_stock_candidates_generated': 0,
+            'two_stock_candidates_retained': 0,
+            'two_stock_candidates_deduplicated': 0,
+            'two_stock_target_row_cache_reuses': 0,
+            'stock_allocation_stop_reason': 'calibrated_plan_reused',
+        }
+        for field, value in standard_defaults.items():
+            result.setdefault(field, copy.deepcopy(value))
+
+        if reuse_context == 'calibration':
+            result.update(copy.deepcopy(standard_defaults))
+            result.update({
+                'calibrated_stock_allocation_reused': True,
+                'optimizer_strategy_used': 'calibration_requantization',
+                'stock_allocation_stop_reason': 'calibrated_plan_reused',
+            })
+        return result
+
+    def _export_calibrated_stock_allocation_payload(
+        self,
+        *,
+        calibrated_stock_id: str,
+        calibration_record_key: str | None = None,
+    ) -> Dict[str, Any]:
+        fingerprint = self.stock_allocation_input_fingerprint()
+        allocation = self.export_stock_allocation_reuse_payload(
+            self._current_stock_allocation_result(
+                reuse_context='calibration',
+                expected_fingerprint=fingerprint,
+            )
+        )
+        allocation['plans_per_option'] = {
+            json.dumps(
+                [str(key[0]), key[1]],
+                separators=(',', ':'),
+                ensure_ascii=True,
+            ): copy.deepcopy(plan)
+            for key, plan in self.plans_per_option.items()
+        }
+        allocation["calibrated_independent_volumes"] = True
+        return {
+            "schema_version": 1,
+            "active": True,
+            "calibrated_stock_id": str(calibrated_stock_id),
+            "calibration_record_key": (
+                None if calibration_record_key in (None, "") else str(calibration_record_key)
+            ),
+            "allocation": allocation,
+        }
+
+    def install_stock_allocation_reuse_payload(
+        self,
+        payload: Mapping[str, Any] | None,
+        *,
+        reuse_context: str = "import",
+        expected_calibrated_stock_id: str | None = None,
+    ) -> Dict[str, Any]:
+        if reuse_context not in {"import", "calibration"}:
+            return {"reused": False, "reason": "unsupported_reuse_context"}
+        if not isinstance(payload, Mapping):
+            return {"reused": False, "reason": "missing_reuse_payload"}
+        if payload.get("schema") != "labcraft.import_stock_allocation_reuse.v1":
+            return {"reused": False, "reason": "unsupported_reuse_schema"}
+        expected_fingerprint = self.stock_allocation_input_fingerprint()
+        if str(payload.get("input_fingerprint") or "") != expected_fingerprint:
+            return {"reused": False, "reason": "stock_input_fingerprint_mismatch"}
+
+        raw_plans = payload.get("plans_per_option") or {}
+        plans: Dict[Tuple[str, Optional[str]], Dict[str, Any]] = {}
+        if isinstance(raw_plans, Mapping):
+            for raw_key, raw_plan in raw_plans.items():
+                self._optimization_checkpoint()
+                if isinstance(raw_key, tuple) and len(raw_key) == 2:
+                    key = (str(raw_key[0]), raw_key[1])
+                elif isinstance(raw_key, str):
+                    try:
+                        decoded_key = json.loads(raw_key)
+                    except Exception:
+                        decoded_key = None
+                    if not isinstance(decoded_key, list) or len(decoded_key) != 2:
+                        return {
+                            'reused': False,
+                            'reason': 'stock_plan_key_mismatch',
+                        }
+                    key = (str(decoded_key[0]), decoded_key[1])
+                else:
+                    return {
+                        'reused': False,
+                        'reason': 'stock_plan_key_mismatch',
+                    }
+                if key in plans or not isinstance(raw_plan, Mapping):
+                    return {
+                        'reused': False,
+                        'reason': 'stock_plan_key_mismatch',
+                    }
+                plans[key] = copy.deepcopy(dict(raw_plan))
+        stock_rows = copy.deepcopy(payload.get("stock_rows") or [])
+        allow_independent_volumes = bool(
+            payload.get("calibrated_independent_volumes", False)
+        )
+        calibrated_stock_id = str(expected_calibrated_stock_id or '').strip()
+        if reuse_context == 'import' and allow_independent_volumes:
+            return {
+                'reused': False,
+                'reason': 'calibrated_reuse_context_required',
+            }
+        if reuse_context == 'calibration':
+            if not allow_independent_volumes:
+                return {
+                    'reused': False,
+                    'reason': 'calibrated_independent_volumes_required',
+                }
+            if not calibrated_stock_id:
+                return {
+                    'reused': False,
+                    'reason': 'calibrated_stock_identity_required',
+                }
+        plan_fingerprint = self._canonical_payload_sha256(
+            self._stock_allocation_plan_document(plans, stock_rows)
+        )
+        if str(payload.get("plan_fingerprint") or "") != plan_fingerprint:
+            return {"reused": False, "reason": "stock_plan_fingerprint_mismatch"}
+
+        expected_options = {
+            (
+                str(factor.name),
+                None if factor.kind == "additive" else str(option.name),
+            ): option
+            for factor in self.factors
+            for option in factor.options
+        }
+        if set(plans) != set(expected_options):
+            return {"reused": False, "reason": "stock_plan_key_mismatch"}
+
+        previous = {
+            "plans": copy.deepcopy(self.plans_per_option),
+            "stock_rows": copy.deepcopy(self._stock_rows_cache),
+            "fill_row": copy.deepcopy(self._fill_row_cache),
+            "preview": copy.deepcopy(self._target_preview_map),
+            "unreachable": copy.deepcopy(self._unreachable_preview_map),
+        }
+
+        def _restore() -> None:
+            self.plans_per_option.clear()
+            self.plans_per_option.update(previous["plans"])
+            self._stock_rows_cache = previous["stock_rows"]
+            self._fill_row_cache = previous["fill_row"]
+            self._target_preview_map = previous["preview"]
+            self._unreachable_preview_map = previous["unreachable"]
+
+        try:
+            validated_stock_rows: List[Dict[str, Any]] = []
+            final_volume = float(
+                self.metadata.get(
+                    "final_reaction_volume_nL",
+                    self.metadata.get("target_reaction_volume_nL", 2000.0),
+                )
+            )
+            for key, option in expected_options.items():
+                self._optimization_checkpoint()
+                plan = plans[key]
+                stocks = list(plan.get("stocks") or [])
+                n_stocks = int(plan.get("n_stocks", len(stocks)))
+                if n_stocks not in (1, 2) or len(stocks) != n_stocks:
+                    raise ValueError(f"Invalid reusable stock count for {key!r}.")
+                forced = getattr(option, "forced_stock_conc", None)
+                maximum = getattr(option, "max_stock_conc", None)
+                if forced not in (None, 0.0) and (
+                    n_stocks != 1
+                    or not math.isclose(
+                        float(stocks[0]["stock_concentration"]),
+                        float(forced),
+                        rel_tol=1e-9,
+                        abs_tol=1e-9,
+                    )
+                ):
+                    raise ValueError(f"Reusable plan violates fixed stock for {key!r}.")
+                for stock in stocks:
+                    concentration = float(stock["stock_concentration"])
+                    droplet_volume = float(stock["droplet_volume_nL"])
+                    delta_per_drop = float(stock["delta_per_drop"])
+                    if (
+                        not math.isfinite(concentration)
+                        or concentration <= 0.0
+                        or not math.isfinite(droplet_volume)
+                        or droplet_volume <= 0.0
+                        or (
+                            not allow_independent_volumes
+                            and not math.isclose(
+                                droplet_volume,
+                                float(getattr(option, "droplet_nL", 0.0)),
+                                rel_tol=1e-12,
+                                abs_tol=1e-12,
+                            )
+                        )
+                        or str(stock.get("units", "") or "")
+                        != str(getattr(option, "units", "") or "")
+                        or not math.isclose(
+                            delta_per_drop,
+                            concentration * droplet_volume / final_volume,
+                            rel_tol=1e-9,
+                            abs_tol=1e-12,
+                        )
+                    ):
+                        raise ValueError(f"Reusable plan has invalid stock for {key!r}.")
+                    if maximum is not None and concentration > float(maximum) + 1e-9:
+                        raise ValueError(f"Reusable plan exceeds max stock for {key!r}.")
+                    raw_mapping = stock.get("droplets_per_target") or {}
+                    if not isinstance(raw_mapping, Mapping):
+                        raise ValueError(
+                            f'Reusable plan has invalid target mappings for {key!r}.'
+                        )
+                    normalized_mapping: Dict[float, int] = {}
+                    for raw_target, raw_drops in raw_mapping.items():
+                        target = float(raw_target)
+                        if not math.isfinite(target):
+                            raise ValueError(
+                                f'Reusable plan has invalid target mappings for {key!r}.'
+                            )
+                        target = self._normalize_target_key(target)
+                        if target in normalized_mapping:
+                            raise ValueError(
+                                f'Reusable plan has duplicate target mappings for {key!r}.'
+                            )
+                        if isinstance(raw_drops, bool) or not isinstance(
+                            raw_drops, (int, float)
+                        ):
+                            raise ValueError(
+                                f'Reusable plan has invalid droplets for {key!r}.'
+                            )
+                        drops = int(raw_drops)
+                        if (
+                            not math.isfinite(float(raw_drops))
+                            or drops < 0
+                            or float(raw_drops) != float(drops)
+                        ):
+                            raise ValueError(
+                                f"Reusable plan has invalid droplets for {key!r}."
+                            )
+                        normalized_mapping[target] = drops
+                    stock['droplets_per_target'] = normalized_mapping
+                    validated_row = self._build_stock_row(
+                        factor_name=key[0],
+                        option_name=key[1] or "",
+                        stock_concentration=concentration,
+                        delta_per_drop=delta_per_drop,
+                        units=str(stock.get("units", "") or ""),
+                        droplet_volume_nL=droplet_volume,
+                    )
+                    persisted_rows = [
+                        row
+                        for row in stock_rows
+                        if str(row.get("factor_name") or "") == str(key[0])
+                        and (str(row.get("option_name") or "") or None) == (key[1] or None)
+                        and str(row.get("units") or "") == str(stock.get("units", "") or "")
+                        and math.isclose(
+                            float(row.get("stock_concentration")),
+                            concentration,
+                            rel_tol=0.0,
+                            abs_tol=1e-12,
+                        )
+                    ]
+                    if len(persisted_rows) != 1:
+                        raise ValueError(
+                            f"Reusable stock identity is ambiguous for {key!r}."
+                        )
+                    persisted_row = persisted_rows[0]
+                    validated_row["printing_mode"] = normalize_printing_mode(
+                        persisted_row.get("printing_mode"),
+                        fallback=validated_row.get("printing_mode"),
+                    )
+                    persisted_volume = validate_ejection_volume_for_mode(
+                        float(persisted_row.get('droplet_volume_nL')),
+                        validated_row['printing_mode'],
+                        label='Persisted stock ejection volume',
+                    )
+                    persisted_delta = float(persisted_row.get('delta_per_drop'))
+                    if (
+                        not math.isfinite(persisted_delta)
+                        or not math.isclose(
+                            persisted_volume,
+                            droplet_volume,
+                            rel_tol=1e-12,
+                            abs_tol=1e-12,
+                        )
+                        or not math.isclose(
+                            persisted_delta,
+                            delta_per_drop,
+                            rel_tol=1e-9,
+                            abs_tol=1e-12,
+                        )
+                    ):
+                        raise ValueError(
+                            f'Reusable stock identity row does not match its '
+                            f'plan for {key!r}.'
+                        )
+                    droplet_volume = validate_ejection_volume_for_mode(
+                        droplet_volume,
+                        validated_row['printing_mode'],
+                        label='Reusable stock ejection volume',
+                    )
+                    stock['droplet_volume_nL'] = droplet_volume
+                    validated_row['droplet_volume_nL'] = droplet_volume
+                    stock["printing_mode"] = validated_row["printing_mode"]
+                    validated_stock_rows.append(validated_row)
+
+            if len(validated_stock_rows) != len(stock_rows):
+                raise ValueError(
+                    'Reusable stock plan has unmatched stock identity rows.'
+                )
+            self.plans_per_option.clear()
+            self.plans_per_option.update(plans)
+            self._stock_rows_cache = validated_stock_rows
+            self._fill_row_cache = None
+            self._refresh_plan_preview_maps()
+            for key, option in expected_options.items():
+                self._optimization_checkpoint()
+                rows = self._target_preview_map.get(key) or []
+                targets = self._effective_targets_for_key(key, option)
+                if len(rows) != len(targets) or any(
+                    not bool(row.get("reachable")) for row in rows
+                ):
+                    raise ValueError(f"Reusable plan cannot reach every target for {key!r}.")
+                plan = self.plans_per_option[key]
+                starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+                expected_target_keys = {
+                    self._normalize_target_key(
+                        max(0.0, float(target) - starting)
+                    )
+                    for target in targets
+                }
+                for stock in plan.get("stocks") or []:
+                    if set(stock.get("droplets_per_target") or {}) != (
+                        expected_target_keys
+                    ):
+                        raise ValueError(
+                            f'Reusable plan does not have exact target mappings '
+                            f'for {key!r}.'
+                        )
+                for target, preview in zip(targets, rows):
+                    self._optimization_checkpoint()
+                    adjusted = self._normalize_target_key(
+                        max(0.0, float(target) - starting)
+                    )
+                    # Single-stock previews round afresh; generation consumes
+                    # the stored mapping. Both must describe the same dispense.
+                    if plan.get("n_stocks", 1) == 1 and (
+                        plan["stocks"][0]["droplets_per_target"][adjusted]
+                        != preview["droplets"]
+                    ):
+                        raise ValueError(
+                            f"Reusable single-stock counts disagree with the "
+                            f"achieved-concentration preview for {key!r}, target {target!r}."
+                        )
+                    for stock in plan.get("stocks") or []:
+                        matches = [
+                            int(drops)
+                            for stored_target, drops in (
+                                stock.get("droplets_per_target") or {}
+                            ).items()
+                            if self._normalize_target_key(float(stored_target))
+                            == adjusted
+                        ]
+                        if len(matches) != 1 or (
+                            adjusted > 1e-12
+                            and sum(
+                                int(value)
+                                for leg in plan.get("stocks") or []
+                                for stored_target, value in (
+                                    leg.get("droplets_per_target") or {}
+                                ).items()
+                                if self._normalize_target_key(float(stored_target))
+                                == adjusted
+                            )
+                            <= 0
+                        ):
+                            raise ValueError(
+                                f"Reusable plan is missing an explicit mapping for {key!r}."
+                            )
+
+            volume_evidence = self._current_stock_allocation_volume_evidence()
+            if reuse_context == 'import':
+                allowed = min(
+                    float(volume_evidence['final_reaction_volume_nL'])
+                    + float(volume_evidence['design_optimization_tolerance_nL']),
+                    min(
+                        float(volume_evidence['target_printed_volume_nL']),
+                        float(volume_evidence['final_reaction_volume_nL']),
+                    )
+                    + float(volume_evidence['design_optimization_tolerance_nL']),
+                )
+                if float(volume_evidence['worst_nonfill_nL']) > allowed + 1e-6:
+                    raise ValueError(
+                        'Reusable stock plan exceeds the exact row-volume limit.'
+                    )
+
+            runtime_rows = list(validated_stock_rows) + [{
+                "factor_name": str(
+                    self.metadata.get("fill_reagent_name", "Water") or "Water"
+                ),
+                "option_name": "",
+                "stock_concentration": 1.0,
+                "units": "--",
+            }]
+            runtime_ids = [stock_id_for_row(row) for row in runtime_rows]
+            if len(runtime_ids) != len(set(runtime_ids)):
+                raise ValueError("Reusable stock plan contains duplicate runtime stock IDs.")
+            if (
+                reuse_context == 'calibration'
+                and calibrated_stock_id not in runtime_ids
+            ):
+                raise ValueError(
+                    'Reusable calibrated stock identity does not match the runtime plan.'
+                )
+        except OptimizationCancelled:
+            _restore()
+            raise
+        except Exception as exc:
+            _restore()
+            return {
+                "reused": False,
+                "reason": "stock_plan_validation_failed",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+
+        result = self._current_stock_allocation_result(
+            reuse_context=reuse_context,
+            expected_fingerprint=expected_fingerprint,
+            base_result=payload.get('optimization_result'),
+            volume_evidence=volume_evidence,
+        )
+        return {
+            'reused': True,
+            'result': result,
+            'volume_warning': copy.deepcopy(volume_evidence.get('volume_warning')),
+        }
+
     def build_import_feasibility_report(
         self,
         df: "pd.DataFrame",
@@ -4930,6 +8983,8 @@ class ExperimentModel(QObject):
                 if printed_volume_tolerance_nL is not None
                 else self.metadata.get("printed_volume_tolerance_nL", 50.0)
             )
+        except OptimizationCancelled:
+            raise
         except Exception:
             printed_volume_tolerance = 0.0
         if not math.isfinite(printed_volume_tolerance) or printed_volume_tolerance < 0.0:
@@ -4959,6 +9014,8 @@ class ExperimentModel(QObject):
             stock_copy["printing_mode"] = mode
             try:
                 droplet_nL = float(stock_copy.get("droplet_nL"))
+            except OptimizationCancelled:
+                raise
             except Exception:
                 droplet_nL = printing_mode_default_ejection_volume_nl(mode)
             if not math.isfinite(droplet_nL) or droplet_nL <= 0:
@@ -4969,6 +9026,7 @@ class ExperimentModel(QObject):
         def _csv_stock_for_spec(spec: Dict[str, Any]):
             tokens = set(spec["tokens"])
             for stock in stock_candidates:
+                self._optimization_checkpoint()
                 if tokens.intersection(set(stock.get("tokens", []))):
                     matched_stock_names.add(stock["name"])
                     return _stock_with_mode_defaults(stock)
@@ -4976,9 +9034,12 @@ class ExperimentModel(QObject):
 
         def _manual_stock_for_spec(spec: Dict[str, Any], base_stock: Dict[str, Any] | None = None):
             for candidate_key, value in max_stock_map.items():
+                self._optimization_checkpoint()
                 if candidate_key == spec["name"] or self._normalize_import_token(candidate_key) in set(spec["tokens"]):
                     try:
                         stock_conc = float(value)
+                    except OptimizationCancelled:
+                        raise
                     except Exception:
                         continue
                     if stock_conc > 0 and math.isfinite(stock_conc):
@@ -5008,6 +9069,7 @@ class ExperimentModel(QObject):
         spec_by_key = {(spec["name"], None): spec for spec in parsed["reagent_specs"]}
         stocks_by_reagent: Dict[str, Dict[str, Any] | None] = {}
         for spec in parsed["reagent_specs"]:
+            self._optimization_checkpoint()
             stock = _stock_for_spec(spec)
             stocks_by_reagent[spec["name"]] = stock
             if stock is not None:
@@ -5041,6 +9103,7 @@ class ExperimentModel(QObject):
                     })
 
         for stock in stock_candidates:
+            self._optimization_checkpoint()
             if stock["name"] not in matched_stock_names and not any(
                 self._normalize_import_token(stock["name"]) == self._normalize_import_token(k)
                 for k in max_stock_map.keys()
@@ -5051,6 +9114,7 @@ class ExperimentModel(QObject):
         reagent_specs = list(parsed["reagent_specs"])
         well_ids = parsed.get("well_ids") or []
         for row_index, rxn in enumerate(parsed["reactions"]):
+            self._optimization_checkpoint()
             signature = tuple(
                 float(f"{float(rxn.get((spec['name'], None), 0.0)):.12g}")
                 for spec in reagent_specs
@@ -5079,10 +9143,12 @@ class ExperimentModel(QObject):
             row["count"] += 1
 
         for signature, row in composition_lookup.items():
+            self._optimization_checkpoint()
             total = 0.0
             missing = False
             unit_mismatch = False
             for idx, spec in enumerate(reagent_specs):
+                self._optimization_checkpoint()
                 target = float(signature[idx])
                 stock = stocks_by_reagent.get(spec["name"])
                 row["targets"][spec["name"]] = target
@@ -5121,8 +9187,9 @@ class ExperimentModel(QObject):
                 row["status"] = "Near budget"
                 row["issue_codes"].append("max_stock_volume_budget_within_tolerance")
 
-        draft_stock_rows_by_name: Dict[str, Dict[str, Any]] = {}
+        draft_stock_rows_by_name: Dict[str, List[Dict[str, Any]]] = {}
         draft_optimizer_issues_by_reagent: Dict[str, List[Dict[str, Any]]] = {}
+        stock_allocation_reuse_payload: Optional[Dict[str, Any]] = None
 
         def _record_draft_optimizer_issue(key, issue: Dict[str, Any]):
             issue_copy = dict(issue or {})
@@ -5148,6 +9215,7 @@ class ExperimentModel(QObject):
 
         try:
             draft = ExperimentModel(prof=CURRENT_PROFILE)
+            draft._optimization_control = getattr(self, "_optimization_control", None)
             draft.set_metadata(
                 target_reaction_volume_nL=printed_volume,
                 printed_volume_tolerance_nL=printed_volume_tolerance,
@@ -5161,6 +9229,7 @@ class ExperimentModel(QObject):
                 starting_conc_default=starting_conc_default,
             )
             for factor in draft.factors:
+                self._optimization_checkpoint()
                 stock = stocks_by_reagent.get(factor.name)
                 if stock is not None and factor.options:
                     opt = factor.options[0]
@@ -5184,11 +9253,30 @@ class ExperimentModel(QObject):
             issues_by_key = res.get("issues_by_key") or {}
             if issues_by_key:
                 for key, issue_list in issues_by_key.items():
+                    self._optimization_checkpoint()
                     for issue in issue_list:
+                        self._optimization_checkpoint()
                         _record_draft_optimizer_issue(key, issue)
             if res.get("best"):
+                stock_leg_indices: Dict[str, int] = {}
                 for row in draft.get_stock_table_rows(include_fill=False):
-                    draft_stock_rows_by_name.setdefault(str(row.get("factor_name")), dict(row))
+                    self._optimization_checkpoint()
+                    factor_name = str(row.get("factor_name"))
+                    plan = draft.plans_per_option.get((factor_name, None)) or {}
+                    leg_index = stock_leg_indices.get(factor_name, 0)
+                    plan_stocks = list(plan.get("stocks") or [])
+                    if leg_index < len(plan_stocks):
+                        row = dict(row)
+                        row["droplets_per_target"] = copy.deepcopy(
+                            plan_stocks[leg_index].get("droplets_per_target") or {}
+                        )
+                    stock_leg_indices[factor_name] = leg_index + 1
+                    draft_stock_rows_by_name.setdefault(
+                        factor_name, []
+                    ).append(dict(row))
+                stock_allocation_reuse_payload = (
+                    draft.export_stock_allocation_reuse_payload(res)
+                )
             else:
                 if not issues_by_key and res.get("reason"):
                     issues.append({
@@ -5197,10 +9285,15 @@ class ExperimentModel(QObject):
                         "code": "draft_optimizer_failed",
                         "message": str(res.get("reason")),
                     })
+        except OptimizationCancelled:
+            raise
         except Exception:
             draft_stock_rows_by_name = {}
+            stock_allocation_reuse_payload = None
 
+        self._optimization_checkpoint("Preparing report")
         for issue in issues:
+            self._optimization_checkpoint()
             if issue.get("field") != "volume_budget":
                 continue
             code = str(issue.get("code") or "")
@@ -5208,6 +9301,7 @@ class ExperimentModel(QObject):
             if row_index is None:
                 continue
             for row in composition_lookup.values():
+                self._optimization_checkpoint()
                 if int(row_index) not in set(int(idx) for idx in row.get("row_indices", [])):
                     continue
                 if "selected_plan_required_volume_nL" not in row and issue.get("required_volume_nL") is not None:
@@ -5237,6 +9331,7 @@ class ExperimentModel(QObject):
 
         stock_rows: List[Dict[str, Any]] = []
         for spec in reagent_specs:
+            self._optimization_checkpoint()
             targets = sorted(set(float(t) for t in spec.get("targets", [])))
             positives = [t for t in targets if t > 1e-12]
             diffs = [
@@ -5256,7 +9351,8 @@ class ExperimentModel(QObject):
                 if stock is not None and stock.get("droplet_nL") is not None
                 else float(spec.get("droplet_nL", droplet_nL_default))
             )
-            ideal_row = draft_stock_rows_by_name.get(spec["name"], {})
+            ideal_rows = list(draft_stock_rows_by_name.get(spec["name"], []))
+            ideal_row = ideal_rows[0] if ideal_rows else {}
             ideal_stock = ideal_row.get("stock_concentration")
             if ideal_stock is None and max_stock is not None:
                 ideal_stock = max_stock
@@ -5264,6 +9360,8 @@ class ExperimentModel(QObject):
             if ideal_stock is not None:
                 try:
                     delta_per_drop = float(ideal_stock) * float(droplet_nL) / final_volume
+                except OptimizationCancelled:
+                    raise
                 except Exception:
                     delta_per_drop = None
             worst_volume = None
@@ -5315,7 +9413,7 @@ class ExperimentModel(QObject):
                 status = "Resolution warning"
                 recommendation = "Use a lower stock concentration or accept rounding error."
 
-            stock_rows.append({
+            base_stock_row = {
                 "reagent": spec["name"],
                 "units": spec["units"],
                 "max_stock_conc": max_stock,
@@ -5333,7 +9431,32 @@ class ExperimentModel(QObject):
                 "smallest_useful_target_step": smallest_step,
                 "status": status,
                 "recommendation": recommendation,
-            })
+            }
+            preview_legs = ideal_rows or [ideal_row]
+            for leg_index, leg_row in enumerate(preview_legs):
+                self._optimization_checkpoint()
+                stock_row = dict(base_stock_row)
+                leg_stock = leg_row.get("stock_concentration", ideal_stock)
+                leg_delta = leg_row.get("delta_per_drop")
+                if leg_delta is None and leg_stock is not None:
+                    leg_delta = (
+                        float(leg_stock) * float(droplet_nL) / final_volume
+                    )
+                stock_row.update({
+                    "ideal_stock_conc": leg_stock,
+                    "delta_per_drop": leg_delta,
+                    "droplets_per_target": copy.deepcopy(
+                        leg_row.get("droplets_per_target") or {}
+                    ),
+                    "stock_leg_index": int(leg_index),
+                    "stock_leg_count": int(len(preview_legs)),
+                    "stock_leg_label": (
+                        f"Stock {leg_index + 1} of {len(preview_legs)}"
+                        if len(preview_legs) > 1
+                        else "Stock 1 of 1"
+                    ),
+                })
+                stock_rows.append(stock_row)
 
         return {
             "ok": not any(issue.get("severity") == "error" for issue in issues),
@@ -5344,6 +9467,12 @@ class ExperimentModel(QObject):
             "reagent_specs": reagent_specs,
             "composition_rows": list(composition_lookup.values()),
             "stock_rows": stock_rows,
+            "stock_allocation_input_fingerprint": (
+                stock_allocation_reuse_payload.get("input_fingerprint")
+                if stock_allocation_reuse_payload is not None
+                else None
+            ),
+            "stock_allocation_reuse_payload": stock_allocation_reuse_payload,
             "issues": issues,
             "missing_stock_rows": [row for row in stock_rows if row["status"] == "Missing max stock"],
             "unmatched_stock_rows": unmatched_stock_rows,
@@ -5378,6 +9507,12 @@ class ExperimentModel(QObject):
         self._clear_design_derived_state()
         self.stock_prep_state = self._default_stock_prep_state()
         self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(None)
+        self.calibration_volume_warning_audits = self._normalize_calibration_volume_warning_audits(None)
+        self.calibrated_stock_allocation = self._normalize_calibrated_stock_allocation(None)
+        self.calibrated_stock_allocation_status = {
+            "active": False,
+            "reason": "not_configured",
+        }
         self.manual_refuel_checks = self._normalize_manual_refuel_checks(None)
         self.unsaved_changes = True
         self.stock_updated.emit()
@@ -5427,6 +9562,7 @@ class ExperimentModel(QObject):
         # -------- 1) Parse reagent columns → (name, units) --------
         col_specs: list[tuple[str, str, str]] = []   # (col_name, reagent_name, units)
         for col in df_in.columns:
+            self._optimization_checkpoint()
             raw = str(col).strip()
             if not raw:
                 continue
@@ -5480,6 +9616,7 @@ class ExperimentModel(QObject):
         for col_name, reagent_name, _units in col_specs:
             vals: list[float] = []
             for v in df_in[col_name].tolist():
+                self._optimization_checkpoint()
                 if v is None or (isinstance(v, float) and pd.isna(v)):
                     vals.append(0.0)
                 else:
@@ -5503,6 +9640,7 @@ class ExperimentModel(QObject):
         uploaded_reactions: list[dict[tuple[str, Optional[str]], float]] = []
 
         for i in range(n_rows):
+            self._optimization_checkpoint()
             rxn: dict[tuple[str, Optional[str]], float] = {}
             for reagent_name, vals in col_values.items():
                 v = float(vals[i]) if i < len(vals) else 0.0
@@ -5522,7 +9660,7 @@ class ExperimentModel(QObject):
         self._reactions_df = pd.DataFrame()
         self._last_worst_nonfill_volume_nL = None
         self.stock_updated.emit()
-    
+
     def has_explicit_well_assignments(self) -> bool:
         """
         True if the uploaded design included a well column with at least one
@@ -5557,12 +9695,29 @@ class ExperimentModel(QObject):
             return max(1, legacy_reps)
         return max(0, reps)
 
+    def _iter_unique_reaction_constraint_specs(self):
+        """Yield each distinct volume constraint once, independent of replicates."""
+        for reaction_index, reaction in enumerate(self._enumerate_reactions()):
+            yield {
+                "reaction": reaction,
+                "design_source": "base",
+                "reaction_index": reaction_index,
+            }
+        for condition_index, condition in enumerate(self.additional_conditions):
+            yield {
+                "reaction": condition.targets,
+                "design_source": "additional_condition",
+                "reaction_index": condition_index,
+            }
+
     def _iter_reaction_run_specs(self):
         base_reactions = self._enumerate_reactions()
         base_reps = self._metadata_replicate_count()
 
         for replicate_index in range(base_reps):
+            self._optimization_checkpoint()
             for reaction_index, reaction in enumerate(base_reactions):
+                self._optimization_checkpoint()
                 yield {
                     "reaction": dict(reaction),
                     "design_source": "base",
@@ -5572,12 +9727,16 @@ class ExperimentModel(QObject):
                 }
 
         for condition_index, condition in enumerate(self.additional_conditions):
+            self._optimization_checkpoint()
             try:
                 condition_reps = int(condition.replicates)
+            except OptimizationCancelled:
+                raise
             except Exception:
                 condition_reps = 1
             condition_reps = max(1, condition_reps)
             for replicate_index in range(condition_reps):
+                self._optimization_checkpoint()
                 yield {
                     "reaction": dict(condition.targets),
                     "design_source": "additional_condition",
@@ -5594,24 +9753,27 @@ class ExperimentModel(QObject):
         fill_dv = float(self.metadata.get("fill_droplet_volume_nL", self._default_fill_droplet_volume_nl()))
 
         run_specs = list(self._iter_reaction_run_specs())
+        self._optimization_activity("reactions generated", completed=0, total=len(run_specs))
         if not run_specs:
             self._reactions_df = pd.DataFrame()
             self._last_worst_nonfill_volume_nL = 0.0
-            self.experiment_generated.emit(0, 0.0)
+            if not getattr(self, "_mutable_calibration_stage_active", False):
+                self.experiment_generated.emit(0, 0.0)
             return
 
         rows = []
-        issues = []
         worst_nonfill = 0.0
 
         # Map (factor, option_or_None) -> starting_conc and units
         start_lookup: Dict[Tuple[str, Optional[str]], Tuple[float, str]] = {}
         for f in self.factors:
+            self._optimization_checkpoint()
             if f.kind == "additive":
                 o = f.options[0]
                 start_lookup[(f.name, None)] = (float(getattr(o, "starting_conc", 0.0) or 0.0), o.units)
             else:
                 for o in f.options:
+                    self._optimization_checkpoint()
                     start_lookup[(f.name, o.name)] = (float(getattr(o, "starting_conc", 0.0) or 0.0), o.units)
 
         # Per-stock totals and per-reaction maxima
@@ -5622,6 +9784,7 @@ class ExperimentModel(QObject):
         fill_total_drops = 0
 
         for global_index, run_spec in enumerate(run_specs):
+            self._optimization_checkpoint()
             rxn = run_spec["reaction"]
             used_nL = 0.0
 
@@ -5629,9 +9792,13 @@ class ExperimentModel(QObject):
             per_rxn_drops: Dict[Tuple[str, str, float], int] = {}
 
             for key, target in rxn.items():
+                self._optimization_checkpoint()
                 plan = self.plans_per_option.get(key)
                 if plan is None:
-                    continue
+                    raise ValueError(
+                        f"No stock plan exists for {self._design_key_label(key)} "
+                        f"at target {float(target):.6g}."
+                    )
 
                 n_stocks = plan["n_stocks"]
                 if n_stocks == 1:
@@ -5639,28 +9806,35 @@ class ExperimentModel(QObject):
                     # k = int(st["droplets_per_target"].get(float(target), 0))
                     s, _u = start_lookup.get(key, (0.0, ""))   # key is (factor, option_or_None)
                     t_add = max(0.0, float(target) - float(s))
-                    k, mk, unreachable, nearest = self._resolve_drops_for_target(st, t_add)
+                    k, _, unreachable, _ = self._resolve_drops_for_target(st, t_add)
+                    if unreachable:
+                        raise ValueError(
+                            f"No reachable droplet mapping exists for "
+                            f"{self._design_key_label(key)} at target "
+                            f"{float(target):.6g}."
+                        )
                     used_nL += k * st["droplet_volume_nL"]
                     tot_key = (key[0], key[1] or "", st["stock_concentration"])
                     stock_totals[tot_key] = stock_totals.get(tot_key, 0) + k
                     per_rxn_drops[tot_key] = per_rxn_drops.get(tot_key, 0) + k
                     stock_drop_vol_nL[tot_key] = float(st["droplet_volume_nL"])
-                    if unreachable:
-                        issues.append({
-                            "where": key,  # (factor, option or None)
-                            "target": float(target),
-                            "stock_concentration": float(st["stock_concentration"]),
-                            "units": st.get("units", ""),
-                            "suggested_nearest": float(nearest) if nearest is not None else None,
-                        })
                 else:
                     st1, st2 = plan["stocks"]
                     s, _u = start_lookup.get(key, (0.0, ""))   # key is (factor, option_or_None)
                     t_add = max(0.0, float(target) - float(s))
-                    k1, mk1, un1, nearest1 = self._resolve_drops_for_target(st1, t_add)
-                    k2, mk2, un2, nearest2 = self._resolve_drops_for_target(st2, t_add)
+                    k1, _, un1, _ = self._resolve_drops_for_target(st1, t_add)
+                    k2, _, un2, _ = self._resolve_drops_for_target(st2, t_add)
+                    if un1 or un2:
+                        raise ValueError(
+                            f"No reachable two-stock droplet mapping exists for "
+                            f"{self._design_key_label(key)} at target "
+                            f"{float(target):.6g}."
+                        )
 
-                    used_nL += (k1 + k2) * st1["droplet_volume_nL"]  # same dv for both legs
+                    used_nL += (
+                        k1 * float(st1["droplet_volume_nL"])
+                        + k2 * float(st2["droplet_volume_nL"])
+                    )
                     tot_key1 = (key[0], key[1] or "", st1["stock_concentration"])
                     tot_key2 = (key[0], key[1] or "", st2["stock_concentration"])
                     stock_totals[tot_key1] = stock_totals.get(tot_key1, 0) + k1
@@ -5669,25 +9843,36 @@ class ExperimentModel(QObject):
                     per_rxn_drops[tot_key2] = per_rxn_drops.get(tot_key2, 0) + k2
                     stock_drop_vol_nL[tot_key1] = float(st1["droplet_volume_nL"])
                     stock_drop_vol_nL[tot_key2] = float(st2["droplet_volume_nL"])
-                    if (un1 and abs(float(target)) > 1e-12) or (un2 and abs(float(target)) > 1e-12):
-                        issues.append({
-                            "where": key,
-                            "target": float(target),
-                            "stock_concentration": (float(st1["stock_concentration"]), float(st2["stock_concentration"])),
-                            "units": st1.get("units", ""),
-                            "suggested_nearest": (float(nearest1) if nearest1 is not None else None,
-                                                float(nearest2) if nearest2 is not None else None),
-                        })
 
             # update per-stock per-reaction maxima
             for k, drops in per_rxn_drops.items():
+                self._optimization_checkpoint()
                 stock_max_per_rxn_drops[k] = max(stock_max_per_rxn_drops.get(k, 0), drops)
 
             worst_nonfill = max(worst_nonfill, used_nL)
 
             # fill reagent for this reaction
-            remaining_nL = max(0.0, V - used_nL)
-            fill_drops = int(round(remaining_nL / fill_dv))
+            if "intended_fill_droplet_volume_nL" in self.metadata:
+                # An applied fill calibration is authoritative measured-volume
+                # evidence. Preserve ordinary nearest-drop quantization across
+                # regeneration and reload; its volume threshold is warning-only.
+                remaining_fill_volume = max(0.0, V - used_nL)
+                fill_drops = max(0, int(round(remaining_fill_volume / fill_dv)))
+            else:
+                printed_tolerance = float(
+                    self.metadata.get("printed_volume_tolerance_nL", 0.0) or 0.0
+                )
+                accepted_volume = min(
+                    float(self.metadata.get("final_reaction_volume_nL", V))
+                    + printed_tolerance,
+                    V + printed_tolerance,
+                )
+                fill_drops = self._bounded_fill_count(
+                    target_printed_volume_nL=V,
+                    accepted_volume_nL=accepted_volume,
+                    nonfill_volume_nL=used_nL,
+                    fill_volume_nL=fill_dv,
+                )
             fill_total_drops += fill_drops
 
             rows.append({
@@ -5699,10 +9884,14 @@ class ExperimentModel(QObject):
                 "design_source": str(run_spec["design_source"]),
                 "additional_condition_label": str(run_spec["additional_condition_label"]),
             })
+            self._optimization_activity(
+                "reactions generated", completed=global_index + 1, total=len(run_specs)
+            )
 
         # Build stock rows cache (with totals AND per-reaction max volume)
         stock_table = []
         for row in self._stock_rows_cache:
+            self._optimization_checkpoint()
             tot_key = (row["factor_name"], row["option_name"], row["stock_concentration"])
             drops = stock_totals.get(tot_key, 0)
             dv_nL = float(row["droplet_volume_nL"])
@@ -5739,10 +9928,8 @@ class ExperimentModel(QObject):
         }
         self._reactions_df = pd.DataFrame(rows)
         self._last_worst_nonfill_volume_nL = worst_nonfill
-        if issues:
-            # Fire a signal so the UI can pop a warning dialog/banner.
-            self.targets_unreachable.emit(issues)
-        self.experiment_generated.emit(len(run_specs), float(worst_nonfill))
+        if not getattr(self, "_mutable_calibration_stage_active", False):
+            self.experiment_generated.emit(len(run_specs), float(worst_nonfill))
 
     def find_option_by_reagent_name(self, reagent_name: str) -> tuple[tuple[str, Optional[str]], OptionSpec] | None:
         """
@@ -5858,6 +10045,7 @@ class ExperimentModel(QObject):
                     "stock_concentration": float(stock.concentration),
                     "droplet_volume_nL": float(stock.effective_volume_nL),
                     "units": stock.units,
+                    "printing_mode": stock.printing_mode,
                     "quantum": 0.1,
                     "droplets_per_target": droplets_per_target,
                 }
@@ -5883,7 +10071,16 @@ class ExperimentModel(QObject):
         return self.plans_per_option.get(key)
 
 
-    def _nearest_two_stock(self, t_add: float, d1: float, d2: float) -> tuple[int, int, float]:
+    def _nearest_two_stock(
+        self,
+        t_add: float,
+        d1: float,
+        d2: float,
+        *,
+        max_total_drops: Optional[int] = None,
+        deadline_reached: Optional[Callable[[], bool]] = None,
+        diagnostics: Optional[Dict[str, Any]] = None,
+    ) -> tuple[int, int, float]:
         """
         Solve min |a*d1 + b*d2 - t_add| over nonnegative ints (a,b) with a simple bounded search.
         Returns (a,b, err). Bound a to reasonable limit to keep fast.
@@ -5891,16 +10088,976 @@ class ExperimentModel(QObject):
         if d1 <= 0 or d2 <= 0:
             return (0, 0, abs(t_add))
         a_max = int(round(t_add / d1)) + 6  # small slack
+        total_limit = None
+        if max_total_drops is not None:
+            total_limit = max(0, int(max_total_drops))
+            a_max = min(a_max, total_limit)
         best = (0, 0, float("inf"))
         for a in range(max(0, a_max + 1)):
+            if deadline_reached is not None and deadline_reached():
+                raise _StockAllocationDeadlineReached
+            if diagnostics is not None:
+                diagnostics["two_stock_solver_iterations"] = int(
+                    diagnostics.get("two_stock_solver_iterations", 0)
+                ) + 1
             rem = t_add - a * d1
-            b = 0 if rem <= 0 else int(round(rem / d2))
-            b = max(0, b)
-            err = abs(a * d1 + b * d2 - t_add)
-            # tie-break on smaller (a+b) to keep printed volume small
-            if (err < best[2] - 1e-12) or (abs(err - best[2]) <= 1e-12 and (a + b) < (best[0] + best[1])):
-                best = (a, b, err)
+            raw_b = 0.0 if rem <= 0 else rem / d2
+            b_limit = total_limit - a if total_limit is not None else None
+            b_candidates = {
+                max(0, int(math.floor(raw_b))),
+                max(0, int(math.ceil(raw_b))),
+                max(0, int(round(raw_b))),
+            }
+            if b_limit is not None:
+                b_candidates = {min(value, b_limit) for value in b_candidates}
+            for b in sorted(b_candidates):
+                err = abs(a * d1 + b * d2 - t_add)
+                # tie-break on smaller (a+b) to keep printed volume small
+                if (err < best[2] - 1e-12) or (abs(err - best[2]) <= 1e-12 and (a + b) < (best[0] + best[1])):
+                    best = (a, b, err)
         return best
+
+
+    def _calibration_plan_with_stock_ids(
+        self,
+        key: tuple[str, Optional[str]],
+    ) -> dict | None:
+        """Return the current option plan with exact runtime stock identities.
+
+        Optimizer plans intentionally contain only concentration/mapping data.
+        Calibration is physical-head specific, so enrich mutable plans from the
+        materialized stock rows and fail closed if a leg cannot be identified
+        uniquely.  Authoritative plans already expose their frozen stock IDs.
+        """
+        plan = self.get_calibration_application_plan_for_key(key)
+        if not plan:
+            return None
+        result = copy.deepcopy(plan)
+        stocks = list(result.get("stocks") or [])
+        if int(result.get("n_stocks", len(stocks))) != len(stocks):
+            return None
+        if result.get("source") == "authoritative_execution_plan":
+            stock_ids = [str(stock.get("stock_id") or "") for stock in stocks]
+            if any(not stock_id for stock_id in stock_ids) or len(set(stock_ids)) != len(stock_ids):
+                return None
+            return result
+
+        factor_name, option_name = key
+        matching_rows = [
+            dict(row)
+            for row in self._stock_rows_cache
+            if str(row.get("factor_name") or "") == str(factor_name)
+            and (str(row.get("option_name") or "") or None) == (option_name or None)
+        ]
+        used_rows: set[int] = set()
+        for stock in stocks:
+            concentration = float(stock.get("stock_concentration"))
+            units = str(stock.get("units") or "")
+            matches = [
+                (index, row)
+                for index, row in enumerate(matching_rows)
+                if index not in used_rows
+                and str(row.get("units") or "") == units
+                and math.isclose(
+                    float(row.get("stock_concentration")),
+                    concentration,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ]
+            if len(matches) != 1:
+                return None
+            row_index, row = matches[0]
+            used_rows.add(row_index)
+            stock["stock_id"] = self.build_stock_prep_stock_id(row)
+            stock["printing_mode"] = normalize_printing_mode(
+                row.get("printing_mode"),
+                fallback=infer_printing_mode_from_volume(
+                    stock.get("droplet_volume_nL")
+                ),
+            )
+        stock_ids = [str(stock.get("stock_id") or "") for stock in stocks]
+        if any(not stock_id for stock_id in stock_ids) or len(set(stock_ids)) != len(stock_ids):
+            return None
+        result["stocks"] = stocks
+        result["source"] = "mutable_materialized_plan"
+        return result
+
+
+    def _calibration_volume_basis(self) -> tuple[float, float, float]:
+        printed = float(self.metadata.get("target_reaction_volume_nL", 2000.0))
+        final = float(self.metadata.get("final_reaction_volume_nL", printed))
+        try:
+            tolerance = float(self.metadata.get("printed_volume_tolerance_nL", 50.0))
+        except (TypeError, ValueError):
+            tolerance = 0.0
+        if not math.isfinite(tolerance) or tolerance < 0.0:
+            tolerance = 0.0
+        warning_threshold = printed + tolerance
+        return printed, final, warning_threshold
+
+
+    def _build_calibration_volume_warning(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        target_printed_volume_nL: float,
+        design_optimization_tolerance_nL: float,
+        final_reaction_volume_nL: float,
+    ) -> dict | None:
+        """Build deterministic, non-blocking evidence for calibrated volume excess."""
+        target = float(target_printed_volume_nL)
+        tolerance = max(0.0, float(design_optimization_tolerance_nL))
+        final = float(final_reaction_volume_nL)
+        warning_threshold = target + tolerance
+        if any(
+            not math.isfinite(value)
+            for value in (target, tolerance, final, warning_threshold)
+        ):
+            raise RuntimeError("Calibration volume-warning inputs must be finite.")
+        planned_nonprinted = max(0.0, final - target)
+
+        affected_rows: list[dict[str, Any]] = []
+        for index, raw_row in enumerate(rows):
+            row = dict(raw_row)
+            total = float(row.get("total_volume_nL"))
+            if not math.isfinite(total) or total < 0.0:
+                raise RuntimeError(
+                    "Calibrated reaction totals must be finite and nonnegative."
+                )
+            if total <= warning_threshold + 1e-9:
+                continue
+            excess = total - warning_threshold
+            projected_final = planned_nonprinted + total
+            projected_final_excess = max(0.0, projected_final - final)
+            well_id = row.get("well_id")
+            reaction_id = row.get("reaction_id")
+            row_id = (
+                row.get("row_id")
+                or well_id
+                or reaction_id
+                or f"reaction-{index + 1}"
+            )
+            affected_rows.append(
+                {
+                    "row_id": str(row_id),
+                    "well_id": None if well_id in (None, "") else str(well_id),
+                    "reaction_id": (
+                        None if reaction_id in (None, "") else str(reaction_id)
+                    ),
+                    "total_volume_nL": total,
+                    "printed_volume_nL": total,
+                    "planned_nonprinted_volume_nL": planned_nonprinted,
+                    "projected_final_volume_nL": projected_final,
+                    "projected_final_excess_nL": projected_final_excess,
+                    "excess_nL": excess,
+                    "exceeds_final_reaction_volume": bool(
+                        projected_final > final + 1e-9
+                    ),
+                }
+            )
+
+        if not affected_rows:
+            return None
+        return {
+            "code": "calibration_volume_tolerance_exceeded",
+            "target_printed_volume_nL": target,
+            "design_optimization_tolerance_nL": tolerance,
+            "warning_threshold_nL": warning_threshold,
+            "final_reaction_volume_nL": final,
+            "affected_row_count": len(affected_rows),
+            "max_total_volume_nL": max(
+                row["total_volume_nL"] for row in affected_rows
+            ),
+            "max_excess_nL": max(row["excess_nL"] for row in affected_rows),
+            "planned_nonprinted_volume_nL": planned_nonprinted,
+            "max_projected_final_volume_nL": max(
+                row["projected_final_volume_nL"] for row in affected_rows
+            ),
+            "max_projected_final_excess_nL": max(
+                row["projected_final_excess_nL"] for row in affected_rows
+            ),
+            "affected_rows": affected_rows,
+        }
+
+
+    def _calibration_volume_warning_for_execution_counts(
+        self,
+        plan,
+        target_counts_by_well: Mapping[str, Mapping[str, int]],
+        *,
+        effective_volume_overrides_nL: Mapping[str, float] | None = None,
+    ) -> dict | None:
+        volumes = {
+            stock.stock_id: float(stock.effective_volume_nL)
+            for stock in plan.stocks
+        }
+        for stock_id, value in dict(effective_volume_overrides_nL or {}).items():
+            stock_id = str(stock_id)
+            if stock_id not in volumes:
+                raise RuntimeError(
+                    f"Calibration volume override references unknown stock {stock_id!r}."
+                )
+            volumes[stock_id] = float(value)
+
+        rows = []
+        for well in plan.wells:
+            counts = target_counts_by_well.get(well.well_id)
+            if not isinstance(counts, Mapping):
+                raise RuntimeError(
+                    f"Calibration target counts are missing well {well.well_id!r}."
+                )
+            total = 0.0
+            for stock_id, raw_count in counts.items():
+                if stock_id not in volumes:
+                    raise RuntimeError(
+                        f"Calibration target counts reference unknown stock {stock_id!r}."
+                    )
+                if (
+                    isinstance(raw_count, bool)
+                    or int(raw_count) != raw_count
+                    or int(raw_count) < 0
+                ):
+                    raise RuntimeError(
+                        "Calibrated target counts must be nonnegative integers."
+                    )
+                total += int(raw_count) * volumes[stock_id]
+            rows.append(
+                {
+                    "row_id": well.well_id,
+                    "well_id": well.well_id,
+                    "reaction_id": well.reaction_id,
+                    "total_volume_nL": total,
+                }
+            )
+        return self._build_calibration_volume_warning(
+            rows,
+            target_printed_volume_nL=plan.volume_basis.target_printed_volume_nL,
+            design_optimization_tolerance_nL=(
+                plan.volume_basis.design_optimization_tolerance_nL
+            ),
+            final_reaction_volume_nL=plan.volume_basis.final_reaction_volume_nL,
+        )
+
+
+    def _calibration_volume_warning_for_execution_plan(self, plan) -> dict | None:
+        target_counts = {
+            well.well_id: {
+                dispense.stock_id: int(dispense.target_dispenses)
+                for dispense in well.dispenses
+            }
+            for well in plan.wells
+        }
+        return self._calibration_volume_warning_for_execution_counts(
+            plan,
+            target_counts,
+        )
+
+
+    def _calibration_volume_warning_for_generated_reactions(self) -> dict | None:
+        frame = self._reactions_df
+        if frame is None or frame.empty:
+            return None
+        if (
+            "nonfill_volume_nL" not in frame.columns
+            or "fill_drops" not in frame.columns
+        ):
+            raise RuntimeError(
+                "Generated reactions do not expose calibrated volume totals."
+            )
+        printed, final, warning_threshold = self._calibration_volume_basis()
+        tolerance = warning_threshold - printed
+        fill_volume = float(
+            self.metadata.get(
+                "fill_droplet_volume_nL",
+                self._default_fill_droplet_volume_nl(),
+            )
+        )
+        rows = []
+        for index, record in enumerate(frame.to_dict("records")):
+            reaction_id = f"R{index + 1}"
+            rows.append(
+                {
+                    "row_id": reaction_id,
+                    "well_id": None,
+                    "reaction_id": reaction_id,
+                    "total_volume_nL": (
+                        float(record["nonfill_volume_nL"])
+                        + int(record["fill_drops"]) * fill_volume
+                    ),
+                }
+            )
+        return self._build_calibration_volume_warning(
+            rows,
+            target_printed_volume_nL=printed,
+            design_optimization_tolerance_nL=tolerance,
+            final_reaction_volume_nL=final,
+        )
+
+
+    def _counts_for_plan_target(
+        self,
+        key: tuple[str, Optional[str]],
+        target_final: float,
+        plan: Mapping[str, Any],
+    ) -> tuple[int, ...]:
+        option = self._get_option_for_key(key)
+        if option is None:
+            raise ValueError(f"Design contains no option for {key!r}.")
+        starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+        target_add = max(0.0, float(target_final) - starting)
+        counts: list[int] = []
+        for stock in plan.get("stocks") or []:
+            drops, _, unreachable, _ = self._resolve_drops_for_target(stock, target_add)
+            if unreachable:
+                raise ValueError(
+                    f"The current stock plan has no exact mapping for {self._design_key_label(key)} "
+                    f"at {float(target_final):.6g}."
+                )
+            counts.append(int(drops))
+        return tuple(counts)
+
+
+    def _calibration_target_volume_limits(
+        self,
+        key: tuple[str, Optional[str]],
+        *,
+        accepted_volume_nL: float,
+        excluded_stock_ids: Iterable[str] = (),
+    ) -> tuple[dict[float, float], list[dict[str, Any]]]:
+        """Return each target's tightest remaining row-volume allowance."""
+        limits: dict[float, float] = {}
+        run_rows: list[dict[str, Any]] = []
+        execution_plan = self.get_execution_plan_snapshot()
+        if (
+            execution_plan is not None
+            and self.get_execution_plan_source() != "legacy_reconstruction"
+        ):
+            excluded = {str(stock_id) for stock_id in excluded_stock_ids}
+            fill_name = self.get_fill_reagent_name()
+            stock_lookup = {
+                stock.stock_id: stock for stock in execution_plan.stocks
+            }
+            fill_ids = {
+                stock.stock_id
+                for stock in execution_plan.stocks
+                if stock.factor_name == fill_name and stock.units == "--"
+            }
+            reaction_targets = {
+                f"R{index + 1}": spec.get("reaction", {})
+                for index, spec in enumerate(self._iter_reaction_run_specs())
+            }
+            for index, well in enumerate(execution_plan.wells):
+                reaction = reaction_targets.get(well.reaction_id)
+                if not isinstance(reaction, Mapping) or key not in reaction:
+                    continue
+                other_volume = sum(
+                    int(dispense.target_dispenses)
+                    * float(stock_lookup[dispense.stock_id].effective_volume_nL)
+                    for dispense in well.dispenses
+                    if dispense.stock_id not in excluded
+                    and dispense.stock_id not in fill_ids
+                )
+                target_key = self._normalize_target_key(float(reaction[key]))
+                remaining = float(accepted_volume_nL) - other_volume
+                limits[target_key] = min(
+                    limits.get(target_key, float("inf")), remaining
+                )
+                run_rows.append(
+                    {
+                        "index": index,
+                        "well_id": well.well_id,
+                        "reaction_id": well.reaction_id,
+                        "reaction": dict(reaction),
+                        "target_key": target_key,
+                        "other_nonfill_volume_nL": float(other_volume),
+                    }
+                )
+            return limits, run_rows
+
+        for index, spec in enumerate(self._iter_reaction_run_specs()):
+            reaction = dict(spec.get("reaction") or {})
+            if key not in reaction:
+                continue
+            other_volume = 0.0
+            for other_key, other_target in reaction.items():
+                if other_key == key:
+                    continue
+                other_plan = self.plans_per_option.get(other_key)
+                if not other_plan:
+                    raise ValueError(
+                        f"No materialized stock plan exists for {self._design_key_label(other_key)}."
+                    )
+                counts = self._counts_for_plan_target(other_key, other_target, other_plan)
+                stocks = list(other_plan.get("stocks") or [])
+                other_volume += sum(
+                    int(count) * float(stock.get("droplet_volume_nL"))
+                    for count, stock in zip(counts, stocks)
+                )
+            target_key = self._normalize_target_key(float(reaction[key]))
+            remaining = float(accepted_volume_nL) - other_volume
+            limits[target_key] = min(limits.get(target_key, float("inf")), remaining)
+            run_rows.append(
+                {
+                    "index": index,
+                    "reaction": reaction,
+                    "target_key": target_key,
+                    "other_nonfill_volume_nL": float(other_volume),
+                }
+            )
+        return limits, run_rows
+
+
+    @staticmethod
+    def _calibration_pair_rank(
+        *,
+        loss: int,
+        worst_error: float,
+        error_sum: float,
+        max_volume: float,
+        volume_sum: float,
+        churn: int,
+        path: tuple[tuple[int, int], ...],
+    ) -> tuple:
+        return (
+            int(loss),
+            float(worst_error),
+            float(error_sum),
+            float(max_volume),
+            float(volume_sum),
+            int(churn),
+            tuple(path),
+        )
+
+
+    @staticmethod
+    def _bounded_fill_count(
+        *,
+        target_printed_volume_nL: float,
+        accepted_volume_nL: float,
+        nonfill_volume_nL: float,
+        fill_volume_nL: float,
+    ) -> int:
+        """Choose the nearest fill count without exceeding the hard volume limit."""
+        remaining_to_target = max(
+            0.0,
+            float(target_printed_volume_nL) - float(nonfill_volume_nL),
+        )
+        desired_count = max(
+            0,
+            int(round(remaining_to_target / float(fill_volume_nL))),
+        )
+        remaining_to_limit = max(
+            0.0,
+            float(accepted_volume_nL) - float(nonfill_volume_nL),
+        )
+        maximum_count = max(
+            0,
+            int(math.floor((remaining_to_limit + 1e-12) / float(fill_volume_nL))),
+        )
+        return min(desired_count, maximum_count)
+
+    def _calibration_fill_count(
+        self,
+        *,
+        target_printed_volume_nL: float,
+        warning_threshold_nL: float,
+        nonfill_volume_nL: float,
+        fill_volume_nL: float,
+        fill_is_calibrated: bool,
+    ) -> int:
+        if fill_is_calibrated:
+            remaining = max(
+                0.0,
+                float(target_printed_volume_nL) - float(nonfill_volume_nL),
+            )
+            return max(0, int(round(remaining / float(fill_volume_nL))))
+        return self._bounded_fill_count(
+            target_printed_volume_nL=target_printed_volume_nL,
+            accepted_volume_nL=warning_threshold_nL,
+            nonfill_volume_nL=nonfill_volume_nL,
+            fill_volume_nL=fill_volume_nL,
+        )
+
+
+    def _requantize_fixed_two_stock_group(
+        self,
+        key: tuple[str, Optional[str]],
+        *,
+        calibrated_stock_id: str,
+        new_effective_volume_nL: float,
+        new_printing_mode: str | None = None,
+        pair_evaluation_cap: int = 12000,
+    ) -> dict:
+        """Re-quantize a fixed two-stock pair with independent leg volumes.
+
+        This is deliberately pure: it returns a complete candidate mapping and
+        never mutates the design, execution plan, calibration records, or runtime.
+        """
+        plan = self._calibration_plan_with_stock_ids(key)
+        if not plan:
+            return {"ok": False, "code": "stock_identity_unavailable", "reason": "The stock plan cannot be mapped to exact stock identities."}
+        stocks = list(plan.get("stocks") or [])
+        if len(stocks) != 2:
+            return {"ok": False, "code": "not_two_stock", "reason": "The selected reagent does not use exactly two stock solutions."}
+        stock_ids = [str(stock.get("stock_id") or "") for stock in stocks]
+        if str(calibrated_stock_id or "") not in stock_ids:
+            return {"ok": False, "code": "calibrated_stock_not_in_plan", "reason": "The loaded printer-head stock is not one of this reagent's two stock solutions."}
+        calibrated_index = stock_ids.index(str(calibrated_stock_id))
+        companion_index = 1 - calibrated_index
+        try:
+            new_volume = float(new_effective_volume_nL)
+        except (TypeError, ValueError):
+            new_volume = float("nan")
+        if not math.isfinite(new_volume) or new_volume <= 0.0:
+            return {"ok": False, "code": "invalid_ejection_volume", "reason": "The measured ejection volume must be positive."}
+
+        modes = [
+            normalize_printing_mode(
+                stock.get("printing_mode"),
+                fallback=infer_printing_mode_from_volume(stock.get("droplet_volume_nL")),
+            )
+            for stock in stocks
+        ]
+        modes[calibrated_index] = normalize_printing_mode(
+            new_printing_mode,
+            fallback=modes[calibrated_index],
+        )
+        try:
+            new_volume = validate_ejection_volume_for_mode(
+                new_volume,
+                modes[calibrated_index],
+                label="Ejection volume",
+            )
+        except Exception as exc:
+            return {"ok": False, "code": "invalid_ejection_volume", "reason": str(exc)}
+
+        printed_volume, final_volume, warning_threshold = self._calibration_volume_basis()
+        if final_volume <= 0.0:
+            return {"ok": False, "code": "invalid_final_volume", "reason": "The final reaction volume must be positive."}
+        volumes = [float(stock.get("droplet_volume_nL")) for stock in stocks]
+        old_volumes = tuple(volumes)
+        volumes[calibrated_index] = new_volume
+        concentrations = [float(stock.get("stock_concentration")) for stock in stocks]
+        deltas = [concentrations[index] * volumes[index] / final_volume for index in range(2)]
+        if any(not math.isfinite(value) or value <= 0.0 for value in deltas + volumes):
+            return {"ok": False, "code": "invalid_stock_plan", "reason": "The stock concentrations and ejection volumes must produce positive concentration increments."}
+
+        option = self._get_option_for_key(key)
+        if option is None:
+            return {"ok": False, "code": "missing_design_option", "reason": "The reagent is absent from the current design."}
+        starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+        units = str(getattr(option, "units", "") or stocks[0].get("units") or "")
+        execution_plan = self.get_execution_plan_snapshot()
+        authoritative_execution = bool(
+            execution_plan is not None
+            and self.get_execution_plan_source() != "legacy_reconstruction"
+        )
+
+        try:
+            _target_limits, run_rows = self._calibration_target_volume_limits(
+                key,
+                accepted_volume_nL=warning_threshold,
+                excluded_stock_ids=stock_ids,
+            )
+        except Exception as exc:
+            return {"ok": False, "code": "row_context_invalid", "reason": str(exc)}
+
+        if authoritative_execution:
+            target_values = {
+                float(row["reaction"][key])
+                for row in run_rows
+                if isinstance(row.get("reaction"), Mapping)
+                and key in row["reaction"]
+            }
+        else:
+            target_values = {
+                float(target) for target in self.get_targets_for_key(key)
+            }
+            for spec in self._iter_reaction_run_specs():
+                reaction = spec.get("reaction") or {}
+                if key in reaction:
+                    target_values.add(float(reaction[key]))
+        ordered_targets = sorted(target_values)
+        if not ordered_targets:
+            return {
+                "ok": False,
+                "code": "missing_targets",
+                "reason": "The reagent has no requested execution targets.",
+            }
+
+        if (
+            authoritative_execution
+        ):
+            fill_candidates = [
+                stock
+                for stock in execution_plan.stocks
+                if stock.factor_name == self.get_fill_reagent_name()
+                and stock.units == "--"
+            ]
+            if len(fill_candidates) > 1:
+                return {
+                    "ok": False,
+                    "code": "invalid_fill_identity",
+                    "reason": "The execution plan contains more than one fill stock.",
+                }
+            fill_available = bool(fill_candidates)
+            fill_volume = (
+                float(fill_candidates[0].effective_volume_nL)
+                if fill_candidates
+                else float(self._default_fill_droplet_volume_nl())
+            )
+            fill_is_calibrated = bool(
+                fill_candidates and fill_candidates[0].calibration_record_key
+            )
+        else:
+            fill_available = True
+            fill_volume = float(
+                self.metadata.get(
+                    "fill_droplet_volume_nL",
+                    self._default_fill_droplet_volume_nl(),
+                )
+            )
+            fill_is_calibrated = bool(
+                "intended_fill_droplet_volume_nL" in self.metadata
+            )
+        if not math.isfinite(fill_volume) or fill_volume <= 0.0:
+            return {
+                "ok": False,
+                "code": "invalid_fill_volume",
+                "reason": "The fill ejection volume must be positive.",
+            }
+
+        rows_by_target: dict[float, list[dict[str, Any]]] = {}
+        for run_row in run_rows:
+            rows_by_target.setdefault(run_row["target_key"], []).append(run_row)
+
+        def _pair_has_available_fill(target_key: float, pair_volume: float) -> bool:
+            for run_row in rows_by_target.get(target_key, []):
+                nonfill = float(run_row["other_nonfill_volume_nL"]) + pair_volume
+                fill_count = self._calibration_fill_count(
+                    target_printed_volume_nL=printed_volume,
+                    warning_threshold_nL=warning_threshold,
+                    nonfill_volume_nL=nonfill,
+                    fill_volume_nL=fill_volume,
+                    fill_is_calibrated=fill_is_calibrated,
+                )
+                if not fill_available and fill_count > 0:
+                    return False
+            return True
+
+        pair_evaluations = 0
+        candidates_by_target: list[list[dict[str, Any]]] = []
+        current_rows: list[dict[str, Any]] = []
+        tolerance = 0.5 * min(deltas) + 1e-12
+        for target_final in ordered_targets:
+            target_key = self._normalize_target_key(target_final)
+            target_add = max(0.0, float(target_final) - starting)
+            try:
+                current_counts = self._counts_for_plan_target(
+                    key,
+                    target_final,
+                    plan,
+                )
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "code": "invalid_stock_plan",
+                    "reason": str(exc),
+                }
+            current_achieved = sum(
+                int(count) * concentrations[index] * old_volumes[index] / final_volume
+                for index, count in enumerate(current_counts)
+            )
+            current_rows.append(
+                {
+                    "target_final": float(target_final),
+                    "achieved_adjusted": float(current_achieved),
+                    "counts": tuple(int(value) for value in current_counts),
+                }
+            )
+
+            if target_add <= 1e-12:
+                candidates_by_target.append([
+                    {
+                        "counts": (0, 0),
+                        "achieved_adjusted": 0.0,
+                        "achieved_key": self._normalize_target_key(0.0),
+                        "abs_error": 0.0,
+                        "printed_volume_nL": 0.0,
+                        "churn": sum(abs(int(value)) for value in current_counts),
+                    }
+                ])
+                continue
+
+            concentration_limit = target_add + tolerance
+            a_max = max(
+                0,
+                int(math.floor((concentration_limit + 1e-12) / deltas[0])),
+            )
+            by_achieved: dict[float, dict[str, Any]] = {}
+            capped = False
+            for a in range(a_max + 1):
+                remaining_concentration = concentration_limit - a * deltas[0]
+                if remaining_concentration < -1e-9:
+                    continue
+                b_max = max(
+                    0,
+                    int(
+                        math.floor(
+                            (remaining_concentration + 1e-12) / deltas[1]
+                        )
+                    ),
+                )
+                raw_b = (target_add - a * deltas[0]) / deltas[1]
+                b_values = {
+                    0,
+                    b_max,
+                    max(0, min(b_max, int(math.floor(raw_b)))),
+                    max(0, min(b_max, int(math.ceil(raw_b)))),
+                    max(0, min(b_max, int(round(raw_b)))),
+                }
+                for base in tuple(b_values):
+                    b_values.add(max(0, min(b_max, base - 1)))
+                    b_values.add(max(0, min(b_max, base + 1)))
+                for b in sorted(b_values):
+                    pair_evaluations += 1
+                    if pair_evaluations > int(pair_evaluation_cap):
+                        capped = True
+                        break
+                    if a + b <= 0:
+                        continue
+                    achieved = a * deltas[0] + b * deltas[1]
+                    error = abs(achieved - target_add)
+                    if error > tolerance:
+                        continue
+                    pair_volume = a * volumes[0] + b * volumes[1]
+                    if not _pair_has_available_fill(target_key, pair_volume):
+                        continue
+                    candidate = {
+                        "counts": (int(a), int(b)),
+                        "achieved_adjusted": float(achieved),
+                        "achieved_key": self._normalize_target_key(achieved),
+                        "abs_error": float(error),
+                        "printed_volume_nL": float(pair_volume),
+                        "churn": abs(int(a) - int(current_counts[0])) + abs(int(b) - int(current_counts[1])),
+                    }
+                    achieved_key = candidate["achieved_key"]
+                    incumbent = by_achieved.get(achieved_key)
+                    candidate_rank = (
+                        candidate["abs_error"],
+                        candidate["printed_volume_nL"],
+                        candidate["churn"],
+                        candidate["counts"],
+                    )
+                    incumbent_rank = (
+                        incumbent["abs_error"],
+                        incumbent["printed_volume_nL"],
+                        incumbent["churn"],
+                        incumbent["counts"],
+                    ) if incumbent is not None else None
+                    if incumbent_rank is None or candidate_rank < incumbent_rank:
+                        by_achieved[achieved_key] = candidate
+                if capped:
+                    break
+            if capped:
+                return {
+                    "ok": False,
+                    "code": "pair_evaluation_cap",
+                    "reason": "The bounded two-stock calibration search reached its pair-evaluation cap; no changes were applied.",
+                    "pair_evaluations": pair_evaluations,
+                }
+            candidates = sorted(
+                by_achieved.values(),
+                key=lambda row: (
+                    row["abs_error"],
+                    row["printed_volume_nL"],
+                    row["churn"],
+                    row["counts"],
+                ),
+            )[:64]
+            if not candidates:
+                return {
+                    "ok": False,
+                    "code": "unreachable_target",
+                    "reason": f"No reachable two-stock mapping remains for target {target_final:.6g} {units}.",
+                    "target_final": float(target_final),
+                    "pair_evaluations": pair_evaluations,
+                }
+            candidates_by_target.append(candidates)
+
+        states: list[dict[str, Any]] = []
+        for candidate in candidates_by_target[0]:
+            path = (candidate["counts"],)
+            states.append({
+                "candidate": candidate,
+                "path": path,
+                "rank": self._calibration_pair_rank(
+                    loss=0,
+                    worst_error=candidate["abs_error"],
+                    error_sum=candidate["abs_error"],
+                    max_volume=candidate["printed_volume_nL"],
+                    volume_sum=candidate["printed_volume_nL"],
+                    churn=candidate["churn"],
+                    path=path,
+                ),
+            })
+        for candidates in candidates_by_target[1:]:
+            next_states: list[dict[str, Any]] = []
+            for candidate in candidates:
+                best_state = None
+                for previous in states:
+                    previous_candidate = previous["candidate"]
+                    if candidate["achieved_adjusted"] < previous_candidate["achieved_adjusted"] - 1e-12:
+                        continue
+                    collision = int(
+                        candidate["achieved_key"] == previous_candidate["achieved_key"]
+                    )
+                    previous_rank = previous["rank"]
+                    path = previous["path"] + (candidate["counts"],)
+                    rank = self._calibration_pair_rank(
+                        loss=int(previous_rank[0]) + collision,
+                        worst_error=max(float(previous_rank[1]), candidate["abs_error"]),
+                        error_sum=float(previous_rank[2]) + candidate["abs_error"],
+                        max_volume=max(float(previous_rank[3]), candidate["printed_volume_nL"]),
+                        volume_sum=float(previous_rank[4]) + candidate["printed_volume_nL"],
+                        churn=int(previous_rank[5]) + candidate["churn"],
+                        path=path,
+                    )
+                    if best_state is None or rank < best_state["rank"]:
+                        best_state = {"candidate": candidate, "path": path, "rank": rank}
+                if best_state is not None:
+                    next_states.append(best_state)
+            if not next_states:
+                return {"ok": False, "code": "nonmonotonic_mapping", "reason": "No monotonic two-stock calibration mapping is reachable."}
+            states = next_states
+        selected_state = min(states, key=lambda state: state["rank"])
+        selected_counts = selected_state["path"]
+
+        current_achieved_keys = [
+            self._normalize_target_key(row["achieved_adjusted"])
+            for row in current_rows
+        ]
+        current_loss = sum(
+            1
+            for previous, current in zip(current_achieved_keys, current_achieved_keys[1:])
+            if previous == current
+        )
+        selected_loss = int(selected_state["rank"][0])
+        if selected_loss > current_loss:
+            return {
+                "ok": False,
+                "code": "distinct_level_loss_increased",
+                "reason": (
+                    "Applying this calibration would increase grouped target levels "
+                    f"from {current_loss} to {selected_loss}."
+                ),
+                "old_distinct_level_loss": current_loss,
+                "new_distinct_level_loss": selected_loss,
+                "pair_evaluations": pair_evaluations,
+            }
+
+        mapping_by_target: dict[float, tuple[int, int]] = {}
+        rows: list[dict[str, Any]] = []
+        for index, (target_final, counts) in enumerate(zip(ordered_targets, selected_counts)):
+            target_add = max(0.0, float(target_final) - starting)
+            achieved_add = counts[0] * deltas[0] + counts[1] * deltas[1]
+            achieved_final = starting + achieved_add
+            pair_volume = counts[0] * volumes[0] + counts[1] * volumes[1]
+            current_counts = current_rows[index]["counts"]
+            current_volume = current_counts[0] * old_volumes[0] + current_counts[1] * old_volumes[1]
+            target_key = self._normalize_target_key(target_final)
+            mapping_by_target[target_key] = tuple(int(value) for value in counts)
+            rows.append({
+                "target_final": float(target_final),
+                "starting": float(starting),
+                "achieved_final": float(achieved_final),
+                "achieved_adjusted": float(achieved_add),
+                "error": float(achieved_add - target_add),
+                "abs_error": float(abs(achieved_add - target_add)),
+                "drops": tuple(int(value) for value in counts),
+                "old_drops": tuple(int(value) for value in current_counts),
+                "printed_nL_new": float(pair_volume),
+                "printed_nL_old": float(current_volume),
+                "printed_nL_shift": float(pair_volume - current_volume),
+                "delta_per_drop_leg1": float(deltas[0]),
+                "delta_per_drop_leg2": float(deltas[1]),
+                "units": units,
+            })
+
+        worst_nonfill = 0.0
+        volume_rows: list[dict[str, Any]] = []
+        for run_row in run_rows:
+            counts = mapping_by_target[run_row["target_key"]]
+            pair_volume = counts[0] * volumes[0] + counts[1] * volumes[1]
+            nonfill = float(run_row["other_nonfill_volume_nL"]) + pair_volume
+            fill_count = self._calibration_fill_count(
+                target_printed_volume_nL=printed_volume,
+                warning_threshold_nL=warning_threshold,
+                nonfill_volume_nL=nonfill,
+                fill_volume_nL=fill_volume,
+                fill_is_calibrated=fill_is_calibrated,
+            )
+            if not fill_available and fill_count > 0:
+                return {
+                    "ok": False,
+                    "code": "missing_fill_stock",
+                    "reason": "The calibrated mapping would require a fill stock that is unavailable.",
+                }
+            total = nonfill + fill_count * fill_volume
+            reaction_id = (
+                run_row.get("reaction_id")
+                or f"R{int(run_row['index']) + 1}"
+            )
+            volume_rows.append(
+                {
+                    "row_id": run_row.get("well_id") or reaction_id,
+                    "well_id": run_row.get("well_id"),
+                    "reaction_id": reaction_id,
+                    "total_volume_nL": total,
+                }
+            )
+            worst_nonfill = max(worst_nonfill, nonfill)
+
+        volume_warning = self._build_calibration_volume_warning(
+            volume_rows,
+            target_printed_volume_nL=printed_volume,
+            design_optimization_tolerance_nL=warning_threshold - printed_volume,
+            final_reaction_volume_nL=final_volume,
+        )
+
+        return {
+            "ok": True,
+            "code": "ok",
+            "n_stocks": 2,
+            "factor_name": key[0],
+            "option_name": key[1],
+            "calibrated_stock_id": stock_ids[calibrated_index],
+            "companion_stock_id": stock_ids[companion_index],
+            "stock_ids": tuple(stock_ids),
+            "calibrated_stock_index": calibrated_index,
+            "companion_stock_index": companion_index,
+            "old_effective_volumes_nL": tuple(old_volumes),
+            "new_effective_volumes_nL": tuple(volumes),
+            "printing_modes": tuple(modes),
+            "stock_concentrations": tuple(concentrations),
+            "deltas": tuple(deltas),
+            "mapping_by_target": mapping_by_target,
+            "rows": rows,
+            "old_distinct_level_loss": int(current_loss),
+            "new_distinct_level_loss": int(selected_loss),
+            "worst_abs_error": max((row["abs_error"] for row in rows), default=0.0),
+            "mean_abs_error": (
+                sum(row["abs_error"] for row in rows) / len(rows) if rows else 0.0
+            ),
+            "worst_nonfill_volume_nL": float(worst_nonfill),
+            "printed_volume_nL": float(printed_volume),
+            "warning_threshold_nL": float(warning_threshold),
+            "final_volume_nL": float(final_volume),
+            "pair_evaluations": int(pair_evaluations),
+            "volume_warning": volume_warning,
+            "source_plan": plan,
+        }
 
 
     def preview_requantized_for_option(
@@ -5908,7 +11065,9 @@ class ExperimentModel(QObject):
         key: tuple[str, Optional[str]],
         new_droplet_nL: float,
         *,
-        quantum: float = 0.1
+        quantum: float = 0.1,
+        calibrated_stock_id: str | None = None,
+        printing_mode: str | None = None,
     ) -> dict:
         """
         PREVIEW ONLY. Keep existing stock concentration(s) for 'key' but recompute the mapping
@@ -5977,37 +11136,116 @@ class ExperimentModel(QObject):
                     "units": units,
                 })
                 max_printed_nL_new = max(max_printed_nL_new, printed_nL_new)
-            return {"ok": True, "n_stocks": 1, "rows": rows, "max_printed_nL_new": max_printed_nL_new, "units": units, "new_droplet_nL": float(new_droplet_nL)}
-
-        # two-stock case
-        st1, st2 = plan["stocks"]
-        c1 = float(st1["stock_concentration"]); d1 = (c1 * new_droplet_nL) / V_final
-        c2 = float(st2["stock_concentration"]); d2 = (c2 * new_droplet_nL) / V_final
-        for t in targets_final:
-            t_add = max(0.0, float(t) - float(starting))
-            a, b, err_add = self._nearest_two_stock(t_add, d1, d2)
-            achieved_add = a * d1 + b * d2
-            achieved_final = starting + achieved_add
-            # compute old printed volume (sum of legs)
-            k1_old = _orig_k_for(t, st1)
-            k2_old = _orig_k_for(t, st2)
-            printed_nL_old = (k1_old + k2_old) * old_dv
-            printed_nL_new = (a + b) * new_droplet_nL
-            rows.append({
-                "target_final": float(t),
-                "starting": float(starting),
-                "delta_per_drop_leg1": float(d1),
-                "delta_per_drop_leg2": float(d2),
-                "achieved_final": float(achieved_final),
-                "error": float(achieved_final - float(t)),
-                "drops": (int(a), int(b)),
-                "printed_nL_new": float(printed_nL_new),
-                "printed_nL_old": float(printed_nL_old),
-                "printed_nL_shift": float(printed_nL_new - printed_nL_old),
+            execution_plan = self.get_execution_plan_snapshot()
+            if (
+                execution_plan is not None
+                and self.get_execution_plan_source() != "legacy_reconstruction"
+            ):
+                matching = [
+                    stock
+                    for stock in execution_plan.stocks
+                    if stock.factor_name == key[0] and stock.option_name == key[1]
+                ]
+                if len(matching) != 1:
+                    return {
+                        "ok": False,
+                        "reason": "The calibrated reagent does not map to exactly one execution stock.",
+                    }
+                target_counts = self._calibrated_target_counts(
+                    execution_plan,
+                    matching[0],
+                    float(new_droplet_nL),
+                )
+                volume_warning = self._calibration_volume_warning_for_execution_counts(
+                    execution_plan,
+                    target_counts,
+                    effective_volume_overrides_nL={
+                        matching[0].stock_id: float(new_droplet_nL),
+                    },
+                )
+            else:
+                printed, final, warning_threshold = self._calibration_volume_basis()
+                _limits, run_rows = self._calibration_target_volume_limits(
+                    key,
+                    accepted_volume_nL=warning_threshold,
+                )
+                rows_by_target = {
+                    self._normalize_target_key(row["target_final"]): row
+                    for row in rows
+                }
+                fill_volume = float(
+                    self.metadata.get(
+                        "fill_droplet_volume_nL",
+                        self._default_fill_droplet_volume_nl(),
+                    )
+                )
+                fill_is_calibrated = bool(
+                    "intended_fill_droplet_volume_nL" in self.metadata
+                )
+                volume_rows = []
+                for run_row in run_rows:
+                    preview_row = rows_by_target[run_row["target_key"]]
+                    nonfill = (
+                        float(run_row["other_nonfill_volume_nL"])
+                        + int(preview_row["drops"]) * float(new_droplet_nL)
+                    )
+                    fill_count = self._calibration_fill_count(
+                        target_printed_volume_nL=printed,
+                        warning_threshold_nL=warning_threshold,
+                        nonfill_volume_nL=nonfill,
+                        fill_volume_nL=fill_volume,
+                        fill_is_calibrated=fill_is_calibrated,
+                    )
+                    reaction_id = f"R{int(run_row['index']) + 1}"
+                    volume_rows.append(
+                        {
+                            "row_id": reaction_id,
+                            "well_id": None,
+                            "reaction_id": reaction_id,
+                            "total_volume_nL": nonfill + fill_count * fill_volume,
+                        }
+                    )
+                volume_warning = self._build_calibration_volume_warning(
+                    volume_rows,
+                    target_printed_volume_nL=printed,
+                    design_optimization_tolerance_nL=warning_threshold - printed,
+                    final_reaction_volume_nL=final,
+                )
+            return {
+                "ok": True,
+                "n_stocks": 1,
+                "rows": rows,
+                "max_printed_nL_new": max_printed_nL_new,
                 "units": units,
-            })
-            max_printed_nL_new = max(max_printed_nL_new, printed_nL_new)
-        return {"ok": True, "n_stocks": 2, "rows": rows, "max_printed_nL_new": max_printed_nL_new, "units": units, "new_droplet_nL": float(new_droplet_nL)}
+                "new_droplet_nL": float(new_droplet_nL),
+                "volume_warning": volume_warning,
+            }
+
+        # Two stock legs correspond to separate physical stocks/heads.  A
+        # measured volume applies to exactly one leg; the companion's volume is
+        # fixed while both planned counts may change.
+        if not calibrated_stock_id:
+            return {
+                "ok": False,
+                "code": "missing_stock_context",
+                "reason": "Select or load the exact two-stock printer head before previewing calibration application.",
+            }
+        requantized = self._requantize_fixed_two_stock_group(
+            key,
+            calibrated_stock_id=str(calibrated_stock_id),
+            new_effective_volume_nL=float(new_droplet_nL),
+            new_printing_mode=printing_mode,
+        )
+        if not requantized.get("ok"):
+            return requantized
+        requantized = dict(requantized)
+        requantized["max_printed_nL_new"] = max(
+            (float(row["printed_nL_new"]) for row in requantized["rows"]),
+            default=0.0,
+        )
+        requantized["units"] = units
+        requantized["new_droplet_nL"] = float(new_droplet_nL)
+        return requantized
 
     def find_key_for_reagent(self, reagent_name: str, group_name: str | None = None) -> tuple[str, str | None]:
         """
@@ -6070,6 +11308,47 @@ class ExperimentModel(QObject):
             "schema_version": int(payload.get("schema_version", 1) or 1),
             "records": records,
         }
+
+    @staticmethod
+    def _normalize_calibration_volume_warning_audits(payload) -> Dict[str, Any]:
+        if payload is None:
+            return {"schema_version": 1, "events": {}}
+        if not isinstance(payload, Mapping):
+            raise ValueError("Calibration volume-warning audits must be an object.")
+        if int(payload.get("schema_version", 1) or 1) != 1:
+            raise ValueError("Unsupported calibration volume-warning audit schema.")
+        raw_events = payload.get("events", {})
+        if not isinstance(raw_events, Mapping):
+            raise ValueError("Calibration volume-warning audit events must be an object.")
+        events = {}
+        for key, value in raw_events.items():
+            normalized = normalize_calibration_volume_warning_audit_intent(
+                dict(value) if isinstance(value, Mapping) else value
+            )
+            if str(key) != normalized["event_id"]:
+                raise ValueError(
+                    "Calibration volume-warning audit key must equal event_id."
+                )
+            events[str(key)] = normalized
+        return {"schema_version": 1, "events": events}
+    @staticmethod
+    def _normalize_calibrated_stock_allocation(payload) -> Dict[str, Any]:
+        if not isinstance(payload, Mapping):
+            return {"schema_version": 1, "active": False}
+        try:
+            schema_version = int(payload.get("schema_version", 1) or 1)
+        except (TypeError, ValueError):
+            schema_version = 1
+        if schema_version != 1:
+            return {
+                "schema_version": schema_version,
+                "active": False,
+                "stale_reason": "unsupported_schema",
+            }
+        result = copy.deepcopy(dict(payload))
+        result["schema_version"] = 1
+        result["active"] = bool(result.get("active", False))
+        return result
 
     @staticmethod
     def _normalize_manual_refuel_checks(payload) -> Dict[str, Any]:
@@ -6460,7 +11739,8 @@ class ExperimentModel(QObject):
                 save=False,
             )
         self.unsaved_changes = True
-        self.applied_imaging_calibration_changed.emit(dict(record))
+        if not getattr(self, "_mutable_calibration_stage_active", False):
+            self.applied_imaging_calibration_changed.emit(dict(record))
         if save and getattr(self, "experiment_file_path", None):
             self.save_experiment()
         return dict(record)
@@ -6520,6 +11800,21 @@ class ExperimentModel(QObject):
             context["factor_name"],
             context["option_name"],
         )
+        calibrated_allocation = self._normalize_calibrated_stock_allocation(
+            getattr(self, "calibrated_stock_allocation", None)
+        )
+        if calibrated_allocation.get("calibration_record_key") == key:
+            allocation_payload = calibrated_allocation.get("allocation")
+            stored_fingerprint = (
+                str((allocation_payload or {}).get("input_fingerprint") or "")
+                if isinstance(allocation_payload, Mapping)
+                else ""
+            )
+            if (
+                not calibrated_allocation.get("active")
+                or stored_fingerprint != self.stock_allocation_input_fingerprint()
+            ):
+                return None
         state = self._normalize_applied_imaging_calibrations(
             getattr(self, "applied_imaging_calibrations", None)
         )
@@ -6608,7 +11903,8 @@ class ExperimentModel(QObject):
         self.manual_refuel_checks = state
         if not use_sidecar:
             self.unsaved_changes = True
-        self.manual_refuel_check_changed.emit(dict(stored_record))
+        if not getattr(self, "_mutable_calibration_stage_active", False):
+            self.manual_refuel_check_changed.emit(dict(stored_record))
         if save and not use_sidecar and getattr(self, "experiment_file_path", None):
             self.save_experiment()
         return dict(stored_record)
@@ -7059,6 +12355,650 @@ class ExperimentModel(QObject):
         return {"ok": True, "code": "ok", "message": "", "record": record}
 
 
+    _MUTABLE_CALIBRATION_STATE_ATTRIBUTES = (
+        "plans_per_option",
+        "_stock_rows_cache",
+        "_fill_row_cache",
+        "_target_preview_map",
+        "_unreachable_preview_map",
+        "_reactions_df",
+        "_last_worst_nonfill_volume_nL",
+        "applied_imaging_calibrations",
+        "calibration_volume_warning_audits",
+        "manual_refuel_checks",
+        "calibrated_stock_allocation",
+        "calibrated_stock_allocation_status",
+        "progress_data",
+        "_progress_execution_reference",
+        "unsaved_changes",
+    )
+
+    def _snapshot_mutable_calibration_state(self) -> dict:
+        attributes = {}
+        for name in ExperimentModel._MUTABLE_CALIBRATION_STATE_ATTRIBUTES:
+            if not hasattr(self, name):
+                attributes[name] = {"present": False}
+                continue
+            value = getattr(self, name)
+            attributes[name] = {
+                "present": True,
+                "value": (
+                    value.copy(deep=True)
+                    if isinstance(value, pd.DataFrame)
+                    else copy.deepcopy(value)
+                ),
+            }
+
+        metadata = getattr(self, "metadata", None)
+        option_states = []
+        for factor in list(getattr(self, "factors", []) or []):
+            for option in list(getattr(factor, "options", []) or []):
+                option_states.append((option, copy.deepcopy(vars(option))))
+
+        return {
+            "attributes": attributes,
+            "metadata_present": isinstance(metadata, dict),
+            "metadata": copy.deepcopy(metadata) if isinstance(metadata, dict) else None,
+            "option_states": option_states,
+        }
+
+    def _restore_mutable_calibration_state(self, snapshot: dict) -> None:
+        if snapshot.get("metadata_present"):
+            metadata = getattr(self, "metadata", None)
+            if not isinstance(metadata, dict):
+                self.metadata = {}
+                metadata = self.metadata
+            metadata.clear()
+            metadata.update(copy.deepcopy(snapshot["metadata"]))
+
+        for option, state in snapshot.get("option_states", []):
+            option.__dict__.clear()
+            option.__dict__.update(copy.deepcopy(state))
+
+        for name, entry in snapshot.get("attributes", {}).items():
+            if not entry.get("present"):
+                if hasattr(self, name):
+                    delattr(self, name)
+                continue
+            value = entry.get("value")
+            current = getattr(self, name, None)
+            if isinstance(current, dict) and isinstance(value, dict):
+                current.clear()
+                current.update(copy.deepcopy(value))
+            elif isinstance(value, pd.DataFrame):
+                setattr(self, name, value.copy(deep=True))
+            else:
+                setattr(self, name, copy.deepcopy(value))
+
+    def _snapshot_mutable_calibration_runtime(self) -> dict | None:
+        runtime = getattr(self, "_runtime_reaction_collection", None)
+        if runtime is None:
+            return None
+        getter = getattr(runtime, "get_all_reactions", None)
+        if not callable(getter):
+            has_assignments = getattr(self, "_has_runtime_assignments", None)
+            if callable(has_assignments) and has_assignments():
+                raise RuntimeError(
+                    "The assigned runtime cannot be snapshotted for calibration."
+                )
+            return None
+        reactions = list(getter())
+        if not reactions:
+            return None
+
+        reaction_states = []
+        for reaction in reactions:
+            reagent_getter = getattr(reaction, "get_all_reagents", None)
+            if not callable(reagent_getter):
+                raise RuntimeError(
+                    "An assigned runtime reaction cannot be snapshotted for calibration."
+                )
+            reagents = reagent_getter()
+            if not isinstance(reagents, dict):
+                raise RuntimeError(
+                    "An assigned runtime reagent mapping is malformed."
+                )
+            reagent_states = {}
+            for stock_id, reagent in reagents.items():
+                for field in ("target_droplets", "added_droplets", "completed"):
+                    if not hasattr(reagent, field):
+                        raise RuntimeError(
+                            "An assigned runtime reagent has incomplete progress state."
+                        )
+                reagent_states[str(stock_id)] = {
+                    "reagent": reagent,
+                    "target_droplets": copy.deepcopy(reagent.target_droplets),
+                    "added_droplets": copy.deepcopy(reagent.added_droplets),
+                    "completed": copy.deepcopy(reagent.completed),
+                }
+            reaction_states.append(
+                {
+                    "reaction": reaction,
+                    "reagents": dict(reagents),
+                    "reagent_states": reagent_states,
+                }
+            )
+        return {"runtime": runtime, "reactions": reaction_states}
+
+    @staticmethod
+    def _restore_mutable_calibration_runtime(snapshot: dict | None) -> None:
+        if snapshot is None:
+            return
+        for reaction_state in snapshot.get("reactions", []):
+            reaction = reaction_state["reaction"]
+            current = reaction.get_all_reagents()
+            current.clear()
+            current.update(reaction_state["reagents"])
+            for state in reaction_state["reagent_states"].values():
+                reagent = state["reagent"]
+                reagent.target_droplets = copy.deepcopy(state["target_droplets"])
+                reagent.added_droplets = copy.deepcopy(state["added_droplets"])
+                reagent.completed = copy.deepcopy(state["completed"])
+
+    def _snapshot_mutable_calibration_files(
+        self,
+        *,
+        include_runtime_files: bool,
+    ) -> list[dict]:
+        names = []
+        if include_runtime_files:
+            names.extend(
+                (
+                    "progress_file_path",
+                    "key_file_path",
+                    "concentration_key_file_path",
+                )
+            )
+        names.append("experiment_file_path")
+
+        snapshots = []
+        seen = set()
+        for name in names:
+            raw_path = getattr(self, name, None)
+            if not raw_path:
+                continue
+            path = os.path.abspath(os.fspath(raw_path))
+            if path in seen:
+                continue
+            seen.add(path)
+            exists = os.path.exists(path)
+            if exists and not os.path.isfile(path):
+                raise RuntimeError(
+                    f"Mutable calibration persistence path is not a file: {path}"
+                )
+            snapshots.append(
+                {
+                    "path": path,
+                    "existed": exists,
+                    "contents": Path(path).read_bytes() if exists else None,
+                }
+            )
+        return snapshots
+
+    @staticmethod
+    def _atomic_write_bytes(path: str, contents: bytes) -> None:
+        parent = os.path.dirname(path) or "."
+        fd, temporary = tempfile.mkstemp(
+            prefix="._tmp_",
+            suffix=".rollback",
+            dir=parent,
+        )
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(contents)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except Exception:
+            try:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            except OSError:
+                pass
+            raise
+
+    @classmethod
+    def _restore_mutable_calibration_files(cls, snapshots: list[dict]) -> None:
+        errors = []
+        for snapshot in reversed(snapshots):
+            path = snapshot["path"]
+            try:
+                if snapshot["existed"]:
+                    expected = snapshot["contents"]
+                    current = (
+                        Path(path).read_bytes()
+                        if os.path.isfile(path)
+                        else None
+                    )
+                    if current != expected:
+                        cls._atomic_write_bytes(path, expected)
+                elif os.path.exists(path):
+                    if not os.path.isfile(path):
+                        raise RuntimeError(
+                            f"Refusing to remove non-file rollback target: {path}"
+                        )
+                    os.unlink(path)
+            except Exception as exc:
+                errors.append(f"{path}: {exc}")
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    @staticmethod
+    def _changed_mutable_calibration_records(before, after) -> list[dict]:
+        before_records = (
+            before.get("records", {})
+            if isinstance(before, dict)
+            else {}
+        )
+        after_records = (
+            after.get("records", {})
+            if isinstance(after, dict)
+            else {}
+        )
+        return [
+            copy.deepcopy(after_records[key])
+            for key in sorted(after_records)
+            if before_records.get(key) != after_records[key]
+            and isinstance(after_records[key], dict)
+        ]
+
+    def _publish_mutable_calibration_notifications(
+        self,
+        *,
+        state_snapshot: dict,
+        runtime_changed: bool,
+    ) -> None:
+        def _emit(signal, *args):
+            if signal is None or not hasattr(signal, "emit"):
+                return
+            try:
+                signal.emit(*args)
+            except Exception as exc:
+                print(
+                    "[ExperimentModel] WARNING: post-calibration notification "
+                    f"failed: {exc}"
+                )
+
+        reactions = getattr(self, "_reactions_df", None)
+        worst = float(
+            getattr(self, "_last_worst_nonfill_volume_nL", 0.0) or 0.0
+        )
+        _emit(
+            getattr(self, "experiment_generated", None),
+            len(reactions) if isinstance(reactions, pd.DataFrame) else 0,
+            worst,
+        )
+        _emit(getattr(self, "stock_updated", None))
+        if runtime_changed:
+            well_plate = getattr(self, "_runtime_well_plate", None)
+            _emit(getattr(well_plate, "well_state_changed_signal", None), "all")
+
+        attributes = state_snapshot.get("attributes", {})
+        before_applied = (
+            attributes.get("applied_imaging_calibrations", {}).get("value")
+            or {}
+        )
+        for record in ExperimentModel._changed_mutable_calibration_records(
+            before_applied,
+            getattr(self, "applied_imaging_calibrations", {}),
+        ):
+            _emit(
+                getattr(self, "applied_imaging_calibration_changed", None),
+                record,
+            )
+
+        before_refuel = (
+            attributes.get("manual_refuel_checks", {}).get("value")
+            or {}
+        )
+        for record in ExperimentModel._changed_mutable_calibration_records(
+            before_refuel,
+            getattr(self, "manual_refuel_checks", {}),
+        ):
+            _emit(
+                getattr(self, "manual_refuel_check_changed", None),
+                record,
+            )
+
+    def _mutable_calibrated_allocation_anchor(self) -> dict | None:
+        """Validate an active allocation before a calibration can replace it."""
+        allocation = ExperimentModel._normalize_calibrated_stock_allocation(
+            getattr(self, "calibrated_stock_allocation", None)
+        )
+        if not allocation.get("active"):
+            return None
+        try:
+            payload = allocation["allocation"]
+            if payload["input_fingerprint"] != self.stock_allocation_input_fingerprint():
+                raise ValueError("stock inputs no longer match")
+            stored_plans = {}
+            for raw_key, plan in payload["plans_per_option"].items():
+                key = tuple(json.loads(raw_key)) if isinstance(raw_key, str) else raw_key
+                if not isinstance(key, tuple) or len(key) != 2 or key in stored_plans:
+                    raise ValueError("invalid or duplicate stock plan key")
+                stored_plans[key] = plan
+            stored_fingerprint = self._canonical_payload_sha256(
+                self._stock_allocation_plan_document(stored_plans, payload["stock_rows"])
+            )
+            live_fingerprint = self._canonical_payload_sha256(
+                self._stock_allocation_plan_document(
+                    self.plans_per_option, self._stock_rows_cache,
+                )
+            )
+            if not stored_fingerprint == payload["plan_fingerprint"] == live_fingerprint:
+                raise ValueError("saved and live stock plans no longer match")
+            stock_id = allocation["calibrated_stock_id"]
+            if stock_id not in {stock_id_for_row(row) for row in self._stock_rows_cache}:
+                raise ValueError("calibrated stock identity is missing")
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise RuntimeError(
+                f"The active calibrated stock allocation is inconsistent: {exc}. "
+                "Calibration was not applied."
+            ) from exc
+        return {
+            "calibrated_stock_id": stock_id,
+            "calibration_record_key": allocation.get("calibration_record_key"),
+        }
+
+    def _run_mutable_calibration_transaction(
+        self,
+        *,
+        write_keys_if_assigned: bool,
+        stage_changes: Callable[[], dict],
+    ) -> dict:
+        if getattr(self, "_mutable_calibration_stage_active", False):
+            raise RuntimeError("Nested mutable calibration transactions are not supported.")
+
+        allocation_anchor = ExperimentModel._mutable_calibrated_allocation_anchor(self)
+        state_snapshot = ExperimentModel._snapshot_mutable_calibration_state(self)
+        runtime_snapshot = ExperimentModel._snapshot_mutable_calibration_runtime(self)
+        file_snapshots = ExperimentModel._snapshot_mutable_calibration_files(
+            self,
+            include_runtime_files=bool(
+                runtime_snapshot is not None and write_keys_if_assigned
+            )
+        )
+        previous_stage_flag = bool(
+            getattr(self, "_mutable_calibration_stage_active", False)
+        )
+        previous_strict_flag = bool(
+            getattr(self, "_mutable_calibration_runtime_strict", False)
+        )
+        self._mutable_calibration_stage_active = True
+        self._mutable_calibration_runtime_strict = runtime_snapshot is not None
+
+        staged = None
+        saved_experiment = False
+        try:
+            staged = stage_changes()
+            if not isinstance(staged, dict) or not isinstance(
+                staged.get("result"), dict
+            ):
+                raise RuntimeError(
+                    "Mutable calibration staging returned an invalid result."
+                )
+            allocation_anchor = staged.get("calibrated_allocation_anchor", allocation_anchor)
+            if allocation_anchor is not None:
+                self.calibrated_stock_allocation = (
+                    self._export_calibrated_stock_allocation_payload(**allocation_anchor)
+                )
+                self.calibrated_stock_allocation_status = {
+                    "active": True,
+                    "reason": "applied",
+                }
+            staged["volume_warning_audit_intent"] = (
+                ExperimentModel._stage_mutable_calibration_volume_warning_audit(
+                    self,
+                    staged["result"].get("volume_warning"),
+                    stock_id=staged.get("audit_stock_id"),
+                    calibration_record=staged.get("calibration_record"),
+                    calibration_record_key=staged.get("calibration_record_key"),
+                )
+            )
+            if runtime_snapshot is not None:
+                rebound = self._refresh_runtime_after_plan_change(
+                    write_keys_if_assigned=write_keys_if_assigned
+                )
+                if not rebound:
+                    raise RuntimeError(
+                        "The assigned runtime did not accept calibrated targets."
+                    )
+            self.unsaved_changes = True
+            if getattr(self, "experiment_file_path", None):
+                self.save_experiment()
+                saved_experiment = True
+        except Exception as operation_error:
+            rollback_errors = []
+            try:
+                ExperimentModel._restore_mutable_calibration_runtime(
+                    runtime_snapshot
+                )
+            except Exception as exc:
+                rollback_errors.append(f"runtime: {exc}")
+            try:
+                ExperimentModel._restore_mutable_calibration_state(
+                    self,
+                    state_snapshot,
+                )
+            except Exception as exc:
+                rollback_errors.append(f"model: {exc}")
+            try:
+                ExperimentModel._restore_mutable_calibration_files(
+                    file_snapshots
+                )
+            except Exception as exc:
+                rollback_errors.append(f"files: {exc}")
+            self._mutable_calibration_stage_active = previous_stage_flag
+            self._mutable_calibration_runtime_strict = previous_strict_flag
+            if rollback_errors:
+                self.unsaved_changes = True
+                raise RuntimeError(
+                    "Mutable calibration failed and rollback was incomplete: "
+                    + "; ".join(rollback_errors)
+                ) from operation_error
+            raise
+
+        self._mutable_calibration_stage_active = previous_stage_flag
+        self._mutable_calibration_runtime_strict = previous_strict_flag
+        public_result = dict(staged["result"])
+        public_result["saved_experiment"] = bool(saved_experiment)
+
+        audit_intent = staged.get("volume_warning_audit_intent")
+        reconciliation = (
+            ExperimentModel.reconcile_calibration_volume_warning_audits(self)
+            if audit_intent is not None
+            else None
+        )
+        public_result.update(
+            ExperimentModel._calibration_volume_warning_audit_result(
+                audit_intent,
+                reconciliation,
+            )
+        )
+        ExperimentModel._publish_mutable_calibration_notifications(
+            self,
+            state_snapshot=state_snapshot,
+            runtime_changed=runtime_snapshot is not None,
+        )
+        return public_result
+
+
+    def _apply_mutable_two_stock_requantization(
+        self,
+        *,
+        key: tuple[str, Optional[str]],
+        calibrated_stock_id: str,
+        new_droplet_nL: float,
+        printing_mode: str | None,
+        applied_calibration: dict | None,
+        write_keys_if_assigned: bool,
+    ) -> dict:
+        result = self._requantize_fixed_two_stock_group(
+            key,
+            calibrated_stock_id=calibrated_stock_id,
+            new_effective_volume_nL=new_droplet_nL,
+            new_printing_mode=printing_mode,
+        )
+        if not result.get("ok"):
+            raise ValueError(str(result.get("reason") or "Two-stock calibration re-quantization failed."))
+
+        option = self._get_option_for_key(key)
+        if option is None:
+            raise ValueError(f"Design contains no OptionSpec for {key!r}.")
+        plan = self.plans_per_option.get(key)
+        if not isinstance(plan, dict) or int(plan.get("n_stocks", 0)) != 2:
+            raise ValueError(f"No mutable two-stock plan exists for {key!r}.")
+
+        def _stage_changes() -> dict:
+            stocks = list(plan.get("stocks") or [])
+            stock_ids = list(result["stock_ids"])
+            calibrated_index = int(result["calibrated_stock_index"])
+            starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+            final_volume = float(result["final_volume_nL"])
+            mappings = [dict(), dict()]
+            for row in result["rows"]:
+                adjusted = self._normalize_target_key(
+                    max(0.0, float(row["target_final"]) - starting)
+                )
+                mappings[0][adjusted] = int(row["drops"][0])
+                mappings[1][adjusted] = int(row["drops"][1])
+
+            for index, stock in enumerate(stocks):
+                volume = float(result["new_effective_volumes_nL"][index])
+                concentration = float(stock["stock_concentration"])
+                stock["droplet_volume_nL"] = volume
+                stock["delta_per_drop"] = concentration * volume / final_volume
+                stock["droplets_per_target"] = mappings[index]
+                stock["quantum"] = 1e-6
+                stock["stock_id"] = stock_ids[index]
+                stock["printing_mode"] = result["printing_modes"][index]
+
+            matched_rows = 0
+            for row in self._stock_rows_cache:
+                try:
+                    row_stock_id = self.build_stock_prep_stock_id(row)
+                except Exception:
+                    continue
+                if row_stock_id not in stock_ids:
+                    continue
+                index = stock_ids.index(row_stock_id)
+                stock = stocks[index]
+                row["droplet_volume_nL"] = float(stock["droplet_volume_nL"])
+                row["delta_per_drop"] = float(stock["delta_per_drop"])
+                row["printing_mode"] = str(stock["printing_mode"])
+                matched_rows += 1
+            if matched_rows != 2:
+                raise RuntimeError(
+                    "The mutable two-stock plan no longer maps to exactly two stock rows."
+                )
+
+            self.generate_experiment()
+            self._refresh_plan_preview_maps()
+            if self._unreachable_preview_map.get(key):
+                raise RuntimeError(
+                    "The calibrated two-stock plan left one or more targets unreachable."
+                )
+
+            record = None
+            if applied_calibration:
+                record_kwargs = dict(applied_calibration)
+                record_kwargs.pop("stock_id", None)
+                record_kwargs.setdefault(
+                    "printing_mode", result["printing_modes"][calibrated_index]
+                )
+                record_kwargs.setdefault(
+                    "original_printing_mode",
+                    result["source_plan"]["stocks"][calibrated_index].get(
+                        "printing_mode"
+                    ),
+                )
+                record_kwargs.setdefault(
+                    "applied_printing_mode",
+                    result["printing_modes"][calibrated_index],
+                )
+                record = self.record_applied_imaging_calibration(
+                    stock_id=calibrated_stock_id,
+                    factor_name=key[0],
+                    option_name=key[1],
+                    is_fill=False,
+                    applied_design_volume_nL=float(new_droplet_nL),
+                    save=False,
+                    **record_kwargs,
+                )
+
+            record_key = None
+            if isinstance(record, dict):
+                record_key = self._applied_imaging_key(
+                    record.get("stock_id"),
+                    record.get("printer_head_id"),
+                    record.get("printing_mode"),
+                    record.get("factor_name"),
+                    record.get("option_name"),
+                )
+            volume_warning = (
+                self._calibration_volume_warning_for_generated_reactions()
+            )
+            calibrated_rows = [
+                row for row in result["rows"]
+                if tuple(row["old_drops"]) != tuple(row["drops"])
+            ]
+            return {
+                "result": {
+                    "factor": key[0],
+                    "option": key[1],
+                    "n_stocks": 2,
+                    "calibrated_stock_id": calibrated_stock_id,
+                    "companion_stock_id": result["companion_stock_id"],
+                    "old_effective_volume_nL": float(
+                        result["old_effective_volumes_nL"][calibrated_index]
+                    ),
+                    "new_droplet_nL": float(
+                        result["new_effective_volumes_nL"][calibrated_index]
+                    ),
+                    "companion_effective_volume_nL": float(
+                        result["new_effective_volumes_nL"][
+                            result["companion_stock_index"]
+                        ]
+                    ),
+                    "old_distinct_level_loss": int(
+                        result["old_distinct_level_loss"]
+                    ),
+                    "new_distinct_level_loss": int(
+                        result["new_distinct_level_loss"]
+                    ),
+                    "worst_abs_error": float(result["worst_abs_error"]),
+                    "worst_nonfill_after_nL": float(
+                        result["worst_nonfill_volume_nL"]
+                    ),
+                    "changed_target_count": len(calibrated_rows),
+                    "count_changes": [
+                        {
+                            "target_final": float(row["target_final"]),
+                            "old_drops": tuple(row["old_drops"]),
+                            "new_drops": tuple(row["drops"]),
+                        }
+                        for row in calibrated_rows
+                    ],
+                    "saved_experiment": False,
+                    "volume_warning": volume_warning,
+                    "applied_imaging_calibration_recorded": record is not None,
+                },
+                "audit_stock_id": calibrated_stock_id,
+                "calibration_record": record,
+                "calibration_record_key": record_key,
+                "calibrated_allocation_anchor": {
+                    "calibrated_stock_id": calibrated_stock_id,
+                    "calibration_record_key": record_key,
+                },
+            }
+
+        return ExperimentModel._run_mutable_calibration_transaction(
+            self,
+            write_keys_if_assigned=write_keys_if_assigned,
+            stage_changes=_stage_changes,
+        )
+
+
     # ---------- apply a new droplet size while keeping stock concentration fixed ----------
     def apply_droplet_volume_for_option(
         self,
@@ -7101,10 +13041,29 @@ class ExperimentModel(QObject):
                 for stock in execution_plan.stocks
                 if stock.factor_name == factor_name and stock.option_name == option_name
             ]
-            if len(matching) != 1:
-                raise RuntimeError("The calibrated design option does not map to exactly one execution stock.")
-            stock = matching[0]
             printer_head = applied_calibration.get("printer_head")
+            calibrated_stock_id = applied_calibration.get("stock_id")
+            if not calibrated_stock_id:
+                calibrated_stock_id = self._printer_head_stock_id(printer_head)
+            if len(matching) not in (1, 2):
+                raise RuntimeError(
+                    "The calibrated design option must map to one or two execution stocks."
+                )
+            if len(matching) == 2:
+                stock = next(
+                    (
+                        item
+                        for item in matching
+                        if item.stock_id == str(calibrated_stock_id or "")
+                    ),
+                    None,
+                )
+                if stock is None:
+                    raise RuntimeError(
+                        "The loaded printer-head stock does not identify one of the two execution stocks."
+                    )
+            else:
+                stock = matching[0]
             printer_head_id = self._printer_head_identity(printer_head)
             if not printer_head_id:
                 raise RuntimeError("The calibrated printer-head identity is unavailable.")
@@ -7131,15 +13090,51 @@ class ExperimentModel(QObject):
                 "applied_imaging_calibration_recorded": True,
                 "execution_plan_revision": result["plan"].plan_revision,
                 "execution_plan_status": result["status"],
+                "n_stocks": len(matching),
+                "calibrated_stock_id": stock.stock_id,
+                "companion_stock_id": (
+                    next(
+                        item.stock_id
+                        for item in matching
+                        if item.stock_id != stock.stock_id
+                    )
+                    if len(matching) == 2
+                    else None
+                ),
+                "changed_target_count": result.get("changed_target_count"),
+                "volume_warning": copy.deepcopy(result.get("volume_warning")),
+                "volume_warning_audit_event_id": result.get("volume_warning_audit_event_id"),
+                "volume_warning_audit_status": result.get("volume_warning_audit_status"),
+                "volume_warning_audit_error": result.get("volume_warning_audit_error"),
+                "count_changes": copy.deepcopy(result.get("count_changes") or []),
             }
         key = (factor_name, option_name)
         plan = self.plans_per_option.get(key)
         if not plan:
             raise ValueError(f"No stock plan for {key}; run optimize_stock_solutions() first.")
 
+        if plan.get("n_stocks", 1) == 2:
+            calibrated_stock_id = None
+            if applied_calibration:
+                calibrated_stock_id = applied_calibration.get("stock_id")
+                if not calibrated_stock_id:
+                    calibrated_stock_id = self._printer_head_stock_id(
+                        applied_calibration.get("printer_head")
+                    )
+            if not calibrated_stock_id:
+                raise ValueError(
+                    "Two-stock calibration application requires the exact loaded printer-head stock ID."
+                )
+            return self._apply_mutable_two_stock_requantization(
+                key=key,
+                calibrated_stock_id=str(calibrated_stock_id),
+                new_droplet_nL=float(new_droplet_nL),
+                printing_mode=printing_mode,
+                applied_calibration=applied_calibration,
+                write_keys_if_assigned=write_keys_if_assigned,
+            )
         if plan.get("n_stocks", 1) != 1:
-            # (You can extend this to 2-stock later; see note below.)
-            raise NotImplementedError("Step 2 currently supports single-stock reagents only.")
+            raise ValueError("Calibration application requires one or two stock solutions.")
 
         # ---- Fetch the OptionSpec so we can update its droplet_nL persistently ----
         opt_obj = None
@@ -7203,88 +13198,105 @@ class ExperimentModel(QObject):
                 key_t = self._normalize_target_key(t_add)
                 dp[key_t] = int(row["droplets"])
 
-        # ---- Patch the live plan & stock table cache ----
-        st["droplet_volume_nL"] = new_dv
-        st["delta_per_drop"] = delta
-        st["units"] = units
-        st["droplets_per_target"] = dp
-        # keep quantum small so future near-match logic is permissive but irrelevant (we use exact t_add keys)
-        st["quantum"] = 1e-6
+        def _stage_changes() -> dict:
+            # ---- Patch the live plan & stock table cache ----
+            st["droplet_volume_nL"] = new_dv
+            st["delta_per_drop"] = delta
+            st["units"] = units
+            st["droplets_per_target"] = dp
+            # Exact target keys make the permissive lookup quantum irrelevant.
+            st["quantum"] = 1e-6
 
-        current_design_dv = float(getattr(opt_obj, "droplet_nL", new_dv))
-        if (
-            getattr(opt_obj, "intended_droplet_nL", None) is None
-            and abs(current_design_dv - new_dv) > 1e-9
-        ):
-            opt_obj.intended_droplet_nL = current_design_dv
-        if (
-            getattr(opt_obj, "intended_printing_mode", None) is None
-            and original_printing_mode != applied_printing_mode
-        ):
-            opt_obj.intended_printing_mode = original_printing_mode
-
-        # Update the persistent design object so saves/loads reflect the new dv
-        opt_obj.droplet_nL = new_dv
-        opt_obj.printing_mode = applied_printing_mode
-        opt_obj.forced_stock_conc = c_stock
-
-        # Update the cached stock rows so UI tables reflect new dv
-        st["printing_mode"] = applied_printing_mode
-        updated_row = None
-        for r in self._stock_rows_cache:
+            current_design_dv = float(getattr(opt_obj, "droplet_nL", new_dv))
             if (
-                r.get("factor_name") == factor_name
-                and (r.get("option_name") or "") == (option_name or "")
-                and float(r.get("stock_concentration", -1)) == c_stock
+                getattr(opt_obj, "intended_droplet_nL", None) is None
+                and abs(current_design_dv - new_dv) > 1e-9
             ):
-                r["droplet_volume_nL"] = new_dv
-                r["delta_per_drop"] = delta
-                r["printing_mode"] = applied_printing_mode
-                updated_row = r
-                break
+                opt_obj.intended_droplet_nL = current_design_dv
+            if (
+                getattr(opt_obj, "intended_printing_mode", None) is None
+                and original_printing_mode != applied_printing_mode
+            ):
+                opt_obj.intended_printing_mode = original_printing_mode
 
-        # ---- Recompute the experiment so droplet counts and fill update everywhere ----
-        self.generate_experiment()
-        self._refresh_plan_preview_maps()
-        self._refresh_runtime_after_plan_change(write_keys_if_assigned=write_keys_if_assigned)
+            opt_obj.droplet_nL = new_dv
+            opt_obj.printing_mode = applied_printing_mode
+            opt_obj.forced_stock_conc = c_stock
 
-        # mark unsaved since design object changed
-        self.unsaved_changes = True
-        applied_recorded = False
-        if applied_calibration:
-            record_kwargs = dict(applied_calibration)
-            record_kwargs.setdefault("printing_mode", applied_printing_mode)
-            record_kwargs.setdefault("original_printing_mode", original_printing_mode)
-            record_kwargs.setdefault("applied_printing_mode", applied_printing_mode)
-            self.record_applied_imaging_calibration(
-                factor_name=factor_name,
-                option_name=option_name,
-                is_fill=False,
-                applied_design_volume_nL=new_dv,
-                save=False,
-                **record_kwargs,
+            st["printing_mode"] = applied_printing_mode
+            updated_row = None
+            for row in self._stock_rows_cache:
+                if (
+                    row.get("factor_name") == factor_name
+                    and (row.get("option_name") or "") == (option_name or "")
+                    and float(row.get("stock_concentration", -1)) == c_stock
+                ):
+                    row["droplet_volume_nL"] = new_dv
+                    row["delta_per_drop"] = delta
+                    row["printing_mode"] = applied_printing_mode
+                    updated_row = row
+                    break
+
+            self.generate_experiment()
+            self._refresh_plan_preview_maps()
+
+            record = None
+            if applied_calibration:
+                record_kwargs = dict(applied_calibration)
+                record_kwargs.setdefault("printing_mode", applied_printing_mode)
+                record_kwargs.setdefault(
+                    "original_printing_mode",
+                    original_printing_mode,
+                )
+                record_kwargs.setdefault(
+                    "applied_printing_mode",
+                    applied_printing_mode,
+                )
+                record = self.record_applied_imaging_calibration(
+                    factor_name=factor_name,
+                    option_name=option_name,
+                    is_fill=False,
+                    applied_design_volume_nL=new_dv,
+                    save=False,
+                    **record_kwargs,
+                )
+
+            warning_getter = getattr(
+                self,
+                "_calibration_volume_warning_for_generated_reactions",
+                None,
             )
-            applied_recorded = True
-        saved_experiment = False
-        if getattr(self, "experiment_file_path", None):
-            self.save_experiment()
-            saved_experiment = True
+            volume_warning = (
+                warning_getter() if callable(warning_getter) else None
+            )
+            return {
+                "result": {
+                    "factor": factor_name,
+                    "option": option_name,
+                    "stock_concentration": c_stock,
+                    "units": units,
+                    "new_droplet_nL": new_dv,
+                    "original_printing_mode": original_printing_mode,
+                    "applied_printing_mode": applied_printing_mode,
+                    "delta_per_drop": delta,
+                    "example_map": dict(list(dp.items())[: min(5, len(dp))]),
+                    "stock_row_updated": bool(updated_row),
+                    "worst_nonfill_after_nL": float(
+                        self._last_worst_nonfill_volume_nL or 0.0
+                    ),
+                    "saved_experiment": False,
+                    "applied_imaging_calibration_recorded": record is not None,
+                    "volume_warning": volume_warning,
+                },
+                "audit_stock_id": (record or {}).get("stock_id"),
+                "calibration_record": record,
+            }
 
-        return {
-            "factor": factor_name,
-            "option": option_name,
-            "stock_concentration": c_stock,
-            "units": units,
-            "new_droplet_nL": new_dv,
-            "original_printing_mode": original_printing_mode,
-            "applied_printing_mode": applied_printing_mode,
-            "delta_per_drop": delta,
-            "example_map": dict(list(dp.items())[: min(5, len(dp))]),
-            "stock_row_updated": bool(updated_row),
-            "worst_nonfill_after_nL": float(self._last_worst_nonfill_volume_nL or 0.0),
-            "saved_experiment": saved_experiment,
-            "applied_imaging_calibration_recorded": applied_recorded,
-        }
+        return ExperimentModel._run_mutable_calibration_transaction(
+            self,
+            write_keys_if_assigned=write_keys_if_assigned,
+            stage_changes=_stage_changes,
+        )
 
 
     # ------------- Public getters for the UI -------------
@@ -7454,12 +13466,21 @@ class ExperimentModel(QObject):
             for key, target in run_spec["reaction"].items():
                 plan = self.plans_per_option.get(key)
                 if not plan:
-                    continue
+                    raise ValueError(
+                        f"No stock plan exists for {self._design_key_label(key)} "
+                        f"at target {float(target):.6g}."
+                    )
                 s = start_lookup.get(key, 0.0)
                 t_add = max(0.0, float(target) - float(s))
                 if plan["n_stocks"] == 1:
                     st = plan["stocks"][0]
-                    drops, _, _, _ = self._resolve_drops_for_target(st, t_add)
+                    drops, _, unreachable, _ = self._resolve_drops_for_target(st, t_add)
+                    if unreachable:
+                        raise ValueError(
+                            f"No reachable droplet mapping exists for "
+                            f"{self._design_key_label(key)} at target "
+                            f"{float(target):.6g}."
+                        )
                     if drops > 0:
                         items.append((_reagent_name_from_key(key),
                                     float(st["stock_concentration"]),
@@ -7467,8 +13488,14 @@ class ExperimentModel(QObject):
                                     drops))
                 else:
                     st1, st2 = plan["stocks"]
-                    k1, _, _, _ = self._resolve_drops_for_target(st1, t_add)
-                    k2, _, _, _ = self._resolve_drops_for_target(st2, t_add)
+                    k1, _, un1, _ = self._resolve_drops_for_target(st1, t_add)
+                    k2, _, un2, _ = self._resolve_drops_for_target(st2, t_add)
+                    if un1 or un2:
+                        raise ValueError(
+                            f"No reachable two-stock droplet mapping exists for "
+                            f"{self._design_key_label(key)} at target "
+                            f"{float(target):.6g}."
+                        )
                     if k1 > 0:
                         items.append((_reagent_name_from_key(key),
                                     float(st1["stock_concentration"]),
@@ -7489,12 +13516,19 @@ class ExperimentModel(QObject):
         any explicit uploaded/manual reaction set.
         """
         self._ensure_well_selection_metadata()
+        self.get_stock_allocation_resolution_policy()
         data: Dict[str, object] = {
             "metadata": self.metadata,
             "calibration_storage": self.calibration_storage_policy.to_document(),
             "stock_prep": self.stock_prep_state,
             "applied_imaging_calibrations": self._normalize_applied_imaging_calibrations(
                 getattr(self, "applied_imaging_calibrations", None)
+            ),
+            "calibration_volume_warning_audits": self._normalize_calibration_volume_warning_audits(
+                getattr(self, "calibration_volume_warning_audits", None)
+            ),
+            "calibrated_stock_allocation": self._normalize_calibrated_stock_allocation(
+                getattr(self, "calibrated_stock_allocation", None)
             ),
             "manual_refuel_checks": self._normalize_manual_refuel_checks(
                 getattr(self, "manual_refuel_checks", None)
@@ -7614,6 +13648,15 @@ class ExperimentModel(QObject):
         # owned by this model so callers can continue using the exact persisted
         # payload for authoritative design-hash validation.
         self.metadata = copy.deepcopy(d.get("metadata", self.metadata))
+        if self.STOCK_RESOLUTION_POLICY_METADATA_KEY in self.metadata:
+            self._stock_allocation_resolution_policy_source = (
+                self.STOCK_RESOLUTION_POLICY_SOURCE_EXPLICIT
+            )
+        else:
+            self.metadata[self.STOCK_RESOLUTION_POLICY_METADATA_KEY] = True
+            self._stock_allocation_resolution_policy_source = (
+                self.STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING
+            )
         self.calibration_storage_policy = load_calibration_storage_policy(
             d.get("calibration_storage")
         )
@@ -7629,6 +13672,16 @@ class ExperimentModel(QObject):
         self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(
             d.get("applied_imaging_calibrations")
         )
+        self.calibration_volume_warning_audits = self._normalize_calibration_volume_warning_audits(
+            d.get("calibration_volume_warning_audits")
+        )
+        self.calibrated_stock_allocation = self._normalize_calibrated_stock_allocation(
+            d.get("calibrated_stock_allocation")
+        )
+        self.calibrated_stock_allocation_status = {
+            "active": False,
+            "reason": "not_restored",
+        }
         self.manual_refuel_checks = self._normalize_manual_refuel_checks(
             d.get("manual_refuel_checks")
         )
@@ -7754,16 +13807,73 @@ class ExperimentModel(QObject):
                     # Design-only load (no experiment dir yet) – store as-is
                     self._uploaded_design_source = csv_fn
 
+        if bool(self.calibrated_stock_allocation.get("active")):
+            restored = self.install_stock_allocation_reuse_payload(
+                self.calibrated_stock_allocation.get("allocation"),
+                reuse_context='calibration',
+                expected_calibrated_stock_id=self.calibrated_stock_allocation.get(
+                    'calibrated_stock_id'
+                ),
+            )
+            if restored.get("reused"):
+                self.calibrated_stock_allocation['allocation'][
+                    'optimization_result'
+                ] = copy.deepcopy(restored.get('result') or {})
+                self.calibrated_stock_allocation_status = {
+                    "active": True,
+                    "reason": "restored",
+                }
+                try:
+                    self.generate_experiment()
+                    self._refresh_plan_preview_maps()
+                    regenerated_warning = (
+                        self._calibration_volume_warning_for_generated_reactions()
+                    )
+                    if regenerated_warning != restored.get('volume_warning'):
+                        raise RuntimeError(
+                            'Restored calibrated allocation volume warning did not '
+                            'match regenerated reactions.'
+                        )
+                except Exception as exc:
+                    self.plans_per_option.clear()
+                    self._stock_rows_cache.clear()
+                    self._fill_row_cache = None
+                    self._target_preview_map = {}
+                    self._unreachable_preview_map = {}
+                    self.calibrated_stock_allocation["active"] = False
+                    self.calibrated_stock_allocation["stale_reason"] = (
+                        f"restore_generation_failed: {type(exc).__name__}: {exc}"
+                    )
+                    self.calibrated_stock_allocation_status = {
+                        "active": False,
+                        "reason": "restore_generation_failed",
+                    }
+            else:
+                self.calibrated_stock_allocation["active"] = False
+                self.calibrated_stock_allocation["stale_reason"] = str(
+                    restored.get("reason") or "restore_failed"
+                )
+                self.calibrated_stock_allocation_status = {
+                    "active": False,
+                    "reason": str(restored.get("reason") or "restore_failed"),
+                }
+
         # Notify UI that the stock table needs rebuilding
         self.stock_updated.emit()
 
     # -----------------------------
     # Runtime context / calibration
     # -----------------------------
-    def set_runtime_context(self, well_plate, reaction_collection):
+    def set_runtime_context(
+        self,
+        well_plate,
+        reaction_collection,
+        stock_solution_manager=None,
+    ):
         """Model will set these right before we write progress/key."""
         self._runtime_well_plate = well_plate
         self._runtime_reaction_collection = reaction_collection
+        self._runtime_stock_solution_manager = stock_solution_manager
 
     def set_calibration_manager(self, mgr):
         """Optional; if your app has a calibration manager, wire it here."""
@@ -9542,13 +15652,20 @@ class ExperimentModel(QObject):
         if resolved_stock_id not in (None, ""):
             resolved_stock_id = str(resolved_stock_id)
 
-        def _result(ok: bool, code: str, message: str) -> dict[str, Any]:
-            return {
+        def _result(
+            ok: bool,
+            code: str,
+            message: str,
+            **details,
+        ) -> dict[str, Any]:
+            result = {
                 "ok": bool(ok),
                 "code": str(code),
                 "message": str(message),
                 "stock_id": resolved_stock_id,
             }
+            result.update(details)
+            return result
 
         if self.is_read_only_legacy_execution() or (
             getattr(self, "_execution_plan_reload_read_only", False)
@@ -9627,20 +15744,65 @@ class ExperimentModel(QObject):
                 "The loaded printer-head stock is not part of this execution plan.",
             )
 
+        selected_stock = stocks[resolved_stock_id]
+        related_stocks = [
+            stock
+            for stock in plan.stocks
+            if stock.factor_name == selected_stock.factor_name
+            and stock.option_name == selected_stock.option_name
+        ]
+        affected_stock_ids = [resolved_stock_id]
+        if len(related_stocks) == 2:
+            affected_stock_ids = [stock.stock_id for stock in related_stocks]
+            fill_name = self.get_fill_reagent_name()
+            affected_stock_ids.extend(
+                stock.stock_id
+                for stock in plan.stocks
+                if stock.factor_name == fill_name and stock.units == "--"
+            )
+        affected_stock_ids = list(dict.fromkeys(affected_stock_ids))
+
         try:
-            added_droplets = self._added_droplets_for_stock(resolved_stock_id)
+            affected_progress = {
+                affected_stock_id: self._added_droplets_for_stock(
+                    affected_stock_id
+                )
+                for affected_stock_id in affected_stock_ids
+            }
         except Exception as exc:
             return _result(
                 False,
                 "progress_unavailable",
                 f"Calibration application eligibility could not read execution progress: {exc}",
+                affected_stock_ids=affected_stock_ids,
             )
-        if added_droplets > 0:
+        blocking_progress = {
+            stock_id: count
+            for stock_id, count in affected_progress.items()
+            if int(count) > 0
+        }
+        if blocking_progress:
+            if len(related_stocks) == 2:
+                blocking_names = ", ".join(
+                    f"{stock_id} ({count} drops)"
+                    for stock_id, count in blocking_progress.items()
+                )
+                return _result(
+                    False,
+                    "affected_stock_progress",
+                    "Two-stock calibration cannot change this plan because an affected "
+                    f"stock has already dispensed: {blocking_names}.",
+                    affected_stock_ids=affected_stock_ids,
+                    affected_stock_progress=affected_progress,
+                    related_stock_ids=[stock.stock_id for stock in related_stocks],
+                )
             return _result(
                 False,
                 "printed_progress",
                 "This printer head has already dispensed droplets in this execution; "
                 "its calibration can no longer be changed.",
+                affected_stock_ids=affected_stock_ids,
+                affected_stock_progress=affected_progress,
             )
 
         try:
@@ -9656,6 +15818,9 @@ class ExperimentModel(QObject):
             True,
             "execution_stock_eligible",
             "This calibration result may be applied to the execution plan.",
+            affected_stock_ids=affected_stock_ids,
+            affected_stock_progress=affected_progress,
+            related_stock_ids=[stock.stock_id for stock in related_stocks],
         )
 
     def _execution_progress_reference(self) -> ProgressExecutionReference | None:
@@ -10216,6 +16381,199 @@ class ExperimentModel(QObject):
         recorder = getattr(owner, "record_experiment_audit_event", None)
         if callable(recorder):
             recorder(event_type, summary, details=details)
+
+    def _build_calibration_volume_warning_audit_intent(
+        self,
+        volume_warning: Mapping[str, Any] | None,
+        *,
+        stock_id: str | None,
+        calibration_record: Mapping[str, Any] | None = None,
+        calibration_record_key: str | None = None,
+        plan=None,
+    ) -> dict | None:
+        if not volume_warning:
+            return None
+        record = dict(calibration_record or {})
+        record_id = record.get("record_id") or calibration_record_key
+        timestamp_utc = (
+            record.get("recorded_at_utc")
+            or record.get("recorded_at")
+            or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        details = {
+            "stock_id": None if stock_id in (None, "") else str(stock_id),
+            "calibration_record_id": (
+                None if record_id in (None, "") else str(record_id)
+            ),
+            "result_id": record.get("result_id"),
+            "result_sha256": record.get("result_sha256"),
+            "process_run_id": record.get("process_run_id"),
+            "run_id": record.get("run_id"),
+            "volume_warning": copy.deepcopy(dict(volume_warning)),
+        }
+        identity = {
+            key: details[key]
+            for key in (
+                "stock_id",
+                "calibration_record_id",
+                "result_id",
+                "result_sha256",
+                "process_run_id",
+                "run_id",
+            )
+        }
+        if plan is not None:
+            details.update(
+                {"plan_id": plan.plan_id, "plan_revision": int(plan.plan_revision)}
+            )
+            identity.update(
+                {"plan_id": plan.plan_id, "plan_revision": int(plan.plan_revision)}
+            )
+        return build_calibration_volume_warning_audit_intent(
+            identity=identity,
+            timestamp_utc=str(timestamp_utc),
+            details=details,
+        )
+
+    def _stage_mutable_calibration_volume_warning_audit(
+        self,
+        volume_warning: Mapping[str, Any] | None,
+        *,
+        stock_id: str | None,
+        calibration_record: Mapping[str, Any] | None = None,
+        calibration_record_key: str | None = None,
+    ) -> dict | None:
+        intent = ExperimentModel._build_calibration_volume_warning_audit_intent(
+            self,
+            volume_warning,
+            stock_id=stock_id,
+            calibration_record=calibration_record,
+            calibration_record_key=calibration_record_key,
+        )
+        if intent is None:
+            return None
+        outbox = ExperimentModel._normalize_calibration_volume_warning_audits(
+            getattr(self, "calibration_volume_warning_audits", None)
+        )
+        existing = outbox["events"].get(intent["event_id"])
+        if existing is not None and existing != intent:
+            raise RuntimeError(
+                "Calibration volume-warning audit event ID conflicts with durable evidence."
+            )
+        outbox["events"][intent["event_id"]] = intent
+        self.calibration_volume_warning_audits = outbox
+        return intent
+
+    def _stage_execution_calibration_volume_warning_audit(
+        self,
+        document,
+        volume_warning: Mapping[str, Any] | None,
+        *,
+        stock_id: str | None,
+        calibration_record: Mapping[str, Any] | None,
+        plan,
+    ) -> dict | None:
+        intent = self._build_calibration_volume_warning_audit_intent(
+            volume_warning,
+            stock_id=stock_id,
+            calibration_record=calibration_record,
+            plan=plan,
+        )
+        if intent is None:
+            return None
+        existing = document.volume_warning_audits.get(intent["event_id"])
+        if existing is not None and existing != intent:
+            raise RuntimeError(
+                "Execution calibration volume-warning audit event ID conflicts with durable evidence."
+            )
+        document.volume_warning_audits[intent["event_id"]] = intent
+        return intent
+
+    def get_calibration_volume_warning_audit_intents(self) -> dict[str, dict]:
+        intents = dict(
+            self._normalize_calibration_volume_warning_audits(
+                getattr(self, "calibration_volume_warning_audits", None)
+            )["events"]
+        )
+        plan = self.get_execution_plan_snapshot()
+        path = getattr(self, "execution_calibrations_file_path", None)
+        if plan is not None and path and os.path.isfile(path):
+            document = load_execution_calibrations(path)
+            if document.plan_id != plan.plan_id:
+                raise RuntimeError(
+                    "Execution calibration warning outbox plan ID does not match."
+                )
+            for event_id, intent in document.volume_warning_audits.items():
+                existing = intents.get(event_id)
+                if existing is not None and existing != intent:
+                    raise RuntimeError(
+                        "Calibration volume-warning audit event ID conflicts across stores."
+                    )
+                intents[event_id] = intent
+        return {key: copy.deepcopy(intents[key]) for key in sorted(intents)}
+
+    def reconcile_calibration_volume_warning_audits(self) -> dict:
+        try:
+            intents = self.get_calibration_volume_warning_audit_intents()
+        except Exception as exc:
+            return {
+                "status": "pending",
+                "event_ids": [],
+                "recorded_event_ids": [],
+                "pending_event_ids": [],
+                "errors": [str(exc)],
+            }
+        manager = getattr(self, "_calibration_manager", None)
+        owner = getattr(manager, "model", None)
+        log_getter = getattr(owner, "_get_experiment_audit_log", None)
+        log = log_getter() if callable(log_getter) else None
+        recorded = []
+        pending = []
+        errors = []
+        for event_id, intent in intents.items():
+            if log is None or not callable(getattr(log, "ensure_event", None)):
+                pending.append(event_id)
+                errors.append("Experiment audit timeline is unavailable.")
+                continue
+            try:
+                log.ensure_event(intent)
+                recorded.append(event_id)
+            except Exception as exc:
+                pending.append(event_id)
+                errors.append(f"{event_id}: {exc}")
+        return {
+            "status": "pending" if pending else "recorded",
+            "event_ids": list(intents),
+            "recorded_event_ids": recorded,
+            "pending_event_ids": pending,
+            "errors": errors,
+        }
+
+    @staticmethod
+    def _calibration_volume_warning_audit_result(
+        intent: Mapping[str, Any] | None,
+        reconciliation: Mapping[str, Any] | None,
+    ) -> dict:
+        if not intent:
+            return {
+                "volume_warning_audit_event_id": None,
+                "volume_warning_audit_status": "not_required",
+                "volume_warning_audit_error": None,
+            }
+        reconciliation = dict(reconciliation or {})
+        event_id = str(intent["event_id"])
+        recorded = set(reconciliation.get("recorded_event_ids") or [])
+        status = "recorded" if event_id in recorded else "pending"
+        errors = reconciliation.get("errors") or []
+        return {
+            "volume_warning_audit_event_id": event_id,
+            "volume_warning_audit_status": status,
+            "volume_warning_audit_error": (
+                "; ".join(str(value) for value in errors)
+                if status == "pending"
+                else None
+            ),
+        }
 
     def lock_execution_plan(
         self,
@@ -10908,6 +17266,175 @@ class ExperimentModel(QObject):
             results[well.well_id] = counts
         return results
 
+    def _calibrated_two_stock_target_counts(
+        self,
+        plan,
+        requantized: Mapping[str, Any],
+    ) -> dict[str, dict[str, int]]:
+        stock_lookup = {stock.stock_id: stock for stock in plan.stocks}
+        stock_ids = tuple(str(value) for value in requantized["stock_ids"])
+        if len(stock_ids) != 2 or any(stock_id not in stock_lookup for stock_id in stock_ids):
+            raise RuntimeError(
+                "The two-stock calibration result does not match the execution plan."
+            )
+        fill_name = self.get_fill_reagent_name()
+        fill_stocks = [
+            stock
+            for stock in plan.stocks
+            if stock.factor_name == fill_name and stock.units == "--"
+        ]
+        if len(fill_stocks) > 1:
+            raise RuntimeError(
+                "The execution plan must contain at most one identifiable fill stock."
+            )
+        fill_stock = fill_stocks[0] if fill_stocks else None
+        volumes = {
+            stock.stock_id: float(stock.effective_volume_nL)
+            for stock in plan.stocks
+        }
+        for index, stock_id in enumerate(stock_ids):
+            volumes[stock_id] = float(
+                requantized["new_effective_volumes_nL"][index]
+            )
+        key = (str(requantized["factor_name"]), requantized.get("option_name"))
+        reaction_targets = {
+            f"R{index + 1}": spec.get("reaction")
+            for index, spec in enumerate(self._iter_reaction_run_specs())
+        }
+        mapping = {
+            self._normalize_target_key(float(target)): tuple(int(value) for value in counts)
+            for target, counts in requantized["mapping_by_target"].items()
+        }
+        warning_threshold = (
+            float(plan.volume_basis.target_printed_volume_nL)
+            + float(plan.volume_basis.design_optimization_tolerance_nL)
+        )
+        results: dict[str, dict[str, int]] = {}
+        for well in plan.wells:
+            reaction = reaction_targets.get(well.reaction_id)
+            if not isinstance(reaction, Mapping):
+                raise RuntimeError(
+                    f"No frozen design reaction matches {well.reaction_id!r} for the calibrated reagent."
+                )
+            counts = {
+                dispense.stock_id: int(dispense.target_dispenses)
+                for dispense in well.dispenses
+            }
+            if key not in reaction:
+                if any(counts.get(stock_id, 0) > 0 for stock_id in stock_ids):
+                    raise RuntimeError(
+                        f"Reaction {well.reaction_id!r} omits the calibrated reagent "
+                        "but its well has positive counts for that reagent."
+                    )
+                results[well.well_id] = counts
+                continue
+            target_key = self._normalize_target_key(float(reaction[key]))
+            if target_key not in mapping:
+                raise RuntimeError(
+                    f"The calibration result has no mapping for target {float(reaction[key]):.6g}."
+                )
+            pair = mapping[target_key]
+            for index, stock_id in enumerate(stock_ids):
+                count = int(pair[index])
+                if count > 0 or stock_id in counts:
+                    counts[stock_id] = count
+                else:
+                    counts.pop(stock_id, None)
+            nonfill = sum(
+                int(count) * volumes[stock_id]
+                for stock_id, count in counts.items()
+                if fill_stock is None or stock_id != fill_stock.stock_id
+            )
+            if fill_stock is None:
+                default_fill_volume = float(self._default_fill_droplet_volume_nl())
+                required_fill = self._calibration_fill_count(
+                    target_printed_volume_nL=float(
+                        plan.volume_basis.target_printed_volume_nL
+                    ),
+                    warning_threshold_nL=warning_threshold,
+                    nonfill_volume_nL=nonfill,
+                    fill_volume_nL=default_fill_volume,
+                    fill_is_calibrated=False,
+                )
+                if required_fill > 0:
+                    raise RuntimeError(
+                        "The calibrated two-stock mapping would require a fill stock "
+                        "that is absent from the finalized execution plan."
+                    )
+            else:
+                fill_volume = volumes[fill_stock.stock_id]
+                fill_count = self._calibration_fill_count(
+                    target_printed_volume_nL=float(
+                        plan.volume_basis.target_printed_volume_nL
+                    ),
+                    warning_threshold_nL=warning_threshold,
+                    nonfill_volume_nL=nonfill,
+                    fill_volume_nL=fill_volume,
+                    fill_is_calibrated=bool(fill_stock.calibration_record_key),
+                )
+                if fill_count > 0 or fill_stock.stock_id in counts:
+                    counts[fill_stock.stock_id] = fill_count
+                else:
+                    counts.pop(fill_stock.stock_id, None)
+            results[well.well_id] = counts
+        return results
+
+    def _validate_calibrated_target_counts_against_progress(
+        self,
+        plan,
+        target_counts_by_well: Mapping[str, Mapping[str, int]],
+        *,
+        required_unprinted_stock_ids: Iterable[str] = (),
+    ) -> None:
+        progress_payload = self.return_progress_data()
+        progress_wells = self._well_entries_from_progress_payload(progress_payload)
+        required_unprinted = {
+            str(stock_id) for stock_id in required_unprinted_stock_ids
+        }
+        if set(target_counts_by_well) != {well.well_id for well in plan.wells}:
+            raise RuntimeError(
+                "The calibrated target map does not contain exactly the execution wells."
+            )
+        for well in plan.wells:
+            progress_well = progress_wells.get(well.well_id, {})
+            progress_reagents = (
+                progress_well.get("reagents")
+                if isinstance(progress_well, Mapping)
+                else {}
+            )
+            if not isinstance(progress_reagents, Mapping):
+                progress_reagents = {}
+            counts = target_counts_by_well[well.well_id]
+            for stock_id, target_count in counts.items():
+                if isinstance(target_count, bool) or int(target_count) != target_count or int(target_count) < 0:
+                    raise RuntimeError(
+                        f"The calibrated target for {well.well_id}/{stock_id} is invalid."
+                    )
+                details = progress_reagents.get(stock_id, {})
+                added = int(details.get("added_droplets", 0) or 0) if isinstance(details, Mapping) else 0
+                if stock_id in required_unprinted and added > 0:
+                    raise RuntimeError(
+                        f"Calibration cannot change {stock_id!r} after it dispensed droplets."
+                    )
+                if int(target_count) < added:
+                    raise RuntimeError(
+                        f"The calibrated target for {well.well_id}/{stock_id} would be "
+                        f"{int(target_count)}, below {added} already-dispensed droplets."
+                    )
+            for stock_id, details in progress_reagents.items():
+                if not isinstance(details, Mapping):
+                    continue
+                added = int(details.get("added_droplets", 0) or 0)
+                if stock_id in required_unprinted and added > 0:
+                    raise RuntimeError(
+                        f"Calibration cannot change {stock_id!r} after it dispensed droplets."
+                    )
+                if added > 0 and stock_id not in counts:
+                    raise RuntimeError(
+                        f"The calibrated plan would remove {well.well_id}/{stock_id} after "
+                        f"{added} droplets were dispensed."
+                    )
+
     def _apply_plan_targets_to_runtime(self, plan) -> None:
         reaction_by_id = {}
         stock_objects = {}
@@ -10967,10 +17494,11 @@ class ExperimentModel(QObject):
         plan = self.lock_execution_plan("calibration_started", timestamp_utc=timestamp_utc)
         if plan is None:
             raise RuntimeError("A finalized execution plan is required for execution calibration.")
-        if self._added_droplets_for_stock(stock_id) > 0:
-            raise RuntimeError(
-                f"Stock {stock_id!r} has already dispensed droplets and cannot change calibration."
-            )
+        post_lock_eligibility = self.get_calibration_application_eligibility(
+            stock_id=stock_id
+        )
+        if not post_lock_eligibility.get("ok"):
+            raise RuntimeError(str(post_lock_eligibility.get("message") or "Calibration application became ineligible."))
         design_payload = self._validate_plan_design_link(plan)
         self._validate_runtime_matches_execution_plan(plan)
         stocks = {stock.stock_id: stock for stock in plan.stocks}
@@ -10985,9 +17513,9 @@ class ExperimentModel(QObject):
             if item.factor_name == stock.factor_name
             and item.option_name == stock.option_name
         ]
-        if len(identity_matches) != 1:
+        if len(identity_matches) not in (1, 2):
             raise RuntimeError(
-                "Two-stock execution calibration is not supported by this schema slice."
+                "The calibrated design option must map to one or two execution stocks."
             )
         stock_is_fill = bool(
             stock.factor_name == self.get_fill_reagent_name() and stock.units == "--"
@@ -11103,9 +17631,79 @@ class ExperimentModel(QObject):
                 "full_validation_count": 1,
             }
             self.set_execution_plan_sync_error(None)
-            return {"plan": plan, "record": record.to_dict(), "status": "reused"}
+            volume_warning = self._calibration_volume_warning_for_execution_plan(plan)
+            audit_intent = next(
+                (
+                    intent
+                    for intent in document.volume_warning_audits.values()
+                    if intent.get("details", {}).get("calibration_record_id")
+                    == record_id
+                    and intent.get("details", {}).get("plan_id") == plan.plan_id
+                    and int(
+                        intent.get("details", {}).get("plan_revision", -1)
+                    )
+                    == int(plan.plan_revision)
+                ),
+                None,
+            )
+            reconciliation = self.reconcile_calibration_volume_warning_audits()
+            response = {
+                "plan": plan,
+                "record": record.to_dict(),
+                "status": "reused",
+                "volume_warning": volume_warning,
+            }
+            response.update(
+                self._calibration_volume_warning_audit_result(
+                    audit_intent,
+                    reconciliation,
+                )
+            )
+            return response
 
-        target_counts = self._calibrated_target_counts(plan, stock, float(new_effective_volume_nL))
+        requantized = None
+        if len(identity_matches) == 2:
+            if stock_is_fill:
+                raise RuntimeError(
+                    "A fill reagent cannot be represented as a two-stock calibration group."
+                )
+            requantized = self._requantize_fixed_two_stock_group(
+                (stock.factor_name, stock.option_name),
+                calibrated_stock_id=stock.stock_id,
+                new_effective_volume_nL=float(new_effective_volume_nL),
+                new_printing_mode=printing_mode,
+            )
+            if not requantized.get("ok"):
+                raise RuntimeError(
+                    str(
+                        requantized.get("reason")
+                        or "Two-stock execution calibration re-quantization failed."
+                    )
+                )
+            target_counts = self._calibrated_two_stock_target_counts(
+                plan,
+                requantized,
+            )
+        else:
+            target_counts = self._calibrated_target_counts(
+                plan, stock, float(new_effective_volume_nL)
+            )
+        required_unprinted_stock_ids: set[str] = {stock.stock_id}
+        if requantized is not None:
+            required_unprinted_stock_ids.update(
+                str(value) for value in requantized["stock_ids"]
+            )
+            required_unprinted_stock_ids.update(
+                item.stock_id
+                for item in plan.stocks
+                if item.factor_name == self.get_fill_reagent_name()
+                and item.units == "--"
+            )
+        self._validate_calibrated_target_counts_against_progress(
+            plan,
+            target_counts,
+            required_unprinted_stock_ids=required_unprinted_stock_ids,
+        )
         candidate = build_calibrated_revision(
             plan,
             stock_id=stock_id,
@@ -11115,6 +17713,26 @@ class ExperimentModel(QObject):
             calibration_record_key=record_id,
             target_counts_by_well=target_counts,
             timestamp_utc=record.recorded_at_utc,
+        )
+        volume_warning = self._calibration_volume_warning_for_execution_plan(candidate)
+        if requantized is not None:
+            original_by_id = {item.stock_id: item for item in plan.stocks}
+            candidate_by_id = {item.stock_id: item for item in candidate.stocks}
+            companion_id = str(requantized["companion_stock_id"])
+            if candidate_by_id.get(companion_id) != original_by_id.get(companion_id):
+                raise RuntimeError(
+                    "Two-stock calibration changed the companion stock metadata."
+                )
+            if set(candidate_by_id) != set(original_by_id):
+                raise RuntimeError(
+                    "Two-stock calibration changed the execution stock identities."
+                )
+        audit_intent = self._stage_execution_calibration_volume_warning_audit(
+            document,
+            volume_warning,
+            stock_id=stock_id,
+            calibration_record=record.to_dict(),
+            plan=candidate,
         )
         cached_commit = bool(
             getattr(self, "_active_authoritative_execution_session", None)
@@ -11187,7 +17805,39 @@ class ExperimentModel(QObject):
                 "new_effective_volume_nL": float(new_effective_volume_nL),
             },
         )
-        return {"plan": candidate, "record": record.to_dict(), "status": status}
+        reconciliation = self.reconcile_calibration_volume_warning_audits()
+        response = {
+            "plan": candidate,
+            "record": record.to_dict(),
+            "status": status,
+            "volume_warning": volume_warning,
+        }
+        response.update(
+            self._calibration_volume_warning_audit_result(
+                audit_intent,
+                reconciliation,
+            )
+        )
+        if requantized is not None:
+            changed_rows = [
+                row
+                for row in requantized["rows"]
+                if tuple(row["old_drops"]) != tuple(row["drops"])
+            ]
+            response.update(
+                {
+                    "changed_target_count": len(changed_rows),
+                    "count_changes": [
+                        {
+                            "target_final": float(row["target_final"]),
+                            "old_drops": tuple(row["old_drops"]),
+                            "new_drops": tuple(row["drops"]),
+                        }
+                        for row in changed_rows
+                    ],
+                }
+            )
+        return response
 
     def _project_reconstructed_execution_plan(self, plan):
         fill_name = str(self.metadata.get("fill_reagent_name", "Water"))
@@ -11632,7 +18282,7 @@ class ExperimentModel(QObject):
         if df.empty:
             # Nothing assigned yet; don't write a misleading header-only CSV
             return
-        df.to_csv(self.key_file_path, index_label="Well ID")
+        self._atomic_dataframe_csv(df, self.key_file_path)
 
     def progress_to_concentration_key(self) -> "pd.DataFrame":
         """
@@ -11766,7 +18416,7 @@ class ExperimentModel(QObject):
             return
         if decimals is not None and isinstance(decimals, int):
             df = df.round(decimals)
-        df.to_csv(self.concentration_key_file_path, index_label="Well ID")
+        self._atomic_dataframe_csv(df, self.concentration_key_file_path)
     
     def write_keys_now(self):
         """
@@ -11940,6 +18590,68 @@ class ExperimentModel(QObject):
         return True
 
 
+    def _iter_mutable_calibration_runtime_items(self):
+        start_lookup = {}
+        for factor in self.factors:
+            if factor.kind == "additive":
+                option = factor.options[0]
+                start_lookup[(factor.name, None)] = float(
+                    getattr(option, "starting_conc", 0.0) or 0.0
+                )
+            else:
+                for option in factor.options:
+                    start_lookup[(factor.name, option.name)] = float(
+                        getattr(option, "starting_conc", 0.0) or 0.0
+                    )
+
+        run_specs = list(self._iter_reaction_run_specs())
+        fill_counts = (
+            [int(value) for value in self._reactions_df["fill_drops"].tolist()]
+            if (
+                isinstance(self._reactions_df, pd.DataFrame)
+                and not self._reactions_df.empty
+                and "fill_drops" in self._reactions_df.columns
+            )
+            else [0] * len(run_specs)
+        )
+        if len(fill_counts) != len(run_specs):
+            raise RuntimeError(
+                "Generated fill targets do not match the runtime reaction count."
+            )
+
+        fill_name = self.get_fill_reagent_name()
+        for index, run_spec in enumerate(run_specs):
+            items = []
+            for key, target in run_spec["reaction"].items():
+                plan = self.plans_per_option.get(key)
+                if not isinstance(plan, dict):
+                    raise RuntimeError(
+                        f"No calibrated stock plan exists for {key!r}."
+                    )
+                starting = start_lookup.get(key, 0.0)
+                target_add = max(0.0, float(target) - starting)
+                reagent_name = key[0] if key[1] is None else key[1]
+                for stock in list(plan.get("stocks") or []):
+                    drops, _, unreachable, _ = self._resolve_drops_for_target(
+                        stock,
+                        target_add,
+                    )
+                    if unreachable:
+                        raise RuntimeError(
+                            f"The calibrated runtime target for {key!r} is unreachable."
+                        )
+                    items.append(
+                        (
+                            reagent_name,
+                            float(stock["stock_concentration"]),
+                            stock["units"],
+                            int(drops),
+                        )
+                    )
+            items.append((fill_name, 1.0, "--", int(fill_counts[index])))
+            yield items
+
+
     def _rebind_runtime_assignments_to_current_plans(self) -> bool:
         """
         Force per-well droplet counts in the runtime collection to match the
@@ -11951,16 +18663,155 @@ class ExperimentModel(QObject):
         if rc is None:
             return False
 
-        it = self.iter_reaction_stock_droplets()
+        runtime_additions = []
+        strict = bool(
+            getattr(self, "_mutable_calibration_runtime_strict", False)
+        )
+        items_list = (
+            list(self._iter_mutable_calibration_runtime_items())
+            if strict
+            else None
+        )
+
+        if strict:
+            getter = getattr(rc, "get_all_reactions", None)
+            setter = getattr(rc, "set_reaction_items_for_index", None)
+            if not callable(getter) or not callable(setter):
+                raise RuntimeError(
+                    "The assigned runtime does not support reversible calibration updates."
+                )
+            reactions = list(getter())
+            if len(reactions) != len(items_list):
+                raise RuntimeError(
+                    "The assigned runtime reaction count does not match the calibrated design."
+                )
+            validated_items_list = []
+            stock_manager = getattr(
+                self,
+                "_runtime_stock_solution_manager",
+                None,
+            )
+            stock_getter = getattr(stock_manager, "get_stock_by_id", None)
+            for index, (reaction, items) in enumerate(zip(reactions, items_list)):
+                reagent_getter = getattr(reaction, "get_all_reagents", None)
+                if not callable(reagent_getter):
+                    raise RuntimeError(
+                        "The assigned runtime reaction cannot be validated before calibration."
+                    )
+                reagents = reagent_getter()
+                if not isinstance(reagents, dict):
+                    raise RuntimeError(
+                        "The assigned runtime reagent mapping is malformed."
+                    )
+                seen_stock_ids = set()
+                validated_items = []
+                for reagent_name, concentration, units, droplets in items:
+                    if (
+                        isinstance(droplets, bool)
+                        or not isinstance(droplets, (int, float))
+                        or not math.isfinite(float(droplets))
+                        or not float(droplets).is_integer()
+                        or int(droplets) < 0
+                    ):
+                        raise RuntimeError(
+                            f"The calibrated runtime target at reaction {index} is invalid."
+                        )
+                    stock_id = stock_id_for_parts(
+                        reagent_name,
+                        concentration,
+                        units,
+                    )
+                    if stock_id in seen_stock_ids:
+                        raise RuntimeError(
+                            f"The calibrated runtime target at reaction {index} duplicates stock {stock_id!r}."
+                        )
+                    seen_stock_ids.add(stock_id)
+                    if stock_id not in reagents:
+                        if int(droplets) <= 0:
+                            continue
+                        if not callable(stock_getter):
+                            raise RuntimeError(
+                                "The assigned runtime cannot resolve newly required "
+                                f"stock {stock_id!r}."
+                            )
+                        try:
+                            stock_solution = stock_getter(stock_id)
+                        except Exception as exc:
+                            raise RuntimeError(
+                                "The assigned runtime cannot resolve newly required "
+                                f"stock {stock_id!r}."
+                            ) from exc
+                        try:
+                            identity_matches = (
+                                stock_solution is not None
+                                and str(getattr(stock_solution, "stock_id", "")) == stock_id
+                                and str(getattr(stock_solution, "reagent_name", ""))
+                                == str(reagent_name)
+                                and math.isclose(
+                                    float(
+                                        getattr(
+                                            stock_solution,
+                                            "raw_concentration",
+                                            float("nan"),
+                                        )
+                                    ),
+                                    float(concentration),
+                                    rel_tol=0.0,
+                                    abs_tol=1e-12,
+                                )
+                                and str(getattr(stock_solution, "units", ""))
+                                == str(units)
+                            )
+                        except (TypeError, ValueError):
+                            identity_matches = False
+                        if not identity_matches:
+                            raise RuntimeError(
+                                "The assigned runtime stock registry does not match "
+                                f"newly required stock {stock_id!r}."
+                            )
+                        add_reagent = getattr(reaction, "add_reagent", None)
+                        if not callable(add_reagent):
+                            raise RuntimeError(
+                                f"The assigned runtime reaction {index} cannot add stock {stock_id!r}."
+                            )
+                        runtime_additions.append(
+                            (reaction, stock_solution, int(droplets))
+                        )
+                    validated_items.append(
+                        (
+                            reagent_name,
+                            concentration,
+                            units,
+                            int(droplets),
+                        )
+                    )
+                validated_items_list.append(validated_items)
+            items_list = validated_items_list
 
         try:
+            for reaction, stock_solution, droplets in runtime_additions:
+                reaction.add_reagent(stock_solution, droplets)
+
             # Most explicit: set each reaction's items
             if hasattr(rc, "set_reaction_items_for_index"):
-                for idx, items in enumerate(it):
-                    rc.set_reaction_items_for_index(idx, items)
+                iterator = (
+                    items_list
+                    if items_list is not None
+                    else self.iter_reaction_stock_droplets()
+                )
+                for idx, items in enumerate(iterator):
+                    updated = rc.set_reaction_items_for_index(idx, items)
+                    if strict and updated is False:
+                        raise RuntimeError(
+                            f"The assigned runtime rejected calibrated reaction {idx}."
+                        )
                 return True
 
             # Bulk reset from an iterator
+            if strict:
+                raise RuntimeError(
+                    "The assigned runtime does not expose a reversible per-reaction update."
+                )
             if hasattr(rc, "reset_from_iterator"):
                 rc.reset_from_iterator(self.iter_reaction_stock_droplets())
                 return True
@@ -11978,8 +18829,14 @@ class ExperimentModel(QObject):
                 return True
 
         except Exception as e:
+            if strict:
+                raise
             print(f"[ExperimentModel] WARNING: rebind of runtime assignments failed: {e}")
 
+        if strict:
+            raise RuntimeError(
+                "The assigned runtime does not support calibrated target updates."
+            )
         return False
 
     def _refresh_runtime_after_plan_change(self, *, write_keys_if_assigned: bool = True) -> bool:
@@ -11996,9 +18853,12 @@ class ExperimentModel(QObject):
                 self.write_keys_now()
 
         # Design/stock tables and other ExperimentModel listeners refresh from here.
-        self.stock_updated.emit()
+        if not getattr(self, "_mutable_calibration_stage_active", False):
+            self.stock_updated.emit()
 
-        if had_runtime_assignments:
+        if had_runtime_assignments and not getattr(
+            self, "_mutable_calibration_stage_active", False
+        ):
             wp = getattr(self, "_runtime_well_plate", None)
             signal = getattr(wp, "well_state_changed_signal", None)
             if signal is not None and hasattr(signal, "emit"):
@@ -12057,6 +18917,13 @@ class ExperimentModel(QObject):
             total_new = sum(
                 counts.get(fill_stock.stock_id, 0) for counts in new_counts.values()
             )
+            volume_warning = self._calibration_volume_warning_for_execution_counts(
+                plan,
+                new_counts,
+                effective_volume_overrides_nL={
+                    fill_stock.stock_id: new_fill_droplet_nL,
+                },
+            )
             printed_nL_old = float(total_old * fill_stock.effective_volume_nL)
             printed_nL_new = float(total_new * new_fill_droplet_nL)
             return {
@@ -12081,6 +18948,7 @@ class ExperimentModel(QObject):
                 "target_counts_by_well": new_counts,
                 "plan_id": plan.plan_id,
                 "plan_revision": plan.plan_revision,
+                "volume_warning": volume_warning,
             }
 
         # Ensure we have a current reactions frame with nonfill volumes.
@@ -12099,6 +18967,25 @@ class ExperimentModel(QObject):
         remaining = (V_print - df["nonfill_volume_nL"]).clip(lower=0.0)
         drops_old = (remaining / old_fill_dv).round().astype(int)
         drops_new = (remaining / new_fill_droplet_nL).round().astype(int)
+        printed, final, warning_threshold = self._calibration_volume_basis()
+        volume_warning = self._build_calibration_volume_warning(
+            [
+                {
+                    "row_id": f"R{index + 1}",
+                    "well_id": None,
+                    "reaction_id": f"R{index + 1}",
+                    "total_volume_nL": (
+                        float(nonfill) + int(drop_count) * new_fill_droplet_nL
+                    ),
+                }
+                for index, (nonfill, drop_count) in enumerate(
+                    zip(df["nonfill_volume_nL"], drops_new)
+                )
+            ],
+            target_printed_volume_nL=printed,
+            design_optimization_tolerance_nL=warning_threshold - printed,
+            final_reaction_volume_nL=final,
+        )
 
         total_old = int(drops_old.sum())
         total_new = int(drops_new.sum())
@@ -12127,6 +19014,7 @@ class ExperimentModel(QObject):
             "total_drops_old": total_old,
             "total_drops_new": total_new,
             "total_drops_delta": total_new - total_old,
+            "volume_warning": volume_warning,
         }
 
     def apply_fill_droplet_volume(
@@ -12211,6 +19099,10 @@ class ExperimentModel(QObject):
                 "saved_experiment": False,
                 "applied_imaging_calibration_recorded": True,
                 "execution_plan_revision": result["plan"].plan_revision,
+                "volume_warning": copy.deepcopy(result.get("volume_warning")),
+                "volume_warning_audit_event_id": result.get("volume_warning_audit_event_id"),
+                "volume_warning_audit_status": result.get("volume_warning_audit_status"),
+                "volume_warning_audit_error": result.get("volume_warning_audit_error"),
                 "execution_plan_status": result["status"],
             }
         metadata = getattr(self, "metadata", {}) or {}
@@ -12242,54 +19134,77 @@ class ExperimentModel(QObject):
 
         # Preview before we apply, so we can report useful deltas after recompute
         prev = self.preview_fill_requantized(new_fill_droplet_nL)
-        # Apply
-        if (
-            "intended_fill_droplet_volume_nL" not in self.metadata
-            and abs(old - new_fill_droplet_nL) > 1e-9
-        ):
-            self.metadata["intended_fill_droplet_volume_nL"] = old
-        if (
-            "intended_fill_printing_mode" not in self.metadata
-            and original_fill_mode != applied_fill_mode
-        ):
-            self.metadata["intended_fill_printing_mode"] = original_fill_mode
-        self.metadata["fill_droplet_volume_nL"] = new_fill_droplet_nL
-        self.metadata["fill_printing_mode"] = applied_fill_mode
-        self.generate_experiment()
 
-        self._refresh_runtime_after_plan_change(write_keys_if_assigned=write_keys_if_assigned)
+        def _stage_changes() -> dict:
+            if (
+                "intended_fill_droplet_volume_nL" not in self.metadata
+                and abs(old - new_fill_droplet_nL) > 1e-9
+            ):
+                self.metadata["intended_fill_droplet_volume_nL"] = old
+            if (
+                "intended_fill_printing_mode" not in self.metadata
+                and original_fill_mode != applied_fill_mode
+            ):
+                self.metadata["intended_fill_printing_mode"] = original_fill_mode
+            self.metadata["fill_droplet_volume_nL"] = new_fill_droplet_nL
+            self.metadata["fill_printing_mode"] = applied_fill_mode
+            self.generate_experiment()
 
-        self.unsaved_changes = True
-        applied_recorded = False
-        if applied_calibration:
-            record_kwargs = dict(applied_calibration)
-            record_kwargs.setdefault("printing_mode", applied_fill_mode)
-            record_kwargs.setdefault("original_printing_mode", original_fill_mode)
-            record_kwargs.setdefault("applied_printing_mode", applied_fill_mode)
-            self.record_applied_imaging_calibration(
-                factor_name=str(self.metadata.get("fill_reagent_name", "Water")),
-                option_name=None,
-                is_fill=True,
-                applied_design_volume_nL=new_fill_droplet_nL,
-                save=False,
-                **record_kwargs,
+            record = None
+            if applied_calibration:
+                record_kwargs = dict(applied_calibration)
+                record_kwargs.setdefault("printing_mode", applied_fill_mode)
+                record_kwargs.setdefault(
+                    "original_printing_mode",
+                    original_fill_mode,
+                )
+                record_kwargs.setdefault(
+                    "applied_printing_mode",
+                    applied_fill_mode,
+                )
+                record = self.record_applied_imaging_calibration(
+                    factor_name=str(
+                        self.metadata.get("fill_reagent_name", "Water")
+                    ),
+                    option_name=None,
+                    is_fill=True,
+                    applied_design_volume_nL=new_fill_droplet_nL,
+                    save=False,
+                    **record_kwargs,
+                )
+
+            warning_getter = getattr(
+                self,
+                "_calibration_volume_warning_for_generated_reactions",
+                None,
             )
-            applied_recorded = True
-        saved_experiment = False
-        if getattr(self, "experiment_file_path", None):
-            self.save_experiment()
-            saved_experiment = True
-        return {
-            "old_fill_nL": old,
-            "new_fill_nL": new_fill_droplet_nL,
-            "original_printing_mode": original_fill_mode,
-            "applied_printing_mode": applied_fill_mode,
-            "total_drops_old": prev.get("total_drops_old"),
-            "total_drops_new": prev.get("total_drops_new"),
-            "total_drops_delta": prev.get("total_drops_delta"),
-            "saved_experiment": saved_experiment,
-            "applied_imaging_calibration_recorded": applied_recorded,
-        }
+            volume_warning = (
+                warning_getter()
+                if callable(warning_getter)
+                else copy.deepcopy(prev.get("volume_warning"))
+            )
+            return {
+                "result": {
+                    "old_fill_nL": old,
+                    "new_fill_nL": new_fill_droplet_nL,
+                    "original_printing_mode": original_fill_mode,
+                    "applied_printing_mode": applied_fill_mode,
+                    "total_drops_old": prev.get("total_drops_old"),
+                    "total_drops_new": prev.get("total_drops_new"),
+                    "total_drops_delta": prev.get("total_drops_delta"),
+                    "saved_experiment": False,
+                    "applied_imaging_calibration_recorded": record is not None,
+                    "volume_warning": volume_warning,
+                },
+                "audit_stock_id": (record or {}).get("stock_id"),
+                "calibration_record": record,
+            }
+
+        return ExperimentModel._run_mutable_calibration_transaction(
+            self,
+            write_keys_if_assigned=write_keys_if_assigned,
+            stage_changes=_stage_changes,
+        )
 
 
     def read_progress_file(self, progress_file: str):
@@ -12796,6 +19711,8 @@ class ExperimentModel(QObject):
                     option["printing_mode"] = intended_mode
         payload["stock_prep"] = self._default_stock_prep_state()
         payload["applied_imaging_calibrations"] = self._normalize_applied_imaging_calibrations(None)
+        payload["calibration_volume_warning_audits"] = self._normalize_calibration_volume_warning_audits(None)
+        payload["calibrated_stock_allocation"] = self._normalize_calibrated_stock_allocation(None)
         payload["manual_refuel_checks"] = self._normalize_manual_refuel_checks(None)
         return payload
 
@@ -12814,6 +19731,10 @@ class ExperimentModel(QObject):
             raise FileExistsError(f"Experiment folder already exists: {destination}")
         destination.parent.mkdir(parents=True, exist_ok=True)
 
+        source_metadata = data.get("metadata") if isinstance(data, dict) else None
+        source_missing_resolution_policy = not isinstance(source_metadata, dict) or (
+            self.STOCK_RESOLUTION_POLICY_METADATA_KEY not in source_metadata
+        )
         payload = self._duplicate_design_payload(
             data,
             new_name,
@@ -12883,6 +19804,12 @@ class ExperimentModel(QObject):
             str(destination / "experiment_design.json"),
             str(destination),
         )
+        if source_missing_resolution_policy:
+            # The copy now persists the normalized boolean, but session provenance
+            # lets the editor explain why concentration-first grouping is enabled.
+            self._stock_allocation_resolution_policy_source = (
+                self.STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING
+            )
         self.unsaved_changes = False
         return True
 
@@ -13228,6 +20155,7 @@ class ExperimentModel(QObject):
             "replicates": 1,
             "use_subset_design": False,   # <-- keep key consistent
             "allow_two_stock_solutions": False,
+            "allow_avoidable_target_grouping": False,
             "reduction_factor": 1,
             "target_reaction_volume_nL": 2000.0,
             "printed_volume_tolerance_nL": 50.0,
@@ -13241,6 +20169,9 @@ class ExperimentModel(QObject):
             "start_col": 0,
             "well_selection": self._default_well_selection(),
         }
+        self._stock_allocation_resolution_policy_source = (
+            self.STOCK_RESOLUTION_POLICY_SOURCE_NEW_DEFAULT
+        )
         self.calibration_storage_policy = new_experiment_policy()
         self._sync_calibration_storage_policy_to_manager()
         self.stock_prep_state = self._default_stock_prep_state()
@@ -13249,6 +20180,12 @@ class ExperimentModel(QObject):
         self._stock_prep_worksheet_source = None
         self._stock_prep_worksheet_loaded_path = None
         self.applied_imaging_calibrations = self._normalize_applied_imaging_calibrations(None)
+        self.calibration_volume_warning_audits = self._normalize_calibration_volume_warning_audits(None)
+        self.calibrated_stock_allocation = self._normalize_calibrated_stock_allocation(None)
+        self.calibrated_stock_allocation_status = {
+            "active": False,
+            "reason": "not_configured",
+        }
         self.manual_refuel_checks = self._normalize_manual_refuel_checks(None)
         self.plans_per_option.clear()
         self._unreachable_preview_map = {}
@@ -13278,6 +20215,7 @@ class ExperimentModel(QObject):
         self.concentration_key_file_path = None
         self._runtime_well_plate = None
         self._runtime_reaction_collection = None
+        self._runtime_stock_solution_manager = None
         self._execution_plan_snapshot = None
         self._execution_plan_source = None
         self._reconstructed_execution_plan = None
@@ -13468,12 +20406,13 @@ class StockSolutionManager(QObject):
             reagent_name, concentration_str, units = stock_id.split('_')
             concentration = float(concentration_str[:])  # Remove 'M' and convert to float
             if stock_id in self.stock_solutions.keys():
-                print('Duplicate stock solution found:',stock_id)
-            else:
-                self.stock_solutions.update({stock_id:StockSolution(stock_id,reagent_name,concentration,units)})
+                raise ValueError(f"Duplicate runtime stock ID {stock_id!r}.")
+            self.stock_solutions.update({stock_id:StockSolution(stock_id,reagent_name,concentration,units)})
 
     def add_stock_solution(self, reagent_name, concentration, units, required_volume=None):
         stock_id = self._make_stock_id(reagent_name, concentration, units)
+        if stock_id in self.stock_solutions:
+            raise ValueError(f"Duplicate runtime stock ID {stock_id!r}.")
         print('Adding stock solution:',stock_id)
         self.stock_solutions.update({
             stock_id: StockSolution(stock_id, reagent_name, float(concentration), units, required_volume=required_volume)
@@ -13510,8 +20449,7 @@ class StockSolutionManager(QObject):
         self.stock_solutions = {}
 
     def _make_stock_id(self, reagent_name, concentration, units):
-        conc_str = f"{float(concentration):.2f}"   # <-- 2 decimals, zero-padded
-        return "_".join([reagent_name, conc_str, units])
+        return stock_id_for_parts(reagent_name, concentration, units)
 
 
 class ReactionComposition(QObject):
@@ -13643,9 +20581,7 @@ class ReactionCollection(QObject):
     # ---- helpers -------------------------------------------------
     @staticmethod
     def _stock_id_from_tuple(reagent_name: str, concentration: float, units: str) -> str:
-        # Must match StockSolutionManager._make_stock_id format exactly
-        conc_str = f"{float(concentration):.2f}"
-        return "_".join([reagent_name, conc_str, units])
+        return stock_id_for_parts(reagent_name, concentration, units)
 
     def _reaction_by_index(self, index: int) -> ReactionComposition | None:
         rxns = list(self.reactions.values())
@@ -16446,6 +23382,30 @@ class Model(QObject):
             print(f"[ExperimentAudit] Failed to record event '{event_type}': {e}")
         return None
 
+    def get_calibration_volume_warning_audit_intents(self):
+        getter = getattr(
+            self.experiment_model,
+            "get_calibration_volume_warning_audit_intents",
+            None,
+        )
+        return getter() if callable(getter) else {}
+
+    def reconcile_calibration_volume_warning_audits(self):
+        reconciler = getattr(
+            self.experiment_model,
+            "reconcile_calibration_volume_warning_audits",
+            None,
+        )
+        if not callable(reconciler):
+            return {
+                "status": "recorded",
+                "event_ids": [],
+                "recorded_event_ids": [],
+                "pending_event_ids": [],
+                "errors": [],
+            }
+        return reconciler()
+
     @staticmethod
     def _clean_identity_text(value):
         if value is None:
@@ -17169,13 +24129,11 @@ class Model(QObject):
 
         def _stock_lookup_key(reagent_name, concentration, units):
             try:
-                return (
-                    str(reagent_name),
-                    f"{float(concentration):.2f}",
-                    str(units),
-                )
+                return stock_id_for_parts(reagent_name, concentration, units)
             except Exception:
-                return (str(reagent_name), str(concentration), str(units))
+                return "_".join(
+                    (str(reagent_name), str(concentration), str(units))
+                )
 
         # ---------- 1) STOCKS (include fill) ----------
         stock_rows = self.experiment_model.get_stock_table_rows(include_fill=True)
@@ -17184,7 +24142,10 @@ class Model(QObject):
             reagent_name = row.get("option_name") or row.get("factor_name") or ""
             conc = float(row.get("stock_concentration", 0.0))
             units = row.get("units", "mM")
-            stock_row_lookup[_stock_lookup_key(reagent_name, conc, units)] = dict(row)
+            lookup_key = _stock_lookup_key(reagent_name, conc, units)
+            if lookup_key in stock_row_lookup:
+                raise ValueError(f"Duplicate runtime stock ID {lookup_key!r}.")
+            stock_row_lookup[lookup_key] = dict(row)
 
             total_uL = row.get("total_volume_uL", None)
             if total_uL is None:
@@ -17531,7 +24492,11 @@ class Model(QObject):
             self.experiment_model.update_all_paths()
 
         # Give ExperimentModel a runtime view so it can build progress/key files
-        self.experiment_model.set_runtime_context(self.well_plate, self.reaction_collection)
+        self.experiment_model.set_runtime_context(
+            self.well_plate,
+            self.reaction_collection,
+            self.stock_solutions,
+        )
 
         execution_plan = None
         execution_plan_status = None
@@ -17554,7 +24519,7 @@ class Model(QObject):
         except Exception as exc:
             if finalize_execution_plan:
                 self.experiment_model.set_execution_plan_finalization_error(exc)
-                self.experiment_model.set_runtime_context(None, None)
+                self.experiment_model.set_runtime_context(None, None, None)
                 self._clear_runtime_experiment_without_signal()
                 raise RuntimeError(
                     f"Experiment finalization failed before the execution artifacts were ready: {exc}"
@@ -17563,6 +24528,13 @@ class Model(QObject):
 
         if execution_plan is not None:
             self._rack_runtime_plan_id = execution_plan.plan_id
+
+        audit_reconciliation = self.reconcile_calibration_volume_warning_audits()
+        if audit_reconciliation.get("status") == "pending":
+            print(
+                "[ExperimentAudit] Calibration warning timeline synchronization "
+                "remains pending after experiment load."
+            )
 
         assigned_well_count = sum(
             1
@@ -18076,6 +25048,7 @@ class Model(QObject):
         self.experiment_model.set_runtime_context(
             self.well_plate,
             self.reaction_collection,
+            self.stock_solutions,
         )
         self.experiment_model._authoritative_runtime_active = True
         self.experiment_model._write_execution_plan_exports(
@@ -18248,6 +25221,7 @@ class Model(QObject):
         self.experiment_model.set_runtime_context(
             self.well_plate,
             self.reaction_collection,
+            self.stock_solutions,
         )
         self.experiment_model._authoritative_runtime_active = False
         self.experiment_model._active_authoritative_execution_session = None

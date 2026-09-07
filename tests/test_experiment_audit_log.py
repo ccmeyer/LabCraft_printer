@@ -1,9 +1,15 @@
 import json
+import os
 from datetime import datetime, timedelta, timezone
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
-from ExperimentAuditLog import ExperimentAuditLog
+from ExperimentAuditLog import (
+    ExperimentAuditLog,
+    build_calibration_volume_warning_audit_intent,
+)
 
 
 class _Clock:
@@ -166,3 +172,65 @@ def test_write_failure_returns_none_and_preserves_existing_file(tmp_path, monkey
         assert log.record("write_failure", "Will fail") is None
         assert "simulated append failure" in log.get_last_error()
     assert _read_jsonl(audit_path) == [{"event_id": "existing"}]
+
+def _warning_intent():
+    return build_calibration_volume_warning_audit_intent(
+        identity={"stock_id": "stock-1", "calibration_record_id": "record-1"},
+        timestamp_utc="2026-08-30T12:00:00Z",
+        details={
+            "stock_id": "stock-1",
+            "calibration_record_id": "record-1",
+            "volume_warning": {
+                "code": "calibration_volume_tolerance_exceeded",
+                "affected_row_count": 1,
+            },
+        },
+    )
+
+
+def test_ensure_event_fsyncs_once_and_is_idempotent(tmp_path, monkeypatch):
+    audit_path = tmp_path / "experiment_audit.jsonl"
+    log = ExperimentAuditLog(audit_path=audit_path)
+    fsync = []
+    monkeypatch.setattr(os, "fsync", lambda fileno: fsync.append(fileno))
+
+    intent = _warning_intent()
+    first = log.ensure_event(intent, context={"experiment_name": "Audit Test"})
+    second = log.ensure_event(intent, context={"experiment_name": "Changed"})
+
+    assert first == second
+    assert first["event_id"] == intent["event_id"]
+    assert _read_jsonl(audit_path) == [first]
+    assert len(fsync) == 1
+
+
+def test_ensure_event_preserves_conflicts_and_malformed_tails(tmp_path):
+    audit_path = tmp_path / "experiment_audit.jsonl"
+    log = ExperimentAuditLog(audit_path=audit_path)
+    intent = _warning_intent()
+    log.ensure_event(intent)
+    original = audit_path.read_bytes()
+
+    conflicting = json.loads(json.dumps(intent))
+    conflicting["details"]["volume_warning"]["affected_row_count"] = 2
+    with pytest.raises(ValueError, match="conflicts with durable evidence"):
+        log.ensure_event(conflicting)
+    assert audit_path.read_bytes() == original
+
+    with audit_path.open("ab") as handle:
+        handle.write(b"{malformed tail\n")
+    malformed = audit_path.read_bytes()
+    missing = build_calibration_volume_warning_audit_intent(
+        identity={"stock_id": "stock-2"},
+        timestamp_utc="2026-08-30T12:01:00Z",
+        details={
+            "stock_id": "stock-2",
+            "volume_warning": {
+                "code": "calibration_volume_tolerance_exceeded",
+                "affected_row_count": 1,
+            },
+        },
+    )
+    with pytest.raises(ValueError, match="malformed"):
+        log.ensure_event(missing)
+    assert audit_path.read_bytes() == malformed

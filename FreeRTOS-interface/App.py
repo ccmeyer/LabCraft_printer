@@ -443,6 +443,8 @@ def main():
         # # Show the main window
         # view.show()
 
+        from OptimizationJobs import optimization_job_manager
+        optimization_job_manager()
         install_ui_freeze_watchdog(app)
         return app.exec()
     except Exception as exc:

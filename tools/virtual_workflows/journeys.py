@@ -62,6 +62,10 @@ from tools.virtual_workflows.assertions import (
     real_application_assertion,
     randomized_joined_design_assertion,
     optimizer_360_design_assertion,
+    resolution_stock_design_assertion,
+    same_reagent_two_stock_calibration_assertion,
+    same_reagent_two_stock_progress_guard_assertion,
+    two_stock_import_preview_reuse_assertion,
     simulation_identity_assertion,
     sustained_evidence_assertions,
     SoftStopResumeExpectation,
@@ -113,6 +117,7 @@ from tools.virtual_workflows.journey_phases import (
     run_post_start_lock_copy,
     run_stock_passes,
     run_stock_calibration_only,
+    run_progressed_paired_calibration_guard,
     normalized_stock_pass_steps,
     run_soft_stop_resume,
     run_soft_stop_boundary,
@@ -146,6 +151,19 @@ from tools.virtual_workflows.optimizer_360_cases import (
     OPTIMIZER_360_CASE_ID,
     OPTIMIZER_360_FIXTURE_PATH,
     RANGE_A_STOCK_ID,
+)
+from tools.virtual_workflows.resolution_stock_cases import (
+    IMPORT_CASE_ID as TWO_STOCK_IMPORT_WORKLOAD_ID,
+    IMPORT_FIXTURE_PATH as TWO_STOCK_IMPORT_FIXTURE_PATH,
+    PROGRESS_GUARD_CASE_ID as TWO_STOCK_PROGRESS_GUARD_WORKLOAD_ID,
+    PROGRESS_GUARD_FIXTURE_PATH as TWO_STOCK_PROGRESS_GUARD_FIXTURE_PATH,
+    SINGLE_CASE as RESOLUTION_SINGLE_CASE,
+    SINGLE_CASE_ID as RESOLUTION_SINGLE_WORKLOAD_ID,
+    SINGLE_FIXTURE_PATH as RESOLUTION_SINGLE_FIXTURE_PATH,
+    TWO_STOCK_CASE as RESOLUTION_TWO_STOCK_CASE,
+    TWO_STOCK_CASE_ID as RESOLUTION_TWO_STOCK_WORKLOAD_ID,
+    TWO_STOCK_FIXTURE_PATH as RESOLUTION_TWO_STOCK_FIXTURE_PATH,
+    load_auxiliary_fixture,
 )
 from tools.virtual_workflows.m13_interaction_cases import (
     COMPACT_CASE as M13_COMPACT_CASE,
@@ -352,6 +370,49 @@ OPTIMIZER_360_LIFECYCLE_REQUIRED_ASSERTIONS = (
 )
 OPTIMIZER_360_REQUIRED_ASSERTIONS = (
     *OPTIMIZER_360_LIFECYCLE_REQUIRED_ASSERTIONS,
+    "artifacts.required_present",
+)
+RESOLUTION_SINGLE_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "experiment.editor_create_finalize",
+    "experiment.resolution_first_design_exact",
+    "execution.calibrated_zero_progress_exact",
+    "ui.fresh_application_session_constructed",
+    "execution.first_session_teardown_clean",
+    "execution.authoritative_reload_valid",
+    "execution.authoritative_runtime_rehydrated",
+    "execution.clean_session_rotation_exact",
+    "execution.remaining_calibrations_exact",
+    "execution.completed_terminal_reload_exact",
+    "execution.randomized_calibration_terminal_exact",
+    "artifacts.required_present",
+)
+RESOLUTION_TWO_STOCK_REQUIRED_ASSERTIONS = (
+    *RESOLUTION_SINGLE_REQUIRED_ASSERTIONS[:-3],
+    "execution.same_reagent_two_stock_calibration_exact",
+    *RESOLUTION_SINGLE_REQUIRED_ASSERTIONS[-3:],
+)
+RESOLUTION_PROGRESS_GUARD_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "experiment.editor_create_finalize",
+    "experiment.resolution_first_design_exact",
+    "execution.calibrated_zero_progress_exact",
+    "ui.fresh_application_session_constructed",
+    "execution.first_session_teardown_clean",
+    "execution.authoritative_reload_valid",
+    "execution.authoritative_runtime_rehydrated",
+    "execution.clean_session_rotation_exact",
+    "execution.same_reagent_two_stock_calibration_exact",
+    "execution.same_reagent_two_stock_progress_guard_exact",
+    "artifacts.required_present",
+)
+TWO_STOCK_IMPORT_REQUIRED_ASSERTIONS = (
+    "sil.host_hardware_disabled",
+    "ui.real_app_constructed",
+    "experiment.editor_create_finalize",
+    "experiment.two_stock_import_preview_reuse_exact",
     "artifacts.required_present",
 )
 EXPERIMENT_DESIGN_REJECTED_REQUIRED_ASSERTIONS = (
@@ -563,6 +624,24 @@ JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS = frozenset(
 RANDOMIZED_CALIBRATION_REQUIRED_UI_ACTIONS = (
     JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS
 )
+RESOLUTION_TERMINAL_REQUIRED_UI_ACTIONS = (
+    JOINED_CALIBRATED_CHECKPOINT_REQUIRED_UI_ACTIONS
+)
+RESOLUTION_PROGRESS_GUARD_REQUIRED_UI_ACTIONS = (
+    RESOLUTION_TERMINAL_REQUIRED_UI_ACTIONS
+    - frozenset({"experiment.inspect_completed_via_ui"})
+    | frozenset({"calibration.apply_progressed_stock_via_ui"})
+)
+TWO_STOCK_IMPORT_REQUIRED_UI_ACTIONS = frozenset(
+    {
+        "editor.open_via_ui",
+        "editor.new_experiment_via_ui",
+        "editor.configure_design_via_ui",
+        "editor.upload_design_apply_via_ui",
+        "editor.finish_via_ui",
+        "experiment.load_authoritative_via_ui",
+    }
+)
 EXPERIMENT_DESIGN_REJECTED_REQUIRED_UI_ACTIONS = frozenset(
     {
         "editor.open_via_ui",
@@ -729,6 +808,27 @@ RANDOMIZED_CALIBRATION_REQUIRED_SCREENSHOTS = frozenset(
 OPTIMIZER_360_REQUIRED_SCREENSHOTS = frozenset(
     OPTIMIZER_360_CASE.qualification.required_screenshots
 )
+RESOLUTION_SINGLE_REQUIRED_SCREENSHOTS = frozenset(
+    RESOLUTION_SINGLE_CASE.qualification.required_screenshots
+)
+RESOLUTION_TWO_STOCK_REQUIRED_SCREENSHOTS = frozenset(
+    RESOLUTION_TWO_STOCK_CASE.qualification.required_screenshots
+)
+RESOLUTION_PROGRESS_GUARD_REQUIRED_SCREENSHOTS = frozenset(
+    {
+        "resolution_stocks_generated",
+        "prepared",
+        "first_stock_calibrated",
+        "fresh_loaded",
+        "fresh_activated",
+        "paired_stocks_calibrated",
+        "signal_high_pass_complete",
+        "progressed_pair_apply_blocked",
+    }
+)
+TWO_STOCK_IMPORT_REQUIRED_SCREENSHOTS = frozenset(
+    {"two_stock_import_preview", "prepared_reloaded", "validated"}
+)
 
 _COMMON_ACTIONS = frozenset(
     {"app.launch_simulated", "artifact.capture_milestone", "scenario.teardown"}
@@ -892,6 +992,22 @@ def _randomized_calibration_fixture() -> tuple[dict[str, Any], Path]:
 
 def _optimizer_360_fixture() -> tuple[dict[str, Any], Path]:
     return OPTIMIZER_360_CASE.normalized(), OPTIMIZER_360_FIXTURE_PATH
+
+
+def _resolution_single_fixture() -> tuple[dict[str, Any], Path]:
+    return RESOLUTION_SINGLE_CASE.normalized(), RESOLUTION_SINGLE_FIXTURE_PATH
+
+
+def _resolution_two_stock_fixture() -> tuple[dict[str, Any], Path]:
+    return RESOLUTION_TWO_STOCK_CASE.normalized(), RESOLUTION_TWO_STOCK_FIXTURE_PATH
+
+
+def _resolution_progress_guard_fixture() -> tuple[dict[str, Any], Path]:
+    return load_auxiliary_fixture(TWO_STOCK_PROGRESS_GUARD_WORKLOAD_ID)
+
+
+def _two_stock_import_fixture() -> tuple[dict[str, Any], Path]:
+    return load_auxiliary_fixture(TWO_STOCK_IMPORT_WORKLOAD_ID)
 
 
 def _editor_fixture() -> tuple[dict[str, Any], Path]:
@@ -2553,6 +2669,581 @@ def run_optimizer_360_full_lifecycle(runtime: JourneyRuntime) -> None:
     runtime.observations["optimizer_360_calibration_lifecycle"]["terminal"] = (
         dict(terminal_result.evidence)
     )
+
+
+def _run_resolution_stock_first_calibration(
+    runtime: JourneyRuntime,
+    *,
+    case: Any,
+    lifecycle_key: str,
+) -> None:
+    """Prepare one compact optimizer case and apply its first calibration."""
+
+    context = runtime.context
+    runtime.add_assertion(simulation_identity_assertion(context))
+    runtime.add_assertion(real_application_assertion(context))
+    action_start = len(context.action_results)
+    driver = run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(
+            case.editor_specification(),
+            use_harness_action_runner=True,
+            capture_editor_milestones=False,
+        ),
+    )
+    runtime.add_assertion(
+        editor_create_finalize_assertion(
+            context,
+            action_start=action_start,
+            action_end=len(context.action_results),
+            optimization_action_ids=("editor.optimize_generate_via_ui",),
+            capture_editor_milestones=False,
+        )
+    )
+    capture_milestone(
+        context,
+        "resolution_stocks_generated",
+        evidence={
+            "case_id": case.case_id,
+            "allow_two_stock_solutions": case.editor.allow_two_stock_solutions,
+            "allow_avoidable_target_grouping": False,
+        },
+    )
+    design_result, prepared = resolution_stock_design_assertion(
+        context,
+        case=case,
+        driver_evidence=driver,
+    )
+    runtime.add_assertion(design_result)
+    capture_milestone(
+        context,
+        "prepared",
+        evidence={
+            "plan_id": prepared.plan_id,
+            "plan_revision": prepared.plan_revision,
+            "case_sha256": case.sha256(),
+            "count_oracle_sha256": case.count_oracle_sha256(),
+        },
+    )
+    runtime.observations[lifecycle_key] = {
+        "prepared": dict(design_result.evidence)
+    }
+
+    runtime.run_steps(machine_startup_steps())
+    first = case.calibrations[0]
+    observer_key = f"{lifecycle_key}_session_1_execution"
+    observer = ExecutionObserver(
+        context,
+        experiment_dir=Path(prepared.experiment_dir),
+        completed_count=lambda: 0,
+        pass_context=lambda: {
+            "stock_id": first.stock_id,
+            "phase": "calibration_only",
+        },
+    )
+    runtime.register_restorable(observer_key, observer)
+    observer.install()
+    boundary = run_stock_calibration_only(
+        runtime,
+        CalibrationOnlySpec(
+            stock_id=first.stock_id,
+            printer_head_id=first.printer_head_id,
+            pulse_width_us=first.print_pulse_width_us,
+            pressure_psi=2.0,
+            frequency_hz=100,
+            initial_volume_uL=100.0,
+            expected_volume_nL=float(first.droplet_volume_nL),
+        ),
+    )
+    runtime.restore_all()
+    observer_snapshot = runtime.observations[f"{observer_key}_snapshot"]
+    first_checkpoint = case.count_maps[1][0]
+    calibrated_result, calibrated = calibrated_zero_progress_assertion(
+        context,
+        case=case,
+        prepared_snapshot=prepared,
+        calibration_evidence=boundary,
+        observer=observer_snapshot,
+        oracle_checkpoint_id=first_checkpoint,
+        legacy_evidence_names=False,
+    )
+    runtime.add_assertion(calibrated_result)
+    capture_milestone(
+        context,
+        "first_stock_calibrated",
+        evidence={
+            "stock_id": first.stock_id,
+            "printer_head_id": first.printer_head_id,
+            "plan_revision": calibrated.plan_revision,
+            "total_added_droplets": calibrated.total_added_droplets,
+        },
+    )
+    runtime.observations[lifecycle_key]["first_stock_calibrated"] = dict(
+        calibrated_result.evidence
+    )
+    runtime.observations.update(
+        {
+            f"{lifecycle_key}_prepared_snapshot": prepared,
+            f"{lifecycle_key}_calibrated_snapshot": calibrated,
+            f"{lifecycle_key}_session_1_observer": observer_snapshot,
+            f"{lifecycle_key}_first_calibration_evidence": boundary,
+        }
+    )
+
+
+def _run_resolution_stock_full_lifecycle(
+    runtime: JourneyRuntime,
+    *,
+    case: Any,
+    lifecycle_key: str,
+) -> None:
+    """Run a compact resolution case through calibration, print, and reload."""
+
+    _run_resolution_stock_first_calibration(
+        runtime, case=case, lifecycle_key=lifecycle_key
+    )
+    context = runtime.context
+    calibrated = runtime.observations[f"{lifecycle_key}_calibrated_snapshot"]
+    first_observer = runtime.observations[f"{lifecycle_key}_session_1_observer"]
+    second_observer_key = f"{lifecycle_key}_session_2_execution"
+    rotation = run_clean_authoritative_session_rotation_boundary(
+        runtime,
+        experiment_dir=calibrated.experiment_dir,
+        expected_name=str(calibrated.metadata.get("name") or ""),
+        completed_count=lambda: 0,
+        pass_context=lambda: _current_pass_context(runtime),
+        inspect_loaded=lambda: capture_count_snapshot(context),
+        inspect_activated=lambda: capture_count_snapshot(context),
+        observer_key=second_observer_key,
+    )
+    second_observer = runtime.observations["execution_observer"].snapshot()
+    fresh_result = clean_joined_session_rotation_assertion(
+        context,
+        case=case,
+        rotation=rotation,
+        first_session_observer=first_observer,
+        second_session_observer=second_observer,
+        oracle_checkpoint_id=case.count_maps[1][0],
+    )
+    runtime.add_assertion(fresh_result)
+    runtime.observations[lifecycle_key]["clean_session_rotation"] = dict(
+        fresh_result.evidence
+    )
+    runtime.observations.update(
+        {
+            "expected_wells": tuple(case.editor.selected_well_ids),
+            "expected_stock_ids": tuple(row.stock_id for row in case.execution_passes),
+            "completed_wells": [],
+            "array_completions": [],
+            "pass_boundaries": [],
+            "head_staging": [],
+            "returned_head_ids": [],
+            "starvation_events": [],
+            "current_pass": {"index": -1, "starting_count": 0, "stock_id": None},
+        }
+    )
+    _connect_execution_signals(runtime, array_complete=True, machine_errors=True)
+    _install_starvation_observer(runtime)
+    runtime.run_steps(machine_startup_steps())
+
+    remaining: list[Mapping[str, Any]] = []
+    for calibration in case.calibrations[1:]:
+        remaining.append(
+            run_stock_calibration_only(
+                runtime,
+                CalibrationOnlySpec(
+                    stock_id=calibration.stock_id,
+                    printer_head_id=calibration.printer_head_id,
+                    pulse_width_us=calibration.print_pulse_width_us,
+                    pressure_psi=2.0,
+                    frequency_hz=100,
+                    initial_volume_uL=100.0,
+                    expected_volume_nL=float(calibration.droplet_volume_nL),
+                    staging_slot=(calibration.order - 1) % 4,
+                    apply_success_title=(
+                        "Applied (Fill)"
+                        if calibration.reagent_name == "Water"
+                        else "Applied"
+                    ),
+                    enable_pressure_regulation=calibration.order == 2,
+                    return_head=True,
+                ),
+            )
+        )
+    remaining_result, fully_calibrated = joined_remaining_calibrations_assertion(
+        context,
+        case=case,
+        calibration_evidence=remaining,
+    )
+    runtime.add_assertion(remaining_result)
+    if case.case_id == RESOLUTION_TWO_STOCK_WORKLOAD_ID:
+        paired_result = same_reagent_two_stock_calibration_assertion(
+            context,
+            case=case,
+            first_calibration_evidence=runtime.observations[
+                f"{lifecycle_key}_first_calibration_evidence"
+            ],
+            remaining_calibration_evidence=remaining,
+        )
+        runtime.add_assertion(paired_result)
+        runtime.observations[lifecycle_key]["paired_calibration"] = dict(
+            paired_result.evidence
+        )
+    capture_milestone(
+        context,
+        "all_stocks_calibrated",
+        evidence={
+            "plan_id": fully_calibrated.plan_id,
+            "plan_revision": fully_calibrated.plan_revision,
+            "record_count": fully_calibrated.calibration_record_count,
+        },
+    )
+    runtime.observations[lifecycle_key]["remaining_calibrations"] = dict(
+        remaining_result.evidence
+    )
+
+    calibrations_by_stock = {row.stock_id: row for row in case.calibrations}
+    pass_specs = tuple(
+        PrecalibratedStockPassSpec(
+            stock_id=execution_pass.stock_id,
+            printer_head_id=calibrations_by_stock[execution_pass.stock_id].printer_head_id,
+            pulse_width_us=calibrations_by_stock[
+                execution_pass.stock_id
+            ].print_pulse_width_us,
+            pressure_psi=2.0,
+            frequency_hz=100,
+            initial_volume_uL=100.0,
+            expected_volume_nL=float(
+                calibrations_by_stock[execution_pass.stock_id].droplet_volume_nL
+            ),
+            expected_completion_count=execution_pass.cumulative_completion,
+            expected_plan_state=(
+                "completed"
+                if execution_pass.order == len(case.execution_passes)
+                else "active"
+            ),
+            completed_milestone=execution_pass.milestone,
+            staging_slot=(execution_pass.order - 1) % 4,
+            start_dialog_titles=(
+                ("Start Print Array", "Evaporation Plate Dock Check")
+                if execution_pass.order == 1
+                else ("Start Print Array",)
+            ),
+        )
+        for execution_pass in case.execution_passes
+    )
+    run_precalibrated_stock_passes(runtime, pass_specs)
+    terminal_counts = capture_count_snapshot(context)
+    capture_milestone(
+        context,
+        "completed",
+        evidence={
+            "completion_count": len(runtime.observations["completed_wells"]),
+            "expected_intents": case.terminal.expected_intents,
+            "expected_droplets": case.terminal.expected_droplets,
+        },
+    )
+    runtime.restore_all()
+    session_2_observer = runtime.observations[f"{second_observer_key}_snapshot"]
+    _run_completed_terminal_reload(runtime, expected_name=case.editor.name)
+    terminal_result = joined_terminal_execution_assertion(
+        context,
+        case=case,
+        terminal_counts=terminal_counts,
+        terminal_reload=runtime.observations["completed_terminal_reload"],
+        observer=session_2_observer,
+        first_session_observer=first_observer,
+        pass_boundaries=runtime.observations["pass_boundaries"],
+        starvation_events=runtime.observations["starvation_events"],
+        application_sessions=runtime.harness.application_sessions,
+    )
+    runtime.add_assertion(terminal_result)
+    runtime.observations[lifecycle_key]["terminal"] = dict(terminal_result.evidence)
+
+
+def run_resolution_first_single_stock_terminal(runtime: JourneyRuntime) -> None:
+    _run_resolution_stock_full_lifecycle(
+        runtime,
+        case=RESOLUTION_SINGLE_CASE,
+        lifecycle_key="resolution_stock_lifecycle",
+    )
+
+
+def run_same_reagent_two_stock_terminal(runtime: JourneyRuntime) -> None:
+    _run_resolution_stock_full_lifecycle(
+        runtime,
+        case=RESOLUTION_TWO_STOCK_CASE,
+        lifecycle_key="resolution_stock_lifecycle",
+    )
+
+
+def run_same_reagent_two_stock_progress_guard(runtime: JourneyRuntime) -> None:
+    """Print the high leg, then prove the low-leg diagnostic cannot Apply."""
+
+    case = RESOLUTION_TWO_STOCK_CASE
+    lifecycle_key = "resolution_stock_lifecycle"
+    _run_resolution_stock_first_calibration(
+        runtime, case=case, lifecycle_key=lifecycle_key
+    )
+    context = runtime.context
+    calibrated = runtime.observations[f"{lifecycle_key}_calibrated_snapshot"]
+    first_observer = runtime.observations[f"{lifecycle_key}_session_1_observer"]
+    observer_key = "paired_progress_guard_session_2_execution"
+    rotation = run_clean_authoritative_session_rotation_boundary(
+        runtime,
+        experiment_dir=calibrated.experiment_dir,
+        expected_name=case.editor.name,
+        completed_count=lambda: len(runtime.observations.get("completed_wells") or ()),
+        pass_context=lambda: _current_pass_context(runtime),
+        inspect_loaded=lambda: capture_count_snapshot(context),
+        inspect_activated=lambda: capture_count_snapshot(context),
+        observer_key=observer_key,
+    )
+    fresh = clean_joined_session_rotation_assertion(
+        context,
+        case=case,
+        rotation=rotation,
+        first_session_observer=first_observer,
+        second_session_observer=runtime.observations["execution_observer"].snapshot(),
+        oracle_checkpoint_id="high_calibrated",
+    )
+    runtime.add_assertion(fresh)
+    runtime.observations[lifecycle_key]["clean_session_rotation"] = dict(
+        fresh.evidence
+    )
+    runtime.observations.update(
+        {
+            "expected_wells": tuple(case.editor.selected_well_ids),
+            "expected_stock_ids": tuple(row.stock_id for row in case.execution_passes),
+            "completed_wells": [],
+            "array_completions": [],
+            "pass_boundaries": [],
+            "head_staging": [],
+            "returned_head_ids": [],
+            "starvation_events": [],
+            "current_pass": {"index": -1, "starting_count": 0, "stock_id": None},
+        }
+    )
+    _connect_execution_signals(runtime, array_complete=True, machine_errors=True)
+    _install_starvation_observer(runtime)
+    runtime.run_steps(machine_startup_steps())
+
+    low_calibration = next(
+        row
+        for row in case.calibrations
+        if row.reagent_name == "Signal"
+        and row.stock_id != case.calibrations[0].stock_id
+    )
+    remaining = [
+        run_stock_calibration_only(
+            runtime,
+            CalibrationOnlySpec(
+                stock_id=low_calibration.stock_id,
+                printer_head_id=low_calibration.printer_head_id,
+                pulse_width_us=low_calibration.print_pulse_width_us,
+                pressure_psi=2.0,
+                frequency_hz=100,
+                initial_volume_uL=100.0,
+                expected_volume_nL=float(low_calibration.droplet_volume_nL),
+                staging_slot=1,
+                apply_success_title="Applied",
+                enable_pressure_regulation=True,
+                return_head=True,
+            ),
+        )
+    ]
+    paired_result = same_reagent_two_stock_calibration_assertion(
+        context,
+        case=case,
+        first_calibration_evidence=runtime.observations[
+            f"{lifecycle_key}_first_calibration_evidence"
+        ],
+        remaining_calibration_evidence=remaining,
+        require_fill_calibration=False,
+    )
+    runtime.add_assertion(paired_result)
+    runtime.observations[lifecycle_key]["paired_calibration"] = dict(
+        paired_result.evidence
+    )
+    capture_milestone(
+        context,
+        "paired_stocks_calibrated",
+        evidence={
+            "plan_revision": context.experiment_model.get_execution_plan_snapshot().plan_revision
+        },
+    )
+
+    high_pass = case.execution_passes[0]
+    high_calibration = case.calibrations[0]
+    run_precalibrated_stock_passes(
+        runtime,
+        (
+            PrecalibratedStockPassSpec(
+                stock_id=high_pass.stock_id,
+                printer_head_id=high_calibration.printer_head_id,
+                pulse_width_us=high_calibration.print_pulse_width_us,
+                pressure_psi=2.0,
+                frequency_hz=100,
+                initial_volume_uL=100.0,
+                expected_volume_nL=float(high_calibration.droplet_volume_nL),
+                expected_completion_count=high_pass.cumulative_completion,
+                expected_plan_state="active",
+                completed_milestone=high_pass.milestone,
+                staging_slot=0,
+                start_dialog_titles=(
+                    "Start Print Array",
+                    "Evaporation Plate Dock Check",
+                ),
+            ),
+        ),
+    )
+    guard = run_progressed_paired_calibration_guard(
+        runtime,
+        CalibrationOnlySpec(
+            stock_id=low_calibration.stock_id,
+            printer_head_id=low_calibration.printer_head_id,
+            pulse_width_us=low_calibration.print_pulse_width_us,
+            pressure_psi=2.0,
+            frequency_hz=100,
+            initial_volume_uL=100.0,
+            expected_volume_nL=float(low_calibration.droplet_volume_nL),
+            staging_slot=1,
+            enable_pressure_regulation=False,
+        ),
+    )
+    guard_result = same_reagent_two_stock_progress_guard_assertion(
+        context,
+        case=case,
+        guard_evidence=guard,
+    )
+    runtime.add_assertion(guard_result)
+    runtime.observations[lifecycle_key]["progress_guard"] = dict(
+        guard_result.evidence
+    )
+    capture_milestone(
+        context,
+        "progressed_pair_apply_blocked",
+        evidence={
+            "stock_id": low_calibration.stock_id,
+            "eligibility": guard_result.evidence.get("apply_state", {}).get(
+                "eligibility"
+            ),
+        },
+    )
+
+
+def run_two_stock_csv_import_prepare_reload(runtime: JourneyRuntime) -> None:
+    """Drive native CSV loading, allocation reuse, finalization, and reload."""
+
+    fixture = runtime.fixture
+    context = runtime.context
+    runtime.add_assertion(simulation_identity_assertion(context))
+    runtime.add_assertion(real_application_assertion(context))
+    design_csv = TWO_STOCK_IMPORT_FIXTURE_PATH.parent / fixture["design_csv"]
+    max_stock_csv = TWO_STOCK_IMPORT_FIXTURE_PATH.parent / fixture["max_stock_csv"]
+    specification = {
+        "experiment": {
+            "name": fixture["experiment_name"],
+            "plate_name": fixture["plate_name"],
+            "replicates": 1,
+            "selected_well_ids": ["A1", "A2"],
+            "excluded_well_ids": [],
+            "printed_volume_nL": fixture["printed_volume_nL"],
+            "final_volume_nL": fixture["final_volume_nL"],
+            "printed_volume_tolerance_nL": 0,
+            "randomize_assignments": False,
+            "random_seed": None,
+            "allow_two_stock_solutions": True,
+            "allow_avoidable_target_grouping": False,
+            "expected_reaction_count": 2,
+        },
+        "reagents": [
+            {
+                "stock_label": "Import Seed",
+                "group": "Additive",
+                "printing_mode": "droplet",
+                "starting_concentration": 0,
+                "targets": [1],
+                "units": "x",
+                "fixed_stock_concentration": 10,
+                "max_stock_concentration": None,
+                "droplet_volume_nL": 9,
+            }
+        ],
+        "optimization_attempts": [
+            {
+                "allow_two_stock_solutions": True,
+                "expected_outcome": "generated",
+            }
+        ],
+        "positive_upload": {
+            "design_csv_path": str(design_csv),
+            "max_stock_csv_path": str(max_stock_csv),
+            "printed_volume_nL": fixture["printed_volume_nL"],
+            "printed_volume_tolerance_nL": 0,
+            "final_volume_nL": fixture["final_volume_nL"],
+        },
+        "expected": {"terminal": "prepared"},
+    }
+    action_start = len(context.action_results)
+    driver = run_editor_preparation(
+        runtime,
+        EditorPreparationSpec(
+            specification,
+            use_harness_action_runner=True,
+            capture_editor_milestones=False,
+        ),
+    )
+    runtime.add_assertion(
+        editor_create_finalize_assertion(
+            context,
+            action_start=action_start,
+            action_end=len(context.action_results),
+            optimization_action_ids=("editor.upload_design_apply_via_ui",),
+            capture_editor_milestones=False,
+        )
+    )
+    before_reload = capture_authoritative_bundle(context)
+    capture_milestone(
+        context,
+        "two_stock_import_preview",
+        evidence=dict(driver.get("positive_upload") or {}),
+    )
+    first_close = runtime.harness.close_application_session()["evidence"]
+    second_launch = runtime.harness.reopen_application_session()["evidence"]
+    loader = ExperimentLoaderDriver(context)
+    reload_evidence = loader.load_prepared_design(
+        before_reload.experiment_dir,
+        expected_name=fixture["experiment_name"],
+        expected_plan_id=before_reload.plan_id,
+        expected_plan_revision=before_reload.plan_revision,
+        capture_milestone_name="prepared_reloaded",
+    )
+    after_reload = capture_authoritative_bundle(context)
+    result = two_stock_import_preview_reuse_assertion(
+        context,
+        fixture=fixture,
+        driver_evidence=driver,
+        before_reload=before_reload,
+        after_reload=after_reload,
+        reload_evidence=reload_evidence,
+    )
+    runtime.add_assertion(result)
+    capture_milestone(
+        context,
+        "validated",
+        evidence={
+            "case_id": TWO_STOCK_IMPORT_WORKLOAD_ID,
+            "decision": result.decision,
+        },
+    )
+    runtime.observations["two_stock_import_lifecycle"] = {
+        "driver": driver,
+        "first_session_cleanup": first_close,
+        "second_session_launch": second_launch,
+        "reload": reload_evidence,
+        "oracle": dict(result.evidence),
+    }
 
 
 def run_joined_calibrated_checkpoint(runtime: JourneyRuntime) -> None:
@@ -5699,6 +6390,185 @@ def _optimizer_360_payload(
     )
 
 
+def _resolution_stock_payload_for(
+    runtime: JourneyRuntime,
+    teardown: Mapping[str, Any],
+    *,
+    case: Any,
+    progress_guard: bool = False,
+) -> ComposedReportPayload:
+    decisions = _decisions(runtime)
+    passed = all(
+        decisions.get(assertion_id) == "pass"
+        for assertion_id in runtime.definition.required_assertion_ids
+    )
+    status = "measured" if passed else "partial"
+    lifecycle = dict(runtime.observations.get("resolution_stock_lifecycle") or {})
+    terminal = dict(lifecycle.get("terminal") or {})
+    expected_completion = (
+        case.execution_passes[0].expected_intents
+        if progress_guard
+        else case.terminal.expected_completed_wells
+    )
+    return ComposedReportPayload(
+        workload={
+            **_base_workload(runtime),
+            "case_id": case.case_id,
+            "case_sha256": case.sha256(),
+            "count_oracle_sha256": case.count_oracle_sha256(),
+            "stock_ids": [row.stock_id for row in case.stocks],
+            "stock_count": len(case.stocks),
+            "array_passes": 1 if progress_guard else len(case.execution_passes),
+            "expected_completion_count": expected_completion,
+            "expected_intent_count": (
+                case.execution_passes[0].expected_intents
+                if progress_guard
+                else case.terminal.expected_intents
+            ),
+            "expected_droplets": (
+                case.execution_passes[0].expected_droplets
+                if progress_guard
+                else case.terminal.expected_droplets
+            ),
+            "action_cap": case.qualification.action_cap,
+            "speed_multiplier": runtime.harness.config.speed_multiplier,
+            "timeout_seconds": runtime.harness.config.timeout_seconds,
+        },
+        workflow_status=status,
+        workflow_values={
+            "expected_stock_well_completion_count": expected_completion,
+            "completed_stock_well_count": len(
+                runtime.observations.get("completed_wells") or ()
+            ),
+            "completed_well_ids": list(
+                runtime.observations.get("completed_wells") or ()
+            ),
+            "array_complete_count": len(
+                runtime.observations.get("array_completions") or ()
+            ),
+            "application_sessions": [
+                dict(row) for row in runtime.harness.application_sessions
+            ],
+            "cleanup_results": [dict(teardown)],
+            "action_count": len(runtime.context.action_results),
+            "action_cap": case.qualification.action_cap,
+        },
+        queue={
+            "status": status,
+            "values": {
+                "unexpected_starvation_count": len(
+                    runtime.observations.get("starvation_events") or ()
+                ),
+                "queue_drained_at_terminal": bool(
+                    runtime.context.machine.check_if_all_completed()
+                ),
+                "simulator_dispense_overflow_count": int(
+                    terminal.get("simulator_dispense_overflow_count", 0) or 0
+                ),
+            },
+        },
+        persistence={
+            "status": status,
+            "values": {
+                "assertion_decisions": decisions,
+                "resolution_stock_lifecycle": lifecycle,
+                "case_contract": {
+                    "case_id": case.case_id,
+                    "case_sha256": case.sha256(),
+                    "count_oracle_sha256": case.count_oracle_sha256(),
+                },
+            },
+        },
+        limitations=(
+            "Windows host SIL uses an in-process machine simulator and does not validate firmware, protocol framing, physical calibration, motion, pressure, cameras, balance, or droplet quality.",
+            "Optimizer timing assertions cover the host-SIL acceptance window and do not freeze elapsed-time or candidate-count oracles.",
+        ),
+    )
+
+
+def _resolution_single_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    return _resolution_stock_payload_for(
+        runtime, teardown, case=RESOLUTION_SINGLE_CASE
+    )
+
+
+def _resolution_two_stock_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    return _resolution_stock_payload_for(
+        runtime, teardown, case=RESOLUTION_TWO_STOCK_CASE
+    )
+
+
+def _resolution_progress_guard_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    return _resolution_stock_payload_for(
+        runtime,
+        teardown,
+        case=RESOLUTION_TWO_STOCK_CASE,
+        progress_guard=True,
+    )
+
+
+def _two_stock_import_payload(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> ComposedReportPayload:
+    decisions = _decisions(runtime)
+    passed = all(
+        decisions.get(assertion_id) == "pass"
+        for assertion_id in runtime.definition.required_assertion_ids
+    )
+    status = "measured" if passed else "partial"
+    lifecycle = dict(runtime.observations.get("two_stock_import_lifecycle") or {})
+    fixture = runtime.fixture
+    return ComposedReportPayload(
+        workload={
+            **_base_workload(runtime),
+            "case_id": TWO_STOCK_IMPORT_WORKLOAD_ID,
+            "expected_completion_count": int(
+                fixture["workload"]["completion_count"]
+            ),
+            "expected_stock_ids": list(fixture["expected_stock_ids"]),
+            "speed_multiplier": runtime.harness.config.speed_multiplier,
+            "timeout_seconds": runtime.harness.config.timeout_seconds,
+        },
+        workflow_status=status,
+        workflow_values={
+            "expected_stock_well_completion_count": int(
+                fixture["workload"]["completion_count"]
+            ),
+            "completed_stock_well_count": 0,
+            "application_sessions": [
+                dict(row) for row in runtime.harness.application_sessions
+            ],
+            "cleanup_results": [dict(teardown)],
+            "action_count": len(runtime.context.action_results),
+            "action_cap": 50,
+        },
+        queue={
+            "status": status,
+            "values": {
+                "queue_drained_at_terminal": bool(
+                    runtime.context.machine.check_if_all_completed()
+                ),
+                "simulator_dispense_overflow_count": 0,
+            },
+        },
+        persistence={
+            "status": status,
+            "values": {
+                "assertion_decisions": decisions,
+                "two_stock_import_lifecycle": lifecycle,
+            },
+        },
+        limitations=(
+            "The import journey stops at inactive PREPARED reload; terminal same-reagent execution is covered by the dedicated paired-stock lifecycle.",
+            "Windows host SIL validates application-side parsing, preview, reuse, finalization, and persistence without physical hardware.",
+        ),
+    )
 def _cleanup_artifact(runtime: JourneyRuntime, teardown: Mapping[str, Any]) -> Any:
     return cleanup_assertion(teardown)
 
@@ -5815,6 +6685,16 @@ def _optimizer_360_artifact(
     return multi_stock_artifacts_assertion(
         screenshots=runtime.context.screenshots,
         required_screenshots=set(OPTIMIZER_360_REQUIRED_SCREENSHOTS),
+        teardown=teardown,
+    )
+
+
+def _resolution_stock_artifact(
+    runtime: JourneyRuntime, teardown: Mapping[str, Any]
+) -> Any:
+    return multi_stock_artifacts_assertion(
+        screenshots=runtime.context.screenshots,
+        required_screenshots=set(runtime.definition.required_screenshots),
         teardown=teardown,
     )
 
@@ -6145,6 +7025,19 @@ def _optimizer_360_summary(
         f"Droplets: {terminal['terminal']['total_added_droplets']} / {case.terminal.expected_droplets}\n"
         f"Application sessions: {len(runtime.harness.application_sessions)}\n"
         f"Seed: {report['run']['seed']}\n"
+        "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
+    )
+
+
+def _resolution_stock_summary(
+    report: Mapping[str, Any], runtime: JourneyRuntime
+) -> str:
+    workflow = report["metrics"]["workflow"]["values"]
+    return (
+        f"{runtime.definition.scenario_name}\n"
+        f"Status: {report['classification']['status']}\n"
+        f"Completions: {workflow.get('completed_stock_well_count', 0)} / "
+        f"{report['workload']['expected_completion_count']}\n"
         "Replay: " + " ".join(report["run"]["replay_command"]) + "\n"
     )
 
@@ -6489,6 +7382,74 @@ OPTIMIZER_360_DEFINITION = JourneyDefinition(
     payload_builder=_optimizer_360_payload,
     summary_builder=_optimizer_360_summary,
 )
+RESOLUTION_SINGLE_DEFINITION = JourneyDefinition(
+    registry_id=RESOLUTION_SINGLE_WORKLOAD_ID,
+    scenario_name="resolution_first_single_stock_terminal",
+    scenario_version="1",
+    workload_id=RESOLUTION_SINGLE_WORKLOAD_ID,
+    required_action_ids=_RANDOMIZED_CALIBRATION_ACTIONS,
+    required_ui_action_ids=RESOLUTION_TERMINAL_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=RESOLUTION_SINGLE_REQUIRED_ASSERTIONS,
+    required_screenshots=RESOLUTION_SINGLE_REQUIRED_SCREENSHOTS,
+    fixture_loader=_resolution_single_fixture,
+    body=run_resolution_first_single_stock_terminal,
+    artifact_assertion=_resolution_stock_artifact,
+    payload_builder=_resolution_single_payload,
+    summary_builder=_resolution_stock_summary,
+)
+RESOLUTION_TWO_STOCK_DEFINITION = JourneyDefinition(
+    registry_id=RESOLUTION_TWO_STOCK_WORKLOAD_ID,
+    scenario_name="same_reagent_two_stock_calibration_terminal",
+    scenario_version="1",
+    workload_id=RESOLUTION_TWO_STOCK_WORKLOAD_ID,
+    required_action_ids=_RANDOMIZED_CALIBRATION_ACTIONS,
+    required_ui_action_ids=RESOLUTION_TERMINAL_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=RESOLUTION_TWO_STOCK_REQUIRED_ASSERTIONS,
+    required_screenshots=RESOLUTION_TWO_STOCK_REQUIRED_SCREENSHOTS,
+    fixture_loader=_resolution_two_stock_fixture,
+    body=run_same_reagent_two_stock_terminal,
+    artifact_assertion=_resolution_stock_artifact,
+    payload_builder=_resolution_two_stock_payload,
+    summary_builder=_resolution_stock_summary,
+)
+RESOLUTION_PROGRESS_GUARD_DEFINITION = JourneyDefinition(
+    registry_id=TWO_STOCK_PROGRESS_GUARD_WORKLOAD_ID,
+    scenario_name="same_reagent_two_stock_progress_guard",
+    scenario_version="1",
+    workload_id=TWO_STOCK_PROGRESS_GUARD_WORKLOAD_ID,
+    required_action_ids=(
+        _RANDOMIZED_CALIBRATION_ACTIONS
+        - frozenset({"experiment.inspect_completed_via_ui"})
+        | frozenset({"calibration.apply_progressed_stock_via_ui"})
+    ),
+    required_ui_action_ids=RESOLUTION_PROGRESS_GUARD_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=RESOLUTION_PROGRESS_GUARD_REQUIRED_ASSERTIONS,
+    required_screenshots=RESOLUTION_PROGRESS_GUARD_REQUIRED_SCREENSHOTS,
+    fixture_loader=_resolution_progress_guard_fixture,
+    body=run_same_reagent_two_stock_progress_guard,
+    artifact_assertion=_resolution_stock_artifact,
+    payload_builder=_resolution_progress_guard_payload,
+    summary_builder=_resolution_stock_summary,
+)
+TWO_STOCK_IMPORT_DEFINITION = JourneyDefinition(
+    registry_id=TWO_STOCK_IMPORT_WORKLOAD_ID,
+    scenario_name="two_stock_csv_import_prepare_reload",
+    scenario_version="1",
+    workload_id=TWO_STOCK_IMPORT_WORKLOAD_ID,
+    required_action_ids=(
+        _COMMON_ACTIONS
+        | TWO_STOCK_IMPORT_REQUIRED_UI_ACTIONS
+        | frozenset({"app.close_simulated_session"})
+    ),
+    required_ui_action_ids=TWO_STOCK_IMPORT_REQUIRED_UI_ACTIONS,
+    required_assertion_ids=TWO_STOCK_IMPORT_REQUIRED_ASSERTIONS,
+    required_screenshots=TWO_STOCK_IMPORT_REQUIRED_SCREENSHOTS,
+    fixture_loader=_two_stock_import_fixture,
+    body=run_two_stock_csv_import_prepare_reload,
+    artifact_assertion=_resolution_stock_artifact,
+    payload_builder=_two_stock_import_payload,
+    summary_builder=_resolution_stock_summary,
+)
 DISCONNECT_DEFINITION = JourneyDefinition(
     registry_id=DISCONNECT_WORKLOAD_ID,
     scenario_name=DISCONNECT_SCENARIO_NAME,
@@ -6534,6 +7495,10 @@ JOURNEY_DEFINITIONS = {
         DISCONNECT_DEFINITION,
         RANDOMIZED_CALIBRATION_DEFINITION,
         OPTIMIZER_360_DEFINITION,
+        RESOLUTION_SINGLE_DEFINITION,
+        RESOLUTION_TWO_STOCK_DEFINITION,
+        RESOLUTION_PROGRESS_GUARD_DEFINITION,
+        TWO_STOCK_IMPORT_DEFINITION,
         CALIBRATION_STORAGE_FUNCTIONAL_DEFINITION,
         CALIBRATION_STORAGE_PERFORMANCE_DEFINITION,
         CALIBRATION_STORAGE_SHADOW_FUNCTIONAL_DEFINITION,
@@ -7142,6 +8107,10 @@ __all__ = [
     "OPTIMIZER_360_REQUIRED_ASSERTIONS",
     "OPTIMIZER_360_REQUIRED_SCREENSHOTS",
     "OPTIMIZER_360_WORKLOAD_ID",
+    "RESOLUTION_SINGLE_WORKLOAD_ID",
+    "RESOLUTION_TWO_STOCK_WORKLOAD_ID",
+    "TWO_STOCK_PROGRESS_GUARD_WORKLOAD_ID",
+    "TWO_STOCK_IMPORT_WORKLOAD_ID",
     "JourneyRunConfig",
     "MULTI_STOCK_REQUIRED_ASSERTIONS",
     "MULTI_STOCK_REQUIRED_UI_ACTIONS",
@@ -7171,6 +8140,10 @@ __all__ = [
     "run_optimizer_360_first_calibration_checkpoint",
     "run_optimizer_360_calibration_chain",
     "run_optimizer_360_full_lifecycle",
+    "run_resolution_first_single_stock_terminal",
+    "run_same_reagent_two_stock_terminal",
+    "run_same_reagent_two_stock_progress_guard",
+    "run_two_stock_csv_import_prepare_reload",
     "run_exploration_sequence",
     "run_editor_create_finalize_journey",
     "run_disconnect_fail_closed_24_journey",

@@ -730,7 +730,7 @@ class ExperimentEditorDriver(_QTestSurfaceDriver):
 
         import Model as model_module
         from View import ExperimentDesignDialog
-        from tools.virtual_workflows.actions import capture_milestone
+        from tools.virtual_workflows.actions import capture_milestone, execute_action
 
         source_dir = Path(source_dir).resolve()
         experiments_root = Path(experiments_root).resolve()
@@ -2114,7 +2114,7 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
         expected_plan_revision: int,
         capture_milestone_name: str | None = None,
     ) -> dict[str, Any]:
-        from tools.virtual_workflows.actions import capture_milestone
+        from tools.virtual_workflows.actions import capture_milestone, execute_action
 
         from pathlib import Path
         directory = Path(experiment_dir).resolve()
@@ -2170,8 +2170,15 @@ class ExperimentLoaderDriver(_QTestSurfaceDriver):
                     raise RuntimeError("prepared inspection editor did not close")
                 return result
 
+        def record_loaded(dialog) -> Mapping[str, Any]:
+            return execute_action(
+                self.context,
+                "experiment.load_authoritative_via_ui",
+                lambda: inspect_loaded(dialog),
+            )["evidence"]
+
         return self._drive_directory_load(
-            directory, purpose="prepared", on_loaded=inspect_loaded
+            directory, purpose="prepared", on_loaded=record_loaded
         )["loaded"]
 
     def inspect_same_session_completed_execution(
@@ -3917,6 +3924,7 @@ class CalibrationDialogDriver:
         target_mode: str,
         *,
         print_profile_id: str | None = None,
+        diagnostic_confirmation: str | None = None,
     ) -> dict[str, Any]:
         """Use the real tab and Calibrate All control to generate one result."""
 
@@ -3939,14 +3947,52 @@ class CalibrationDialogDriver:
         availability = getattr(self.dialog, "synthetic_availability_callback", None)
         readiness = dict(availability(profile_id) or {}) if callable(availability) else {}
         preflight_expected = bool(readiness.get("correctable"))
+        diagnostic_choice = (
+            str(diagnostic_confirmation or "").strip().lower() or None
+        )
+        if diagnostic_choice not in {None, "record", "cancel"}:
+            raise ValueError(
+                "diagnostic_confirmation must be record, cancel, or None"
+            )
+
+        def accept_diagnostic_confirmation() -> None:
+            active = self.app.activeModalWidget()
+            if not isinstance(active, QtWidgets.QMessageBox):
+                QtCore.QTimer.singleShot(10, accept_diagnostic_confirmation)
+                return
+            if active.windowTitle() != "Record diagnostic calibration?":
+                active.reject()
+                return
+            if diagnostic_choice == "cancel":
+                button = active.button(QtWidgets.QMessageBox.Cancel)
+            else:
+                button = next(
+                    (
+                        candidate
+                        for candidate in active.buttons()
+                        if candidate.text().replace("&", "")
+                        == "Record Diagnostic Result"
+                    ),
+                    None,
+                )
+            if button is None:
+                active.reject()
+                return
+            QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
+
         with _expected_dialogs(
             self.app,
             *(("Calibration Settings Check", "CalibrationModePreflightDialog"),)
             if preflight_expected
             else (),
+            *(("Record diagnostic calibration?", "QMessageBox"),)
+            if diagnostic_choice is not None
+            else (),
         ):
             if preflight_expected:
                 self._schedule_profile_preflight_acceptance(print_profile_id)
+            if diagnostic_choice is not None:
+                QtCore.QTimer.singleShot(0, accept_diagnostic_confirmation)
             QtTest.QTest.mouseClick(button, QtCore.Qt.MouseButton.LeftButton)
 
         generated: dict[str, Any] = {}
@@ -3971,6 +4017,29 @@ class CalibrationDialogDriver:
             f"synthetic {target_mode} result generation",
         )
         return dict(generated)
+
+    def inspect_apply_state(self) -> dict[str, Any]:
+        """Return the real paired-calibration Apply eligibility surface."""
+
+        eligibility_getter = getattr(
+            self.dialog, "_get_bridge_apply_eligibility", None
+        )
+        eligibility = (
+            dict(eligibility_getter() or {})
+            if callable(eligibility_getter)
+            else {}
+        )
+        return {
+            "enabled": bool(self.dialog.bridge_apply_btn.isEnabled()),
+            "text": str(self.dialog.bridge_apply_btn.text() or ""),
+            "state": str(
+                getattr(self.dialog, "_bridge_apply_button_state", "") or ""
+            ),
+            "tooltip": str(self.dialog.bridge_apply_btn.toolTip() or ""),
+            "status": str(self.dialog.bridge_status_label.text() or ""),
+            "selected_result": bool(self.dialog._selected_summary_row()[1]),
+            "eligibility": eligibility,
+        }
 
     def select_result(self, result_fingerprint: str) -> dict[str, Any]:
         table = self.dialog.summary_table

@@ -31,6 +31,7 @@ class AuditTimelineRow:
     stock_solution: str = ""
     tooltip_text: str = ""
     parse_error: str | None = None
+    delivery_status: str = "recorded"
 
 
 def _truncate_text(value: str, limit: int = RAW_LINE_PREVIEW_LIMIT) -> str:
@@ -404,31 +405,88 @@ class ExperimentAuditReader:
         if self.audit_path:
             return os.path.abspath(os.fspath(self.audit_path))
 
-        exp = getattr(self.model, "experiment_model", None)
+        exp = getattr(self.model, "experiment_model", self.model)
         exp_dir = getattr(exp, "experiment_dir_path", None)
         if not exp_dir:
             return None
         return os.path.abspath(os.path.join(os.fspath(exp_dir), self.FILE_NAME))
 
     def read_rows(self) -> list[AuditTimelineRow]:
-        path_text = self.get_audit_path()
-        if not path_text:
-            return []
+        source = self.model
+        experiment_model = getattr(source, "experiment_model", source)
+        reconciler = getattr(source, "reconcile_calibration_volume_warning_audits", None)
+        if not callable(reconciler):
+            reconciler = getattr(
+                experiment_model,
+                "reconcile_calibration_volume_warning_audits",
+                None,
+            )
+        reconciliation = None
+        if callable(reconciler):
+            try:
+                reconciliation = reconciler()
+            except Exception as exc:
+                reconciliation = {"status": "pending", "errors": [str(exc)]}
 
-        path = Path(path_text)
-        if not path.exists():
-            return []
+        getter = getattr(source, "get_calibration_volume_warning_audit_intents", None)
+        if not callable(getter):
+            getter = getattr(
+                experiment_model,
+                "get_calibration_volume_warning_audit_intents",
+                None,
+            )
+        intents = {}
+        intent_error = None
+        if callable(getter):
+            try:
+                intents = getter()
+            except Exception as exc:
+                intent_error = str(exc)
 
         rows: list[AuditTimelineRow] = []
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                for line_number, raw_line in enumerate(handle, start=1):
-                    raw_text = raw_line.rstrip("\r\n")
-                    if not raw_text.strip():
-                        continue
-                    rows.append(self._parse_line(line_number, raw_text))
-        except OSError as exc:
-            return [self._build_warning_row(0, "", f"Could not read audit file: {exc}")]
+        path_text = self.get_audit_path()
+        if path_text:
+            path = Path(path_text)
+            if path.exists():
+                try:
+                    with path.open("r", encoding="utf-8") as handle:
+                        for line_number, raw_line in enumerate(handle, start=1):
+                            raw_text = raw_line.rstrip("\r\n")
+                            if not raw_text.strip():
+                                continue
+                            rows.append(self._parse_line(line_number, raw_text))
+                except OSError as exc:
+                    rows.append(
+                        self._build_warning_row(
+                            0,
+                            "",
+                            f"Could not read audit file: {exc}",
+                        )
+                    )
+
+        persisted_event_ids = {
+            str(row.event.get("event_id"))
+            for row in rows
+            if row.is_valid and row.event.get("event_id")
+        }
+        for event_id in sorted(intents):
+            if event_id not in persisted_event_ids:
+                rows.append(self._build_pending_intent_row(intents[event_id]))
+
+        errors = []
+        if isinstance(reconciliation, dict):
+            errors.extend(reconciliation.get("errors") or [])
+        if intent_error:
+            errors.append(intent_error)
+        if errors:
+            warning_row = self._build_warning_row(
+                0,
+                "",
+                "Audit timeline synchronization pending: "
+                + "; ".join(str(value) for value in errors),
+            )
+            warning_row.delivery_status = "pending"
+            rows.append(warning_row)
         return rows
 
     def read_table(self) -> list[dict]:
@@ -474,6 +532,46 @@ class ExperimentAuditReader:
             stock_solution=stock_solution,
             tooltip_text=build_audit_tooltip(event, stock_solution=stock_solution),
             parse_error=None,
+        )
+
+    def _build_pending_intent_row(self, intent: dict) -> AuditTimelineRow:
+        event = {
+            "schema_version": 1,
+            "event_id": intent.get("event_id"),
+            "timestamp_utc": intent.get("timestamp_utc"),
+            "elapsed_s": None,
+            "event_type": intent.get("event_type"),
+            "level": intent.get("level"),
+            "summary": intent.get("summary"),
+            "details": intent.get("details") if isinstance(intent.get("details"), dict) else {},
+            "context": {},
+            "delivery_status": "pending",
+        }
+        timestamp_utc = str(event.get("timestamp_utc") or "")
+        stock_solution = derive_audit_stock_solution(event)
+        summary = (
+            f"{str(event.get('summary') or '')} "
+            "(audit timeline synchronization pending)"
+        ).strip()
+        return AuditTimelineRow(
+            line_number=0,
+            event=event,
+            is_valid=True,
+            level=str(event.get("level") or "warning"),
+            event_type=str(event.get("event_type") or ""),
+            summary=summary,
+            timestamp_utc=timestamp_utc,
+            elapsed_s=None,
+            time_display=format_audit_timestamp(timestamp_utc),
+            elapsed_display="",
+            detail_json=event_detail_json(event),
+            stock_solution=stock_solution,
+            tooltip_text=(
+                build_audit_tooltip(event, stock_solution=stock_solution)
+                + "\nAudit timeline synchronization: pending"
+            ).strip(),
+            parse_error=None,
+            delivery_status="pending",
         )
 
     def _build_warning_row(self, line_number: int, raw_text: str, parse_error: str) -> AuditTimelineRow:

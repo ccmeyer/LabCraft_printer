@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from collections import Counter
 
@@ -4378,6 +4378,195 @@ def optimizer_360_design_assertion(
         snapshot,
     )
 
+def _resolution_optimizer_timing_evidence(
+    optimizer: Mapping[str, Any], expected_optimizer: Any
+) -> dict[str, Any]:
+    """Validate timing telemetry without making host speed a SIL gate."""
+
+    def _nonnegative_finite(value: Any) -> tuple[bool, float | None]:
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError):
+            return False, None
+        return math.isfinite(normalized) and normalized >= 0.0, normalized
+
+    time_to_best_valid, time_to_best = _nonnegative_finite(
+        optimizer.get("stock_allocation_time_to_best_ms")
+    )
+    resolution_elapsed_valid, resolution_elapsed = _nonnegative_finite(
+        optimizer.get("stock_allocation_elapsed_ms")
+    )
+    return {
+        "telemetry_valid": time_to_best_valid and resolution_elapsed_valid,
+        "time_to_best_ms": time_to_best,
+        "resolution_elapsed_ms": resolution_elapsed,
+        "maximum_time_to_best_ms": expected_optimizer.maximum_time_to_best_ms,
+        "maximum_resolution_elapsed_ms": (
+            expected_optimizer.maximum_resolution_elapsed_ms
+        ),
+        "time_to_best_within_fixture_target": time_to_best_valid
+        and time_to_best
+        <= expected_optimizer.maximum_time_to_best_ms + 1e-9,
+        "resolution_elapsed_within_fixture_target": resolution_elapsed_valid
+        and resolution_elapsed
+        <= expected_optimizer.maximum_resolution_elapsed_ms + 1e-9,
+        "performance_target_exceeded": bool(
+            optimizer.get("stock_allocation_time_budget_exceeded", False)
+        ),
+        "performance_target_overshoot_ms": optimizer.get(
+            "stock_allocation_time_budget_overshoot_ms"
+        ),
+    }
+
+
+
+def resolution_stock_design_assertion(
+    context: Any,
+    *,
+    case: Any,
+    driver_evidence: Mapping[str, Any],
+) -> tuple[AssertionResult, Any]:
+    """Join compact optimizer output to independent resolution-first truth."""
+
+    from tools.virtual_workflows.authoritative_evidence import (
+        capture_authoritative_bundle,
+    )
+
+    snapshot = capture_authoritative_bundle(context)
+    counts = capture_count_snapshot(context)
+    expected_counts = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("prepared").rows
+        ),
+        label="resolution prepared literal",
+    )
+    observed_counts = {
+        name: normalize_stock_well_counts(
+            counts[name], label=f"resolution prepared {name}"
+        )
+        for name in ("plan_targets", "progress_targets", "runtime_targets")
+    }
+    plan_stocks = {
+        row.stock_id: row
+        for row in context.experiment_model.get_execution_plan_snapshot().stocks
+    }
+    expected_stocks = {row.stock_id: row for row in case.stocks}
+    generated = dict(driver_evidence.get("generated") or {})
+    optimizer = dict(generated.get("optimizer") or {})
+    expected_optimizer = case.optimizer_expectations
+
+    def rank_matches(observed: Any, expected: Any) -> bool:
+        if not isinstance(observed, Mapping):
+            return False
+        expected_row = expected.normalized()
+        integer_fields = {
+            "total_distinct_level_loss",
+            "worst_reagent_level_loss",
+            "stock_solution_count",
+        }
+        return all(
+            (
+                int(observed.get(name, -1)) == int(value)
+                if name in integer_fields
+                else math.isclose(
+                    float(observed.get(name, math.nan)),
+                    float(value),
+                    rel_tol=1e-10,
+                    abs_tol=1e-8,
+                )
+            )
+            for name, value in expected_row.items()
+        )
+
+    timing_evidence = _resolution_optimizer_timing_evidence(optimizer, expected_optimizer)
+    states = int(optimizer.get("stock_allocation_states_evaluated") or 0)
+    pairs = int(optimizer.get("two_stock_pairs_evaluated") or 0)
+    checks = {
+        "revision_one_prepared": snapshot.plan_revision == 1
+        and snapshot.plan_state == "prepared",
+        "bundle_and_design_hash_valid": snapshot.bundle_valid
+        and snapshot.plan_design_sha256 == snapshot.design_sha256,
+        "runtime_inactive_zero_progress": not snapshot.runtime_active
+        and snapshot.total_added_droplets == 0,
+        "stock_ids_unique_exact": len(plan_stocks) == len(expected_stocks)
+        and set(plan_stocks) == set(expected_stocks),
+        "stock_concentrations_exact": all(
+            stock_id in plan_stocks
+            and Decimal(str(plan_stocks[stock_id].concentration))
+            == Decimal(expected.concentration)
+            for stock_id, expected in expected_stocks.items()
+        ),
+        "assignments_exact": snapshot.assignments
+        == {row.well_id: row.reaction_id for row in case.assignments},
+        "literal_plan_counts_exact": observed_counts["plan_targets"]
+        == expected_counts,
+        "literal_progress_counts_exact": observed_counts["progress_targets"]
+        == expected_counts,
+        "literal_runtime_counts_exact": observed_counts["runtime_targets"]
+        == expected_counts,
+        "resolution_strategy_exact": optimizer.get("optimizer_strategy_used")
+        == expected_optimizer.strategy,
+        "seed_loss_exact": optimizer.get("optimizer_seed_distinct_level_loss")
+        == expected_optimizer.seed_rank.total_distinct_level_loss,
+        "selected_loss_exact": optimizer.get("distinct_level_loss")
+        == expected_optimizer.selected_rank.total_distinct_level_loss,
+        "seed_rank_exact": rank_matches(
+            optimizer.get("optimizer_seed_rank"), expected_optimizer.seed_rank
+        ),
+        "selected_rank_exact": rank_matches(
+            optimizer.get("optimizer_selected_rank"),
+            expected_optimizer.selected_rank,
+        ),
+        "seed_improved": optimizer.get("stock_allocation_improved_seed")
+        is expected_optimizer.improved_seed,
+        "stop_reason_expected": optimizer.get("stock_allocation_stop_reason")
+        in set(expected_optimizer.allowed_stop_reasons),
+        "no_fallback_or_hard_limit": optimizer.get("optimizer_strategy_used")
+        != "legacy_fallback"
+        and optimizer.get("stock_allocation_search_limited") is False
+        and not (optimizer.get("stock_allocation_limit_reasons") or []),
+        "timing_telemetry_valid": timing_evidence["telemetry_valid"],
+        "state_and_pair_caps_respected": states <= expected_optimizer.maximum_states
+        and pairs <= expected_optimizer.maximum_pairs,
+        "action_cap_not_exceeded": len(context.action_results)
+        <= case.qualification.action_cap,
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "case_id": case.case_id,
+        "case_sha256": case.sha256(),
+        "count_oracle_sha256": case.count_oracle_sha256(),
+        "prepared": snapshot.prepared_evidence(),
+        "expected_stocks": {
+            stock_id: expected.concentration
+            for stock_id, expected in expected_stocks.items()
+        },
+        "observed_stocks": {
+            stock_id: str(row.concentration) for stock_id, row in plan_stocks.items()
+        },
+        "optimizer_timing": timing_evidence,
+        "counts": counts,
+        "optimizer": optimizer,
+    }
+    return (
+        AssertionResult(
+            "experiment.resolution_first_design_exact",
+            "prepared",
+            "pass" if not evidence["failed_checks"] else "fail",
+            ("ui", "model", "persistence"),
+            evidence,
+            (
+                None
+                if not evidence["failed_checks"]
+                else "resolution-first prepared design failed: "
+                + ", ".join(evidence["failed_checks"])
+            ),
+        ),
+        snapshot,
+    )
+
 
 def calibrated_zero_progress_assertion(
     context: Any,
@@ -4856,6 +5045,705 @@ def joined_remaining_calibrations_assertion(
     )
 
 
+def _normalized_calibration_volume_warning(value: Any) -> Any:
+    """Normalize warning floats for stable independent SIL comparison."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalized_calibration_volume_warning(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalized_calibration_volume_warning(item) for item in value]
+    if isinstance(value, float):
+        return round(value, 9)
+    return value
+
+
+def _expected_calibration_volume_warning(
+    case: Any,
+    totals_nL: Mapping[str, float],
+) -> dict[str, Any] | None:
+    """Derive warning truth from frozen counts without calling product code."""
+
+    target = float(case.editor.printed_volume_nL)
+    tolerance = max(0.0, float(case.editor.printed_volume_tolerance_nL))
+    threshold = target + tolerance
+    final = float(case.editor.final_volume_nL)
+    planned_nonprinted = max(0.0, final - target)
+    reaction_by_well = {
+        assignment.well_id: assignment.reaction_id for assignment in case.assignments
+    }
+    affected_rows: list[dict[str, Any]] = []
+    for well_id in case.editor.selected_well_ids:
+        total = float(totals_nL[well_id])
+        if total <= threshold + 1e-9:
+            continue
+        projected_final = planned_nonprinted + total
+        affected_rows.append(
+            {
+                "row_id": str(well_id),
+                "well_id": str(well_id),
+                "reaction_id": str(reaction_by_well[well_id]),
+                "total_volume_nL": total,
+                "printed_volume_nL": total,
+                "planned_nonprinted_volume_nL": planned_nonprinted,
+                "projected_final_volume_nL": projected_final,
+                "projected_final_excess_nL": max(0.0, projected_final - final),
+                "excess_nL": total - threshold,
+                "exceeds_final_reaction_volume": bool(
+                    projected_final > final + 1e-9
+                ),
+            }
+        )
+    if not affected_rows:
+        return None
+    return {
+        "code": "calibration_volume_tolerance_exceeded",
+        "target_printed_volume_nL": target,
+        "design_optimization_tolerance_nL": tolerance,
+        "warning_threshold_nL": threshold,
+        "final_reaction_volume_nL": final,
+        "affected_row_count": len(affected_rows),
+        "max_total_volume_nL": max(
+            row["total_volume_nL"] for row in affected_rows
+        ),
+        "max_excess_nL": max(row["excess_nL"] for row in affected_rows),
+        "planned_nonprinted_volume_nL": planned_nonprinted,
+        "max_projected_final_volume_nL": max(
+            row["projected_final_volume_nL"] for row in affected_rows
+        ),
+        "max_projected_final_excess_nL": max(
+            row["projected_final_excess_nL"] for row in affected_rows
+        ),
+        "affected_rows": affected_rows,
+    }
+
+
+def _calibration_warning_transition_contract(
+    *,
+    label: str,
+    transition: Mapping[str, Any],
+    expected_warning: Mapping[str, Any] | None,
+    totals_nL: Mapping[str, float],
+) -> dict[str, Any]:
+    """Validate one warned Apply against preview, audit, and revision evidence."""
+
+    preview = dict(transition.get("preview") or {})
+    preview_payload = dict(preview.get("payload") or {})
+    preview_warning = preview_payload.get("volume_warning")
+    expected_normalized = _normalized_calibration_volume_warning(expected_warning)
+    preview_normalized = _normalized_calibration_volume_warning(preview_warning)
+    added_audit_rows = [
+        dict(row)
+        for row in transition.get("audit_rows_added") or ()
+        if isinstance(row, Mapping)
+    ]
+    warning_audit_rows = [
+        row
+        for row in added_audit_rows
+        if str(row.get("event_type") or "")
+        == "calibration_volume_tolerance_exceeded"
+    ]
+    revision_audit_rows = [
+        row
+        for row in added_audit_rows
+        if str(row.get("event_type") or "")
+        == "execution_plan_calibration_revised"
+    ]
+    lock_audit_rows = [
+        row
+        for row in added_audit_rows
+        if str(row.get("event_type") or "") == "execution_plan_locked"
+    ]
+    audit_row = warning_audit_rows[0] if len(warning_audit_rows) == 1 else {}
+    audit_details = dict(audit_row.get("details") or {})
+    audit_warning = audit_details.get("volume_warning")
+    revision_row = (
+        revision_audit_rows[0] if len(revision_audit_rows) == 1 else {}
+    )
+    revision_details = dict(revision_row.get("details") or {})
+    after_snapshot = dict(transition.get("after") or {})
+    before_snapshot = dict(transition.get("before") or {})
+
+    def optional_revision(value: Any) -> int | None:
+        return (
+            int(value)
+            if isinstance(value, int) and not isinstance(value, bool)
+            else None
+        )
+
+    before_revision = optional_revision(before_snapshot.get("plan_revision"))
+    after_revision = optional_revision(after_snapshot.get("plan_revision"))
+    expected_previous_revision = before_revision
+    if label == "high":
+        lock_row = lock_audit_rows[0] if len(lock_audit_rows) == 1 else {}
+        lock_details = dict(lock_row.get("details") or {})
+        lock_revision = (
+            before_revision + 1 if before_revision is not None else None
+        )
+        lock_transition_exact = (
+            len(lock_audit_rows) == 1
+            and lock_row.get("level") == "info"
+            and lock_details.get("plan_id") == after_snapshot.get("plan_id")
+            and optional_revision(lock_details.get("previous_revision"))
+            == before_revision
+            and optional_revision(lock_details.get("plan_revision"))
+            == lock_revision
+        )
+        expected_previous_revision = lock_revision
+        expected_revision_delta = 2
+    else:
+        lock_transition_exact = not lock_audit_rows
+        expected_revision_delta = 1
+
+    affected_ids = [
+        str(row["row_id"])
+        for row in (expected_warning or {}).get("affected_rows", ())
+    ]
+    status = str(preview.get("status") or "")
+    max_excess = float((expected_warning or {}).get("max_excess_nL", 0.0))
+    source_fingerprint = list(
+        preview_payload.get("source_row_fingerprint") or ()
+    )
+    source_result_identity = (
+        str(source_fingerprint[0]) if source_fingerprint else ""
+    )
+    audit_result_identity = str(
+        audit_details.get("run_id") or audit_details.get("result_id") or ""
+    )
+    calibration_record_id = audit_details.get("calibration_record_id")
+    revision_transition_exact = (
+        before_revision is not None
+        and after_revision is not None
+        and after_revision == before_revision + expected_revision_delta
+        and len(revision_audit_rows) == 1
+        and revision_row.get("level") == "info"
+        and revision_details.get("plan_id") == after_snapshot.get("plan_id")
+        and revision_details.get("stock_id") == transition.get("stock_id")
+        and revision_details.get("calibration_record_id")
+        == calibration_record_id
+        and optional_revision(revision_details.get("previous_revision"))
+        == expected_previous_revision
+        and optional_revision(revision_details.get("plan_revision"))
+        == after_revision
+        and lock_transition_exact
+    )
+    transition_checks = {
+        "preview_warning_exact": preview_normalized == expected_normalized
+        and expected_warning is not None,
+        "preview_warning_visible": "Volume warning:" in status
+        and f"{max_excess:.3f} nL" in status
+        and all(row_id in status for row_id in affected_ids),
+        "apply_remains_enabled": preview.get("apply_enabled") is True
+        and preview.get("apply_state") == "ready",
+        "audit_append_prefix_preserved": transition.get(
+            "audit_prefix_preserved"
+        )
+        is True,
+        "one_warning_audit_event": len(warning_audit_rows) == 1,
+        "audit_warning_exact": _normalized_calibration_volume_warning(
+            audit_warning
+        )
+        == expected_normalized,
+        "audit_level_and_identity_exact": audit_row.get("level") == "warning"
+        and audit_details.get("stock_id") == transition.get("stock_id")
+        and bool(calibration_record_id)
+        and bool(audit_result_identity)
+        and audit_result_identity == source_result_identity
+        and audit_details.get("plan_id") == after_snapshot.get("plan_id")
+        and optional_revision(audit_details.get("plan_revision"))
+        == after_revision,
+        "revision_transition_exact": revision_transition_exact,
+    }
+    return {
+        "label": label,
+        "stock_id": transition.get("stock_id"),
+        "totals_nL": dict(totals_nL),
+        "expected_warning": expected_warning,
+        "preview_warning": preview_warning,
+        "preview_status": status,
+        "preview_apply_enabled": preview.get("apply_enabled"),
+        "preview_apply_state": preview.get("apply_state"),
+        "audit_rows_added": added_audit_rows,
+        "warning_audit_rows": warning_audit_rows,
+        "revision_audit_rows": revision_audit_rows,
+        "lock_audit_rows": lock_audit_rows,
+        "before_plan_revision": before_revision,
+        "after_plan_revision": after_revision,
+        "checks": transition_checks,
+    }
+
+
+def same_reagent_two_stock_calibration_assertion(
+    context: Any,
+    *,
+    case: Any,
+    first_calibration_evidence: Mapping[str, Any],
+    remaining_calibration_evidence: Sequence[Mapping[str, Any]],
+    require_fill_calibration: bool = True,
+) -> AssertionResult:
+    """Prove paired-leg requantization is atomic and keyed by stock identity."""
+
+    prepared = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("prepared").rows
+        ),
+        label="paired prepared literal",
+    )
+    high_calibrated = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("high_calibrated").rows
+        ),
+        label="paired high-calibrated literal",
+    )
+    fill_calibrated = (
+        normalize_stock_well_counts(
+            (
+                StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+                for row in case.oracle("fill_calibrated").rows
+            ),
+            label="paired fill-calibrated literal",
+        )
+        if require_fill_calibration
+        else ()
+    )
+    final = normalize_stock_well_counts(
+        (
+            StockWellCount(row.stock_id, row.well_id, row.target_droplets)
+            for row in case.oracle("all_stocks_calibrated").rows
+        ),
+        label="paired all-calibrated literal",
+    )
+
+    def transition_counts(
+        evidence: Mapping[str, Any], boundary: str
+    ) -> tuple[StockWellCount, ...]:
+        transition = dict(evidence.get("count_transition") or {})
+        snapshot = dict(transition.get(boundary) or {})
+        return normalize_stock_well_counts(
+            snapshot.get("plan_targets") or (),
+            label=f"paired {boundary}",
+        )
+
+    remaining = list(remaining_calibration_evidence)
+    signal_calibrations = sorted(
+        (row for row in case.calibrations if row.reagent_name == "Signal"),
+        key=lambda row: float(
+            next(
+                stock.concentration
+                for stock in case.stocks
+                if stock.stock_id == row.stock_id
+            )
+        ),
+        reverse=True,
+    )
+    high_calibration, low_calibration = signal_calibrations
+    low_evidence = next(
+        (
+            row
+            for row in remaining
+            if str(row.get("stock_id") or "") == low_calibration.stock_id
+        ),
+        {},
+    )
+    fill_calibration = next(
+        (row for row in case.calibrations if row.reagent_name == "Water"),
+        None,
+    )
+    fill_evidence = next(
+        (
+            row
+            for row in remaining
+            if fill_calibration is not None
+            and str(row.get("stock_id") or "") == fill_calibration.stock_id
+        ),
+        {},
+    )
+    high_before = transition_counts(first_calibration_evidence, "before")
+    high_after = transition_counts(first_calibration_evidence, "after")
+    fill_before = transition_counts(fill_evidence, "before")
+    fill_after = transition_counts(fill_evidence, "after")
+    low_before = transition_counts(low_evidence, "before")
+    low_after = transition_counts(low_evidence, "after")
+    plan = context.experiment_model.get_execution_plan_snapshot()
+    plan_stocks = {row.stock_id: row for row in plan.stocks}
+    high_id, low_id = high_calibration.stock_id, low_calibration.stock_id
+    def effective_volumes(
+        calibration_evidence: Mapping[str, Any], boundary: str
+    ) -> dict[str, float]:
+        transition = dict(calibration_evidence.get("count_transition") or {})
+        return {
+            str(stock_id): float(volume)
+            for stock_id, volume in dict(
+                transition.get(f"{boundary}_effective_volumes_nL") or {}
+            ).items()
+        }
+
+    def row_volumes(
+        counts: Sequence[StockWellCount], volumes: Mapping[str, float]
+    ) -> dict[str, float]:
+        by_key = {(row.stock_id, row.well_id): row.droplets for row in counts}
+        return {
+            well_id: sum(
+                by_key.get((stock_id, well_id), 0) * float(volume)
+                for stock_id, volume in volumes.items()
+            )
+            for well_id in case.editor.selected_well_ids
+        }
+
+    def only_selected_volume_changed(
+        calibration_evidence: Mapping[str, Any],
+        selected_stock_id: str,
+        expected_volume_nL: float,
+    ) -> bool:
+        before = effective_volumes(calibration_evidence, "before")
+        after = effective_volumes(calibration_evidence, "after")
+        return (
+            bool(before)
+            and set(before) == set(after)
+            and selected_stock_id in after
+            and math.isclose(after[selected_stock_id], expected_volume_nL)
+            and all(
+                stock_id == selected_stock_id
+                or math.isclose(before[stock_id], after[stock_id])
+                for stock_id in before
+            )
+        )
+
+    transition_after_volumes = {
+        "high": row_volumes(
+            high_after, effective_volumes(first_calibration_evidence, "after")
+        ),
+        "low": row_volumes(low_after, effective_volumes(low_evidence, "after")),
+    }
+    if require_fill_calibration:
+        transition_after_volumes["fill"] = row_volumes(
+            fill_after, effective_volumes(fill_evidence, "after")
+        )
+    final_volumes = transition_after_volumes["low"]
+    chain_exact = (
+        fill_before == high_calibrated
+        and fill_after == fill_calibrated
+        and low_before == fill_calibrated
+        and low_after == final
+        if require_fill_calibration
+        else low_before == high_calibrated and low_after == final
+    )
+    selected_volume_updates = only_selected_volume_changed(
+        first_calibration_evidence,
+        high_calibration.stock_id,
+        float(high_calibration.droplet_volume_nL),
+    ) and only_selected_volume_changed(
+        low_evidence,
+        low_calibration.stock_id,
+        float(low_calibration.droplet_volume_nL),
+    )
+    if require_fill_calibration and fill_calibration is not None:
+        selected_volume_updates = selected_volume_updates and only_selected_volume_changed(
+            fill_evidence,
+            fill_calibration.stock_id,
+            float(fill_calibration.droplet_volume_nL),
+        )
+
+    def warning_transition_evidence(
+        label: str,
+        calibration_evidence: Mapping[str, Any],
+        counts: Sequence[StockWellCount],
+    ) -> dict[str, Any]:
+        transition = dict(calibration_evidence.get("count_transition") or {})
+        totals = row_volumes(counts, effective_volumes(calibration_evidence, "after"))
+        expected_warning = _expected_calibration_volume_warning(case, totals)
+        return _calibration_warning_transition_contract(
+            label=label,
+            transition=transition,
+            expected_warning=expected_warning,
+            totals_nL=totals,
+        )
+
+    warning_specs = [
+        ("high", first_calibration_evidence, high_after),
+    ]
+    if require_fill_calibration:
+        warning_specs.append(("fill", fill_evidence, fill_after))
+    warning_specs.append(("low", low_evidence, low_after))
+    warning_transitions = [
+        warning_transition_evidence(label, calibration_evidence, counts)
+        for label, calibration_evidence, counts in warning_specs
+    ]
+    expected_warning_revisions = (
+        [3, 4, 5] if require_fill_calibration else [3, 4]
+    )
+    checks = {
+        "high_transition_prepared_to_literal": high_before == prepared
+        and high_after == high_calibrated,
+        "calibration_chain_matches_literal_checkpoints": chain_exact,
+        "only_selected_effective_volume_changes": selected_volume_updates,
+        "selected_leg_volumes_exact": math.isclose(
+            float(plan_stocks[high_id].effective_volume_nL),
+            float(high_calibration.droplet_volume_nL),
+        )
+        and math.isclose(
+            float(plan_stocks[low_id].effective_volume_nL),
+            float(low_calibration.droplet_volume_nL),
+        ),
+        "paired_identity_preserved": high_id != low_id
+        and plan_stocks[high_id].reagent_name
+        == plan_stocks[low_id].reagent_name
+        == "Signal",
+        "warning_only_volume_semantics_exact": all(
+            transition["checks"]["preview_warning_exact"]
+            for transition in warning_transitions
+        ),
+        "preview_warning_visible_and_apply_enabled": all(
+            transition["checks"]["preview_warning_visible"]
+            and transition["checks"]["apply_remains_enabled"]
+            for transition in warning_transitions
+        ),
+        "warning_audit_events_exact": all(
+            transition["checks"]["audit_append_prefix_preserved"]
+            and transition["checks"]["one_warning_audit_event"]
+            and transition["checks"]["audit_warning_exact"]
+            and transition["checks"]["audit_level_and_identity_exact"]
+            for transition in warning_transitions
+        ),
+        "calibration_revision_chain_exact": [
+            int(transition["after_plan_revision"])
+            for transition in warning_transitions
+        ]
+        == expected_warning_revisions
+        and all(
+            transition["checks"]["revision_transition_exact"]
+            for transition in warning_transitions
+        ),
+        "projected_final_volume_context_exact": all(
+            row["exceeds_final_reaction_volume"]
+            and float(row["projected_final_excess_nL"]) > 0.0
+            for transition in warning_transitions
+            for row in (transition["expected_warning"] or {}).get("affected_rows", ())
+        ),
+        "progress_stays_zero": all(
+            int(row.get("droplets", 0)) == 0
+            for row in capture_count_snapshot(context)["progress_added"]
+        ),
+        "expected_calibration_transitions_present": len(remaining)
+        == (2 if require_fill_calibration else 1),
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "high_stock_id": high_id,
+        "low_stock_id": low_id,
+        "high_transition": dict(first_calibration_evidence.get("count_transition") or {}),
+        "fill_transition": dict(fill_evidence.get("count_transition") or {}),
+        "low_transition": dict(low_evidence.get("count_transition") or {}),
+        "final_volumes_nL": final_volumes,
+        "transition_after_volumes_nL": transition_after_volumes,
+        "warning_transitions": warning_transitions,
+        "require_fill_calibration": require_fill_calibration,
+    }
+    return AssertionResult(
+        "execution.same_reagent_two_stock_calibration_exact",
+        "all_stocks_calibrated",
+        "pass" if not evidence["failed_checks"] else "fail",
+        ("ui", "model", "persistence"),
+        evidence,
+        (
+            None
+            if not evidence["failed_checks"]
+            else "same-reagent paired calibration failed: "
+            + ", ".join(evidence["failed_checks"])
+        ),
+    )
+
+
+def same_reagent_two_stock_progress_guard_assertion(
+    context: Any,
+    *,
+    case: Any,
+    guard_evidence: Mapping[str, Any],
+) -> AssertionResult:
+    """Prove diagnostic recording cannot mutate a progressed paired plan."""
+
+    before = guard_evidence["before_bundle"]
+    after = guard_evidence["after_bundle"]
+    before_counts = dict(guard_evidence.get("before_counts") or {})
+    after_counts = dict(guard_evidence.get("after_counts") or {})
+    apply_state = dict(guard_evidence.get("apply_state") or {})
+    eligibility = dict(apply_state.get("eligibility") or {})
+    progress_rows = normalize_stock_well_counts(
+        after_counts.get("progress_added") or (),
+        label="paired guard progress",
+    )
+    progressed_id = case.calibrations[0].stock_id
+    progressed_drops = sum(
+        row.droplets for row in progress_rows if row.stock_id == progressed_id
+    )
+    expected_progressed_drops = int(case.execution_passes[0].expected_droplets)
+    message = str(eligibility.get("message") or apply_state.get("tooltip") or "")
+    checks = {
+        "diagnostic_result_recorded": int(
+            guard_evidence.get("summary_rows_after", 0)
+        )
+        > int(guard_evidence.get("summary_rows_before", 0)),
+        "apply_disabled": apply_state.get("enabled") is False
+        and apply_state.get("state") == "unavailable",
+        "affected_progress_code_exact": eligibility.get("code")
+        == "affected_stock_progress",
+        "progressed_stock_and_drop_count_visible": progressed_id in message
+        and f"{expected_progressed_drops} drops" in message,
+        "exact_high_leg_progress": progressed_drops == expected_progressed_drops,
+        "plan_identity_revision_history_unchanged": (
+            before.plan_id,
+            before.plan_revision,
+            before.plan_state,
+            before.history,
+        )
+        == (after.plan_id, after.plan_revision, after.plan_state, after.history),
+        "audit_unchanged": before.audit_rows == after.audit_rows,
+        "plan_progress_runtime_counts_unchanged": before_counts == after_counts
+        and guard_evidence.get("before_click")
+        == guard_evidence.get("after_click"),
+        "key_and_runtime_mappings_unchanged": before.key_rows == after.key_rows
+        and before.concentration_rows == after.concentration_rows
+        and before.assignments == after.assignments,
+        "array_dispatch_unchanged": guard_evidence.get("before_dispatch")
+        == guard_evidence.get("after_dispatch"),
+        "queue_drained_idle": context.controller.get_array_run_state() == "idle"
+        and context.machine.check_if_all_completed(),
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "apply_state": apply_state,
+        "progressed_stock_id": progressed_id,
+        "progressed_drops": progressed_drops,
+        "before_counts": before_counts,
+        "after_counts": after_counts,
+        "before_dispatch": dict(guard_evidence.get("before_dispatch") or {}),
+        "after_dispatch": dict(guard_evidence.get("after_dispatch") or {}),
+        "diagnostic_summary_rows": {
+            "before": guard_evidence.get("summary_rows_before"),
+            "after": guard_evidence.get("summary_rows_after"),
+        },
+    }
+    return AssertionResult(
+        "execution.same_reagent_two_stock_progress_guard_exact",
+        "progressed_pair_apply_blocked",
+        "pass" if not evidence["failed_checks"] else "fail",
+        ("ui", "model", "persistence", "simulator"),
+        evidence,
+        (
+            None
+            if not evidence["failed_checks"]
+            else "paired progress guard failed: "
+            + ", ".join(evidence["failed_checks"])
+        ),
+    )
+
+
+def two_stock_import_preview_reuse_assertion(
+    context: Any,
+    *,
+    fixture: Mapping[str, Any],
+    driver_evidence: Mapping[str, Any],
+    before_reload: Any,
+    after_reload: Any,
+    reload_evidence: Mapping[str, Any],
+) -> AssertionResult:
+    """Prove both imported legs are visible and the wizard allocation is reused."""
+
+    import_evidence = dict(driver_evidence.get("positive_upload") or {})
+    report_rows = list(import_evidence.get("report_stock_rows") or [])
+    table_rows = list(import_evidence.get("stock_table_rows") or [])
+    labels = [str(row.get("stock_leg_label") or "") for row in report_rows]
+    mappings = {
+        f"R_{float(row.get('ideal_stock_conc')):.2f}_mM": {
+            str(key): int(value)
+            for key, value in dict(row.get("droplets_per_target") or {}).items()
+        }
+        for row in report_rows
+    }
+    expected_mappings = {
+        str(stock_id): {str(key): int(value) for key, value in values.items()}
+        for stock_id, values in dict(
+            fixture.get("expected_target_mappings") or {}
+        ).items()
+    }
+    tooltip_text = "\n".join(
+        tooltip
+        for row in table_rows
+        for tooltip in row.get("tooltips") or []
+        if tooltip
+    )
+    plan = context.experiment_model.get_execution_plan_snapshot()
+    stock_ids = [row.stock_id for row in plan.stocks]
+    optimizer = dict(import_evidence.get("optimizer") or {})
+    checks = {
+        "both_stock_leg_labels_visible": labels
+        == list(fixture["expected_preview_labels"]),
+        "both_target_mappings_exact": mappings == expected_mappings,
+        "mapping_tooltips_exact": all(
+            fragment in tooltip_text
+            for fragment in (
+                "0.1 mM: 0 droplets",
+                "0.2 mM: 1 droplet",
+                "0.1 mM: 1 droplet",
+                "0.2 mM: 0 droplets",
+            )
+        ),
+        "wizard_plan_reused": optimizer.get(
+            "stock_allocation_reused_import_plan"
+        )
+        is True,
+        "outer_optimizer_not_called": int(
+            import_evidence.get("outer_optimizer_calls", -1)
+        )
+        == 0,
+        "stock_ids_unique_exact": len(stock_ids) == len(set(stock_ids))
+        and set(stock_ids) == set(fixture["expected_stock_ids"]),
+        "prepared_plan_exact": str(plan.state.value) == "prepared"
+        and int(plan.plan_revision) == 1,
+        "inactive_reload_exact": bool(reload_evidence.get("checks"))
+        and all(reload_evidence["checks"].values())
+        and not after_reload.runtime_active,
+        "reload_byte_stable": before_reload.core_file_hashes
+        == after_reload.core_file_hashes
+        and before_reload.plan_id == after_reload.plan_id
+        and before_reload.plan_revision == after_reload.plan_revision,
+        "two_reactions_retained": len(plan.wells) == int(
+            fixture["workload"]["completion_count"]
+        ),
+    }
+    evidence = {
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
+        "preview_labels": labels,
+        "target_mappings": mappings,
+        "stock_ids": stock_ids,
+        "optimizer": optimizer,
+        "outer_optimizer_calls": import_evidence.get("outer_optimizer_calls"),
+        "reload": dict(reload_evidence),
+        "core_file_hashes_before": before_reload.core_file_hashes,
+        "core_file_hashes_after": after_reload.core_file_hashes,
+    }
+    return AssertionResult(
+        "experiment.two_stock_import_preview_reuse_exact",
+        "prepared_reloaded",
+        "pass" if not evidence["failed_checks"] else "fail",
+        ("ui", "model", "persistence"),
+        evidence,
+        (
+            None
+            if not evidence["failed_checks"]
+            else "two-stock import preview/reuse failed: "
+            + ", ".join(evidence["failed_checks"])
+        ),
+    )
+
+
 def joined_terminal_lifecycle_reconciliation(
     *,
     case: Any,
@@ -4872,7 +5760,12 @@ def joined_terminal_lifecycle_reconciliation(
         label="joined lifecycle literal",
     )
     expected_map = {
-        (row.stock_id, row.well_id): row.droplets for row in expected
+        (row.stock_id, row.well_id): row.droplets
+        for row in expected
+        if row.droplets > 0
+    }
+    zero_count_pairs = {
+        (row.stock_id, row.well_id) for row in expected if row.droplets == 0
     }
     begins = [dict(row) for row in lifecycle.get("begins", ())]
     attachments = [dict(row) for row in lifecycle.get("attachments", ())]
@@ -4952,6 +5845,9 @@ def joined_terminal_lifecycle_reconciliation(
         "intent_pairs_and_counts_exact": len(begins) == expected_intents
         and len(set(begin_ids)) == expected_intents
         and observed_map == expected_map,
+        "zero_count_rows_not_dispatched": zero_count_pairs.isdisjoint(
+            observed_map
+        ),
         "attachments_exact_once": len(attachments) == expected_intents
         and len(attachments_by_id) == expected_intents
         and set(attachments_by_id) == set(begin_ids)
@@ -4991,6 +5887,14 @@ def joined_terminal_lifecycle_reconciliation(
         "expected_counts": [
             {"stock_id": row.stock_id, "well_id": row.well_id, "droplets": row.droplets}
             for row in expected
+        ],
+        "expected_intent_counts": [
+            {"stock_id": stock_id, "well_id": well_id, "droplets": droplets}
+            for (stock_id, well_id), droplets in expected_map.items()
+        ],
+        "zero_count_pairs": [
+            {"stock_id": stock_id, "well_id": well_id}
+            for stock_id, well_id in sorted(zero_count_pairs)
         ],
         "intent_counts": begins,
         "simulator_dispenses": simulator,
@@ -5079,6 +5983,26 @@ def joined_terminal_execution_assertion(
     )
     expected_history = list(range(1, terminal_revision + 1))
     expected_sessions = int(case.terminal.application_sessions)
+    paired_warning_audit_required = (
+        str(getattr(case, "case_id", ""))
+        == "same_reagent_two_stock_calibration_terminal_v1"
+    )
+    warning_audit_before = [
+        row
+        for row in before.audit_rows
+        if str(row.get("event_type") or "")
+        == "calibration_volume_tolerance_exceeded"
+    ]
+    warning_audit_after = [
+        row
+        for row in after.audit_rows
+        if str(row.get("event_type") or "")
+        == "calibration_volume_tolerance_exceeded"
+    ]
+    warning_audit_revisions = [
+        int(dict(row.get("details") or {}).get("plan_revision", -1))
+        for row in warning_audit_after
+    ]
     checks = {
         "terminal_plan_progress_runtime_targets_exact": all(
             normalized_terminal[name] == expected
@@ -5139,6 +6063,16 @@ def joined_terminal_execution_assertion(
         )
         and context.machine.check_if_all_completed()
         and not after.runtime_active,
+        **(
+            {
+                "warning_audits_survive_terminal_reload": warning_audit_before
+                == warning_audit_after
+                and len(warning_audit_after) == len(case.calibrations)
+                and warning_audit_revisions == [3, 4, 5]
+            }
+            if paired_warning_audit_required
+            else {}
+        ),
         "no_starvation_or_errors": not starvation_events
         and not context.errors
         and not context.unexpected_dialogs,
@@ -5163,6 +6097,7 @@ def joined_terminal_execution_assertion(
             "calibration_record_count": after.calibration_record_count,
         },
         "records": records,
+        "warning_audit_rows": warning_audit_after,
         "starvation_events": [dict(row) for row in starvation_events],
     }
     return AssertionResult(
@@ -6011,6 +6946,10 @@ __all__ = [
     "real_application_assertion",
     "randomized_joined_design_assertion",
     "optimizer_360_design_assertion",
+    "resolution_stock_design_assertion",
+    "same_reagent_two_stock_calibration_assertion",
+    "same_reagent_two_stock_progress_guard_assertion",
+    "two_stock_import_preview_reuse_assertion",
     "regression_evidence_assertions",
     "simulation_identity_assertion",
     "synthetic_calibration_contract",

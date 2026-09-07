@@ -1,0 +1,107 @@
+{
+  "case_id": "resolution_first_single_stock_terminal_v1",
+  "schema_version": 1,
+  "identity": {
+    "scenario_name": "resolution_first_single_stock_terminal",
+    "capability": "execution.resolution_first_optimizer_terminal",
+    "experiment_name": "sil-resolution-first-single-stock-v1",
+    "suite": "lifecycle",
+    "tier": "lifecycle",
+    "simulation_seed": 1
+  },
+  "experiment": {
+    "plate_name": "shallow-384_well_plate",
+    "replicates": 1,
+    "selected_well_ids": ["A1", "A2", "A3", "A4"],
+    "excluded_well_ids": [],
+    "printed_volume_nL": "320",
+    "final_volume_nL": "5000",
+    "printed_volume_tolerance_nL": "0",
+    "fill_droplet_volume_nL": "10",
+    "randomize_assignments": false,
+    "random_seed": null,
+    "allow_two_stock_solutions": false,
+    "allow_avoidable_target_grouping": false
+  },
+  "reagents": [
+    {
+      "stock_label": "R",
+      "group": "Additive",
+      "printing_mode": "droplet",
+      "starting_concentration": "0",
+      "targets": ["0.5", "1", "5", "20"],
+      "units": "mM",
+      "droplet_volume_nL": "10",
+      "fixed_stock_concentration": null,
+      "max_stock_concentration": null
+    },
+    {
+      "stock_label": "Other",
+      "group": "Additive",
+      "printing_mode": "droplet",
+      "starting_concentration": "0",
+      "targets": ["100"],
+      "units": "mM",
+      "droplet_volume_nL": "10",
+      "fixed_stock_concentration": null,
+      "max_stock_concentration": null
+    }
+  ],
+  "stocks": [
+    {"stock_id": "R_322.58_mM", "reagent_name": "R", "concentration": "322.5806451615", "units": "mM", "printing_mode": "droplet", "role": "non_fill"},
+    {"stock_id": "Other_50000.00_mM", "reagent_name": "Other", "concentration": "50000", "units": "mM", "printing_mode": "droplet", "role": "non_fill"},
+    {"stock_id": "Water_1.00_--", "reagent_name": "Water", "concentration": "1", "units": "--", "printing_mode": "droplet", "role": "fill"}
+  ],
+  "reactions": [
+    {"reaction_id": "R1", "replicate": 1, "targets": {"Other": "100", "R": "0.5"}},
+    {"reaction_id": "R2", "replicate": 1, "targets": {"Other": "100", "R": "1"}},
+    {"reaction_id": "R3", "replicate": 1, "targets": {"Other": "100", "R": "5"}},
+    {"reaction_id": "R4", "replicate": 1, "targets": {"Other": "100", "R": "20"}}
+  ],
+  "assignments": [
+    {"well_id": "A1", "reaction_id": "R1"},
+    {"well_id": "A2", "reaction_id": "R2"},
+    {"well_id": "A3", "reaction_id": "R3"},
+    {"well_id": "A4", "reaction_id": "R4"}
+  ],
+  "calibrations": [
+    {"order": 1, "stock_id": "R_322.58_mM", "reagent_name": "R", "printer_head_id": "virtual-head-resolution-r-v1", "print_pulse_width_us": 1356, "droplet_volume_nL": "10.008", "input_revision": 2, "output_revision": 3},
+    {"order": 2, "stock_id": "Other_50000.00_mM", "reagent_name": "Other", "printer_head_id": "virtual-head-resolution-other-v1", "print_pulse_width_us": 1356, "droplet_volume_nL": "10.008", "input_revision": 3, "output_revision": 4},
+    {"order": 3, "stock_id": "Water_1.00_--", "reagent_name": "Water", "printer_head_id": "virtual-head-resolution-water-v1", "print_pulse_width_us": 1356, "droplet_volume_nL": "10.008", "input_revision": 4, "output_revision": 5}
+  ],
+  "count_maps": {
+    "prepared": [
+      {"stock_id": "R_322.58_mM", "well_id": "A1", "target_droplets": 1}, {"stock_id": "R_322.58_mM", "well_id": "A2", "target_droplets": 2}, {"stock_id": "R_322.58_mM", "well_id": "A3", "target_droplets": 8}, {"stock_id": "R_322.58_mM", "well_id": "A4", "target_droplets": 31},
+      {"stock_id": "Other_50000.00_mM", "well_id": "A1", "target_droplets": 1}, {"stock_id": "Other_50000.00_mM", "well_id": "A2", "target_droplets": 1}, {"stock_id": "Other_50000.00_mM", "well_id": "A3", "target_droplets": 1}, {"stock_id": "Other_50000.00_mM", "well_id": "A4", "target_droplets": 1},
+      {"stock_id": "Water_1.00_--", "well_id": "A1", "target_droplets": 30}, {"stock_id": "Water_1.00_--", "well_id": "A2", "target_droplets": 29}, {"stock_id": "Water_1.00_--", "well_id": "A3", "target_droplets": 23}
+    ],
+    "r_calibrated": [
+      {"stock_id": "R_322.58_mM", "well_id": "A1", "target_droplets": 1}, {"stock_id": "R_322.58_mM", "well_id": "A2", "target_droplets": 2}, {"stock_id": "R_322.58_mM", "well_id": "A3", "target_droplets": 8}, {"stock_id": "R_322.58_mM", "well_id": "A4", "target_droplets": 31},
+      {"stock_id": "Other_50000.00_mM", "well_id": "A1", "target_droplets": 1}, {"stock_id": "Other_50000.00_mM", "well_id": "A2", "target_droplets": 1}, {"stock_id": "Other_50000.00_mM", "well_id": "A3", "target_droplets": 1}, {"stock_id": "Other_50000.00_mM", "well_id": "A4", "target_droplets": 1},
+      {"stock_id": "Water_1.00_--", "well_id": "A1", "target_droplets": 30}, {"stock_id": "Water_1.00_--", "well_id": "A2", "target_droplets": 29}, {"stock_id": "Water_1.00_--", "well_id": "A3", "target_droplets": 23}
+    ],
+    "all_stocks_calibrated": [
+      {"stock_id": "R_322.58_mM", "well_id": "A1", "target_droplets": 1}, {"stock_id": "R_322.58_mM", "well_id": "A2", "target_droplets": 2}, {"stock_id": "R_322.58_mM", "well_id": "A3", "target_droplets": 8}, {"stock_id": "R_322.58_mM", "well_id": "A4", "target_droplets": 31},
+      {"stock_id": "Other_50000.00_mM", "well_id": "A1", "target_droplets": 1}, {"stock_id": "Other_50000.00_mM", "well_id": "A2", "target_droplets": 1}, {"stock_id": "Other_50000.00_mM", "well_id": "A3", "target_droplets": 1}, {"stock_id": "Other_50000.00_mM", "well_id": "A4", "target_droplets": 1},
+      {"stock_id": "Water_1.00_--", "well_id": "A1", "target_droplets": 30}, {"stock_id": "Water_1.00_--", "well_id": "A2", "target_droplets": 29}, {"stock_id": "Water_1.00_--", "well_id": "A3", "target_droplets": 23}
+    ]
+  },
+  "optimizer_expectations": {
+    "strategy": "resolution_first",
+    "seed_rank": {"total_distinct_level_loss": 1, "worst_reagent_level_loss": 1, "stock_solution_count": 2, "worst_abs_error": 0.452380952381, "mean_abs_error": 0.1476190476192, "concentration_burden": 5476.1904761905, "printed_volume_nL": 310.0},
+    "selected_rank": {"total_distinct_level_loss": 0, "worst_reagent_level_loss": 0, "stock_solution_count": 2, "worst_abs_error": 0.290322580646, "mean_abs_error": 0.1193548387132, "concentration_burden": 50322.5806451615, "printed_volume_nL": 320.0},
+    "improved_seed": true,
+    "allowed_stop_reasons": ["search_exhausted", "zero_loss_polish_complete"],
+    "maximum_time_to_best_ms": 75.0,
+    "maximum_resolution_elapsed_ms": 100.0,
+    "maximum_states": 12000,
+    "maximum_pairs": 12000
+  },
+  "execution_passes": [
+    {"order": 1, "stock_id": "R_322.58_mM", "expected_intents": 4, "expected_droplets": 42, "cumulative_completion": 4, "milestone": "r_pass_complete"},
+    {"order": 2, "stock_id": "Other_50000.00_mM", "expected_intents": 4, "expected_droplets": 4, "cumulative_completion": 8, "milestone": "other_pass_complete"},
+    {"order": 3, "stock_id": "Water_1.00_--", "expected_intents": 3, "expected_droplets": 82, "cumulative_completion": 11, "milestone": "water_pass_complete"}
+  ],
+  "qualification": {"cli_seed": 1, "action_cap": 120, "simulator_evidence_cap": 1000, "offscreen_timeout_seconds": 180, "visible_timeout_seconds": 300, "visible_speed": 20, "required_screenshots": ["resolution_stocks_generated", "prepared", "first_stock_calibrated", "fresh_loaded", "fresh_activated", "all_stocks_calibrated", "r_pass_complete", "other_pass_complete", "water_pass_complete", "completed", "terminal_reloaded"]},
+  "terminal": {"expected_intents": 11, "expected_droplets": 128, "expected_completed_wells": 11, "expected_completed_stocks": 3, "application_sessions": 3, "terminal_revision": 6}
+}

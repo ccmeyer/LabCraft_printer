@@ -95,6 +95,178 @@ On this Windows checkout, use the repo virtual environment directly:
 ```
 
 Avoid `py -m pytest -q` here unless the Windows Python launcher has been verified; in some agent shells it fails with `No installed Python found!`.
+
+The editor and import wizard calculate stock allocations on a dedicated Qt
+worker. Design edits pause during calculation; Cancel preserves the previous
+results. Save, preview, and finalize wait for successful publication. Calibration
+transactions and non-UI model APIs remain synchronous.
+
+After one second the busy display adds elapsed time and phase-specific activity
+counts, refreshed twice per second. Automatic stock calculations reaching three
+seconds pause future automatic updates for that design and explain how to use
+**Recalculate Stocks**. Re-enabling Auto-update honors that choice for the rest
+of the design session. The current calculation continues, with Cancel available.
+
+Run the opt-in no-hardware optimizer responsiveness qualification separately
+from ordinary tests (one warm-up and five measured runs per workload):
+
+```powershell
+.\env\Scripts\python.exe tools\benchmark_optimizer_async.py `
+  --output "$env:TEMP\labcraft-optimizer-async.json"
+```
+
+The harness uses simulated editor dependencies, renders Qt offscreen by default,
+and requires evidence outside the repository. It measures complete editor
+updates and import calculations against synchronous computation, a 20 ms UI
+heartbeat, cancellation, and phase timing.
+An additional automatic dense-target case exercises the slow-update pause and
+records whether it occurred, alongside the normal manual and import workloads.
+Qualification requires every measured heartbeat gap to be at most 250 ms and
+cancellation to complete within one second. It reports a failed gate without
+changing optimizer work limits. Windows results do not qualify the Pi.
+
+The bounded [optimizer merge-readiness checks](docs/optimizer_merge_readiness.md)
+document the import-volume contract, dense single-stock feasibility proof,
+visible Qt walkthrough, final integration procedure, and the accepted Pi timing
+limitation. They do not relabel failed responsiveness measurements as passing.
+
+Import Apply stages the replacement design, allocation reuse and reaction
+generation in the worker. Cancel, failed computation, stale inputs or a newly
+active interlock retain the committed design and calibration history. No file
+is saved by Apply. Inputs stay disabled through publication and table refresh.
+Bulk reagent loading performs one final table layout; the import composition
+table uses fixed initial widths without measuring every cell. Columns remain
+manually resizable.
+
+To rerun the import responsiveness regression, select
+`--suite realistic --case groups_import --case dense_384_10 --runs 5` with a
+unique external `--output`. Evidence includes `ui_work` timings for Apply setup,
+publication and table refresh, alongside worker phases and heartbeat gaps.
+This focused run does not certify the full realistic workload matrix. Existing
+input-volume limitations and infeasible cases remain reported as blockers.
+
+For Pi qualification, commit/push the feature branch and use the documented
+`Status -> Sync -> Validate` development workflow below. Run the same harness
+and focused optimizer/UI tests from the exact validated development checkout,
+using its bound shared interpreter read-only, `PYTHONDONTWRITEBYTECODE=1`, and
+external output/pytest temporary directories. Use the existing offscreen
+no-hardware `Launch` lane for application smoke testing and collect final
+read-only status. Do not run against the production checkout or install packages.
+
+The default `--suite baseline` retains the original nine regression benchmarks.
+Its 88-row and 384-row synthetic designs are sparse (at most one nonzero reagent
+per row); they do not represent dense mixtures of eight or twelve reagents.
+Use the realistic qualification suite for dense explicit mixtures and manual
+designs with additive and choice groups:
+
+```powershell
+.\env\Scripts\python.exe tools\benchmark_optimizer_async.py `
+  --suite all --fixture-root "C:\LabCraftQualification\optimizer-fixtures" `
+  --output "$env:TEMP\optimizer-realistic-$([guid]::NewGuid().ToString('N')).json"
+```
+
+The fixture root must be outside all Git worktrees and contain the three
+directories listed in `tests/fixtures/optimizer_real_designs.json`, with their
+exact design and stock CSV bytes. Recipes are not committed to Git. Missing or
+hash-mismatched fixtures fail the requested suite before calculation. A focused
+rerun can use `--suite realistic --case real_68` (repeat `--case` as needed).
+Both stock modes and all applicable routes are selected automatically. The
+full realistic matrix contains 49 route/mode cases, including an automatic
+ten-reagent case, and may take substantially longer than the baseline suite.
+
+The real cases have 25, 68, and 60 rows with nine reagent/mix columns. Synthetic
+explicit cases cover 96/384 rows with 5/8/10 reagents all present together and
+3–8 positive targets per reagent. Manual cases cover 243 reactions with five
+varying additives, 256 with four varying plus four fixed additives, 144 with
+two independent choice groups and six additives, and 64 requiring three
+simultaneous two-stock plans. The grouped design also has an explicit-import
+case. Ordinary tests separately cover 288 replicated group reactions, zero and
+absent options, and an additional control.
+
+For a bounded memory-stability check in one continuously running Qt application:
+
+```powershell
+.\env\Scripts\python.exe -B tools\benchmark_optimizer_memory.py `
+  --fixture-root "C:\LabCraftQualification\optimizer-fixtures" `
+  --output "$env:TEMP\optimizer-memory-$([guid]::NewGuid().ToString('N')).json"
+```
+
+This opt-in test keeps one worker thread throughout two warm-up rounds and six
+measured rounds. Each round uses the real 68-row recipe in both stock modes and
+the dense 384-row, ten-reagent two-stock design. Each editor applies the import,
+recalculates, cancels a second calculation after the allocation-search phase
+begins, then closes during another active calculation. It reopens for the next
+scenario. Successful outputs/counts/search evidence must repeat exactly;
+cancellation must preserve the committed allocation and calibration history.
+Real CSVs retain their hash verification. The synthetic editor uses the catalog
+10 nL setting after importing through the existing wizard mode defaults.
+
+The supervisor samples resident memory and available system memory every 100 ms
+from outside the Qt process, also recording the OS peak working set/high-water
+mark. The worker reports its PID, which the supervisor verifies belongs to its
+owned process tree; Windows virtual-environment launcher memory is not mistaken
+for application memory. Windows private committed memory and Linux process swap are recorded where
+available. Settled endpoints have no editor open and an idle persistent worker;
+they include Python allocated-block counts and normal GC statistics. The test
+does not force collection, trim allocators, disable GC, enable allocation tracing,
+or retain every result graph. Fixed input payloads, compact expected-output hashes
+and incremental diagnostic records remain resident. Validation hashing also
+contributes to the observed process peak. Sampling gaps are recorded explicitly.
+
+The campaign stops cooperatively after 30 minutes or if available RAM falls below
+the greater of 256 MiB and 10% of physical RAM. Only the owned child process/group
+may be terminated after cancellation grace; no Qt thread is forcibly terminated.
+Results, 100 ms samples, child log and process cleanup evidence use the unique
+external output prefix. Missing fixtures, failed jobs, cancellation/publication
+changes and shutdown failures are reported as failures.
+
+Memory growth is a screening result, not proof of a leak. Compare the medians of
+the first and last three measured endpoints. RSS growth beyond max(32 MiB, 5% of
+the early median), with median pairwise slope above 2 MiB/round, requires review.
+Python-block growth uses max(10,000 blocks, 5%) and 1,000 blocks/round. Large jumps
+without sustained slope, or fewer than six measured rounds, are inconclusive.
+Small growth within these allowances is reported as `stable_within_bound`, not
+an unlimited-session guarantee. Warm-up growth and allocator plateaus are retained
+in the evidence. This lane does not change the separate UI responsiveness gates.
+Use the existing Pi Status -> Sync -> Validate workflow, exact pushed revision,
+external fixture/evidence directories and read-only interpreter; finish with the
+offscreen smoke lane, final Status and protected-state comparisons.
+
+Realistic evidence uses version 2, saves completed trials incrementally, and
+reports actual selected two-stock keys, work counts, input/recipe hashes,
+coverage, timings, and blockers. Import-editor measurements include Apply and
+forced recalculation; the preceding feasibility report is measured separately.
+The existing wizard uses mode-default ejection volumes (9 nL for droplets),
+ignoring a stock CSV's requested 10 nL volume. The suite records this as an
+input-coverage blocker and exercises the 10 nL setting through editor controls
+after Apply. It does not override production parsing or suppress failed gates.
+The wizard now warns explicitly when a nonempty ejection-volume column is
+supplied; its displayed effective volume is the one transferred to the editor.
+
+The supervisor's external 15-minute interaction watchdog requests cooperative
+cancellation, then uses bounded cleanup only for its owned child process/group
+if it cannot unwind. `.process.json`, `.worker.log`, and `.watchdog.json`
+sidecars stay beside the unique external output. No running Qt thread is
+forcibly terminated inside the application. A nonzero exit with completed
+evidence means qualification found blockers, not that they have been fixed.
+
+For external fixture integrity tests, set `LABCRAFT_OPTIMIZER_FIXTURE_ROOT` to
+the same external directory and run `tests/test_optimizer_realistic_qualification.py`.
+Without that environment variable only its three real-file checks are skipped;
+synthetic correctness, UI routes, failure handling, and supervisor tests still run.
+The six legacy recipe tests in `test_experiment_forced_stock_preview.py` also use
+this explicit external-data lane. Their original assertions are unchanged;
+requested qualifications fail on missing or mismatched bytes. In addition to
+the six catalog CSVs, provide the two files listed under `additional_files` in
+the manifest. No test falls back to ignored experiment folders in the checkout.
+
+An isolated compiled-kernel investigation is available through
+`tools/experiment_optimizer_native.py`. See
+[the native optimizer experiment](docs/optimizer_native_experiment.md) for
+profiling, external builds, full-result/cancellation comparisons, and the exact
+Windows/Pi procedure. It does not enable native code in the application or
+change the shared Pi environment.
+
 The full Python suite commonly takes 3-8 minutes on Windows and in agent sandboxes.
 Automation should use a process timeout of at least 15 minutes (`900000` ms) to avoid killing a valid run and paying collection/startup cost again.
 Pytest is configured in `pytest.ini` to collect from `tests/`, and its optional cache provider is disabled to avoid `.pytest_cache` permission warnings in OneDrive/sandboxed runs. That only disables pytest cache conveniences such as `--last-failed`; it does not affect normal validation.

@@ -14,6 +14,12 @@ from tools.virtual_workflows.registry import MANIFEST_PATH
 from tools.virtual_workflows.joined_interaction_cases import (
     JOINED_INTERACTION_CASE_ID,
 )
+from tools.virtual_workflows.resolution_stock_cases import (
+    IMPORT_CASE_ID,
+    PROGRESS_GUARD_CASE_ID,
+    SINGLE_CASE_ID,
+    TWO_STOCK_CASE_ID,
+)
 from tools.virtual_workflows.selection import (
     SELECTION_CATALOG_SCHEMA_NAME,
     SELECTION_PLAN_SCHEMA_NAME,
@@ -96,6 +102,10 @@ def test_lifecycle_suite_preserves_manifest_order_and_per_scenario_timeouts():
         "print_array_mixed_mode_24x2_v1",
         "print_array_disconnect_mid_array_24_v1",
         JOINED_INTERACTION_CASE_ID,
+        SINGLE_CASE_ID,
+        TWO_STOCK_CASE_ID,
+        PROGRESS_GUARD_CASE_ID,
+        IMPORT_CASE_ID,
         "calibration_storage_contract_v1",
         "calibration_storage_shadow_contract_v1",
         "calibration_storage_authoritative_contract_v1",
@@ -104,7 +114,7 @@ def test_lifecycle_suite_preserves_manifest_order_and_per_scenario_timeouts():
         "calibration_storage_historical_conversion_contract_v1",
         "calibration_storage_new_store_only_contract_v1",
     ]
-    assert [row["order"] for row in plan["scenarios"]] == list(range(1, 19))
+    assert [row["order"] for row in plan["scenarios"]] == list(range(1, 23))
     assert {row["seed"] for row in plan["scenarios"]} == {7}
     assert [row["timeout_seconds"] for row in plan["scenarios"]] == [
         60.0,
@@ -117,6 +127,10 @@ def test_lifecycle_suite_preserves_manifest_order_and_per_scenario_timeouts():
         60.0,
         90.0,
         60.0,
+        180.0,
+        180.0,
+        180.0,
+        180.0,
         180.0,
         300.0,
         600.0,

@@ -16,6 +16,30 @@ worktree, the shared read-only Python environment, explicit development
 machine-data binding, later firmware HIL integration, and safe restoration to
 a released firmware state.
 
+The opt-in realistic stock-optimizer qualification uses this same no-hardware
+workflow. After exact-revision Status -> Sync -> Validate, run
+`tools/benchmark_optimizer_async.py --suite all` with an explicit external
+`--fixture-root` and unique external `--output`. README documents the fixture
+manifest and selectors. Use bytecode-disabled execution and the shared
+interpreter read-only. The harness supervises only its owned Qt child process,
+records completed trials incrementally, and reports failed correctness,
+input-coverage, or responsiveness gates as qualification blockers. Finish with
+the wrapper offscreen smoke lane and final read-only Status, preserving
+production/data/environment/firmware evidence and confirming process cleanup.
+This lane adds no hardware authority and changes no wrapper binding or recovery
+rules. Its exact-revision measurements and blockers are stored externally.
+
+The bounded optimizer memory lane uses `tools/benchmark_optimizer_memory.py`
+under the same validated no-hardware workflow. It retains one Qt application and
+worker through repeated real/dense imports, recalculation, cancellation and
+editor close/reopen cycles. The default campaign has two warm-up and six measured
+rounds, a 30-minute limit, external OS memory sampling and an available-memory
+floor of max(256 MiB, 10% of physical RAM). It does not tune GC or change optimizer
+behavior. README specifies the growth-screen thresholds and their limits; a
+stable bounded run does not prove absence of every memory leak. Evidence stays
+outside worktrees, and completion requires owned-process cleanup and final
+production/data/environment/firmware comparisons. No shared packages are added.
+
 Update this document whenever a slice begins, implementation decisions change,
 unexpected findings appear, validation is run, or a slice is completed. A
 slice is not verified until its implementation commit and exact validation

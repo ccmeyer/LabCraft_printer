@@ -1,8 +1,10 @@
+import copy
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pandas as pd
 
 from Model import (
     EJECTION_VOLUME_HARD_MAX_NL,
@@ -46,7 +48,7 @@ def test_refresh_runtime_after_plan_change_rebinds_keys_and_emits_well_refresh()
     assert well_state_changed.calls == [("all",)]
 
 
-def test_apply_droplet_volume_for_option_refreshes_runtime_after_apply():
+def test_apply_droplet_volume_for_option_without_assignments_skips_runtime_rebind():
     refresh_calls = []
     option = SimpleNamespace(
         name="glycerol",
@@ -90,7 +92,7 @@ def test_apply_droplet_volume_for_option_refreshes_runtime_after_apply():
 
     result = em.apply_droplet_volume_for_option("glycerol", None, 12.0, write_keys_if_assigned=False)
 
-    assert refresh_calls == [{"write_keys_if_assigned": False}]
+    assert refresh_calls == []
     assert option.droplet_nL == 12.0
     assert option.intended_droplet_nL == 10.0
     assert option.forced_stock_conc == 10.0
@@ -101,7 +103,7 @@ def test_apply_droplet_volume_for_option_refreshes_runtime_after_apply():
     assert result["saved_experiment"] is False
 
 
-def test_apply_fill_droplet_volume_refreshes_runtime_after_apply():
+def test_apply_fill_droplet_volume_without_assignments_skips_runtime_rebind():
     refresh_calls = []
     generate_calls = []
 
@@ -123,7 +125,7 @@ def test_apply_fill_droplet_volume_refreshes_runtime_after_apply():
     result = em.apply_fill_droplet_volume(12.0, write_keys_if_assigned=True)
 
     assert generate_calls == [True]
-    assert refresh_calls == [{"write_keys_if_assigned": True}]
+    assert refresh_calls == []
     assert em.metadata["intended_fill_droplet_volume_nL"] == 10.0
     assert em.unsaved_changes is True
     assert result["new_fill_nL"] == 12.0
@@ -315,11 +317,11 @@ def test_apply_fill_droplet_volume_rejects_values_outside_hard_envelope(
         )
 
 
-def _configure_calibrated_volume_design(em):
+def _configure_calibrated_volume_design(em, *, targets=None):
     em.factors = []
     em.add_additive(
         "glycerol",
-        [0.9],
+        list(targets or [0.9]),
         "mM",
         10.0,
         forced_stock_conc=10.0,
@@ -338,6 +340,438 @@ def _configure_calibrated_volume_design(em):
     assert em.optimize_stock_solutions()["best"]
     em.generate_experiment()
     em.save_experiment()
+
+
+def _configure_mutable_two_stock_design(em, *, include_other=False):
+    em.factors = []
+    em.set_metadata(
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=1,
+        target_reaction_volume_nL=240.0,
+        final_reaction_volume_nL=5000.0,
+        printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+        allow_two_stock_solutions=True,
+        allow_avoidable_target_grouping=False,
+    )
+    em.add_additive(
+        "Signal",
+        [0.5, 1.0, 5.0, 20.0],
+        "mM",
+        10.0,
+        max_stock_conc=2000.0,
+    )
+    if include_other:
+        em.add_additive("Other", [0.01], "mM", 10.0, forced_stock_conc=5.0)
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=True,
+    )
+    assert result["best"] is True
+    assert result["two_stock_keys"] == [("Signal", None)]
+    em.generate_experiment()
+    em.save_experiment()
+    plan = em._calibration_plan_with_stock_ids(("Signal", None))
+    assert plan["n_stocks"] == 2
+    return tuple(stock["stock_id"] for stock in plan["stocks"])
+
+
+def _apply_sequential_calibration(em, stock_id, *, factor="Signal", volume=12.0):
+    calibration = {
+        "stock_id": stock_id,
+        "printer_head": _printer_head(stock_id, printer_head_id=f"head-{stock_id}"),
+        "measured_volume_nL": volume,
+        "run_id": f"sequential-{stock_id}-{volume}",
+    }
+    if factor == "Water":
+        return em.apply_fill_droplet_volume(
+            volume, write_keys_if_assigned=False, applied_calibration=calibration,
+        )
+    return em.apply_droplet_volume_for_option(
+        factor, None, volume, write_keys_if_assigned=False,
+        applied_calibration=calibration, printing_mode="droplet",
+    )
+
+
+@pytest.mark.parametrize("copy_source", ["memory", "saved"])
+def test_fresh_copy_discards_calibrated_allocation(
+    experiment_model_factory, tmp_path, copy_source,
+):
+    source = experiment_model_factory().experiment_model
+    stock_ids = _configure_mutable_two_stock_design(source)
+    _apply_sequential_calibration(source, stock_ids[0])
+    assert source.calibrated_stock_allocation["active"] is True
+    assert [s["droplet_volume_nL"] for s in source.plans_per_option[("Signal", None)]["stocks"]] == [12.0, 10.0]
+    source_state = copy.deepcopy(source.to_dict())
+    source_status = copy.deepcopy(source.calibrated_stock_allocation_status)
+    source_dir = Path(source.experiment_dir_path)
+    source_files = {
+        p.relative_to(source_dir): p.read_bytes()
+        for p in source_dir.rglob("*") if p.is_file()
+    }
+    nominal = experiment_model_factory().experiment_model
+    _configure_mutable_two_stock_design(nominal)
+    nominal.optimize_stock_solutions(quantum=0.1, max_refine=60, two_max_refine=40, allow_two=True)
+    nominal_counts = [s["droplets_per_target"] for s in nominal.plans_per_option[("Signal", None)]["stocks"]]
+
+    duplicate = experiment_model_factory().experiment_model
+    destination = tmp_path / "fresh_copy"
+    if copy_source == "memory":
+        duplicate.from_dict(source_state)
+        assert duplicate.duplicate_experiment("FreshCopy", str(destination))
+    else:
+        assert duplicate.duplicate_design_from(source.experiment_file_path, "FreshCopy", str(destination))
+
+    payload = json.loads((destination / "experiment_design.json").read_text(encoding="utf-8"))
+    stocks = duplicate.plans_per_option[("Signal", None)]["stocks"]
+    assert [s["droplet_volume_nL"] for s in stocks] == [10.0, 10.0]
+    assert [s["droplets_per_target"] for s in stocks] == nominal_counts
+    assert payload["calibrated_stock_allocation"] == {"schema_version": 1, "active": False}
+    assert payload["applied_imaging_calibrations"]["records"] == {}
+    assert duplicate.calibrated_stock_allocation_status["active"] is False
+
+    reloaded = experiment_model_factory().experiment_model
+    reloaded.load_experiment(str(destination / "experiment_design.json"), str(destination))
+    assert reloaded.calibrated_stock_allocation_status["active"] is False
+    assert reloaded.plans_per_option[("Signal", None)] == duplicate.plans_per_option[("Signal", None)]
+    # Use editable loading for optimization; file loading is historical inspection.
+    editable = experiment_model_factory().experiment_model
+    editable.from_dict(payload)
+    result = editable.optimize_stock_solutions(allow_two=True)
+    assert result["best"] is True
+    assert not result.get("calibrated_stock_allocation_reused", False)
+    stocks = editable.plans_per_option[("Signal", None)]["stocks"]
+    assert [s["droplet_volume_nL"] for s in stocks] == [10.0, 10.0]
+    assert [s["droplets_per_target"] for s in stocks] == nominal_counts
+    assert source.to_dict() == source_state
+    assert source.calibrated_stock_allocation_status == source_status
+    assert {
+        p.relative_to(source_dir): p.read_bytes()
+        for p in source_dir.rglob("*") if p.is_file()
+    } == source_files
+
+
+@pytest.mark.parametrize("allocation_state", ["active", "inactive", "absent"])
+def test_reset_discards_calibrated_allocation(experiment_model_factory, allocation_state):
+    em = experiment_model_factory().experiment_model
+    stock_ids = _configure_mutable_two_stock_design(em)
+    nominal_counts = copy.deepcopy([
+        s["droplets_per_target"] for s in em.plans_per_option[("Signal", None)]["stocks"]
+    ])
+    nominal_metadata = copy.deepcopy(em.metadata)
+    _apply_sequential_calibration(em, stock_ids[0])
+    if allocation_state == "inactive":
+        em.calibrated_stock_allocation["active"] = False
+        em.calibrated_stock_allocation["stale_reason"] = "inputs_changed"
+    elif allocation_state == "absent":
+        del em.calibrated_stock_allocation
+
+    em.reset_experiment_model()
+
+    assert em.calibrated_stock_allocation == {"schema_version": 1, "active": False}
+    assert em.calibrated_stock_allocation_status == {"active": False, "reason": "not_configured"}
+    assert em.applied_imaging_calibrations["records"] == {}
+    em.set_metadata(**nominal_metadata)
+    em.add_additive("Signal", [0.5, 1.0, 5.0, 20.0], "mM", 10.0, max_stock_conc=2000.0)
+    result = em.optimize_stock_solutions(allow_two=True)
+    assert result["best"] is True
+    assert not result.get("calibrated_stock_allocation_reused", False)
+    stocks = em.plans_per_option[("Signal", None)]["stocks"]
+    assert [s["droplet_volume_nL"] for s in stocks] == [10.0, 10.0]
+    assert [s["droplets_per_target"] for s in stocks] == nominal_counts
+
+
+@pytest.mark.parametrize("allocation_state", ["active", "inactive", "absent"])
+def test_clear_import_discards_calibration_before_same_design_reimport(
+    experiment_model_factory, allocation_state,
+):
+    em = experiment_model_factory().experiment_model
+    em.set_metadata(
+        target_reaction_volume_nL=240.0, final_reaction_volume_nL=5000.0,
+        printed_volume_tolerance_nL=0.0, allow_two_stock_solutions=True,
+        fill_droplet_volume_nL=10.0,
+    )
+    design = pd.DataFrame({"Signal mM": [0.5, 1.0, 5.0, 20.0]})
+    report = em.build_import_feasibility_report(
+        design, max_stock_map={"Signal": 2000.0},
+        printed_volume_nL=240.0, final_volume_nL=5000.0,
+        printed_volume_tolerance_nL=0.0, allow_two=True,
+    )
+    assert report["ok"]
+    payload = {**report, "design_df": design}
+    assert em.prepare_import_application(payload, em.metadata)["reused"]
+    nominal_plan = copy.deepcopy(em.plans_per_option[("Signal", None)])
+    assert nominal_plan["n_stocks"] == 2
+    assert [s["droplet_volume_nL"] for s in nominal_plan["stocks"]] == [9.0, 9.0]
+    em.generate_experiment()
+    em.save_experiment()
+    stock_id = em._calibration_plan_with_stock_ids(("Signal", None))["stocks"][0]["stock_id"]
+    _apply_sequential_calibration(em, stock_id)
+    assert em.calibrated_stock_allocation["active"]
+    assert em.applied_imaging_calibrations["records"]
+    if allocation_state == "inactive":
+        em.calibrated_stock_allocation["active"] = False
+        em.calibrated_stock_allocation["stale_reason"] = "inputs_changed"
+    elif allocation_state == "absent":
+        del em.calibrated_stock_allocation
+    metadata = copy.deepcopy(em.metadata)
+    paths = (em.experiment_file_path, em.experiment_dir_path)
+    files = {p: p.read_bytes() for p in Path(paths[1]).rglob("*") if p.is_file()}
+
+    em.clear_uploaded_design()
+
+    assert em.calibrated_stock_allocation == {"schema_version": 1, "active": False}
+    assert em.calibrated_stock_allocation_status == {"active": False, "reason": "not_configured"}
+    assert em.applied_imaging_calibrations["records"] == {}
+    assert em.metadata == metadata
+    assert (em.experiment_file_path, em.experiment_dir_path) == paths
+    assert {p: p.read_bytes() for p in Path(paths[1]).rglob("*") if p.is_file()} == files
+    assert em.prepare_import_application(payload, metadata)["reused"]
+    assert em.plans_per_option[("Signal", None)] == nominal_plan
+    em.generate_experiment()
+    em.save_experiment()
+    restored = experiment_model_factory().experiment_model
+    restored.load_experiment(*paths)
+    # Serialized legs omit printing_mode; the option retains it.
+    saved_plan = copy.deepcopy(nominal_plan)
+    for stock in saved_plan["stocks"]:
+        stock.pop("printing_mode", None)
+    assert restored.plans_per_option[("Signal", None)] == saved_plan
+    assert restored.factors[0].options[0].printing_mode == em.factors[0].options[0].printing_mode
+    assert restored.applied_imaging_calibrations["records"] == {}
+    assert not restored.calibrated_stock_allocation["active"]
+    assert not restored.calibrated_stock_allocation_status["active"]
+    pd.testing.assert_frame_equal(restored.get_reactions_dataframe(), em.get_reactions_dataframe())
+
+
+def test_sequential_calibrations_preserve_two_stock_allocation(experiment_model_factory):
+    em = experiment_model_factory().experiment_model
+    signal_ids = _configure_mutable_two_stock_design(em, include_other=True)
+    _apply_sequential_calibration(em, signal_ids[0])
+    signal_before = copy.deepcopy(em.plans_per_option[("Signal", None)])
+    assert [stock["droplet_volume_nL"] for stock in signal_before["stocks"]] == [12.0, 10.0]
+    anchor_before = em.calibrated_stock_allocation["calibration_record_key"]
+
+    other_id = _stock_id_for_design_row(em, "Other")
+    _apply_sequential_calibration(em, other_id, factor="Other")
+
+    assert em.calibrated_stock_allocation["allocation"]["input_fingerprint"] == (
+        em.stock_allocation_input_fingerprint()
+    )
+    assert em.calibrated_stock_allocation["calibrated_stock_id"] == signal_ids[0]
+    assert em.calibrated_stock_allocation["calibration_record_key"] == anchor_before
+    records_before = copy.deepcopy(em.applied_imaging_calibrations)
+    assert {record["stock_id"] for record in records_before["records"].values()} == {
+        signal_ids[0], other_id,
+    }
+    assert em.plans_per_option[("Signal", None)] == signal_before
+
+    reloaded = experiment_model_factory().experiment_model
+    reloaded.load_experiment(em.experiment_file_path, em.experiment_dir_path)
+    assert reloaded.calibrated_stock_allocation_status["active"] is True
+    # File loading enters historical inspection mode; editable design loading
+    # below exercises re-optimization without bypassing that read-only guard.
+    assert reloaded.calibrated_stock_allocation["allocation"]["plan_fingerprint"] == (
+        em.calibrated_stock_allocation["allocation"]["plan_fingerprint"]
+    )
+    assert reloaded.applied_imaging_calibrations == records_before
+    editable = experiment_model_factory().experiment_model
+    editable.from_dict(json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8")))
+    for candidate in (em, editable):
+        result = candidate.optimize_stock_solutions(allow_two=True)
+        assert result["best"] is True, result
+        assert result["calibrated_stock_allocation_reused"] is True
+        assert candidate.plans_per_option[("Signal", None)] == signal_before
+        assert candidate.applied_imaging_calibrations == records_before
+        assert [s["droplet_volume_nL"] for s in candidate.plans_per_option[("Other", None)]["stocks"]] == [12.0]
+
+
+@pytest.mark.parametrize("next_calibration", ["fill", "companion"])
+def test_sequential_fill_or_companion_calibration_refreshes_allocation(
+    experiment_model_factory, next_calibration,
+):
+    em = experiment_model_factory().experiment_model
+    signal_ids = _configure_mutable_two_stock_design(em)
+    _apply_sequential_calibration(em, signal_ids[0])
+    signal_before = copy.deepcopy(em.plans_per_option[("Signal", None)])
+    anchor_before = em.calibrated_stock_allocation["calibration_record_key"]
+    if next_calibration == "fill":
+        _apply_sequential_calibration(
+            em, _stock_id_for_design_row(em, "Water"), factor="Water", volume=11.0,
+        )
+        assert em.plans_per_option[("Signal", None)] == signal_before
+        assert em.calibrated_stock_allocation["calibration_record_key"] == anchor_before
+    else:
+        _apply_sequential_calibration(em, signal_ids[1], volume=11.0)
+        assert em.calibrated_stock_allocation["calibrated_stock_id"] == signal_ids[1]
+        assert [s["droplet_volume_nL"] for s in em.plans_per_option[("Signal", None)]["stocks"]] == [12.0, 11.0]
+
+    plans_after = copy.deepcopy(em.plans_per_option)
+    records_after = copy.deepcopy(em.applied_imaging_calibrations)
+    reactions_after = em._reactions_df.to_dict(orient="split")
+    restored = experiment_model_factory().experiment_model
+    restored.from_dict(json.loads(Path(em.experiment_file_path).read_text(encoding="utf-8")))
+    assert restored.calibrated_stock_allocation_status["active"] is True
+    for candidate in (em, restored):
+        assert candidate.optimize_stock_solutions(allow_two=True)["calibrated_stock_allocation_reused"]
+        candidate.generate_experiment()
+        assert candidate.plans_per_option == plans_after
+        assert candidate.applied_imaging_calibrations == records_after
+        assert candidate._reactions_df.to_dict(orient="split") == reactions_after
+
+
+@pytest.mark.parametrize("failure_point", ["export", "runtime", "save"])
+def test_sequential_calibration_allocation_publication_rolls_back(
+    experiment_model_factory, monkeypatch, failure_point,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    signal_ids = _configure_mutable_two_stock_design(em, include_other=True)
+    _apply_sequential_calibration(em, signal_ids[0])
+    runtime = _attach_mutable_runtime(model)
+    other_id = _stock_id_for_design_row(em, "Other")
+    before = _mutable_calibration_state(em, runtime)
+    emitted = []
+    for signal in (
+        em.stock_updated, em.experiment_generated,
+        em.applied_imaging_calibration_changed, em.manual_refuel_check_changed,
+        model.well_plate.well_state_changed_signal,
+    ):
+        signal.connect(lambda *args: emitted.append(args))
+    method_name = {
+        "export": "_export_calibrated_stock_allocation_payload",
+        "runtime": "_refresh_runtime_after_plan_change",
+        "save": "save_experiment",
+    }[failure_point]
+    original = getattr(em, method_name)
+
+    def fail_after(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError(f"injected {failure_point} failure")
+
+    monkeypatch.setattr(em, method_name, fail_after)
+    with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+        _apply_sequential_calibration(em, other_id, factor="Other")
+    assert _mutable_calibration_state(em, runtime) == before
+    assert emitted == []
+
+
+@pytest.mark.parametrize("drift", ["inputs", "live_plan", "saved_plan", "identity"])
+def test_sequential_calibration_rejects_inconsistent_active_allocation(
+    experiment_model_factory, drift,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    signal_ids = _configure_mutable_two_stock_design(em, include_other=True)
+    _apply_sequential_calibration(em, signal_ids[0])
+    runtime = _attach_mutable_runtime(model)
+    other_id = _stock_id_for_design_row(em, "Other")
+    if drift == "inputs":
+        em.metadata["final_reaction_volume_nL"] = 5001.0
+    elif drift == "live_plan":
+        em.plans_per_option[("Signal", None)]["stocks"][0]["droplet_volume_nL"] = 13.0
+    elif drift == "saved_plan":
+        stored_plans = em.calibrated_stock_allocation["allocation"]["plans_per_option"]
+        stored_plans['["Signal",null]']["stocks"][0]["droplet_volume_nL"] = 13.0
+    else:
+        em.calibrated_stock_allocation["calibrated_stock_id"] = "missing-stock"
+    before = _mutable_calibration_state(em, runtime)
+    with pytest.raises(RuntimeError, match="active calibrated stock allocation is inconsistent"):
+        _apply_sequential_calibration(em, other_id, factor="Other")
+    assert _mutable_calibration_state(em, runtime) == before
+
+
+def test_sequential_calibration_does_not_reactivate_inactive_allocation(
+    experiment_model_factory,
+):
+    em = experiment_model_factory().experiment_model
+    signal_ids = _configure_mutable_two_stock_design(em, include_other=True)
+    _apply_sequential_calibration(em, signal_ids[0])
+    em.calibrated_stock_allocation["active"] = False
+    em.calibrated_stock_allocation["stale_reason"] = "stock_input_fingerprint_mismatch"
+    before = copy.deepcopy(em.calibrated_stock_allocation)
+    _apply_sequential_calibration(em, _stock_id_for_design_row(em, "Other"), factor="Other")
+    assert em.calibrated_stock_allocation == before
+
+
+def _attach_mutable_runtime(model):
+    em = model.experiment_model
+    model.stock_solutions, model.reaction_collection = (
+        model.load_reactions_from_model()
+    )
+    model.well_plate.assign_reactions_to_wells(
+        model.reaction_collection.get_all_reactions()
+    )
+    em.set_runtime_context(
+        model.well_plate,
+        model.reaction_collection,
+        model.stock_solutions,
+    )
+    em.write_keys_now()
+    return model.reaction_collection
+
+
+def _runtime_reagent_state(collection):
+    return [
+        (
+            reaction.unique_id,
+            [
+                (
+                    stock_id,
+                    reagent.target_droplets,
+                    reagent.added_droplets,
+                    reagent.completed,
+                )
+                for stock_id, reagent in sorted(
+                    reaction.get_all_reagents().items()
+                )
+            ],
+        )
+        for reaction in collection.get_all_reactions()
+    ]
+
+
+def _mutable_calibration_state(em, collection):
+    paths = (
+        em.experiment_file_path,
+        em.progress_file_path,
+        em.key_file_path,
+        em.concentration_key_file_path,
+    )
+    return {
+        "design": copy.deepcopy(em.to_dict()),
+        "plans": copy.deepcopy(em.plans_per_option),
+        "stock_rows": copy.deepcopy(em._stock_rows_cache),
+        "fill_row": copy.deepcopy(em._fill_row_cache),
+        "preview": copy.deepcopy(em._target_preview_map),
+        "unreachable": copy.deepcopy(em._unreachable_preview_map),
+        "reactions": em._reactions_df.to_dict(orient="split"),
+        "worst_nonfill": em._last_worst_nonfill_volume_nL,
+        "applied": copy.deepcopy(em.applied_imaging_calibrations),
+        "manual_refuel": copy.deepcopy(em.manual_refuel_checks),
+        "calibrated_allocation": copy.deepcopy(em.calibrated_stock_allocation),
+        "calibrated_status": copy.deepcopy(
+            em.calibrated_stock_allocation_status
+        ),
+        "progress": copy.deepcopy(em.progress_data),
+        "progress_reference": copy.deepcopy(
+            em._progress_execution_reference
+        ),
+        "runtime": _runtime_reagent_state(collection),
+        "unsaved_changes": em.unsaved_changes,
+        "files": {
+            path: (
+                Path(path).exists(),
+                Path(path).read_bytes() if Path(path).exists() else None,
+            )
+            for path in paths
+        },
+    }
 
 
 def _first_option_payload(payload, factor_name):
@@ -406,6 +840,639 @@ def test_apply_droplet_volume_for_option_persists_effective_and_intended_volume(
     assert option["forced_stock_conc"] == result["stock_concentration"]
     assert result["saved_experiment"] is True
     assert em.unsaved_changes is False
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    [
+        "generate",
+        "record",
+        "runtime",
+        "progress",
+        "key",
+        "concentration",
+        "design",
+    ],
+)
+def test_mutable_single_stock_calibration_rolls_back_every_failure_boundary(
+    experiment_model_factory,
+    monkeypatch,
+    qapp,
+    failure_point,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em, targets=[0.9, 1.8])
+    runtime = _attach_mutable_runtime(model)
+    first_reagent = next(
+        iter(runtime.get_all_reactions()[0].get_all_reagents().values())
+    )
+    first_reagent.added_droplets = 1
+    first_reagent.completed = first_reagent.is_complete()
+    em.write_keys_now()
+    em.save_experiment()
+
+    stock_id = _stock_id_for_design_row(em, "glycerol")
+    head = _printer_head(
+        stock_id,
+        printer_head_id="transactional-stream-head",
+        printing_mode="stream",
+    )
+    calibration = {
+        "printer_head": head,
+        "measured_volume_nL": 30.0,
+        "run_id": f"transaction-{failure_point}",
+    }
+
+    audit_events = []
+    em.set_calibration_manager(
+        SimpleNamespace(
+            model=SimpleNamespace(
+                record_experiment_audit_event=lambda *args, **kwargs: (
+                    audit_events.append((args, kwargs))
+                )
+            )
+        )
+    )
+    emitted = {
+        "experiment": [],
+        "stock": [],
+        "applied": [],
+        "refuel": [],
+        "well": [],
+    }
+    committed_views = []
+    em.experiment_generated.connect(
+        lambda *args: emitted["experiment"].append(args)
+    )
+    def _capture_committed_stock_state(*args):
+        emitted["stock"].append(args)
+        payload = json.loads(
+            Path(em.experiment_file_path).read_text(encoding="utf-8")
+        )
+        committed_views.append(
+            {
+                "saved_volume": _first_option_payload(
+                    payload,
+                    "glycerol",
+                )["droplet_nL"],
+                "runtime": _runtime_reagent_state(runtime),
+                "progress": json.loads(
+                    Path(em.progress_file_path).read_text(encoding="utf-8")
+                ),
+                "key": Path(em.key_file_path).read_bytes(),
+                "concentration": Path(
+                    em.concentration_key_file_path
+                ).read_bytes(),
+            }
+        )
+
+    em.stock_updated.connect(_capture_committed_stock_state)
+    em.applied_imaging_calibration_changed.connect(
+        lambda *args: emitted["applied"].append(args)
+    )
+    em.manual_refuel_check_changed.connect(
+        lambda *args: emitted["refuel"].append(args)
+    )
+    model.well_plate.well_state_changed_signal.connect(
+        lambda *args: emitted["well"].append(args)
+    )
+
+    before = _mutable_calibration_state(em, runtime)
+    target = em
+    method_name = {
+        "generate": "generate_experiment",
+        "record": "record_applied_imaging_calibration",
+        "progress": "create_progress_file",
+        "key": "create_key_file",
+        "concentration": "create_concentration_key_file",
+        "design": "save_experiment",
+    }.get(failure_point)
+    if failure_point == "runtime":
+        target = runtime
+        method_name = "set_reaction_items_for_index"
+    original = getattr(target, method_name)
+
+    if failure_point == "runtime":
+        calls = 0
+
+        def _fail_runtime(index, items, **kwargs):
+            nonlocal calls
+            calls += 1
+            result = original(index, items, **kwargs)
+            if calls == 2:
+                raise RuntimeError("injected runtime failure")
+            return result
+
+        replacement = _fail_runtime
+    else:
+
+        def _fail_after(*args, **kwargs):
+            original(*args, **kwargs)
+            raise RuntimeError(f"injected {failure_point} failure")
+
+        replacement = _fail_after
+    monkeypatch.setattr(target, method_name, replacement)
+
+    with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+        em.apply_droplet_volume_for_option(
+            "glycerol",
+            None,
+            30.0,
+            write_keys_if_assigned=True,
+            applied_calibration=calibration,
+            printing_mode="stream",
+        )
+
+    assert _mutable_calibration_state(em, runtime) == before
+    assert emitted == {
+        "experiment": [],
+        "stock": [],
+        "applied": [],
+        "refuel": [],
+        "well": [],
+    }
+    assert audit_events == []
+
+    monkeypatch.setattr(target, method_name, original)
+    result = em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        30.0,
+        write_keys_if_assigned=True,
+        applied_calibration=calibration,
+        printing_mode="stream",
+    )
+
+    assert result["saved_experiment"] is True
+    assert len(emitted["experiment"]) == 1
+    assert len(emitted["stock"]) == 1
+    assert len(emitted["applied"]) == 1
+    assert len(emitted["refuel"]) == 1
+    assert emitted["well"] == [("all",)]
+    assert len(committed_views) == 1
+    assert committed_views[0]["saved_volume"] == pytest.approx(30.0)
+    assert committed_views[0]["runtime"] == _runtime_reagent_state(runtime)
+    assert committed_views[0]["progress"]
+    assert b"30.0nL" in committed_views[0]["key"]
+    assert committed_views[0]["concentration"]
+
+
+def test_mutable_calibration_surfaces_incomplete_rollback(
+    experiment_model_factory,
+    monkeypatch,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    original_generate = em.generate_experiment
+
+    def _fail_generate():
+        original_generate()
+        raise RuntimeError("injected calibration failure")
+
+    def _fail_file_restore(_snapshots):
+        raise RuntimeError("injected rollback failure")
+
+    monkeypatch.setattr(em, "generate_experiment", _fail_generate)
+    monkeypatch.setattr(
+        ExperimentModel,
+        "_restore_mutable_calibration_files",
+        staticmethod(_fail_file_restore),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "Mutable calibration failed and rollback was incomplete: "
+            "files: injected rollback failure"
+        ),
+    ) as exc_info:
+        em.apply_droplet_volume_for_option(
+            "glycerol",
+            None,
+            30.0,
+            write_keys_if_assigned=False,
+        )
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert "injected calibration failure" in str(exc_info.value.__cause__)
+    assert em.unsaved_changes is True
+
+
+def test_mutable_calibration_without_key_write_still_rebinds_runtime(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em, targets=[0.9, 1.8])
+    runtime = _attach_mutable_runtime(model)
+    runtime_before = _runtime_reagent_state(runtime)
+    derived_before = {
+        path: Path(path).read_bytes()
+        for path in (
+            em.progress_file_path,
+            em.key_file_path,
+            em.concentration_key_file_path,
+        )
+    }
+
+    result = em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        30.0,
+        write_keys_if_assigned=False,
+    )
+
+    assert result["saved_experiment"] is True
+    assert _runtime_reagent_state(runtime) != runtime_before
+    assert {
+        path: Path(path).read_bytes()
+        for path in derived_before
+    } == derived_before
+    saved = json.loads(
+        Path(em.experiment_file_path).read_text(encoding="utf-8")
+    )
+    assert _first_option_payload(saved, "glycerol")["droplet_nL"] == pytest.approx(
+        30.0
+    )
+
+
+def _mutable_two_stock_transition(model):
+    em = model.experiment_model
+    calibrated_stock_id, companion_stock_id = (
+        _configure_mutable_two_stock_design(em)
+    )
+    runtime = _attach_mutable_runtime(model)
+    reaction = next(
+        item
+        for item in runtime.get_all_reactions()
+        if calibrated_stock_id in item.get_all_reagents()
+        and item.get_all_reagents()[
+            calibrated_stock_id
+        ].target_droplets == 5
+        and companion_stock_id not in item.get_all_reagents()
+    )
+    return (
+        em,
+        runtime,
+        reaction,
+        calibrated_stock_id,
+        companion_stock_id,
+    )
+
+
+def _apply_mutable_two_stock_transition(
+    em,
+    calibrated_stock_id,
+    *,
+    write_keys_if_assigned=True,
+):
+    return em.apply_droplet_volume_for_option(
+        "Signal",
+        None,
+        12.0,
+        write_keys_if_assigned=write_keys_if_assigned,
+        applied_calibration={
+            "stock_id": calibrated_stock_id,
+            "printer_head": _printer_head(
+                calibrated_stock_id,
+                printer_head_id="mutable-two-stock-head",
+                printing_mode="droplet",
+            ),
+            "measured_volume_nL": 12.0,
+            "run_id": "mutable-two-stock-calibration",
+        },
+        printing_mode="droplet",
+    )
+
+
+def test_mutable_two_stock_calibration_adds_newly_positive_runtime_leg(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    (
+        em,
+        _runtime,
+        reaction,
+        calibrated_stock_id,
+        companion_stock_id,
+    ) = _mutable_two_stock_transition(model)
+    calibrated_reagent = reaction.get_all_reagents()[calibrated_stock_id]
+    calibrated_reagent.added_droplets = 1
+    calibrated_reagent.completed = calibrated_reagent.is_complete()
+    em.write_keys_now()
+    em.save_experiment()
+
+    result = _apply_mutable_two_stock_transition(
+        em,
+        calibrated_stock_id,
+    )
+
+    assert {
+        (
+            row["target_final"],
+            tuple(row["old_drops"]),
+            tuple(row["new_drops"]),
+        )
+        for row in result["count_changes"]
+    } >= {(20.0, (5, 0), (4, 16))}
+    reagents = reaction.get_all_reagents()
+    assert reagents[calibrated_stock_id].target_droplets == 4
+    assert reagents[calibrated_stock_id].added_droplets == 1
+    companion = reagents[companion_stock_id]
+    assert companion.stock_solution is model.stock_solutions.get_stock_by_id(
+        companion_stock_id
+    )
+    assert companion.target_droplets == 16
+    assert companion.added_droplets == 0
+    assert companion.completed is False
+
+    well = next(
+        item
+        for item in model.well_plate.get_all_wells()
+        if item.get_assigned_reaction() is reaction
+    )
+    progress = json.loads(
+        Path(em.progress_file_path).read_text(encoding="utf-8")
+    )
+    assert progress[well.well_id]["reagents"][companion_stock_id] == {
+        "target_droplets": 16,
+        "added_droplets": 0,
+    }
+    assert companion_stock_id in Path(em.key_file_path).read_text(
+        encoding="utf-8"
+    )
+    concentration_key = Path(
+        em.concentration_key_file_path
+    ).read_text(encoding="utf-8")
+    assert "Signal_mM" in concentration_key
+    assert f"{well.well_id},20.0," in concentration_key
+
+
+@pytest.mark.parametrize(
+    ("registry_factory", "match"),
+    [
+        (
+            lambda _stock_id, _canonical: None,
+            "cannot resolve newly required stock",
+        ),
+        (
+            lambda stock_id, canonical: SimpleNamespace(
+                stock_id=stock_id,
+                reagent_name="Wrong reagent",
+                raw_concentration=canonical.raw_concentration,
+                units=canonical.units,
+            ),
+            "stock registry does not match newly required stock",
+        ),
+    ],
+)
+def test_mutable_two_stock_calibration_rejects_invalid_runtime_stock_registry(
+    experiment_model_factory,
+    registry_factory,
+    match,
+):
+    model = experiment_model_factory()
+    (
+        em,
+        runtime,
+        _reaction,
+        calibrated_stock_id,
+        companion_stock_id,
+    ) = _mutable_two_stock_transition(model)
+    state_before = _mutable_calibration_state(em, runtime)
+    canonical = model.stock_solutions.get_stock_by_id(companion_stock_id)
+    resolved = registry_factory(companion_stock_id, canonical)
+    em._runtime_stock_solution_manager = (
+        None
+        if resolved is None
+        else SimpleNamespace(get_stock_by_id=lambda _stock_id: resolved)
+    )
+
+    with pytest.raises(RuntimeError, match=match):
+        _apply_mutable_two_stock_transition(
+            em,
+            calibrated_stock_id,
+        )
+
+    assert _mutable_calibration_state(em, runtime) == state_before
+
+
+def test_mutable_two_stock_calibration_rolls_back_new_runtime_leg(
+    experiment_model_factory,
+    monkeypatch,
+):
+    model = experiment_model_factory()
+    (
+        em,
+        runtime,
+        reaction,
+        calibrated_stock_id,
+        companion_stock_id,
+    ) = _mutable_two_stock_transition(model)
+    state_before = _mutable_calibration_state(em, runtime)
+
+    def fail_after_runtime_rebind():
+        assert companion_stock_id in reaction.get_all_reagents()
+        raise RuntimeError("injected key persistence failure")
+
+    monkeypatch.setattr(em, "create_key_file", fail_after_runtime_rebind)
+
+    with pytest.raises(
+        RuntimeError,
+        match="injected key persistence failure",
+    ):
+        _apply_mutable_two_stock_transition(
+            em,
+            calibrated_stock_id,
+        )
+
+    assert companion_stock_id not in reaction.get_all_reagents()
+    assert _mutable_calibration_state(em, runtime) == state_before
+
+
+def test_mutable_single_stock_calibration_above_threshold_warns_and_applies(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    em.factors = []
+    em.add_additive(
+        "single-warning",
+        [1.0],
+        "mM",
+        10.0,
+        forced_stock_conc=2.5,
+        printing_mode="droplet",
+    )
+    em.set_metadata(
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=1,
+        target_reaction_volume_nL=200.0,
+        final_reaction_volume_nL=500.0,
+        printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+    )
+    assert em.optimize_stock_solutions()["best"]
+    em.generate_experiment()
+    em.save_experiment()
+    stock_id = _stock_id_for_design_row(em, "single-warning")
+    head = _printer_head(
+        stock_id,
+        printer_head_id="mutable-single-warning-head",
+        printing_mode="stream",
+    )
+
+    preview = em.preview_requantized_for_option(
+        ("single-warning", None),
+        250.0,
+        calibrated_stock_id=stock_id,
+        printing_mode="stream",
+    )
+
+    assert preview["ok"] is True
+    warning = preview["volume_warning"]
+    assert warning["affected_row_count"] == 1
+    assert warning["max_total_volume_nL"] == pytest.approx(250.0)
+
+    result = em.apply_droplet_volume_for_option(
+        "single-warning",
+        None,
+        250.0,
+        write_keys_if_assigned=False,
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 250.0,
+            "run_id": "mutable-single-warning",
+        },
+        printing_mode="stream",
+    )
+
+    assert result["volume_warning"] == warning
+    assert em._reactions_df.iloc[0]["fill_drops"] == 0
+    assert em._calibration_volume_warning_for_generated_reactions() == warning
+
+
+def test_mutable_fill_calibration_above_final_volume_warns_and_applies(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em)
+    em.set_metadata(printed_volume_tolerance_nL=0.0)
+    em.generate_experiment()
+    em.save_experiment()
+    fill_stock_id = _stock_id_for_design_row(em, "Water")
+    head = _printer_head(
+        fill_stock_id,
+        printer_head_id="mutable-fill-warning-head",
+        printing_mode="stream",
+    )
+
+    preview = em.preview_fill_requantized(250.0)
+
+    assert preview["ok"] is True
+    warning = preview["volume_warning"]
+    assert warning["affected_row_count"] == 1
+    assert warning["affected_rows"][0]["exceeds_final_reaction_volume"] is True
+
+    result = em.apply_fill_droplet_volume(
+        250.0,
+        write_keys_if_assigned=False,
+        applied_calibration={
+            "printer_head": head,
+            "measured_volume_nL": 250.0,
+            "run_id": "mutable-fill-warning",
+        },
+        printing_mode="stream",
+    )
+
+    assert result["volume_warning"] == warning
+    assert em.metadata["fill_droplet_volume_nL"] == pytest.approx(250.0)
+    assert em._calibration_volume_warning_for_generated_reactions() == warning
+
+    glycerol_stock_id = _stock_id_for_design_row(em, "glycerol")
+    glycerol_head = _printer_head(
+        glycerol_stock_id,
+        printer_head_id="mutable-stock-after-fill-warning-head",
+        printing_mode="droplet",
+    )
+    reagent_preview = em.preview_requantized_for_option(
+        ("glycerol", None),
+        30.0,
+        calibrated_stock_id=glycerol_stock_id,
+        printing_mode="droplet",
+    )
+    assert reagent_preview["volume_warning"] is not None
+
+    reagent_result = em.apply_droplet_volume_for_option(
+        "glycerol",
+        None,
+        30.0,
+        write_keys_if_assigned=False,
+        applied_calibration={
+            "printer_head": glycerol_head,
+            "measured_volume_nL": 30.0,
+            "run_id": "mutable-stock-after-fill-warning",
+        },
+        printing_mode="droplet",
+    )
+    assert reagent_result["volume_warning"] == reagent_preview["volume_warning"]
+
+
+@pytest.mark.parametrize("failure_point", ["generate", "record"])
+def test_mutable_fill_calibration_rolls_back_staged_state(
+    experiment_model_factory,
+    monkeypatch,
+    failure_point,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_calibrated_volume_design(em, targets=[0.9, 1.8])
+    runtime = _attach_mutable_runtime(model)
+    em.save_experiment()
+    fill_stock_id = _stock_id_for_design_row(em, "Water")
+    calibration = {
+        "printer_head": _printer_head(
+            fill_stock_id,
+            printer_head_id="transactional-fill-head",
+            printing_mode="stream",
+        ),
+        "measured_volume_nL": 30.0,
+        "run_id": f"fill-{failure_point}",
+    }
+    before = _mutable_calibration_state(em, runtime)
+
+    method_name = (
+        "generate_experiment"
+        if failure_point == "generate"
+        else "record_applied_imaging_calibration"
+    )
+    original = getattr(em, method_name)
+
+    def _fail_after(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError(f"injected fill {failure_point} failure")
+
+    monkeypatch.setattr(em, method_name, _fail_after)
+
+    with pytest.raises(
+        RuntimeError,
+        match=f"injected fill {failure_point} failure",
+    ):
+        em.apply_fill_droplet_volume(
+            30.0,
+            write_keys_if_assigned=True,
+            applied_calibration=calibration,
+            printing_mode="stream",
+        )
+
+    assert _mutable_calibration_state(em, runtime) == before
+
 
 
 def test_apply_droplet_volume_for_option_can_switch_printing_mode(

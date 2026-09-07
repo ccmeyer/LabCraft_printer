@@ -1,6 +1,5 @@
 import math
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -14,13 +13,15 @@ from Model import (
 )
 
 
-SAMPLE_DESIGN = (
-    Path(__file__).resolve().parents[1]
-    / "FreeRTOS-interface"
-    / "Experiments"
-    / "CSV_upload_examples"
-    / "sample_target_concentrations.csv"
-)
+def _sample_uploaded_design():
+    row_count = 103
+    data = {"well": [f"W{row_index + 1}" for row_index in range(row_count)]}
+    for reagent_index, level_count in enumerate(range(11, 21)):
+        data[f"[Sample{reagent_index + 1}] mM"] = [
+            float((row_index + reagent_index) % level_count)
+            for row_index in range(row_count)
+        ]
+    return pd.DataFrame(data)
 
 
 def _make_model() -> ExperimentModel:
@@ -89,9 +90,12 @@ def test_subset_estimate_counts_gsd_rows_without_materializing_reactions():
 
 
 def test_sample_csv_is_estimated_from_its_103_explicit_rows_not_factorial_levels():
-    design = pd.read_csv(SAMPLE_DESIGN)
+    design = _sample_uploaded_design()
     model = _make_model()
-    model.set_uploaded_design_from_dataframe(design, source_path=str(SAMPLE_DESIGN))
+    model.set_uploaded_design_from_dataframe(
+        design,
+        source_path="synthetic_sample_target_concentrations.csv",
+    )
 
     estimate = model.estimate_design_size()
     implied_factorial = math.prod(count for _name, count in estimate.factor_level_counts)

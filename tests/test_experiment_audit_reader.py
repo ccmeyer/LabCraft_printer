@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from ExperimentAuditLog import build_calibration_volume_warning_audit_intent
 from ExperimentAuditReader import (
     ExperimentAuditReader,
     build_audit_tooltip,
@@ -281,3 +282,98 @@ def test_reader_does_not_mutate_existing_audit_file(tmp_path):
     ExperimentAuditReader(audit_path=audit_path).read_rows()
 
     assert audit_path.read_bytes() == before
+
+
+def _pending_warning_intent():
+    return build_calibration_volume_warning_audit_intent(
+        identity={"stock_id": "stock-pending"},
+        timestamp_utc="2026-08-30T12:00:00Z",
+        details={
+            "stock_id": "stock-pending",
+            "volume_warning": {
+                "code": "calibration_volume_tolerance_exceeded",
+                "affected_row_count": 1,
+            },
+        },
+    )
+
+
+def test_pending_authoritative_warning_is_synthesized_then_deduplicated(tmp_path):
+    experiment_dir = tmp_path / "experiment"
+    experiment_dir.mkdir()
+    audit_path = experiment_dir / "experiment_audit.jsonl"
+    intent = _pending_warning_intent()
+    evidence = {intent["event_id"]: intent}
+    experiment_model = SimpleNamespace(
+        experiment_dir_path=str(experiment_dir),
+        get_calibration_volume_warning_audit_intents=lambda: evidence,
+        reconcile_calibration_volume_warning_audits=lambda: {
+            "status": "pending",
+            "pending_event_ids": [intent["event_id"]],
+            "errors": [],
+        },
+    )
+    model = SimpleNamespace(experiment_model=experiment_model)
+    reader = ExperimentAuditReader(model=model)
+
+    pending_rows = reader.read_rows()
+
+    assert len(pending_rows) == 1
+    assert pending_rows[0].event["event_id"] == intent["event_id"]
+    assert pending_rows[0].delivery_status == "pending"
+    assert "synchronization pending" in pending_rows[0].summary
+
+    persisted = {
+        "schema_version": 1,
+        "event_id": intent["event_id"],
+        "timestamp_utc": intent["timestamp_utc"],
+        "elapsed_s": 0.0,
+        "event_type": intent["event_type"],
+        "level": intent["level"],
+        "summary": intent["summary"],
+        "details": intent["details"],
+        "context": {},
+    }
+    _write_jsonl(audit_path, [persisted])
+    experiment_model.reconcile_calibration_volume_warning_audits = lambda: {
+        "status": "recorded",
+        "recorded_event_ids": [intent["event_id"]],
+        "errors": [],
+    }
+
+    repaired_rows = reader.read_rows()
+
+    assert len(repaired_rows) == 1
+    assert repaired_rows[0].line_number == 1
+    assert repaired_rows[0].delivery_status == "recorded"
+    assert repaired_rows[0].summary == intent["summary"]
+
+
+def test_pending_warning_remains_visible_with_malformed_audit_tail(tmp_path):
+    experiment_dir = tmp_path / "experiment"
+    experiment_dir.mkdir()
+    audit_path = experiment_dir / "experiment_audit.jsonl"
+    audit_path.write_text("{malformed\n", encoding="utf-8")
+    intent = _pending_warning_intent()
+    experiment_model = SimpleNamespace(
+        experiment_dir_path=str(experiment_dir),
+        get_calibration_volume_warning_audit_intents=lambda: {
+            intent["event_id"]: intent
+        },
+        reconcile_calibration_volume_warning_audits=lambda: {
+            "status": "pending",
+            "pending_event_ids": [intent["event_id"]],
+            "errors": ["Audit line 1 is malformed"],
+        },
+    )
+
+    rows = ExperimentAuditReader(
+        model=SimpleNamespace(experiment_model=experiment_model)
+    ).read_rows()
+
+    assert any(row.event_type == "audit_parse_error" for row in rows)
+    assert any(
+        row.event.get("event_id") == intent["event_id"]
+        and row.delivery_status == "pending"
+        for row in rows
+    )

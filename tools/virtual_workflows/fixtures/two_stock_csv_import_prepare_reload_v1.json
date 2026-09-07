@@ -1,0 +1,18 @@
+{
+  "fixture_id": "two_stock_csv_import_prepare_reload_v1",
+  "schema_version": 1,
+  "workload": {"completion_count": 2},
+  "experiment_name": "sil-two-stock-csv-import-v1",
+  "plate_name": "96well-8x12",
+  "printed_volume_nL": 9,
+  "final_volume_nL": 450,
+  "allow_two_stock_solutions": true,
+  "design_csv": "two_stock_csv_import_design_v1.csv",
+  "max_stock_csv": "two_stock_csv_import_max_stock_v1.csv",
+  "expected_stock_ids": ["R_10.00_mM", "R_5.00_mM"],
+  "expected_preview_labels": ["Stock 1 of 2", "Stock 2 of 2"],
+  "expected_target_mappings": {
+    "R_10.00_mM": {"0.1": 0, "0.2": 1},
+    "R_5.00_mM": {"0.1": 1, "0.2": 0}
+  }
+}

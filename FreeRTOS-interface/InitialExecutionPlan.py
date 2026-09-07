@@ -14,6 +14,7 @@ from ExecutionPlan import (
     canonical_sha256,
     new_plan_id,
 )
+from StockIdentity import stock_id_for_parts
 
 
 def _utc_now_text() -> str:
@@ -29,7 +30,7 @@ def _stock_id_for_row(row: Mapping[str, Any]) -> str:
         concentration = float(row.get("stock_concentration"))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Stock {reagent_name!r} has no numeric concentration.") from exc
-    return f"{reagent_name}_{concentration:.2f}_{units}"
+    return stock_id_for_parts(reagent_name, concentration, units)
 
 
 def _design_option_lookup(

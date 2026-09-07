@@ -1,3 +1,4 @@
+from tests.optimization_ui_helpers import immediate_optimization_jobs, complete_flow
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -83,12 +84,15 @@ class _FakeTimer:
 
 def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog.color_dict = {"dark_red": "#8a0303", "dark_blue": "#1b3a57"}
     dialog.model = _OptimizeModelStub(responses or [], stock_rows=stock_rows)
     dialog.status_lbl = QLabel("")
     dialog.stock_table_status_lbl = QLabel("")
     dialog.stock_table = QTableWidget(0, 9)
     dialog.allow_two_chk = QCheckBox()
+    dialog.allow_avoidable_grouping_chk = QCheckBox()
     dialog.v_spin = QDoubleSpinBox()
     dialog.v_spin.setRange(1.0, 1_000_000.0)
     dialog.v_spin.setValue(2000.0)
@@ -97,7 +101,8 @@ def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None
     dialog.final_v_spin.setValue(2000.0)
     dialog.auto_update_chk = QCheckBox()
     dialog.auto_update_chk.setChecked(True)
-    dialog.run_btn = QPushButton("Update Reactions and Stock Solutions")
+    dialog.slow_auto_update_notice = QLabel("")
+    dialog.run_btn = QPushButton("Recalculate Stocks")
     dialog._run_btn_default_stylesheet = dialog.run_btn.styleSheet()
     dialog.reagent_table = QTableWidget(ExperimentDesignDialog.COL_DELETE + 1, 1)
 
@@ -129,6 +134,65 @@ def _build_dialog(*, fixed_text="", max_text="", responses=None, stock_rows=None
     dialog.stock_table.insertRow(0)
     dialog.stock_table.setItem(0, 0, QTableWidgetItem("AddA"))
     return dialog, fixed_edit, max_edit
+
+
+def _collapsed_preview_rows(*, unreachable=False):
+    return [
+        {
+            "requested_final": 0.5,
+            "achieved_final": 0.952,
+            "droplets": 1,
+            "reachable": not unreachable,
+            "reason": "outside_half_step" if unreachable else "nearest_achievable",
+            "abs_error": 0.452,
+            "signed_error": 0.452,
+            "units": "mM",
+            "plan_mode": "auto",
+            "stock_concentration": 476.0,
+        },
+        {
+            "requested_final": 1.0,
+            "achieved_final": 0.952,
+            "droplets": 1,
+            "reachable": True,
+            "reason": "nearest_achievable",
+            "abs_error": 0.048,
+            "signed_error": -0.048,
+            "units": "mM",
+            "plan_mode": "auto",
+            "stock_concentration": 476.0,
+        },
+    ]
+
+
+def test_collapsed_target_tooltip_has_explicit_grouping():
+    tooltip = ExperimentDesignDialog._build_target_preview_tooltip(
+        _collapsed_preview_rows()
+    )
+
+    assert "Collapsed requested levels:" in tooltip
+    assert "0.5, 1 → 0.952 mM" in tooltip
+
+
+def test_collapsed_target_styling_is_orange_with_red_precedence(qapp):
+    dialog, _fixed_edit, _max_edit = _build_dialog()
+    target_edit = dialog._reagent_cell_widget(0, dialog.COL_TARGETS)
+    dialog.model.get_target_preview_map = lambda: {
+        ("AddA", None): _collapsed_preview_rows()
+    }
+
+    ExperimentDesignDialog._apply_target_color_state(dialog)
+
+    assert "#f4743b" in target_edit.styleSheet()
+    assert "0.5, 1 → 0.952 mM" in target_edit.toolTip()
+
+    dialog.model.get_target_preview_map = lambda: {
+        ("AddA", None): _collapsed_preview_rows(unreachable=True)
+    }
+    ExperimentDesignDialog._apply_target_color_state(dialog)
+
+    assert "#8a0303" in target_edit.styleSheet()
+    assert "#f4743b" not in target_edit.styleSheet()
 
 
 def test_invalid_fixed_stock_text_is_styled_and_skips_optimize(qapp):
@@ -249,6 +313,89 @@ def test_successful_optimization_marks_design_clean(qapp):
     assert dialog._auto_timer.stops == 1
 
 
+@pytest.mark.parametrize(
+    ("dirty_domain", "expected_optimizer_calls"),
+    [("layout", 0), ("count", 0), ("stock", 1)],
+)
+def test_dirty_domains_control_optimizer_calls_and_coalesce_stock_refresh(
+    qapp, dirty_domain, expected_optimizer_calls
+):
+    dialog, _fixed_edit, _max_edit = _build_dialog(
+        responses=[
+            {"best": True, "issues_by_key": {}, "two_stock_search_limited_keys": []}
+        ]
+    )
+    dialog.model.plans_per_option = {("AddA", None): {"n_stocks": 1}}
+    dialog._last_optimization_result = {
+        "best": True,
+        "issues_by_key": {},
+        "two_stock_search_limited_keys": [],
+    }
+    dialog._stock_allocation_dirty = False
+    dialog._reaction_layout_dirty = False
+    dialog._stock_amounts_dirty = False
+    dialog._design_optimization_dirty = False
+    refresh_calls = []
+    dialog._refresh_stock_table = lambda: refresh_calls.append(True)
+
+    ExperimentDesignDialog._schedule_auto_update(
+        dialog, dirty_domain=dirty_domain
+    )
+    assert dialog._auto_timer.starts == 1
+    ok, result = ExperimentDesignDialog._run_design_optimization_flow(
+        dialog, show_failure_dialog=False
+    )
+
+    assert ok is True
+    assert result["best"] is True
+    assert dialog.model.optimize_calls == expected_optimizer_calls
+    assert dialog.model.generated == 1
+    assert len(refresh_calls) == 1
+    assert result.get("stock_allocation_reused", False) is (
+        expected_optimizer_calls == 0
+    )
+
+
+def test_experiment_name_change_updates_metadata_without_scheduling_optimizer(qapp):
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
+    metadata_calls = []
+    dialog.model = type(
+        "Model",
+        (),
+        {"set_metadata": lambda _self, **kwargs: metadata_calls.append(kwargs)},
+    )()
+    dialog._draft_dirty = False
+    dialog._refresh_draft_dirty_indicator = lambda: None
+
+    ExperimentDesignDialog._on_experiment_name_changed(dialog, " Renamed ")
+
+    assert metadata_calls == [{"name": "Renamed"}]
+    assert dialog._draft_dirty is True
+    assert not hasattr(dialog, "_stock_allocation_dirty")
+
+
+def test_model_stock_updates_are_coalesced_into_one_table_refresh(qapp):
+    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
+    dialog._stock_table_refresh_scheduled = False
+    refresh_calls = []
+
+    def refresh():
+        dialog._stock_table_refresh_scheduled = False
+        refresh_calls.append(True)
+
+    dialog._refresh_stock_table = refresh
+
+    ExperimentDesignDialog._on_model_stock_updated(dialog)
+    ExperimentDesignDialog._on_model_stock_updated(dialog)
+    qapp.processEvents()
+
+    assert refresh_calls == [True]
+
+
 def _install_design_busy_buttons(dialog):
     for name in (
         "run_btn",
@@ -303,7 +450,7 @@ def test_experiment_design_optimization_busy_state_disables_controls(qapp):
         "reset_upload_btn": False,
         "add_reagent_btn": False,
     }
-    assert observed["status"] == "Optimizing test design..."
+    assert "Updating reactions" in observed["status"]
     assert all(getattr(dialog, name).isEnabled() for name in observed["buttons_enabled"])
 
 
@@ -318,12 +465,11 @@ def test_experiment_design_busy_state_restores_after_optimizer_exception(qapp):
 
     dialog.model.optimize_stock_solutions = fail_optimize
 
-    with pytest.raises(RuntimeError, match="optimizer boom"):
-        ExperimentDesignDialog._run_design_optimization_flow(
-            dialog,
-            show_failure_dialog=False,
-            busy_message="Optimizing test design...",
-        )
+    ok, result = ExperimentDesignDialog._run_design_optimization_flow(
+        dialog, show_failure_dialog=False,
+    )
+    assert not ok
+    assert result["status"] == "failed"
 
     assert all(
         getattr(dialog, name).isEnabled()
@@ -336,7 +482,7 @@ def test_experiment_design_busy_state_restores_after_optimizer_exception(qapp):
             "add_reagent_btn",
         )
     )
-    assert dialog.status_lbl.text() == "Reactions and stock solutions could not be updated."
+    assert dialog.status_lbl.text() == "optimizer boom"
 
 
 def test_auto_update_on_preserves_debounced_schedule(qapp):
@@ -362,7 +508,7 @@ def test_auto_update_off_marks_dirty_without_starting_timer(qapp):
     assert dialog._auto_timer.starts == 0
     assert "background-color: #1b3a57" in dialog.run_btn.styleSheet()
     assert "color: white" in dialog.run_btn.styleSheet()
-    assert "Press Update Reactions and Stock Solutions" in dialog.status_lbl.text()
+    assert "Press Recalculate Stocks" in dialog.status_lbl.text()
 
 
 def test_auto_update_toggle_back_on_schedules_dirty_design(qapp):
@@ -472,6 +618,85 @@ class _ImportFeasibilityModel:
             "max_stock_by_reagent": {},
             "stock_settings_by_reagent": {},
         }
+
+
+def test_import_wizard_displays_both_two_stock_legs_as_one_reagent(qapp):
+    class _TwoStockPreviewModel:
+        def build_import_feasibility_report(self, *_args, **kwargs):
+            base = {
+                "reagent": "R",
+                "units": "mM",
+                "printing_mode": "droplet",
+                "droplet_nL": 9.0,
+                "max_stock_conc": 10.0,
+                "target_min": 0.1,
+                "target_max": 0.2,
+                "target_span": 0.1,
+                "smallest_nonzero_target": 0.1,
+                "worst_max_stock_volume_nL": 9.0,
+                "smallest_useful_target_step": 0.1,
+                "status": "OK",
+                "recommendation": "Feasible.",
+                "stock_leg_count": 2,
+            }
+            return {
+                "ok": True,
+                "printed_volume_nL": kwargs["printed_volume_nL"],
+                "final_volume_nL": kwargs["final_volume_nL"],
+                "reagent_specs": [{"name": "R", "units": "mM"}],
+                "composition_rows": [],
+                "stock_rows": [
+                    {
+                        **base,
+                        "ideal_stock_conc": 10.0,
+                        "delta_per_drop": 0.2,
+                        "droplets_per_target": {0.1: 0, 0.2: 1},
+                        "stock_leg_index": 0,
+                        "stock_leg_label": "Stock 1 of 2",
+                    },
+                    {
+                        **base,
+                        "ideal_stock_conc": 5.0,
+                        "delta_per_drop": 0.1,
+                        "droplets_per_target": {0.1: 1, 0.2: 0},
+                        "stock_leg_index": 1,
+                        "stock_leg_label": "Stock 2 of 2",
+                    },
+                ],
+                "issues": [],
+                "missing_stock_rows": [],
+                "unmatched_stock_rows": [],
+                "status_counts": {},
+                "max_stock_by_reagent": {"R": 10.0},
+                "stock_settings_by_reagent": {},
+            }
+
+    wizard = View.ExperimentImportWizard(
+        _TwoStockPreviewModel(),
+        printed_volume_nL=9.0,
+        final_volume_nL=450.0,
+        allow_two=True,
+    )
+    wizard.load_design_dataframe(pd.DataFrame({"R mM": [0.1, 0.2]}))
+
+    _calculate_import_wizard(wizard)
+
+    assert wizard.stock_table.rowCount() == 2
+    assert wizard.stock_table.item(0, wizard.STOCK_COL_REAGENT).text() == (
+        "R\nStock 1 of 2"
+    )
+    assert wizard.stock_table.item(1, wizard.STOCK_COL_REAGENT).text() == (
+        "R\nStock 2 of 2"
+    )
+    assert wizard.stock_table.item(0, wizard.STOCK_COL_IDEAL).text() == "10"
+    assert wizard.stock_table.item(1, wizard.STOCK_COL_IDEAL).text() == "5"
+    assert "0.2 mM: 1 droplet" in wizard.stock_table.item(
+        0, wizard.STOCK_COL_IDEAL
+    ).toolTip()
+    assert "0.1 mM: 1 droplet" in wizard.stock_table.item(
+        1, wizard.STOCK_COL_IDEAL
+    ).toolTip()
+    assert "1 reagent(s)" in wizard.status_lbl.text()
 
 
 def test_import_wizard_invalid_volume_skips_feasibility_until_corrected(qapp):
@@ -622,6 +847,8 @@ def test_busy_context_uses_dedicated_failure_status_callback(qapp):
 
 def test_recompute_silent_suppresses_modal_busy_dialog(qapp):
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog._uploaded_design_active = False
     calls = []
 
@@ -635,6 +862,7 @@ def test_recompute_silent_suppresses_modal_busy_dialog(qapp):
 
     assert calls == [
         {
+            "automatic": True,
             "show_failure_dialog": False,
             "show_capacity_dialog": False,
             "busy_message": (
@@ -998,8 +1226,8 @@ def test_import_wizard_busy_state_restores_after_report_exception(qapp):
     )
     wizard.load_design_dataframe(pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}))
 
-    with pytest.raises(RuntimeError, match="boom"):
-        wizard._recompute_report()
+    wizard._recompute_report()
+    assert wizard._report_dirty
 
     assert wizard.load_design_btn.isEnabled()
     assert wizard.load_stock_btn.isEnabled()
@@ -1007,7 +1235,7 @@ def test_import_wizard_busy_state_restores_after_report_exception(qapp):
     assert wizard.cancel_btn.isEnabled()
     assert not wizard.apply_btn.isEnabled()
     assert wizard._report_dirty is True
-    assert wizard.status_lbl.text() == "Feasibility calculation failed."
+    assert "boom" in wizard.status_lbl.text()
 
 
 def test_import_wizard_status_colors_distinguish_warnings_from_errors(qapp):
@@ -1184,116 +1412,36 @@ def test_import_wizard_composition_table_layout_and_formatting(qapp):
     assert wizard.composition_table.item(0, 6).text() == "7440"
 
 
-def test_upload_design_wizard_apply_mutates_model_once(qapp, monkeypatch):
-    design_df = pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]})
-    constructed = {}
-
-    class _FakeWizard:
+def test_upload_design_defers_apply_and_passes_complete_wizard_payload(qapp, monkeypatch):
+    from tests.test_experiment_design_reagent_headtype_integration import _build_real_dialog
+    dialog = _build_real_dialog()
+    dialog.v_spin.setValue(500)
+    dialog.volume_tolerance_spin.setValue(25)
+    payload = dict(design_df=pd.DataFrame({"well_id": ["A1"], "Reagent A mM": [1.0]}),
+                   source_path="design.csv", max_stock_by_reagent={"Reagent A": 10.0},
+                   stock_settings_by_reagent={"Reagent A": dict(max_stock_conc=10., printing_mode="stream", droplet_nL=60.)},
+                   printed_volume_nL=750., printed_volume_tolerance_nL=35., final_volume_nL=1000.,
+                   allow_two=True, stock_allocation_reuse_payload={"fingerprint": "unchanged"})
+    constructed, applied = [], []
+    class Wizard:
         def __init__(self, *args, **kwargs):
-            constructed["args"] = args
-            constructed["kwargs"] = kwargs
-
+            constructed.append(kwargs)
         def exec(self):
             return QDialog.Accepted
-
         def get_apply_payload(self):
-            return {
-                "design_df": design_df,
-                "source_path": "design.csv",
-                "max_stock_by_reagent": {"Reagent A": 10.0},
-                "stock_settings_by_reagent": {
-                    "Reagent A": {
-                        "max_stock_conc": 10.0,
-                        "printing_mode": "stream",
-                        "droplet_nL": 60.0,
-                    }
-                },
-                "printed_volume_nL": 750.0,
-                "printed_volume_tolerance_nL": 35.0,
-                "final_volume_nL": 1000.0,
-                "allow_two": True,
-            }
-
-    class _ModelStub:
-        def __init__(self):
-            self.metadata = {}
-            self.factors = []
-            self.upload_calls = 0
-            self.metadata_calls = []
-
-        def set_metadata(self, **kwargs):
-            self.metadata.update(kwargs)
-            self.metadata_calls.append(kwargs)
-
-        def set_uploaded_design_from_dataframe(self, df, **kwargs):
-            self.upload_calls += 1
-            self.uploaded_df = df.copy()
-            self.upload_kwargs = kwargs
-            option = type(
-                "Option",
-                (),
-                {
-                    "max_stock_conc": None,
-                    "printing_mode": "droplet",
-                    "droplet_nL": 10.0,
-                },
-            )()
-            self.factors = [type("Factor", (), {"name": "Reagent A", "kind": "additive", "options": [option]})()]
-
-        def extract_uploaded_design_well_ids_from_dataframe(self, _df):
-            return None
-
-    dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
-    dialog.model = _ModelStub()
-    dialog.choice_groups = set()
-    dialog._uploaded_design_active = False
-    dialog._uploaded_design_path = None
-    dialog.v_spin = QDoubleSpinBox()
-    dialog.v_spin.setRange(1.0, 1_000_000.0)
-    dialog.v_spin.setValue(500.0)
-    dialog.final_v_spin = QDoubleSpinBox()
-    dialog.final_v_spin.setRange(1.0, 1_000_000.0)
-    dialog.final_v_spin.setValue(500.0)
-    dialog.volume_tolerance_spin = QDoubleSpinBox()
-    dialog.volume_tolerance_spin.setRange(0.0, 1_000_000.0)
-    dialog.volume_tolerance_spin.setValue(25.0)
-    dialog.allow_two_chk = QCheckBox()
-    dialog._validate_uploaded_design_well_assignments = lambda _df: True
-    dialog._load_factors_into_table = lambda: None
-    dialog._update_metadata_from_controls = lambda: None
-    run_calls = []
-    dialog._design_optimization_dirty = True
-    dialog._auto_timer = _FakeTimer()
-
-    def fake_run_design_optimization_flow(**kwargs):
-        run_calls.append(kwargs)
-        ExperimentDesignDialog._mark_design_optimization_clean(dialog, {"best": True})
-        return True, {"best": True}
-
-    dialog._run_design_optimization_flow = fake_run_design_optimization_flow
-
-    monkeypatch.setattr(View, "ExperimentImportWizard", _FakeWizard)
-
-    ExperimentDesignDialog._on_upload_design(dialog)
-
-    assert constructed["kwargs"]["printed_volume_nL"] == 500.0
-    assert constructed["kwargs"]["printed_volume_tolerance_nL"] == 25.0
-    assert dialog.model.upload_calls == 0
-    assert len(run_calls) == 0
-
-    qapp.processEvents()
-
-    assert dialog.model.upload_calls == 1
-    assert dialog.model.upload_kwargs["source_path"] == "design.csv"
-    assert dialog.model.factors[0].options[0].max_stock_conc == 10.0
-    assert dialog.model.factors[0].options[0].printing_mode == "stream"
-    assert dialog.model.factors[0].options[0].droplet_nL == pytest.approx(60.0)
-    assert dialog.model.metadata["target_reaction_volume_nL"] == 750.0
-    assert dialog.model.metadata["printed_volume_tolerance_nL"] == 35.0
-    assert dialog.model.metadata["final_reaction_volume_nL"] == 1000.0
-    assert dialog.model.metadata["allow_two_stock_solutions"] is True
-    assert len(run_calls) == 1
-    assert dialog._design_optimization_dirty is False
+            return payload
+    monkeypatch.setattr(View, "ExperimentImportWizard", Wizard)
+    monkeypatch.setattr(dialog, "_apply_uploaded_design_payload", applied.append)
+    try:
+        dialog._on_upload_design()
+        assert constructed[0]["printed_volume_nL"] == 500.
+        assert constructed[0]["printed_volume_tolerance_nL"] == 25.
+        assert not applied
+        qapp.processEvents()
+        assert len(applied) == 1 and applied[0] is payload
+        assert not dialog.model.has_uploaded_design()
+    finally:
+        dialog.close()
 
 
 def _build_finish_dialog():
@@ -1320,6 +1468,8 @@ def _build_finish_dialog():
             self.complete_kwargs = kwargs
 
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog.model = _FinishModel()
     dialog.main_window = _MainWindow()
     dialog._editing_locked_by_gripper = False
@@ -1345,7 +1495,7 @@ def _build_finish_dialog():
 def test_finish_reuses_clean_generated_design_without_reoptimizing(qapp):
     dialog = _build_finish_dialog()
     optimize_calls = []
-    dialog._on_optimize_and_generate = lambda **kwargs: optimize_calls.append(kwargs) or True
+    dialog._run_design_optimization_flow = lambda **kwargs: (optimize_calls.append(kwargs), complete_flow(**kwargs))[1]
 
     ExperimentDesignDialog._on_finish(dialog)
 
@@ -1359,7 +1509,7 @@ def test_finish_reuses_clean_generated_design_without_reoptimizing(qapp):
 def test_design_edit_marks_dirty_and_finish_reoptimizes(qapp):
     dialog = _build_finish_dialog()
     optimize_calls = []
-    dialog._on_optimize_and_generate = lambda **kwargs: optimize_calls.append(kwargs) or True
+    dialog._run_design_optimization_flow = lambda **kwargs: (optimize_calls.append(kwargs), complete_flow(**kwargs))[1]
 
     ExperimentDesignDialog._schedule_auto_update(dialog)
     ExperimentDesignDialog._on_finish(dialog)
@@ -1398,6 +1548,7 @@ def test_load_factors_into_table_suspends_auto_update(qapp):
     dialog.choice_groups = set()
     dialog._design_optimization_dirty = False
     dialog._auto_update_suspended = False
+    dialog.reagent_table = QTableWidget(dialog)
     dialog._clear_reagent_rows = lambda: None
     dialog._sync_reagent_tables_geometry = lambda: None
     dialog._refresh_all_prior_availability = lambda: None
@@ -1433,6 +1584,8 @@ def test_upload_design_wizard_cancel_leaves_model_unchanged(qapp, monkeypatch):
             self.upload_calls += 1
 
     dialog = ExperimentDesignDialog.__new__(ExperimentDesignDialog)
+    from PySide6.QtWidgets import QDialog
+    QDialog.__init__(dialog)
     dialog.model = _ModelStub()
     dialog.v_spin = QDoubleSpinBox()
     dialog.v_spin.setRange(1.0, 1_000_000.0)

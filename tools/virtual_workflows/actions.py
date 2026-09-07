@@ -2694,6 +2694,19 @@ def drive_editor_create_finalize(
                         toggle_checkbox(checkbox)
                     if bool(checkbox.isChecked()) != bool(expected):
                         raise RuntimeError("checkbox did not retain requested state")
+                grouping_control = getattr(
+                    dialog, "allow_avoidable_grouping_chk", None
+                )
+                expected_grouping = bool(
+                    experiment.get("allow_avoidable_target_grouping", False)
+                )
+                if grouping_control is not None:
+                    if bool(grouping_control.isChecked()) != expected_grouping:
+                        toggle_checkbox(grouping_control)
+                    if bool(grouping_control.isChecked()) != expected_grouping:
+                        raise RuntimeError(
+                            "avoidable-grouping checkbox did not retain requested state"
+                        )
                 requested_seed = experiment.get("random_seed")
                 if experiment["randomize_assignments"]:
                     if requested_seed is None:
@@ -2800,6 +2813,11 @@ def drive_editor_create_finalize(
                         else None
                     ),
                     "allow_two_stock_solutions": dialog.allow_two_chk.isChecked(),
+                    "allow_avoidable_target_grouping": (
+                        bool(grouping_control.isChecked())
+                        if grouping_control is not None
+                        else False
+                    ),
                 }
                 state["configured"] = configured
                 return configured
@@ -2930,6 +2948,44 @@ def drive_editor_create_finalize(
                             values.append("")
                     rows.append(values)
                 return rows
+
+            def optimizer_projection(
+                result: Mapping[str, Any] | None,
+            ) -> dict[str, Any]:
+                """Retain stable optimizer decisions without freezing counters."""
+
+                source = dict(result or {})
+                fields = (
+                    "optimizer_strategy_used",
+                    "distinct_level_loss",
+                    "collapsed_target_keys",
+                    "optimizer_seed_distinct_level_loss",
+                    "optimizer_seed_worst_level_loss",
+                    "optimizer_seed_rank",
+                    "optimizer_selected_rank",
+                    "stock_allocation_improved_seed",
+                    "stock_allocation_stop_reason",
+                    "stock_allocation_search_limited",
+                    "stock_allocation_limit_reasons",
+                    "stock_allocation_states_evaluated",
+                    "two_stock_pairs_evaluated",
+                    "optimizer_seed_elapsed_ms",
+                    "stock_allocation_elapsed_ms",
+                    "optimizer_total_elapsed_ms",
+                    "stock_allocation_time_to_best_ms",
+                    "stock_allocation_candidates_generated",
+                    "stock_allocation_candidates_retained",
+                    "stock_allocation_candidates_pruned",
+                    "stock_allocation_branches_pruned",
+                    "stock_allocation_loss_tiers_evaluated",
+                    "stock_allocation_reused_import_plan",
+                )
+                return json.loads(
+                    json.dumps(
+                        {field: source.get(field) for field in fields},
+                        default=str,
+                    )
+                )
 
             def rejected_finalization_guard_state() -> dict[str, Any]:
                 if not specification.get("safeguard_boundary_sync"):
@@ -3211,6 +3267,182 @@ def drive_editor_create_finalize(
                 state["finished"] = True
                 return
 
+            positive_upload = specification.get("positive_upload")
+            if positive_upload:
+                upload_spec = dict(positive_upload)
+                design_path = Path(upload_spec["design_csv_path"]).resolve()
+                max_stock_path = Path(upload_spec["max_stock_csv_path"]).resolve()
+                if not design_path.is_file() or not max_stock_path.is_file():
+                    raise RuntimeError("positive upload CSV fixtures are unavailable")
+
+                def apply_positive_upload() -> Mapping[str, Any]:
+                    modal_state: dict[str, Any] = {
+                        "phase": "load_design",
+                        "wizard": None,
+                        "stock_rows": [],
+                        "report_rows": [],
+                        "error": None,
+                    }
+                    chooser_paths = iter((str(design_path), str(max_stock_path)))
+                    original_chooser = QtWidgets.QFileDialog.getOpenFileName
+                    original_optimize = dialog.model.optimize_stock_solutions
+                    optimizer_calls = {"count": 0}
+
+                    def choose_fixture(*_args: Any, **_kwargs: Any):
+                        try:
+                            return next(chooser_paths), "CSV files (*.csv)"
+                        except StopIteration as exc:
+                            raise RuntimeError(
+                                "native file chooser was called more than twice"
+                            ) from exc
+
+                    def observe_optimize(*args: Any, **kwargs: Any):
+                        optimizer_calls["count"] += 1
+                        return original_optimize(*args, **kwargs)
+
+                    def table_rows(wizard: Any) -> list[dict[str, Any]]:
+                        rows: list[dict[str, Any]] = []
+                        for row in range(wizard.stock_table.rowCount()):
+                            cells = []
+                            tooltips = []
+                            for column in range(wizard.stock_table.columnCount()):
+                                item = wizard.stock_table.item(row, column)
+                                cells.append(str(item.text()) if item is not None else "")
+                                tooltips.append(
+                                    str(item.toolTip()) if item is not None else ""
+                                )
+                            rows.append({"cells": cells, "tooltips": tooltips})
+                        return rows
+
+                    def drive_wizard() -> None:
+                        active_modal = context.app.activeModalWidget()
+                        if not isinstance(active_modal, ExperimentImportWizard):
+                            return
+                        modal_state["wizard"] = active_modal
+                        try:
+                            phase = modal_state["phase"]
+                            if phase == "load_design":
+                                modal_state["phase"] = "load_stock"
+                                click(active_modal.load_design_btn)
+                                return
+                            if phase == "load_stock":
+                                modal_state["phase"] = "calculate"
+                                click(active_modal.load_stock_btn)
+                                return
+                            if phase == "calculate":
+                                if bool(active_modal.allow_two_chk.isChecked()) is not True:
+                                    toggle_checkbox(active_modal.allow_two_chk)
+                                _qt_set_spin_value(
+                                    QtCore,
+                                    QtTest,
+                                    active_modal.printed_volume_spin,
+                                    upload_spec["printed_volume_nL"],
+                                )
+                                _qt_set_spin_value(
+                                    QtCore,
+                                    QtTest,
+                                    active_modal.final_volume_spin,
+                                    upload_spec["final_volume_nL"],
+                                )
+                                _qt_set_spin_value(
+                                    QtCore,
+                                    QtTest,
+                                    active_modal.printed_volume_tolerance_spin,
+                                    upload_spec.get("printed_volume_tolerance_nL", 0),
+                                )
+                                click(active_modal.calculate_btn)
+                                if not active_modal.apply_btn.isEnabled():
+                                    raise RuntimeError(
+                                        "positive import did not reach Apply readiness: "
+                                        + active_modal.status_lbl.text()
+                                    )
+                                modal_state["stock_rows"] = table_rows(active_modal)
+                                modal_state["report_rows"] = json.loads(
+                                    json.dumps(
+                                        list((active_modal.report or {}).get("stock_rows") or []),
+                                        default=str,
+                                    )
+                                )
+                                modal_state["phase"] = "apply"
+                                return
+                            if phase == "apply":
+                                modal_state["phase"] = "accepted"
+                                click(active_modal.apply_btn)
+                        except BaseException as exc:
+                            modal_state["error"] = exc
+                            active_modal.reject()
+
+                    QtWidgets.QFileDialog.getOpenFileName = staticmethod(choose_fixture)
+                    dialog.model.optimize_stock_solutions = observe_optimize
+                    timer = QtCore.QTimer(context.app)
+                    timer.setInterval(5)
+                    timer.timeout.connect(drive_wizard)
+                    timer.start()
+                    try:
+                        with (
+                            _expected_editor_import_dialog(context),
+                            _expected_editor_progress_dialog(context),
+                        ):
+                            click(dialog.upload_design_btn)
+                            _wait_for_editor_progress_dialogs(
+                                context,
+                                QtTest,
+                                "editor.upload_design_apply_via_ui",
+                            )
+                        deadline = time.monotonic() + context.deadline.remaining_seconds(20.0)
+                        while dialog._design_optimization_dirty:
+                            if time.monotonic() >= deadline:
+                                raise RuntimeError(
+                                    "imported design did not finish generation"
+                                )
+                            context.app.processEvents()
+                    finally:
+                        timer.stop()
+                        timer.deleteLater()
+                        QtWidgets.QFileDialog.getOpenFileName = original_chooser
+                        dialog.model.optimize_stock_solutions = original_optimize
+                    if modal_state["error"] is not None:
+                        raise modal_state["error"]
+                    if modal_state["phase"] != "accepted":
+                        raise RuntimeError(
+                            "positive import wizard did not accept its payload"
+                        )
+                    result = dict(getattr(dialog, "_last_optimization_result", {}) or {})
+                    evidence = {
+                        "design_csv_path": str(design_path),
+                        "max_stock_csv_path": str(max_stock_path),
+                        "stock_table_rows": list(modal_state["stock_rows"]),
+                        "report_stock_rows": list(modal_state["report_rows"]),
+                        "outer_optimizer_calls": optimizer_calls["count"],
+                        "optimizer": optimizer_projection(result),
+                        "reaction_count": int(dialog.model.get_number_of_reactions()),
+                        "stock_row_count": int(dialog.stock_table.rowCount()),
+                        "stock_table_rows_after_apply": stock_table_rows(),
+                        "status": str(dialog.status_lbl.text() or ""),
+                    }
+                    state["positive_upload"] = evidence
+                    state["generated"] = {
+                        "allow_two_stock_solutions": True,
+                        "expected_outcome": "generated",
+                        "observed_outcome": "generated",
+                        "reaction_count": evidence["reaction_count"],
+                        "stock_row_count": evidence["stock_row_count"],
+                        "stock_table_rows": evidence["stock_table_rows_after_apply"],
+                        "status": evidence["status"],
+                        "dirty_after": False,
+                        "optimizer": evidence["optimizer"],
+                    }
+                    return evidence
+
+                upload_result = run_action(
+                    "editor.upload_design_apply_via_ui",
+                    apply_positive_upload,
+                    allowed_dialogs=(dialog,),
+                )
+                state["positive_upload"] = dict(
+                    upload_result.get("evidence") or upload_result
+                )
+
             def run_optimization_attempt(
                 attempt: Mapping[str, Any],
                 *,
@@ -3433,6 +3665,9 @@ def drive_editor_create_finalize(
                     "stock_table_rows": stock_table_rows(),
                     "status": dialog.status_lbl.text(),
                     "dirty_after": False,
+                    "optimizer": optimizer_projection(
+                        getattr(dialog, "_last_optimization_result", None)
+                    ),
                 }
                 state["generated"] = generated
                 return generated
@@ -3440,7 +3675,7 @@ def drive_editor_create_finalize(
             observed_attempts: list[dict[str, Any]] = []
             attempted_before_finalize = (
                 []
-                if expected_terminal == "formulation_rejected"
+                if expected_terminal == "formulation_rejected" or positive_upload
                 else optimization_attempts
             )
             for attempt_index, attempt in enumerate(attempted_before_finalize):
@@ -3474,7 +3709,7 @@ def drive_editor_create_finalize(
                 context.app.processEvents()
                 state["finished"] = True
                 return
-            if expected_terminal != "formulation_rejected" and (
+            if not positive_upload and expected_terminal != "formulation_rejected" and (
                 not observed_attempts
                 or observed_attempts[-1].get("observed_outcome")
                 != "generated"
@@ -3847,6 +4082,7 @@ def drive_editor_create_finalize(
         "finalized": expected_terminal == "prepared",
         "configured": dict(state["configured"]),
         "generated": dict(state.get("generated") or {}),
+        "positive_upload": dict(state.get("positive_upload") or {}),
         "optimization_attempts": list(state["optimization_attempts"]),
         "pre_finalize_mutation": dict(
             state.get("pre_finalize_mutation") or {}

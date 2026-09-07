@@ -95,9 +95,16 @@ records must contain exactly the fields documented below.
 - Plate dimensions are positive integers. Every well ID must use uppercase plate
   notation and fall inside those dimensions.
 - The target and final reaction volumes are positive finite numbers.
-- The design optimization tolerance is a nonnegative finite number. It records
-  design-time optimization context; later execution stages will not treat it as
-  a calibrated-volume limit.
+- The design optimization tolerance is a nonnegative finite number. Initial
+  design optimization continues to enforce its volume policy. Later calibration
+  treats target printed volume plus this tolerance as a warning threshold, not
+  an Apply limit.
+- Calibration warning evidence distinguishes printed volume from projected final
+  mixture volume. Planned non-printed volume is inferred as
+  `max(0, final reaction volume - target printed volume)` and is added to the
+  recalculated printed total for the projection. The intended final volume is
+  diagnostic context, not a physical-capacity or Apply gate. Physical well
+  capacity is intentionally not modeled by v1.
 
 ### Stocks
 
@@ -167,6 +174,155 @@ The slice 1 writer:
 - Removes the temporary file after failure and leaves an existing destination
   unchanged.
 - Uses deterministic sorted-key, two-space-indented JSON with a trailing newline.
+
+## Design-time stock resolution policy
+
+New experiment designs default to resolution-first stock allocation. The
+optimizer preserves requested concentration levels where its deterministic
+bounded search can do so. The advanced editor setting
+`allow_avoidable_target_grouping=true` explicitly selects concentration-first
+allocation, which may group requested levels to reduce stock concentration or
+printed volume; unavoidable grouping is always reported.
+
+Designs saved before this metadata field existed retain their historical
+concentration-first behavior when opened for editing. The model normalizes the
+missing field to `true`, identifies that choice to the editor as compatibility
+behavior, and persists the existing boolean on the next save or editable copy.
+Explicit `true` and `false` values are never reinterpreted. Authoritative and
+recorded execution plans always reload their frozen stock identities and counts
+without consulting this design-time optimization policy.
+
+Resolution-first allocation completes the same single-stock search in both
+modes before spending work on optional two-stock improvements. When single-stock
+optimization succeeds, enabling two-stock mode cannot replace that baseline
+with a worse allocation under the full resolution rank. A zero-loss baseline
+using only single stocks skips pair enumeration. Designs requiring two stocks
+for feasibility retain the existing bounded feasibility fallback.
+
+The resolution phases share a deterministic 12,000-work-unit allowance. After
+the baseline, at least half the remaining work is reserved for candidate
+preparation and combined search. The rest is divided equally among eligible
+reagents/options, with remainder units assigned in canonical key order.
+Collapsed options are scanned before volume donors; fixed stocks are excluded
+and existing pair candidates are reused. Unused scan allowance remains
+available to combined search. Exhaustion or a handled search failure retains
+the best allocation already validated, including accepted pair improvements.
+
+Diagnostic result fields `stock_allocation_baseline_rank`,
+`stock_allocation_baseline_work`, `stock_allocation_pair_work_by_key`, and
+`stock_allocation_combined_work` expose these phases. Per-key entries use
+JSON-encoded `[factor, option]` keys and report `limit`, `used`, and
+`quota_exhausted`. `pair_quota` identifies a limited scan rather than claiming
+the candidate space was exhausted. Work and candidate counters accumulate
+across phases. When no single-stock allocation is feasible, the baseline phase
+starts from the feasible incumbent, which can already contain two stocks.
+
+Candidate dominance filtering uses NumPy batches while preserving the original
+sequential decisions, `1e-12` comparison tolerance, and candidate identities and
+ordering. Each candidate is compared only against earlier retained candidates;
+fixed stocks bypass dominance filtering. Each temporary comparison matrix is
+at most 256 candidates by 256 criteria (65,536 elements). Numeric storage grows
+linearly with candidate count times criterion count, without constructing a
+candidate-by-candidate matrix. Worst-case comparison work remains quadratic;
+batching reduces Python overhead rather than changing the search space.
+
+The diagnostic fields `stock_allocation_dominance_pairs_evaluated` and
+`stock_allocation_dominance_blocks_evaluated` accumulate actual filtering work
+across resolution phases. Pair counts include every retained candidate in an
+evaluated row batch, even when an early match could end a scalar scan sooner.
+`stock_allocation_dominance_max_block_elements` records the largest temporary
+comparison block. These counters do not consume the existing resolution work
+allowance or change stopping decisions; paths that do not filter report zero.
+
+Editor updates and import feasibility calculations run on one dedicated Qt
+worker thread. The worker owns a detached input snapshot and computes both the
+allocation and generated reaction data. It cannot write experiment files or
+access live runtime bindings. The main thread publishes complete results only
+while the request's inputs, owner, and editing interlocks remain current.
+Design inputs and dependent actions are paused during calculation; Cancel
+retains the previous published results and leaves the edited inputs dirty.
+Save, preview, and finalize continue only after successful publication.
+
+The busy display shows the current phase immediately on its next half-second
+refresh. After one second it also shows total elapsed job time and, where
+available, one activity count: single-stock candidates considered, stock pairs
+considered, candidates filtered, complete allocations evaluated, or reactions
+generated. Search counters describe work in the current phase, not percent
+complete or a prediction of remaining time. Only reaction generation has a
+known total. A bounded shared snapshot coalesces activity; Qt refreshes the
+small busy display at most twice per second. Canceling remains visible until
+the worker's terminal outcome, and late phase updates cannot overwrite it.
+
+Automatic editor stock calculations reaching three seconds pause future
+automatic updates, without interrupting the current job. A persistent notice
+explains that the user can make several edits and click **Recalculate Stocks**.
+This action updates both stocks and reactions and does not save. The trigger
+measures the actual optimizer call, including candidate preparation, but
+excludes dispatch, exact output validation, reaction generation, publication,
+and table refresh. Manual actions, import calculations, and layout/count-only
+allocation reuse cannot trigger this policy. Threshold checks use an independent
+monotonic clock and do not consume optimizer work or affect search decisions.
+
+Re-enabling Auto-update after a slow pause explicitly opts in for the remainder
+of that design session. Successful New, Load, editable-copy creation, Import
+Apply, or Clear Imported Design resets the pause and override, restoring the
+underlying user preference; an explicit Off remains Off. Ordinary edits, saves,
+failed replacements, and canceled calculations do not reset this policy.
+These are UI session flags only, with no persisted-schema or calibration change.
+
+The implementation/validation plan for these additions is: extend the existing
+computation control with coalesced activity and one-shot timing; use it from
+actual search/generation counters; add delayed UI details and session-local
+slow-update handling; verify thresholds, stale notices, cancellation and
+preferences with deterministic tests; then qualify complete manual, automatic,
+and import interactions on Windows and the Pi with the existing 250 ms
+heartbeat and one-second cancellation gates. Evidence stays outside worktrees.
+Rollback is a revert of the feature commit followed by normal development sync;
+no experiment-data migration or calibration-history rewrite is required.
+
+Optimizer qualification now distinguishes sparse regression inputs from dense
+mixtures and manual group designs. The shared qualification catalog records
+authored and unique compositions, active and varying reagents, target counts,
+groups, volumes, and fixture hashes. Real experimental CSVs remain external.
+Both stock modes are checked against their synchronous counterpart and, where
+single-stock optimization succeeds, against its complete result rank. Separate
+arithmetic checks verify counts, concentrations, fill, exact uploaded row/well
+ordering, and independent manual Cartesian/choice compositions. A dedicated
+64-reaction fixture requires three simultaneous two-stock allocations and zero
+lost levels; merely enabling two-stock mode is not evidence of pair exploration.
+
+The opt-in realistic benchmark records measured outcomes and input limitations,
+including the import wizard's mode-default ejection volumes. Five measured
+interactions follow one warm-up; early cancellation and observed candidate-phase
+cancellation have separate evidence. Unobserved short phases are explicitly
+identified rather than credited as exercised. Timing gates remain 250 ms per
+heartbeat gap and one second for cancellation. A failed fixture, comparison,
+input-coverage check, or responsiveness gate blocks qualification; this test-only
+extension does not change production search decisions. README documents the
+external fixture layout, selectors, evidence, watchdog, and Pi workflow.
+
+Cancellation is cooperative, including candidate preparation, filtering,
+combined search, and reaction generation. Brief worker yields let Qt's Python
+callbacks acquire the interpreter lock; neither yielding nor cancellation
+checks change search budgets or ranking. Initial dispatch follows pending UI
+repaints, so disabling controls does not overlap worker garbage collection.
+Closing an active editor cancels and
+drains its job before completing normal unsaved-draft handling. Application
+shutdown drains the worker without forcibly terminating a thread.
+
+The synchronous model APIs remain available to calibration and non-UI callers.
+Disk persistence and machine communications retain their existing execution
+model. Background calculation is not a hard latency guarantee: qualification
+measures complete UI interactions separately from optimizer compute time.
+
+The 75 ms resolution target is diagnostic, not a wall-clock deadline. Work
+units have different costs depending on target counts and reaction structure.
+`optimizer_seed_elapsed_ms` includes seed/feasibility work outside the shared
+resolution allowance; `stock_allocation_elapsed_ms` covers resolution phases;
+`optimizer_total_elapsed_ms` covers the optimizer through result construction,
+excluding stock-update subscribers. End-to-end benchmarks additionally measure
+the complete interaction, including UI preparation and result publication.
+Windows timings do not qualify Raspberry Pi responsiveness.
 
 ## Initial creation in Slice 3
 
@@ -247,9 +403,11 @@ activation and resume flow described below.
 ## Execution calibration sidecar
 
 `execution_calibrations.json` uses schema
-`labcraft.execution_calibrations`, version 1. Its root contains exactly the
-schema identity, `plan_id`, deterministic calibration records, and manual-refuel
-checks. Unknown, missing, malformed, or duplicate fields fail closed.
+`labcraft.execution_calibrations`, version 3. Its root contains the schema
+identity, `plan_id`, deterministic calibration records, manual-refuel checks,
+and immutable `volume_warning_audits`. Readers continue to accept version 1
+and 2 sidecars as empty warning-outbox inputs. Unknown, missing, malformed, or
+duplicate fields fail closed.
 
 Calibration-record UUIDs are deterministic UUID5 values derived from the plan,
 stock, printer head, source-result fingerprint, exact effective volume,
@@ -262,19 +420,56 @@ Applying a distinct calibration creates the next immutable plan revision. It:
 
 - verifies the unchanged `experiment_design.json` hash and frozen execution
   identities;
-- rejects two-stock option calibration and any selected stock that already has
-  positive printed progress;
-- changes only that stock's exact effective volume, printing mode, printer-head
-  reference, calibration-record reference, and the resulting target maps;
-- requantizes the selected stock with the existing nearest-integral rule while
-  preserving all other non-fill targets;
-- recalculates fill from remaining target printed volume and clamps it to zero
-  when calibrated non-fill volume is already larger; and
-- recomputes exact expected well volumes without applying the design-time
-  tolerance as an execution feasibility limit.
+- requires the exact loaded stock identity and rejects a selected single stock
+  that already has positive printed progress;
+- for a two-stock reagent, requires zero progress for both reagent legs and the
+  fill stock, then jointly re-quantizes the two count maps;
+- changes calibration metadata only on the measured stock; the companion stock
+  retains its concentration, effective volume, printing mode, printer-head
+  reference, and calibration-record reference;
+- preserves every unrelated non-fill target and permits only the calibrated
+  stock, its one related companion, and fill to change per-well counts;
+- preserves all counts, including fill, in wells selecting another choice-group
+  option; missing reaction records or positive calibrated-stock counts in a
+  reaction omitting that option remain integrity errors;
+- recalculates fill from remaining target printed volume, reducing it to zero
+  when calibrated non-fill volume already meets or exceeds that target; and
+- recomputes exact expected well volumes without re-running the design-time
+  optimizer.
 
-Consequently, a calibrated historical well may legitimately exceed the design
-optimization limit. Progress preserves all added counts while targets and its
+Two-stock calibration never increases distinct target-level loss and fails
+closed when no concentration-reachable mapping exists, the bounded pair search
+is exhausted, required stock identities are missing, or execution integrity and
+progress constraints are violated. Neither the recorded design threshold nor
+the final reaction volume independently rejects an otherwise valid in-envelope
+calibration.
+
+Before finalization, a mutable two-stock calibration saves the complete stock
+allocation. Later single-stock, fill, or two-stock calibrations refresh that
+allocation within the same guarded transaction, preserving earlier measured
+volumes, stock identities, and calibration records across editable-design
+reload and re-optimization. An active allocation must match the current inputs
+and live stock plan before calibration starts; inconsistent active allocations
+are rejected, and unrelated calibrations do not reactivate inactive allocations.
+Allocation export, runtime rebinding, or save failures restore the prior model,
+runtime, and file state through the existing transaction rollback.
+
+After preview and again from the committed candidate, calibration recalculates
+every well's exact printed total. A printed total above target printed volume
+plus design tolerance produces a prominent, non-blocking
+`calibration_volume_tolerance_exceeded` warning. Its per-well evidence includes
+printed volume, inferred planned non-printed volume, projected final volume, and
+projected excess above the intended final volume. None of those diagnostic
+projection values blocks Apply or printing.
+
+Each distinct successful warned application commits an immutable audit intent
+inside the same mutable-design or execution-calibration transaction. The
+append-only `experiment_audit.jsonl` timeline is an idempotent projection of
+that authoritative evidence: identical event IDs are reused, conflicting IDs
+and malformed tails are preserved as integrity errors, and missing rows are
+retried after load, when the timeline opens, and before printing. Timeline
+delivery failure remains visible as pending but cannot roll back calibration or
+block printing. Progress preserves all added counts while targets and its
 `__execution__` revision reference are atomically replaced. `key.csv` and
 `concentration_key.csv` are regenerated from the committed plan, not by running
 stock optimization. `experiment_design.json` remains byte-identical throughout
@@ -426,3 +621,30 @@ Starting **New Experiment** is also non-destructive. It requires an idle array
 runner, an empty command queue, and no printer head in the gripper, then detaches
 the previous folder unchanged and clears only in-memory runtime/execution state
 before creating the fresh design folder.
+
+## Import publication and table responsiveness
+
+Import Apply prepares factors, explicit rows, stock settings and validated
+allocation reuse on the detached optimizer model. It publishes those inputs
+and generated outputs together only while the original editor session, input
+fingerprint, execution/gripper interlocks and available wells still permit the
+replacement. Cancellation (including immediately before publication), worker
+failure or rejected publication retains the previous design, calibration
+history and saved files. Apply does not save files. The UI remains busy through
+publication and display refresh, and a canceled import does not restart itself.
+Once the atomic publication begins, the dialog briefly says "Finishing display
+update" and removes Cancel. Control restoration runs on the next event-loop
+turn; the job remains busy and shutdown waits until that step finishes.
+
+Bulk reagent loading defers full-table sizing until all reagents are present.
+The wizard composition table starts with fixed, manually resizable columns and
+uniform row heights, avoiding a full content-sizing pass. The qualification
+harness records main-thread Apply, publication and table timings separately
+from worker phases. The application quit filter ignores unrelated widget events
+before decoding their types in Python. The existing 250 ms heartbeat and one-second cancellation
+gates remain unchanged. Native acceleration remains an opt-in experiment and
+is not part of this application path.
+
+Rollback is a revert of the import/UI fix followed by the normal development
+synchronization workflow. No experiment or calibration-history migration is
+needed.

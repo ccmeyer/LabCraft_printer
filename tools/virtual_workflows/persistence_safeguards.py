@@ -218,7 +218,6 @@ def _write_pristine_bundle(root: Path, *, baseline_kind: str, name: str) -> None
         ExecutionCalibrationDocument,
         ExecutionCalibrationRecord,
         deterministic_calibration_record_id,
-        save_execution_calibrations,
     )
     from ExecutionPlan import (
         ExecutionDispense,
@@ -329,11 +328,27 @@ def _write_pristine_bundle(root: Path, *, baseline_kind: str, name: str) -> None
     )
     save_execution_resume(root / "execution_resume.json", resume)
     if calibration_record is not None:
-        save_execution_calibrations(
-            root / "execution_calibrations.json",
-            ExecutionCalibrationDocument(PLAN_ID, {calibration_key: calibration_record}),
-        )
+        # Keep this frozen safeguard as a schema-v2 artifact so it exercises
+        # backward-compatible loading without changing its reviewed hashes when
+        # the current sidecar writer advances.
+        calibration_payload = ExecutionCalibrationDocument(
+            PLAN_ID,
+            {calibration_key: calibration_record},
+        ).to_dict()
+        calibration_payload["schema_version"] = 2
+        calibration_payload.pop("volume_warning_audits")
+        (root / "execution_calibrations.json").write_text(
+            json.dumps(
+                calibration_payload,
+                ensure_ascii=False,
+                allow_nan=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
 
+        )
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")

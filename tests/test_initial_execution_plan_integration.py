@@ -16,6 +16,8 @@ from ExecutionProgressStore import (
     serialize_execution_progress,
 )
 from ExecutionCalibrationStore import load_execution_calibrations
+from ExperimentAuditLog import ExperimentAuditLog
+from ExperimentAuditReader import ExperimentAuditReader
 from ExecutionPlanRevision import validate_revision_history
 from Model import CURRENT_PROFILE, ExperimentModel, Model
 
@@ -233,6 +235,587 @@ def test_fresh_finalization_writes_prepared_plan_before_linked_progress(
     assert details["execution_plan_id"] == plan.plan_id
     assert details["execution_plan_revision"] == 1
     assert details["execution_plan_status"] == "created"
+
+
+def test_valid_two_stock_editor_result_survives_runtime_projection_and_finalization(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    em.factors = []
+    em.set_metadata(
+        name="two-stock-finalization",
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=1,
+        target_reaction_volume_nL=10.0,
+        final_reaction_volume_nL=500.0,
+        printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+        allow_two_stock_solutions=True,
+        allow_avoidable_target_grouping=True,
+    )
+    em.add_additive("Signal", [0.1, 0.2], "mM", 10.0)
+
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=True,
+    )
+    assert result["best"] is True
+    assert result["two_stock_keys"] == [("Signal", None)]
+    em.generate_experiment()
+    em.save_experiment()
+
+    Model.load_experiment_from_model(
+        model,
+        load_progress=False,
+        finalize_execution_plan=True,
+    )
+
+    plan = load_execution_plan(em.execution_plan_file_path)
+    signal_stocks = [stock for stock in plan.stocks if stock.factor_name == "Signal"]
+    assert len(signal_stocks) == 2
+    assert len({stock.stock_id for stock in signal_stocks}) == 2
+    assert {
+        stock.stock_id
+        for stock in model.stock_solutions.get_all_stock_solutions()
+        if stock.reagent_name == "Signal"
+    } == {stock.stock_id for stock in signal_stocks}
+    assert all(
+        any(
+            dispense.stock_id == stock.stock_id
+            for well in plan.wells
+            for dispense in well.dispenses
+        )
+        for stock in signal_stocks
+    )
+
+
+def _configure_calibratable_two_stock_execution(
+    model,
+    *,
+    base_replicates=1,
+    additional_conditions=None,
+):
+    em = model.experiment_model
+    em.factors = []
+    em.set_metadata(
+        name="two-stock-calibration-application",
+        randomize_assignments=False,
+        start_row=0,
+        start_col=0,
+        replicates=base_replicates,
+        target_reaction_volume_nL=240.0,
+        final_reaction_volume_nL=5000.0,
+        printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Water",
+        fill_droplet_volume_nL=10.0,
+        allow_two_stock_solutions=True,
+        allow_avoidable_target_grouping=False,
+    )
+    em.add_additive("Signal", [0.5, 1.0, 5.0, 20.0], "mM", 10.0)
+    if additional_conditions is not None:
+        em.set_additional_conditions(additional_conditions)
+    result = em.optimize_stock_solutions(
+        quantum=0.1,
+        max_refine=20,
+        two_max_refine=20,
+        allow_two=True,
+    )
+    assert result["best"] is True
+    assert result["two_stock_keys"] == [("Signal", None)]
+    em.generate_experiment()
+    em.save_experiment()
+    Model.load_experiment_from_model(
+        model,
+        load_progress=False,
+        finalize_execution_plan=True,
+    )
+    return em
+
+
+def _configure_choice_two_stock_execution(model, *, replicates=1):
+    em = model.experiment_model
+    em.factors = []
+    em.set_metadata(
+        randomize_assignments=False, start_row=0, start_col=0,
+        replicates=replicates, target_reaction_volume_nL=240.0,
+        final_reaction_volume_nL=5000.0, printed_volume_tolerance_nL=0.0,
+        fill_reagent_name="Water", fill_droplet_volume_nL=10.0,
+        allow_two_stock_solutions=True, allow_avoidable_target_grouping=False,
+    )
+    em.add_choice_group("Signal")
+    em.add_choice_option("Signal", "Signal A", [0.0, 0.5, 1.0, 5.0, 20.0], "mM", 10.0)
+    em.add_choice_option("Signal", "Signal B", [1.0], "mM", 10.0)
+    result = em.optimize_stock_solutions(
+        quantum=0.1, max_refine=20, two_max_refine=20, allow_two=True,
+    )
+    assert result["best"] is True
+    assert result["two_stock_keys"] == [("Signal", "Signal A")]
+    em.generate_experiment()
+    em.save_experiment()
+    Model.load_experiment_from_model(model, load_progress=False, finalize_execution_plan=True)
+    return em
+
+
+@pytest.mark.parametrize("replicates", [1, 2])
+def test_choice_two_stock_calibration_preserves_other_option_wells(
+    experiment_model_factory, replicates,
+):
+    em = _configure_choice_two_stock_execution(
+        experiment_model_factory(), replicates=replicates,
+    )
+    before = load_execution_plan(em.execution_plan_file_path)
+    design_before = Path(em.experiment_file_path).read_bytes()
+    signal_stocks = sorted(
+        (stock for stock in before.stocks if stock.option_name == "Signal A"),
+        key=lambda stock: stock.concentration, reverse=True,
+    )
+    calibrated, companion = signal_stocks
+    preview = em.preview_requantized_for_option(
+        ("Signal", "Signal A"), 12.0,
+        calibrated_stock_id=calibrated.stock_id, printing_mode="droplet",
+    )
+    assert preview["ok"] is True
+    expected = {row["target_final"]: tuple(row["drops"]) for row in preview["rows"]}
+    result = em.apply_droplet_volume_for_option(
+        "Signal", "Signal A", 12.0, printing_mode="droplet",
+        applied_calibration={
+            "stock_id": calibrated.stock_id,
+            "printer_head": SimpleNamespace(printer_head_id="choice-calibration-head"),
+            "measured_volume_nL": 12.0, "run_id": "choice-calibration",
+        },
+    )
+    revised = load_execution_plan(em.execution_plan_file_path)
+    assert revised.plan_revision == result["execution_plan_revision"]
+    assert revised.plan_revision == before.plan_revision + 2
+    assert Path(em.experiment_file_path).read_bytes() == design_before
+    assert next(s for s in revised.stocks if s.stock_id == companion.stock_id) == companion
+    reactions = {
+        f"R{index + 1}": spec["reaction"]
+        for index, spec in enumerate(em._iter_reaction_run_specs())
+    }
+    for old_well, new_well in zip(before.wells, revised.wells):
+        reaction = reactions[old_well.reaction_id]
+        if ("Signal", "Signal A") not in reaction:
+            assert new_well == old_well
+        else:
+            counts = {d.stock_id: d.target_dispenses for d in new_well.dispenses}
+            actual = tuple(counts.get(s.stock_id, 0) for s in signal_stocks)
+            assert actual == expected[reaction[("Signal", "Signal A")]]
+    assert expected[0.0] == (0, 0)
+    validate_revision_history(Path(em.experiment_dir_path))
+
+
+@pytest.mark.parametrize(
+    "fault, message",
+    [
+        ("missing_reaction", "No frozen design reaction matches"),
+        ("malformed_reaction", "No frozen design reaction matches"),
+        ("missing_reaction_field", "No frozen design reaction matches"),
+        ("positive_absent_option", "omits the calibrated reagent"),
+        ("missing_mapping", "has no mapping for target"),
+    ],
+)
+def test_choice_two_stock_target_counts_reject_inconsistent_reactions(
+    experiment_model_factory, monkeypatch, fault, message,
+):
+    em = _configure_choice_two_stock_execution(experiment_model_factory())
+    plan = load_execution_plan(em.execution_plan_file_path)
+    stock_id = next(s.stock_id for s in plan.stocks if s.option_name == "Signal A")
+    requantized = em._requantize_fixed_two_stock_group(
+        ("Signal", "Signal A"), calibrated_stock_id=stock_id,
+        new_effective_volume_nL=12.0,
+    )
+    assert requantized["ok"] is True
+    specs = list(em._iter_reaction_run_specs())
+    if fault == "missing_reaction":
+        specs.pop()
+    elif fault == "malformed_reaction":
+        specs[-1]["reaction"] = None
+    elif fault == "missing_reaction_field":
+        specs[-1].pop("reaction")
+    elif fault == "positive_absent_option":
+        # This well actually dispenses Signal A; omitting that option is corruption.
+        specs[1]["reaction"] = {("Signal", "Signal B"): 1.0}
+    else:
+        requantized["mapping_by_target"].pop(0.5)
+    monkeypatch.setattr(em, "_iter_reaction_run_specs", lambda: iter(specs))
+    design_bytes = Path(em.experiment_file_path).read_bytes()
+    plan_bytes = Path(em.execution_plan_file_path).read_bytes()
+    with pytest.raises(RuntimeError, match=message):
+        em._calibrated_two_stock_target_counts(plan, requantized)
+    assert Path(em.experiment_file_path).read_bytes() == design_bytes
+    assert Path(em.execution_plan_file_path).read_bytes() == plan_bytes
+
+
+def test_finalized_two_stock_calibration_requantizes_both_legs_atomically(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = _configure_calibratable_two_stock_execution(model)
+    before = load_execution_plan(em.execution_plan_file_path)
+    signal_stocks = sorted(
+        (stock for stock in before.stocks if stock.factor_name == "Signal"),
+        key=lambda stock: stock.concentration,
+        reverse=True,
+    )
+    calibrated, companion = signal_stocks
+    companion_before = companion
+    old_counts = {
+        well.well_id: {
+            dispense.stock_id: dispense.target_dispenses
+            for dispense in well.dispenses
+        }
+        for well in before.wells
+    }
+
+    result = em.apply_droplet_volume_for_option(
+        "Signal",
+        None,
+        12.0,
+        applied_calibration={
+            "stock_id": calibrated.stock_id,
+            "printer_head": SimpleNamespace(printer_head_id="two-stock-head-final"),
+            "measured_volume_nL": 12.0,
+            "pw_us": 1200,
+            "pressure_psi": 0.8,
+            "run_id": "two-stock-finalized-calibration",
+            "phase": "synthetic_characterization",
+        },
+        printing_mode="droplet",
+    )
+
+    revised = load_execution_plan(em.execution_plan_file_path)
+    revised_by_id = {stock.stock_id: stock for stock in revised.stocks}
+    assert result["n_stocks"] == 2
+    assert result["calibrated_stock_id"] == calibrated.stock_id
+    assert result["companion_stock_id"] == companion.stock_id
+    assert revised_by_id[calibrated.stock_id].effective_volume_nL == pytest.approx(12.0)
+    assert revised_by_id[calibrated.stock_id].calibration_record_key is not None
+    assert revised_by_id[companion.stock_id] == companion_before
+    assert set(revised_by_id) == {stock.stock_id for stock in before.stocks}
+    new_counts = {
+        well.well_id: {
+            dispense.stock_id: dispense.target_dispenses
+            for dispense in well.dispenses
+        }
+        for well in revised.wells
+    }
+    assert any(
+        old_counts[well_id].get(companion.stock_id, 0)
+        != new_counts[well_id].get(companion.stock_id, 0)
+        for well_id in old_counts
+    )
+    assert all(
+        well.expected_printed_volume_nL
+        <= revised.volume_basis.target_printed_volume_nL
+        + revised.volume_basis.design_optimization_tolerance_nL
+        + 1e-9
+        for well in revised.wells
+    )
+
+def test_finalized_two_stock_calibration_uses_only_frozen_subset_targets(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = _configure_calibratable_two_stock_execution(
+        model,
+        base_replicates=0,
+        additional_conditions=[
+            {
+                "label": "Subset low",
+                "replicates": 1,
+                "targets": {("Signal", None): 5.0},
+            },
+            {
+                "label": "Subset high",
+                "replicates": 1,
+                "targets": {("Signal", None): 20.0},
+            },
+        ],
+    )
+    before = load_execution_plan(em.execution_plan_file_path)
+    design_before = Path(em.experiment_file_path).read_bytes()
+    signal_stocks = sorted(
+        (stock for stock in before.stocks if stock.factor_name == "Signal"),
+        key=lambda stock: stock.concentration,
+        reverse=True,
+    )
+    calibrated = signal_stocks[0]
+
+    preview = em.preview_requantized_for_option(
+        ("Signal", None),
+        12.0,
+        calibrated_stock_id=calibrated.stock_id,
+        printing_mode="droplet",
+    )
+
+    assert preview["ok"] is True
+    assert [row["target_final"] for row in preview["rows"]] == [5.0, 20.0]
+    expected_counts = {
+        row["target_final"]: tuple(row["drops"])
+        for row in preview["rows"]
+    }
+
+    result = em.apply_droplet_volume_for_option(
+        "Signal",
+        None,
+        12.0,
+        applied_calibration={
+            "stock_id": calibrated.stock_id,
+            "printer_head": SimpleNamespace(
+                printer_head_id="two-stock-subset-head"
+            ),
+            "measured_volume_nL": 12.0,
+            "pw_us": 1200,
+            "pressure_psi": 0.8,
+            "run_id": "two-stock-subset-calibration",
+            "phase": "synthetic_characterization",
+        },
+        printing_mode="droplet",
+    )
+
+    revised = load_execution_plan(em.execution_plan_file_path)
+    assert revised.plan_revision == result["execution_plan_revision"]
+    assert revised.plan_revision == before.plan_revision + 2
+    assert revised.state is ExecutionPlanState.ACTIVE
+    assert len(revised.wells) == 2
+    assert result["changed_target_count"] == 2
+    assert Path(em.experiment_file_path).read_bytes() == design_before
+    assert em.factors[0].options[0].targets == [0.5, 1.0, 5.0, 20.0]
+
+    reactions_by_id = {
+        f"R{index + 1}": spec["reaction"]
+        for index, spec in enumerate(em._iter_reaction_run_specs())
+    }
+    for well in revised.wells:
+        target = float(reactions_by_id[well.reaction_id][("Signal", None)])
+        actual_counts = tuple(
+            next(
+                (
+                    dispense.target_dispenses
+                    for dispense in well.dispenses
+                    if dispense.stock_id == stock_id
+                ),
+                0,
+            )
+            for stock_id in preview["stock_ids"]
+        )
+        assert actual_counts == expected_counts[target]
+
+
+def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = _configure_calibratable_two_stock_execution(model)
+    audit_owner = SimpleNamespace(experiment_model=em)
+    audit_log = ExperimentAuditLog(model=audit_owner)
+    audit_owner.record_experiment_audit_event = audit_log.record
+    audit_owner._get_experiment_audit_log = lambda: audit_log
+    actual_ensure = audit_log.ensure_event
+    delivery_available = False
+
+    def _ensure(intent, **kwargs):
+        if not delivery_available:
+            raise OSError("simulated finalized audit fsync failure")
+        return actual_ensure(intent, **kwargs)
+
+    audit_log.ensure_event = _ensure
+    em.set_calibration_manager(SimpleNamespace(model=audit_owner))
+
+    design_before = Path(em.experiment_file_path).read_bytes()
+    before = load_execution_plan(em.execution_plan_file_path)
+    signal_stocks = sorted(
+        (stock for stock in before.stocks if stock.factor_name == "Signal"),
+        key=lambda stock: stock.concentration,
+        reverse=True,
+    )
+    calibrated, companion_before = signal_stocks
+
+    preview = em.preview_requantized_for_option(
+        ("Signal", None),
+        140.0,
+        calibrated_stock_id=calibrated.stock_id,
+        printing_mode="stream",
+    )
+
+    assert preview["ok"] is True
+    assert preview["pair_evaluations"] > 0
+    preview_warning = preview["volume_warning"]
+    assert preview_warning["code"] == "calibration_volume_tolerance_exceeded"
+    assert preview_warning["affected_row_count"] > 0
+
+    result = em.apply_droplet_volume_for_option(
+        "Signal",
+        None,
+        140.0,
+        applied_calibration={
+            "stock_id": calibrated.stock_id,
+            "printer_head": SimpleNamespace(
+                printer_head_id="two-stock-stream-warning-head"
+            ),
+            "measured_volume_nL": 140.0,
+            "pw_us": 1200,
+            "pressure_psi": 0.8,
+            "run_id": "two-stock-stream-warning",
+            "result_id": "two-stock-stream-warning-result",
+            "result_sha256": "a" * 64,
+            "process_run_id": "two-stock-stream-warning-process",
+            "phase": "synthetic_characterization",
+            "original_printing_mode": "droplet",
+            "applied_printing_mode": "stream",
+            "printing_mode": "stream",
+        },
+        printing_mode="stream",
+    )
+
+    revised = load_execution_plan(em.execution_plan_file_path)
+    revised_by_id = {stock.stock_id: stock for stock in revised.stocks}
+    warning = result["volume_warning"]
+    assert warning == preview_warning
+    assert result["volume_warning_audit_status"] == "pending"
+    assert result["volume_warning_audit_event_id"]
+    assert "simulated finalized audit fsync failure" in result[
+        "volume_warning_audit_error"
+    ]
+    assert Path(em.experiment_file_path).read_bytes() == design_before
+    assert revised_by_id[calibrated.stock_id].effective_volume_nL == pytest.approx(
+        140.0
+    )
+    assert revised_by_id[calibrated.stock_id].printing_mode == "stream"
+    assert revised_by_id[companion_before.stock_id] == companion_before
+    warned_by_well = {row["well_id"]: row for row in warning["affected_rows"]}
+    assert set(warned_by_well).issubset({well.well_id for well in revised.wells})
+    assert all(
+        next(
+            well.expected_printed_volume_nL
+            for well in revised.wells
+            if well.well_id == well_id
+        )
+        == pytest.approx(row["total_volume_nL"])
+        for well_id, row in warned_by_well.items()
+    )
+
+    delivery_available = True
+    first_repair = em.reconcile_calibration_volume_warning_audits()
+    second_repair = em.reconcile_calibration_volume_warning_audits()
+    assert first_repair["status"] == second_repair["status"] == "recorded"
+
+    audit_rows = ExperimentAuditReader(
+        audit_path=em.experiment_audit_file_path
+    ).read_rows()
+    warning_rows = [
+        row
+        for row in audit_rows
+        if row.event_type == "calibration_volume_tolerance_exceeded"
+    ]
+    assert len(warning_rows) == 1
+    sidecar = load_execution_calibrations(em.execution_calibrations_file_path)
+    assert list(sidecar.volume_warning_audits) == [
+        result["volume_warning_audit_event_id"]
+    ]
+    audit_row = warning_rows[0]
+    assert audit_row.is_valid is True
+    assert audit_row.level == "warning"
+    details = audit_row.event["details"]
+    assert details["volume_warning"] == warning
+    assert details["stock_id"] == calibrated.stock_id
+    assert details["calibration_record_id"] is not None
+    assert details["result_id"] == "two-stock-stream-warning-result"
+    assert details["plan_id"] == revised.plan_id
+    reused = em.apply_droplet_volume_for_option(
+        "Signal",
+        None,
+        140.0,
+        applied_calibration={
+            "stock_id": calibrated.stock_id,
+            "printer_head": SimpleNamespace(
+                printer_head_id="two-stock-stream-warning-head"
+            ),
+            "measured_volume_nL": 140.0,
+            "pw_us": 1200,
+            "pressure_psi": 0.8,
+            "run_id": "two-stock-stream-warning",
+            "result_id": "two-stock-stream-warning-result",
+            "result_sha256": "a" * 64,
+            "process_run_id": "two-stock-stream-warning-process",
+            "phase": "synthetic_characterization",
+            "original_printing_mode": "droplet",
+            "applied_printing_mode": "stream",
+            "printing_mode": "stream",
+        },
+        printing_mode="stream",
+    )
+
+    assert reused["execution_plan_status"] == "reused"
+    assert reused["execution_plan_revision"] == revised.plan_revision
+    assert reused["volume_warning_audit_status"] == "recorded"
+    assert reused["volume_warning_audit_event_id"] == result[
+        "volume_warning_audit_event_id"
+    ]
+    repaired_warning_rows = [
+        row
+        for row in ExperimentAuditReader(
+            audit_path=em.experiment_audit_file_path
+        ).read_rows()
+        if row.event_type == "calibration_volume_tolerance_exceeded"
+    ]
+    assert len(repaired_warning_rows) == 1
+    assert len(
+        load_execution_calibrations(
+            em.execution_calibrations_file_path
+        ).volume_warning_audits
+    ) == 1
+
+
+    assert details["plan_revision"] == revised.plan_revision
+
+
+
+@pytest.mark.parametrize("blocking_role", ["companion", "fill"])
+def test_two_stock_calibration_application_blocks_affected_stock_progress(
+    experiment_model_factory,
+    blocking_role,
+):
+    model = experiment_model_factory()
+    em = _configure_calibratable_two_stock_execution(model)
+    active = em.lock_execution_plan("printing_started")
+    signal_stocks = sorted(
+        (stock for stock in active.stocks if stock.factor_name == "Signal"),
+        key=lambda stock: stock.concentration,
+        reverse=True,
+    )
+    calibrated, companion = signal_stocks
+    fill_stock = next(
+        stock
+        for stock in active.stocks
+        if stock.factor_name == em.get_fill_reagent_name() and stock.units == "--"
+    )
+    blocking_stock = companion if blocking_role == "companion" else fill_stock
+    progress = json.loads(Path(em.progress_file_path).read_text(encoding="utf-8"))
+    values = progress["added_droplets"][blocking_stock.stock_id]
+    target_index = next(index for index, value in enumerate(values) if value is not None)
+    values[target_index] = 1
+    Path(em.progress_file_path).write_text(
+        serialize_execution_progress(progress),
+        encoding="utf-8",
+    )
+    em.read_progress_file(em.progress_file_path)
+
+    eligibility = em.get_calibration_application_eligibility(
+        stock_id=calibrated.stock_id
+    )
+
+    assert eligibility["ok"] is False
+    assert eligibility["code"] == "affected_stock_progress"
+    assert blocking_stock.stock_id in eligibility["affected_stock_ids"]
+    assert eligibility["affected_stock_progress"][blocking_stock.stock_id] == 1
 
 
 @pytest.mark.parametrize("activate", [False, True])
@@ -669,6 +1252,15 @@ def test_lock_and_calibration_revision_preserve_design_and_allow_tolerance_overr
         2559.9845212965747
     )
     assert max(well.expected_printed_volume_nL for well in calibrated.wells) > 2550.0
+    warning = result["volume_warning"]
+    assert warning["code"] == "calibration_volume_tolerance_exceeded"
+    assert warning["warning_threshold_nL"] == pytest.approx(2550.0)
+    assert warning["max_total_volume_nL"] == pytest.approx(2559.9845212965747)
+    assert warning["affected_row_count"] > 0
+    assert any(
+        row["exceeds_final_reaction_volume"]
+        for row in warning["affected_rows"]
+    )
     assert design_path.read_bytes() == design_bytes
     history = validate_revision_history(
         em.execution_plan_revisions_dir_path,
@@ -742,6 +1334,7 @@ def test_lock_and_calibration_revision_preserve_design_and_allow_tolerance_overr
     )
     assert retry["status"] == "reused"
     assert retry["plan"].plan_revision == 3
+    assert retry["volume_warning"] == warning
     assert revision_bytes == {
         path.name: path.read_bytes()
         for path in Path(em.execution_plan_revisions_dir_path).glob("revision_*.json")
@@ -1544,6 +2137,74 @@ def test_sparse_explicit_uploaded_design_fill_preview_matches_committed_revision
         em.experiment_dir_path,
     )
     assert reloaded.get_execution_plan_snapshot() == calibrated
+
+def test_fill_calibration_above_final_volume_warns_without_blocking_apply(
+    experiment_model_factory,
+):
+    model = experiment_model_factory()
+    em = model.experiment_model
+    _configure_explicit_uploaded_design(em)
+    em.set_metadata(printed_volume_tolerance_nL=0.0)
+    em.generate_experiment()
+    em.save_experiment()
+    design_before = Path(em.experiment_file_path).read_bytes()
+
+    Model.load_experiment_from_model(
+        model,
+        load_progress=False,
+        finalize_execution_plan=True,
+    )
+    prepared = load_execution_plan(em.execution_plan_file_path)
+    fill_stock = next(
+        stock
+        for stock in prepared.stocks
+        if stock.factor_name == em.get_fill_reagent_name() and stock.units == "--"
+    )
+
+    preview = em.preview_fill_requantized(250.0)
+
+    assert preview["ok"] is True
+    warning = preview["volume_warning"]
+    assert warning["code"] == "calibration_volume_tolerance_exceeded"
+    assert warning["warning_threshold_nL"] == pytest.approx(500.0)
+    assert warning["affected_row_count"] > 0
+    assert all(
+        row["exceeds_final_reaction_volume"]
+        for row in warning["affected_rows"]
+    )
+
+    result = em.apply_fill_droplet_volume(
+        250.0,
+        printing_mode="stream",
+        applied_calibration={
+            "printer_head": SimpleNamespace(
+                printer_head_id="fill-volume-warning-head"
+            ),
+            "measured_volume_nL": 250.0,
+            "pw_us": 1400,
+            "pressure_psi": 0.9,
+            "run_id": "fill-volume-warning",
+            "phase": "synthetic_characterization",
+            "source_row_fingerprint": ("fill-volume-warning", 250.0),
+            "original_printing_mode": "droplet",
+            "applied_printing_mode": "stream",
+        },
+    )
+
+    revised = load_execution_plan(em.execution_plan_file_path)
+    revised_fill = next(
+        stock for stock in revised.stocks if stock.stock_id == fill_stock.stock_id
+    )
+    assert result["volume_warning"] == warning
+    assert revised_fill.effective_volume_nL == pytest.approx(250.0)
+    assert revised_fill.printing_mode == "stream"
+    assert any(
+        well.expected_printed_volume_nL
+        > revised.volume_basis.final_reaction_volume_nL
+        for well in revised.wells
+    )
+    assert Path(em.experiment_file_path).read_bytes() == design_before
+
 
 
 def test_initialize_and_duplicate_do_not_create_execution_plan(
