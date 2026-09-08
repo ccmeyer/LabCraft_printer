@@ -1615,7 +1615,7 @@ def test_stock_warning_and_general_status_coexist_in_information_panel(qapp):
     status_message = "The current design needs attention before it can be generated."
     stock_warning = "Showing the last valid stock solutions; current inputs are invalid."
 
-    dialog._set_status(status_message)
+    dialog._set_status(status_message, severity="error")
     dialog._set_stock_table_stale(True, stock_warning)
     qapp.processEvents()
 
@@ -1687,8 +1687,9 @@ def test_design_information_severity_and_tip_states(qapp):
 
     dialog._set_stock_table_stale(True, "Stock solutions are stale.")
     dialog._set_status("Update completed.", severity="success")
-    assert dialog.status_heading_lbl.text() == "Error"
-    assert "border:2px solid #8a0303" in dialog.design_information_panel.styleSheet()
+    assert dialog.status_heading_lbl.text() == "Status"
+    assert "border:2px solid #8c8c8c" in dialog.design_information_panel.styleSheet()
+    assert dialog.stock_table.styleSheet() == ""
 
     dialog._set_stock_table_stale(False, "")
     assert dialog.status_heading_lbl.text() == "Ready"

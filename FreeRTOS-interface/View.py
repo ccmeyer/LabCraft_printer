@@ -12491,7 +12491,7 @@ class _OptimizationProgress(QWidget):
         self.label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         layout.addWidget(self.label, 1)
         self.bar = QtWidgets.QProgressBar(self)
-        self.bar.setRange(0, 0)
+        self.bar.setRange(0, 1)
         self.bar.setTextVisible(False)
         self.bar.setFixedWidth(180)
         self.bar.setFixedHeight(self.label.fontMetrics().lineSpacing())
@@ -12510,14 +12510,23 @@ class _OptimizationProgress(QWidget):
     def reset(self):
         self.set_status("Changes pending." if getattr(self.parent(), "_design_optimization_dirty", False)
                         else "Ready.")
-        self.bar.setRange(0, 1)
-        self.bar.setValue(0)
+        self.stop_activity()
         self.cancel_button.setEnabled(False)
 
     def start(self):
+        self.stop_activity()
         self.set_status("Updating…")
-        self.bar.setRange(0, 0)
         self.cancel_button.setEnabled(True)
+
+    def show_activity(self):
+        if self.bar.maximum() != 0:
+            self.bar.setRange(0, 0)
+            self.label.setStyleSheet("color:#1e64b4;")
+
+    def stop_activity(self):
+        self.bar.setRange(0, 1)
+        self.bar.setValue(0)
+        self.label.setStyleSheet("")
 
 
 class _DesignEditGuard(QtCore.QObject):
@@ -12672,10 +12681,16 @@ class _AsyncOptimizationUi:
         if self.finished or not isValid(self.progress):
             return
         if self.canceling:
+            self.progress.stop_activity()
             self.progress.set_status("Canceling…")
             return
         text = self.phase_text
         elapsed = time.monotonic() - self.started
+        # Fast updates remain quiet. This gates presentation only; the worker,
+        # Cancel and action interlocks have all been active since submission.
+        if elapsed < 0.5:
+            return
+        self.progress.show_activity()
         if elapsed >= 1.0:
             seconds = int(elapsed)
             detail = f"{seconds:,} {'second' if seconds == 1 else 'seconds'} elapsed"
@@ -12717,6 +12732,7 @@ class _AsyncOptimizationUi:
         self.finished = True
         self.timer.stop()
         self.timer.deleteLater()
+        self.progress.stop_activity()
         self.progress.cancel_button.setEnabled(False)
         self.progress.set_status("Finishing display update…")
         manager = optimization_job_manager()
@@ -12725,7 +12741,11 @@ class _AsyncOptimizationUi:
             result = self.completed(outcome)
         except Exception as exc:
             result = (False, {"reason": str(exc), "status": "failed"})
-            self.status(str(exc))
+            error_status = getattr(self.owner, "_set_status", None)
+            if error_status is not None:
+                error_status(str(exc), severity="error")
+            else:
+                self.status(str(exc))
         # Let Qt paint the completed table before enabling its child controls.
         # Combining both style/layout passes can exceed one UI frame on the Pi.
         QTimer.singleShot(1, lambda: self._restore_after_publication(result, manager))
@@ -15821,7 +15841,7 @@ class ExperimentDesignDialog(QDialog):
             if getattr(self, "_design_optimization_dirty", False):
                 self._set_status(
                     "Experiment changes are pending. Press Recalculate Stocks to apply them.",
-                    severity="warning",
+                    severity="info",
                 )
             self._update_run_button_dirty_state()
             return
@@ -15988,7 +16008,7 @@ class ExperimentDesignDialog(QDialog):
             if getattr(self, "_design_optimization_dirty", False):
                 self._set_status(
                     "Experiment changes are pending. Press Recalculate Stocks to apply them.",
-                    severity="warning",
+                    severity="info",
                 )
             self._update_run_button_dirty_state()
             return
@@ -16641,12 +16661,15 @@ class ExperimentDesignDialog(QDialog):
             imported_well_ids=self.model.extract_uploaded_design_well_ids_from_dataframe(df) or [],
         )
         self._set_stock_table_stale(True, "Applying imported formulations…")
+        self._set_status("Applying imported formulations…")
 
         def finished(outcome):
             if outcome.status != "succeeded" or not outcome.result.get("best"):
                 self._mark_design_optimization_dirty()
                 message = outcome.error or outcome.result.get("reason") or "Import canceled. Previous design retained."
-                self._set_status(message, severity="warning")
+                self._set_status(message, severity=(
+                    "info" if outcome.status in ("cancelled", "superseded") else "error"
+                ))
                 return False, {"reason": message, "status": outcome.status}
             self._reset_auto_update_session()
             self._uploaded_design_active = True
@@ -17423,11 +17446,6 @@ class ExperimentDesignDialog(QDialog):
         heading = getattr(self, "stock_warning_heading_lbl", None)
         if heading is not None:
             heading.setVisible(bool(stale and message))
-        if hasattr(self, "stock_table") and self.stock_table is not None:
-            self.stock_table.setStyleSheet(
-                "QTableWidget { border:1px solid #8a0303; }"
-                if stale else ""
-            )
         self._refresh_design_information_style()
         
     def _rebuild_model_from_table(self):
@@ -18060,6 +18078,7 @@ class ExperimentDesignDialog(QDialog):
             "previous_result": copy.deepcopy(getattr(self, "_last_optimization_result", None)),
         }
         self._set_stock_table_stale(True, "Updating reactions and stock solutions…")
+        self._set_status("Updating reactions and stock solutions…")
 
         def finished(outcome):
             res = outcome.result
@@ -18075,7 +18094,9 @@ class ExperimentDesignDialog(QDialog):
                         if outcome.status == "superseded" else
                         "Optimization canceled. Previous results retained."
                     )
-                    self._set_status(message, severity="warning")
+                    self._set_status(message, severity=(
+                        "info" if outcome.status in ("cancelled", "superseded") else "error"
+                    ))
                     return False, {"reason": message, "status": outcome.status}
                 ok, res = self._complete_design_optimization_flow(
                     res, size_estimate=size_estimate,
@@ -19547,13 +19568,26 @@ class ExperimentDesignDialog(QDialog):
         self.accept()
 
     def _effective_status_severity(self) -> str:
-        if bool(getattr(self, "_stock_table_stale_active", False)):
-            return "error"
         severity = str(getattr(self, "_status_severity", "info") or "info")
+        if severity == "success" and getattr(self, "_stock_table_stale_active", False):
+            return "info"  # Old results are not ready for the current inputs.
         return severity if severity in self.STATUS_SEVERITIES else "info"
 
     def _refresh_design_information_style(self):
         severity = self._effective_status_severity()
+        table = getattr(self, "stock_table", None)
+        if table is not None:
+            table_style = ("QTableWidget { border:1px solid #8a0303; }"
+                           if severity == "error" and getattr(self, "_stock_table_stale_active", False)
+                           else "")
+            if table.styleSheet() != table_style:
+                table.setStyleSheet(table_style)
+        stock_heading = getattr(self, "stock_warning_heading_lbl", None)
+        if stock_heading is not None:
+            stock_heading.setText("Stock Solution Warning" if severity == "error" else "Stock Results")
+            stock_heading.setStyleSheet(
+                "color:#8a0303; font-weight:600;" if severity == "error" else "font-weight:600;"
+            )
         border_color = {
             "error": "#8a0303",
             "warning": "#c58a00",

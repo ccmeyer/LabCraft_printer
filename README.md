@@ -116,7 +116,12 @@ row; the full status is also available in a tooltip. Idle controls retain their
 space, preventing layout movement as jobs start and stop. The editor uses more
 available desktop height; its left settings and design tools scroll when needed,
 while Save/Finalize and the other experiment actions stay visible below them.
-Expanded Advanced Settings never compress the buttons. After one second the footer adds elapsed time and phase-specific activity
+Expanded Advanced Settings never compress the buttons. Updating text and Cancel
+are available immediately; animation and blue footer text appear only after
+500 ms, so quick updates stay quiet. The Design Information panel stays neutral
+during normal processing: out-of-date results alone are not an error. Actual
+validation or computation failures appear immediately in red. After one second
+the footer adds elapsed time and phase-specific activity
 counts, refreshed twice per second. Automatic stock calculations reaching three
 seconds pause future automatic updates for that design and explain how to use
 **Recalculate Stocks**. Re-enabling Auto-update honors that choice for the rest

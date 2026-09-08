@@ -266,8 +266,15 @@ and finalize retain their input locks, validation and continuations. Cancel or
 close consumes the pending automatic request; it does not restart without
 another edit or explicit request. Turning Auto off prevents pending replacements.
 
-A permanently allocated footer in the editor and import wizard shows the current phase on its next half-second
-refresh. After one second it also shows total elapsed job time and, where
+A permanently allocated footer in the editor and import wizard shows quiet
+"Updating" text immediately. On the first half-second refresh at or after 500 ms,
+it shows the current phase in blue and starts the progress animation. Jobs that
+finish sooner never animate; completion and cancellation suppress late busy
+feedback. Cancel and operation guards take effect immediately, independently
+of this presentation delay. Normal processing leaves Design Information and
+the stock table neutral. Result freshness does not imply an error; actual input,
+computation, or publication errors are shown immediately in red.
+After one second the footer also shows total elapsed job time and, where
 available, one activity count: single-stock candidates considered, stock pairs
 considered, candidates filtered, complete allocations evaluated, or reactions
 generated. Search counters describe work in the current phase, not percent
