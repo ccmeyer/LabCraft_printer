@@ -14501,8 +14501,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         # losing the operator's selection during a runtime recovery.
         self._refresh_bridge_preview_from_selection()
 
-    def _apply_calibration_with_retry(self, callback):
+    def _apply_calibration_with_retry(self, callback, *, source_experiment):
         """Offer one retry for I/O failure after guarded rollback; never loop."""
+        if self.model.experiment_model is not source_experiment:
+            raise RuntimeError("The experiment changed. Review its preview before applying.")
         _, selected = self._selected_summary_row()
         fingerprint = self._summary_row_fingerprint(selected) if selected else None
         try:
@@ -14524,6 +14526,8 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.Retry | QtWidgets.QMessageBox.Cancel, QtWidgets.QMessageBox.Cancel)
             if answer != QtWidgets.QMessageBox.Retry:
                 raise
+            if self.model.experiment_model is not source_experiment:
+                raise RuntimeError("The experiment changed. Review its preview before applying.") from exc
             _, current = self._selected_summary_row()
             if not current or self._summary_row_fingerprint(current) != fingerprint:
                 raise RuntimeError("The selected measurement changed. Review its preview before applying.") from exc
@@ -14693,7 +14697,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                     write_keys_if_assigned=True,
                     applied_calibration=applied_calibration,
                     printing_mode=applied_mode,
-                ))
+                ), source_experiment=em)
             except Exception as e:
                 self._handle_calibration_apply_error(e, payload)
                 return
@@ -14838,7 +14842,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 write_keys_if_assigned=True,
                 applied_calibration=applied_calibration,
                 printing_mode=applied_mode,
-            ))
+            ), source_experiment=em)
         except NotImplementedError as e:
             QtWidgets.QMessageBox.warning(self, "Apply failed", str(e))
             return

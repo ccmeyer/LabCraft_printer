@@ -189,3 +189,32 @@ def test_activation_never_discards_unsaved_live_prints(experiment_model_factory)
         em.calibration_activation_context()
     assert _files(em) == files
     assert reagent.added_droplets == 1
+
+
+def test_retry_cannot_apply_to_experiment_replaced_during_prompt(
+    experiment_model_factory, monkeypatch, qapp, tmp_path,
+):
+    original = _configure(experiment_model_factory())
+    replacement = _configure(experiment_model_factory())
+    _apply(original, _stock(original, "Signal"), 10.0)
+    with _dialog(original, monkeypatch, qapp, tmp_path) as dialog:
+        before = _files(original), _files(replacement)
+        write = original._write_execution_plan_exports
+        attempts = []
+
+        def fail_once(*args, **kwargs):
+            attempts.append(1)
+            write(*args, **kwargs)
+            if len(attempts) == 1:
+                raise OSError("injected save failure")
+
+        def switch_experiment(*args, **kwargs):
+            dialog.model.experiment_model = replacement
+            return QtWidgets.QMessageBox.Retry
+
+        monkeypatch.setattr(original, "_write_execution_plan_exports", fail_once)
+        monkeypatch.setattr(QtWidgets.QMessageBox, "question", switch_experiment)
+        dialog._apply_previewed_droplet_volume()
+        assert attempts == [1]
+        assert (_files(original), _files(replacement)) == before
+        assert "changed" in dialog.bridge_status_label.text().lower()
