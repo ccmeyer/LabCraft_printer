@@ -12482,33 +12482,40 @@ class _OptimizationProgress(QWidget):
     def __init__(self, owner):
         super().__init__(owner)
         self.setObjectName("optimization_progress")
-        layout = QVBoxLayout(self)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(8)
         self.label = QLabel("Ready.", self)
-        self.label.setFixedHeight(self.label.fontMetrics().lineSpacing() * 2)
+        self.label.setTextFormat(Qt.PlainText)
+        self.label.setWordWrap(False)
         self.label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        layout.addWidget(self.label)
-        actions = QHBoxLayout()
+        layout.addWidget(self.label, 1)
         self.bar = QtWidgets.QProgressBar(self)
         self.bar.setRange(0, 0)
         self.bar.setTextVisible(False)
-        actions.addWidget(self.bar, 1)
+        self.bar.setFixedWidth(180)
+        self.bar.setFixedHeight(self.label.fontMetrics().lineSpacing())
+        layout.addWidget(self.bar)
         self.cancel_button = QPushButton("Cancel calculation", self)
         self.cancel_button.setAutoDefault(False)
-        actions.addWidget(self.cancel_button)
-        layout.addLayout(actions)
+        layout.addWidget(self.cancel_button)
         owner._optimization_progress_layout.addWidget(self)
         self.setFixedHeight(self.sizeHint().height())
         self.reset()
 
+    def set_status(self, text):
+        self.label.setText(text.replace("\n", " · "))
+        self.label.setToolTip(text)
+
     def reset(self):
-        self.label.setText("Changes pending." if getattr(self.parent(), "_design_optimization_dirty", False)
-                           else "Ready.")
+        self.set_status("Changes pending." if getattr(self.parent(), "_design_optimization_dirty", False)
+                        else "Ready.")
         self.bar.setRange(0, 1)
         self.bar.setValue(0)
         self.cancel_button.setEnabled(False)
 
     def start(self):
-        self.label.setText("Updating…")
+        self.set_status("Updating…")
         self.bar.setRange(0, 0)
         self.cancel_button.setEnabled(True)
 
@@ -12665,7 +12672,7 @@ class _AsyncOptimizationUi:
         if self.finished or not isValid(self.progress):
             return
         if self.canceling:
-            self.progress.label.setText("Canceling…")
+            self.progress.set_status("Canceling…")
             return
         text = self.phase_text
         elapsed = time.monotonic() - self.started
@@ -12678,7 +12685,7 @@ class _AsyncOptimizationUi:
                 counts = f"{count:,}" if total is None else f"{count:,} of {total:,}"
                 detail = f"{counts} {label} · {detail}"
             text += "\n" + detail
-        self.progress.label.setText(text)
+        self.progress.set_status(text)
 
     def cancel(self):
         self.superseded = False
@@ -12711,7 +12718,7 @@ class _AsyncOptimizationUi:
         self.timer.stop()
         self.timer.deleteLater()
         self.progress.cancel_button.setEnabled(False)
-        self.progress.label.setText("Finishing display update…")
+        self.progress.set_status("Finishing display update…")
         manager = optimization_job_manager()
         manager.begin_publication()
         try:
@@ -14230,8 +14237,11 @@ class ExperimentDesignDialog(QDialog):
         self.default_droplet_volume_nL = printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET)
 
         self.setWindowTitle("Experiment Design (v2)")
-        self.setMinimumSize(1560, 840)
-        self.resize(1760, 900)
+        # Leave room for the desktop panel and window decorations. Shorter
+        # displays scroll the settings rather than compressing their controls.
+        available_height = self.screen().availableGeometry().height() - 60
+        self.setMinimumSize(1560, min(720, available_height))
+        self.resize(1760, min(1000, available_height))
 
         self.model: ExperimentModel = model
         self.runtime_model = getattr(self.main_window, "model", None)
@@ -14366,7 +14376,17 @@ class ExperimentDesignDialog(QDialog):
         self.stock_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
 
         # ---------- Organized controls (left) ----------
-        controls_col = left
+        self.controls_scroll = QScrollArea(left_panel)
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        controls_content = QWidget(self.controls_scroll)
+        controls_col = QVBoxLayout(controls_content)
+        controls_col.setContentsMargins(0, 0, 4, 0)
+        controls_col.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize)
+        self.controls_scroll.setWidget(controls_content)
+        left.addWidget(self.controls_scroll, stretch=1)
 
         experiment_group = QGroupBox("Experiment")
         experiment_form = QFormLayout(experiment_group)
@@ -14657,6 +14677,7 @@ class ExperimentDesignDialog(QDialog):
 
         # --- Experiment lifecycle actions ---
         experiment_actions_group = QGroupBox("Experiment Actions")
+        self.experiment_actions_panel = experiment_actions_group
         experiment_actions_layout = QGridLayout(experiment_actions_group)
         experiment_actions_layout.setColumnStretch(0, 1)
         experiment_actions_layout.setColumnStretch(1, 1)
@@ -14682,7 +14703,8 @@ class ExperimentDesignDialog(QDialog):
         self.finish_btn.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
         self.finish_btn.clicked.connect(self._on_finish)
         experiment_actions_layout.addWidget(self.finish_btn, 2, 0, 1, 2)
-        controls_col.addWidget(experiment_actions_group)
+        experiment_actions_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        left.addWidget(experiment_actions_group)
 
         # Fixed-size information panel beside the stock table. Variable-length
         # messages scroll inside this panel and cannot resize the controls column.
@@ -14789,6 +14811,13 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_design_information_style()
         right.addWidget(self.stock_information_region, stretch=1)
 
+        # Reserve the scrollbar width up front, including the collapsed advanced
+        # panel's minimum width. Showing it must not clip fields horizontally.
+        controls_width = max(controls_col.itemAt(i).widget().minimumSizeHint().width()
+                             for i in range(controls_col.count()))
+        left_panel.setFixedWidth(max(
+            430, controls_width + 4 + 8 + self.controls_scroll.verticalScrollBar().sizeHint().width()
+        ))
         controls_col.addStretch(1)
 
         # ---- Auto-update bindings ----
@@ -15971,7 +16000,7 @@ class ExperimentDesignDialog(QDialog):
             if self.stock_table_status_lbl.text() != message:
                 self._set_stock_table_stale(True, message)
             if getattr(self, "_optimization_ui", None) is None:
-                self._optimization_progress.label.setText(message)
+                self._optimization_progress.set_status(message)
             return
 
         # Debounce rapid edits

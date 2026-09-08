@@ -273,9 +273,15 @@ considered, candidates filtered, complete allocations evaluated, or reactions
 generated. Search counters describe work in the current phase, not percent
 complete or a prediction of remaining time. Only reaction generation has a
 known total. A bounded shared snapshot coalesces activity; Qt refreshes the
-footer at most twice per second. Its height, label space, progress bar and Cancel
-button remain allocated when idle, so starting and stopping jobs do not move the
-window contents. It never opens or activates a separate window. Canceling remains visible until
+footer at most twice per second. Status, a short progress bar, and Cancel occupy
+one fixed-height row, with the full status available in a tooltip. Their space
+remains allocated when idle, so starting and stopping jobs do not move the
+window contents. The editor's initial height uses available desktop space up to
+1,000 logical pixels, leaving room for window decorations. Its settings and
+design tools scroll vertically rather than compress when Advanced Settings is
+expanded or the window is short. Experiment lifecycle actions, including Save
+and Finalize, stay outside that scroll area. It never opens or activates a
+separate progress window. Canceling remains visible until
 the worker's terminal outcome, and late phase updates cannot overwrite it.
 
 Automatic editor stock calculations reaching three seconds pause future

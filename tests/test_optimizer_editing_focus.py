@@ -2,13 +2,23 @@
 import threading
 
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QDialog, QLineEdit, QProgressDialog, QVBoxLayout
 
 from Model import ExperimentModel
 from OptimizationJobs import optimization_job_manager
 from tests.test_optimization_jobs import real_editor, wait_for
+
+
+@pytest.fixture(params=[1.0, 1.25])
+def layout_font(qapp, request):
+    original = qapp.font()
+    enlarged = qapp.font()
+    enlarged.setPointSizeF(original.pointSizeF() * request.param)
+    qapp.setFont(enlarged)
+    yield
+    qapp.setFont(original)
 
 
 def begin_edit(qapp, editor):
@@ -108,6 +118,85 @@ def test_progress_footer_never_changes_editor_geometry(qapp, real_editor):
     wait_for(qapp, lambda: outcomes)
     assert (editor.size(), editor.reagent_table.geometry(), footer.geometry()) == before
     assert footer.isVisible() and not footer.cancel_button.isEnabled()
+
+
+@pytest.mark.parametrize("height", [720, 900, 1000])
+@pytest.mark.parametrize("expanded", [False, True])
+def test_editor_controls_scroll_without_overlap(qapp, layout_font, real_editor, height, expanded):
+    editor = real_editor
+    editor.resize(1760, height)
+    editor.show()
+    editor.activateWindow()
+    editor.advanced_settings_toggle.setChecked(expanded)
+    qapp.processEvents()
+    scroll = editor.controls_scroll
+    content = scroll.widget()
+    # Every visible section must receive its minimum height, even when the
+    # viewport is shorter than the expanded settings.
+    sections = [content.layout().itemAt(i).widget()
+                for i in range(content.layout().count())]
+    sections = [widget for widget in sections if widget and widget.isVisible()]
+    for before, after in zip(sections, sections[1:]):
+        assert before.geometry().bottom() < after.geometry().top()
+    for widget in sections:
+        assert widget.height() >= widget.minimumSizeHint().height()
+    buttons = [editor.add_reagent_btn, editor.unique_conditions_btn,
+               editor.preview_reactions_btn, editor.run_btn]
+    for i, button in enumerate(buttons):
+        assert button.height() >= button.minimumSizeHint().height()
+        for other in buttons[i + 1:]:
+            assert not button.geometry().intersects(other.geometry())
+    if height == 720 and expanded:
+        assert scroll.verticalScrollBar().maximum() > 0
+    assert scroll.horizontalScrollBar().maximum() == 0
+    actions = editor.experiment_actions_panel
+    before = (editor.size(), scroll.geometry(), actions.geometry(),
+              editor._optimization_progress.geometry())
+    editor.auto_update_chk.setFocus()
+    wait_for(qapp, editor.auto_update_chk.hasFocus)
+    QTest.keyClick(editor.auto_update_chk, Qt.Key_Tab)
+    wait_for(qapp, editor.run_btn.hasFocus)
+    rect = QRect(editor.run_btn.mapTo(scroll.viewport(), QPoint()), editor.run_btn.size())
+    assert scroll.viewport().rect().contains(rect)
+    for target in (editor.run_btn, editor.exp_name_edit):
+        scroll.ensureWidgetVisible(target)
+        qapp.processEvents()
+        rect = QRect(target.mapTo(scroll.viewport(), QPoint()), target.size())
+        assert scroll.viewport().rect().contains(rect)
+    assert actions.geometry().top() > scroll.geometry().bottom()
+    for button in (editor.save_btn, editor.finish_btn):
+        rect = QRect(button.mapTo(editor, QPoint()), button.size())
+        assert editor.rect().contains(rect)
+    editor._optimization_progress.start()
+    editor._optimization_progress.set_status("Preparing candidates\n2,400 stock pairs considered · 3 seconds elapsed")
+    qapp.processEvents()
+    assert (editor.size(), scroll.geometry(), actions.geometry(),
+            editor._optimization_progress.geometry()) == before
+
+
+def test_editor_initial_height_leaves_desktop_space(qapp, real_editor):
+    available_height = real_editor.screen().availableGeometry().height()
+    assert real_editor.height() <= available_height - 60
+    assert real_editor.height() == min(1000, available_height - 60)
+
+
+def test_footer_is_one_compact_row_with_full_status_tooltip(qapp, real_editor):
+    editor = real_editor
+    editor.show()
+    qapp.processEvents()
+    footer = editor._optimization_progress
+    assert 160 <= footer.bar.width() <= 200
+    assert footer.height() <= footer.cancel_button.sizeHint().height() + 12
+    centers = [widget.geometry().center().y() for widget in
+               (footer.label, footer.bar, footer.cancel_button)]
+    assert max(centers) - min(centers) <= 2
+    before = footer.geometry()
+    message = "Preparing candidates\n" + "Long calculation detail " * 100
+    footer.set_status(message)
+    qapp.processEvents()
+    assert footer.geometry() == before
+    assert footer.label.toolTip() == message
+    assert "\n" not in footer.label.text()
 
 
 def test_import_footer_is_reserved_before_calculation(qapp, real_editor):

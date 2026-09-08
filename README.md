@@ -111,8 +111,12 @@ Stocks** commits the current inputs explicitly. Pending edits mark stock results
 as out of date. Turning automatic updates off permits explicit recalculation only.
 
 Calculation progress occupies a permanently reserved footer in the editor and
-import wizard. Its fixed height and idle controls prevent layout movement as
-jobs start and stop. After one second it adds elapsed time and phase-specific activity
+import wizard. Status, a short progress bar, and Cancel share one fixed-height
+row; the full status is also available in a tooltip. Idle controls retain their
+space, preventing layout movement as jobs start and stop. The editor uses more
+available desktop height; its left settings and design tools scroll when needed,
+while Save/Finalize and the other experiment actions stay visible below them.
+Expanded Advanced Settings never compress the buttons. After one second the footer adds elapsed time and phase-specific activity
 counts, refreshed twice per second. Automatic stock calculations reaching three
 seconds pause future automatic updates for that design and explain how to use
 **Recalculate Stocks**. Re-enabling Auto-update honors that choice for the rest
