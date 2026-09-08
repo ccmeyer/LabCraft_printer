@@ -3,6 +3,7 @@ import numpy as np
 
 import copy
 import hashlib
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from math import gcd
 from numbers import Integral, Real
@@ -10580,6 +10581,76 @@ class ExperimentModel(QObject):
         )
 
 
+    def _calibration_execution_context(self) -> dict | None:
+        """Bind a calculation to both durable and live execution progress."""
+        plan = self.get_execution_plan_snapshot()
+        if plan is None or self.get_execution_plan_source() == "legacy_reconstruction":
+            return None
+        self._validate_runtime_matches_execution_plan(plan)
+        session = getattr(self, "_active_authoritative_execution_session", None)
+        if session is not None:
+            session = self._guard_authoritative_runtime_session()
+        elif load_execution_plan(self.execution_plan_file_path) != plan:
+            raise RuntimeError("The durable execution plan changed before calibration.")
+        with open(self.progress_file_path, encoding="utf-8") as handle:
+            persisted = decode_execution_progress(plan, json.load(handle)).progress_wells
+        live = self._well_entries_from_progress_payload(self._build_progress_payload_from_runtime())
+        for well in plan.wells:
+            for dispense in well.dispenses:
+                sid = dispense.stock_id
+                actual = live.get(well.well_id, {}).get("reagents", {}).get(sid, {})
+                saved = persisted[well.well_id]["reagents"].get(sid, {})
+                if (int(actual.get("target_droplets", 0)) != dispense.target_dispenses
+                        or int(actual.get("added_droplets", 0)) != int(saved.get("added_droplets", 0))):
+                    raise RuntimeError("Live execution progress differs from the durable checkpoint.")
+        if session is not None and any(intent.status == "pending" for intent in session.resume.intents):
+            raise RuntimeError("Calibration cannot change an execution with pending print commands.")
+        return {
+            "plan": plan.to_dict(),
+            "progress": copy.deepcopy(persisted),
+            "live_progress": copy.deepcopy(live),
+            "resume": session.resume.to_dict() if session is not None else None,
+        }
+
+    def validate_calibration_execution_context(self, expected) -> None:
+        if expected is not None and expected != self._calibration_execution_context():
+            raise RuntimeError(
+                "Execution progress or plan changed after calibration preview; refresh the preview."
+            )
+
+    @staticmethod
+    def _nearest_execution_pair(target, deltas, volumes, current, fixed_index=None):
+        """Minimize concentration error, then volume, count churn and counts.
+
+        For a fixed leg, only floor/ceil of the nonnegative residual can win.
+        Joint search enumerates the coarser leg and rounds the finer leg.
+        Zero is a candidate; target separation is a diagnostic, not a guard.
+        """
+        if fixed_index is not None:
+            outer = fixed_index
+            outer_counts = (int(current[outer]),)
+        else:
+            outer = 0 if deltas[0] >= deltas[1] else 1
+            # Larger contributions cannot beat rounding the finer leg alone.
+            limit = target + min(target, 0.5 * min(deltas))
+            outer_counts = range(max(0, int(math.floor(limit / deltas[outer]))) + 1)
+        inner = 1 - outer
+        best = None
+        evaluations = 0
+        for count in outer_counts:
+            residual = max(0.0, (target - count * deltas[outer]) / deltas[inner])
+            for other in {int(math.floor(residual)), int(math.ceil(residual))}:
+                evaluations += 1
+                pair = [0, 0]
+                pair[outer], pair[inner] = count, other
+                achieved = sum(pair[i] * deltas[i] for i in range(2))
+                rank = (abs(achieved - target),
+                        sum(pair[i] * volumes[i] for i in range(2)),
+                        sum(abs(pair[i] - current[i]) for i in range(2)), tuple(pair))
+                if best is None or rank < best:
+                    best = rank
+        return best[-1], evaluations
+
     def _requantize_fixed_two_stock_group(
         self,
         key: tuple[str, Optional[str]],
@@ -10663,6 +10734,12 @@ class ExperimentModel(QObject):
         except Exception as exc:
             return {"ok": False, "code": "row_context_invalid", "reason": str(exc)}
 
+        execution_context = self._calibration_execution_context() if authoritative_execution else None
+        fixed_companion = bool(authoritative_execution and
+                               self._added_droplets_for_stock(stock_ids[companion_index]) > 0)
+        if authoritative_execution and self._added_droplets_for_stock(calibrated_stock_id) > 0:
+            return {"ok": False, "code": "printed_progress",
+                    "reason": "The calibrated stock has already dispensed droplets."}
         if authoritative_execution:
             target_values = {
                 float(row["reaction"][key])
@@ -10776,6 +10853,22 @@ class ExperimentModel(QObject):
                     "counts": tuple(int(value) for value in current_counts),
                 }
             )
+
+            if authoritative_execution:
+                counts, evaluations = self._nearest_execution_pair(
+                    target_add, deltas, volumes, current_counts,
+                    companion_index if fixed_companion else None,
+                )
+                pair_evaluations += evaluations
+                achieved = sum(counts[i] * deltas[i] for i in range(2))
+                candidates_by_target.append([{
+                    "counts": counts, "achieved_adjusted": achieved,
+                    "achieved_key": self._normalize_target_key(achieved),
+                    "abs_error": abs(achieved - target_add),
+                    "printed_volume_nL": sum(counts[i] * volumes[i] for i in range(2)),
+                    "churn": sum(abs(counts[i] - current_counts[i]) for i in range(2)),
+                }])
+                continue
 
             if target_add <= 1e-12:
                 candidates_by_target.append([
@@ -10908,7 +11001,7 @@ class ExperimentModel(QObject):
                 best_state = None
                 for previous in states:
                     previous_candidate = previous["candidate"]
-                    if candidate["achieved_adjusted"] < previous_candidate["achieved_adjusted"] - 1e-12:
+                    if not authoritative_execution and candidate["achieved_adjusted"] < previous_candidate["achieved_adjusted"] - 1e-12:
                         continue
                     collision = int(
                         candidate["achieved_key"] == previous_candidate["achieved_key"]
@@ -10944,7 +11037,14 @@ class ExperimentModel(QObject):
             if previous == current
         )
         selected_loss = int(selected_state["rank"][0])
-        if selected_loss > current_loss:
+        if authoritative_execution:
+            current_loss = len(current_achieved_keys) - len(set(current_achieved_keys))
+            achieved_keys = {
+                self._normalize_target_key(sum(counts[i] * deltas[i] for i in range(2)))
+                for counts in selected_counts
+            }
+            selected_loss = len(selected_counts) - len(achieved_keys)
+        if not authoritative_execution and selected_loss > current_loss:
             return {
                 "ok": False,
                 "code": "distinct_level_loss_increased",
@@ -10973,8 +11073,8 @@ class ExperimentModel(QObject):
                 "starting": float(starting),
                 "achieved_final": float(achieved_final),
                 "achieved_adjusted": float(achieved_add),
-                "error": float(achieved_add - target_add),
-                "abs_error": float(abs(achieved_add - target_add)),
+                "error": float(achieved_final - target_final),
+                "abs_error": float(abs(achieved_final - target_final)),
                 "drops": tuple(int(value) for value in counts),
                 "old_drops": tuple(int(value) for value in current_counts),
                 "printed_nL_new": float(pair_volume),
@@ -11004,6 +11104,12 @@ class ExperimentModel(QObject):
                     "code": "missing_fill_stock",
                     "reason": "The calibrated mapping would require a fill stock that is unavailable.",
                 }
+            if authoritative_execution and fill_candidates:
+                fill_id = fill_candidates[0].stock_id
+                progress_row = self._well_entries_from_progress_payload(execution_context["progress"]).get(run_row["well_id"], {})
+                if progress_row.get("reagents", {}).get(fill_id, {}).get("added_droplets", 0) > 0:
+                    well = execution_plan.wells[int(run_row["index"])]
+                    fill_count = next((d.target_dispenses for d in well.dispenses if d.stock_id == fill_id), 0)
             total = nonfill + fill_count * fill_volume
             reaction_id = (
                 run_row.get("reaction_id")
@@ -11057,6 +11163,9 @@ class ExperimentModel(QObject):
             "pair_evaluations": int(pair_evaluations),
             "volume_warning": volume_warning,
             "source_plan": plan,
+            "execution_context": execution_context,
+            "requantization_mode": "constrained" if fixed_companion else "joint",
+            "volume_rows": volume_rows,
         }
 
 
@@ -13101,6 +13210,8 @@ class ExperimentModel(QObject):
                     if len(matching) == 2
                     else None
                 ),
+                "requantization_mode": result.get("requantization_mode"),
+                "achieved_rows": copy.deepcopy(result.get("achieved_rows") or []),
                 "changed_target_count": result.get("changed_target_count"),
                 "volume_warning": copy.deepcopy(result.get("volume_warning")),
                 "volume_warning_audit_event_id": result.get("volume_warning_audit_event_id"),
@@ -15124,6 +15235,7 @@ class ExperimentModel(QObject):
         *,
         calibration_document: ExecutionCalibrationDocument,
         design_payload: dict,
+        execution_context=None,
     ) -> str:
         """Append one guarded calibration successor without rereading its prefix."""
         self._last_authoritative_calibration_transition = None
@@ -15181,6 +15293,8 @@ class ExperimentModel(QObject):
                 "progress.json",
                 "execution_resume.json",
             }
+            self.validate_calibration_execution_context(execution_context)
+            self._execution_pair_write_started = True
             write_started = True
             self._write_authoritative_calibration_document(calibration_document)
             self._persist_authoritative_calibration_immutable_revision(candidate_plan)
@@ -15779,23 +15893,9 @@ class ExperimentModel(QObject):
         blocking_progress = {
             stock_id: count
             for stock_id, count in affected_progress.items()
-            if int(count) > 0
+            if stock_id == resolved_stock_id and int(count) > 0
         }
         if blocking_progress:
-            if len(related_stocks) == 2:
-                blocking_names = ", ".join(
-                    f"{stock_id} ({count} drops)"
-                    for stock_id, count in blocking_progress.items()
-                )
-                return _result(
-                    False,
-                    "affected_stock_progress",
-                    "Two-stock calibration cannot change this plan because an affected "
-                    f"stock has already dispensed: {blocking_names}.",
-                    affected_stock_ids=affected_stock_ids,
-                    affected_stock_progress=affected_progress,
-                    related_stock_ids=[stock.stock_id for stock in related_stocks],
-                )
             return _result(
                 False,
                 "printed_progress",
@@ -17309,6 +17409,9 @@ class ExperimentModel(QObject):
             float(plan.volume_basis.target_printed_volume_nL)
             + float(plan.volume_basis.design_optimization_tolerance_nL)
         )
+        progress = (requantized.get("execution_context") or {}).get("progress")
+        if progress is None:
+            progress = self.return_progress_data()
         results: dict[str, dict[str, int]] = {}
         for well in plan.wells:
             reaction = reaction_targets.get(well.reaction_id)
@@ -17336,6 +17439,10 @@ class ExperimentModel(QObject):
             pair = mapping[target_key]
             for index, stock_id in enumerate(stock_ids):
                 count = int(pair[index])
+                if (requantized.get("requantization_mode") == "constrained"
+                        and stock_id == requantized["companion_stock_id"]
+                        and count != counts.get(stock_id, 0)):
+                    raise RuntimeError("Constrained calibration changed the committed companion map.")
                 if count > 0 or stock_id in counts:
                     counts[stock_id] = count
                 else:
@@ -17372,6 +17479,9 @@ class ExperimentModel(QObject):
                     fill_volume_nL=fill_volume,
                     fill_is_calibrated=bool(fill_stock.calibration_record_key),
                 )
+                added_fill = progress.get(well.well_id, {}).get("reagents", {}).get(fill_stock.stock_id, {}).get("added_droplets", 0)
+                if added_fill > 0:
+                    fill_count = counts.get(fill_stock.stock_id, 0)
                 if fill_count > 0 or fill_stock.stock_id in counts:
                     counts[fill_stock.stock_id] = fill_count
                 else:
@@ -17385,6 +17495,7 @@ class ExperimentModel(QObject):
         target_counts_by_well: Mapping[str, Mapping[str, int]],
         *,
         required_unprinted_stock_ids: Iterable[str] = (),
+        preserve_started_allocations: bool = False,
     ) -> None:
         progress_payload = self.return_progress_data()
         progress_wells = self._well_entries_from_progress_payload(progress_payload)
@@ -17415,6 +17526,11 @@ class ExperimentModel(QObject):
                 if stock_id in required_unprinted and added > 0:
                     raise RuntimeError(
                         f"Calibration cannot change {stock_id!r} after it dispensed droplets."
+                    )
+                original = next((d.target_dispenses for d in well.dispenses if d.stock_id == stock_id), 0)
+                if preserve_started_allocations and added > 0 and int(target_count) != original:
+                    raise RuntimeError(
+                        f"Calibration cannot change an allocation already underway: {well.well_id}/{stock_id}."
                     )
                 if int(target_count) < added:
                     raise RuntimeError(
@@ -17465,6 +17581,57 @@ class ExperimentModel(QObject):
         if signal is not None and hasattr(signal, "emit"):
             signal.emit("all")
 
+    @contextmanager
+    def _execution_pair_publication(self, candidate, context):
+        """Roll back this candidate's files and live publication as one operation.
+
+        Only the new candidate revision belongs to this transaction. Historical
+        revision bytes, design data and audit history are never rollback targets.
+        """
+        self.validate_calibration_execution_context(context)
+        state = self._snapshot_mutable_calibration_state()
+        runtime = self._snapshot_mutable_calibration_runtime()
+        names = ("_execution_plan_snapshot", "_execution_plan_source",
+                 "_authoritative_execution_bundle", "_active_authoritative_execution_session",
+                 "_authoritative_runtime_active", "_last_authoritative_calibration_transition")
+        execution_state = {name: copy.deepcopy(getattr(self, name, None)) for name in names}
+        paths = [self.execution_plan_file_path, self.execution_calibrations_file_path,
+                 self.progress_file_path, self.execution_resume_file_path,
+                 self.key_file_path, self.concentration_key_file_path,
+                 os.path.join(self.execution_plan_revisions_dir_path,
+                              revision_file_name(candidate.plan_revision))]
+        snapshots = [{"path": path, "existed": os.path.isfile(path),
+                      "contents": Path(path).read_bytes() if os.path.isfile(path) else None}
+                     for path in paths if path]
+        blockers = [QtCore.QSignalBlocker(self), QtCore.QSignalBlocker(self._runtime_well_plate)]
+        self._execution_pair_write_started = False
+        try:
+            yield
+        except Exception as original:
+            if not self._execution_pair_write_started:
+                raise
+            try:
+                self._restore_mutable_calibration_files(snapshots)
+                self._restore_mutable_calibration_state(state)
+                self._restore_mutable_calibration_runtime(runtime)
+                for name, value in execution_state.items():
+                    setattr(self, name, value)
+                session = self._active_authoritative_execution_session
+                if session is not None:
+                    identities, revisions = self._capture_authoritative_runtime_files()
+                    session.file_identities = identities
+                    session.revision_names = revisions
+            except Exception as rollback:
+                self._invalidate_authoritative_runtime_session()
+                self.set_execution_plan_sync_error(f"Calibration rollback incomplete: {rollback}")
+                raise RuntimeError(
+                    f"Execution calibration failed and rollback was incomplete: {rollback}"
+                ) from original
+            raise
+        finally:
+            for blocker in blockers:
+                blocker.unblock()
+
     def apply_execution_calibration(
         self,
         *,
@@ -17478,6 +17645,7 @@ class ExperimentModel(QObject):
         calibration_payload: dict,
         timestamp_utc: str | None = None,
     ) -> dict:
+        self.validate_calibration_execution_context(calibration_payload.get("execution_context"))
         eligibility = self.get_calibration_application_eligibility(stock_id=stock_id)
         if not eligibility["ok"]:
             raise RuntimeError(eligibility["message"])
@@ -17661,6 +17829,7 @@ class ExperimentModel(QObject):
             )
             return response
 
+        calculation_context = self._calibration_execution_context()
         requantized = None
         if len(identity_matches) == 2:
             if stock_is_fill:
@@ -17689,20 +17858,13 @@ class ExperimentModel(QObject):
                 plan, stock, float(new_effective_volume_nL)
             )
         required_unprinted_stock_ids: set[str] = {stock.stock_id}
-        if requantized is not None:
-            required_unprinted_stock_ids.update(
-                str(value) for value in requantized["stock_ids"]
-            )
-            required_unprinted_stock_ids.update(
-                item.stock_id
-                for item in plan.stocks
-                if item.factor_name == self.get_fill_reagent_name()
-                and item.units == "--"
-            )
+        if requantized is not None and requantized["requantization_mode"] == "joint":
+            required_unprinted_stock_ids.update(requantized["stock_ids"])
         self._validate_calibrated_target_counts_against_progress(
             plan,
             target_counts,
             required_unprinted_stock_ids=required_unprinted_stock_ids,
+            preserve_started_allocations=requantized is not None,
         )
         candidate = build_calibrated_revision(
             plan,
@@ -17713,6 +17875,12 @@ class ExperimentModel(QObject):
             calibration_record_key=record_id,
             target_counts_by_well=target_counts,
             timestamp_utc=record.recorded_at_utc,
+            added_counts_by_well=(
+                {well_id: {sid: int(details["added_droplets"])
+                           for sid, details in row["reagents"].items()}
+                 for well_id, row in calculation_context["progress"].items()}
+                if requantized is not None else None
+            ),
         )
         volume_warning = self._calibration_volume_warning_for_execution_plan(candidate)
         if requantized is not None:
@@ -17739,48 +17907,54 @@ class ExperimentModel(QObject):
             is not None
             and not self.get_execution_plan_sync_error()
         )
+        publication = (self._execution_pair_publication(candidate, calculation_context)
+                       if requantized is not None else nullcontext())
         try:
-            existing_record = document.records.get(record_id)
-            if existing_record is not None and existing_record != record:
-                raise RuntimeError("Calibration record ID collides with different content.")
-            document.records[record_id] = record
-            if cached_commit:
-                status = self._commit_authoritative_calibration_revision(
-                    plan,
-                    candidate,
-                    calibration_document=document,
-                    design_payload=design_payload,
+            with publication:
+                self.validate_calibration_execution_context(calculation_context)
+                self._validate_calibrated_target_counts_against_progress(
+                    plan, target_counts, required_unprinted_stock_ids=required_unprinted_stock_ids,
+                    preserve_started_allocations=requantized is not None,
                 )
-            else:
-                save_execution_calibrations(self.execution_calibrations_file_path, document)
-                status = self._commit_plan_revision(plan, candidate)
-                self._write_progress_for_execution_plan(candidate)
-                self.synchronize_execution_resume_revision(candidate)
-                self._write_execution_plan_exports(candidate, design_payload)
+                existing_record = document.records.get(record_id)
+                if existing_record is not None and existing_record != record:
+                    raise RuntimeError("Calibration record ID collides with different content.")
+                document.records[record_id] = record
+                if cached_commit:
+                    status = self._commit_authoritative_calibration_revision(
+                        plan,
+                        candidate,
+                        calibration_document=document,
+                        design_payload=design_payload,
+                        execution_context=calculation_context,
+                    )
+                else:
+                    self.validate_calibration_execution_context(calculation_context)
+                    self._execution_pair_write_started = True
+                    save_execution_calibrations(self.execution_calibrations_file_path, document)
+                    status = self._commit_plan_revision(plan, candidate)
+                    self._write_progress_for_execution_plan(candidate)
+                    self.synchronize_execution_resume_revision(candidate)
+                    self._write_execution_plan_exports(candidate, design_payload)
+                self._execution_plan_snapshot = candidate
+                self._execution_plan_source = "calibration_revision"
+                self._project_reconstructed_execution_plan(candidate)
+                self._apply_plan_targets_to_runtime(candidate)
+                if normalize_printing_mode(printing_mode) == PRINTING_MODE_STREAM:
+                    self.mark_manual_refuel_check_required(
+                        stock_id=stock_id,
+                        printer_head_id=str(printer_head_id),
+                        printing_mode=printing_mode,
+                        factor_name=factor_name,
+                        option_name=option_name,
+                        is_fill=is_fill,
+                        applied_record=record.to_dict(),
+                        save=True,
+                    )
         except Exception as exc:
-            self.set_execution_plan_sync_error(exc)
+            if requantized is None:
+                self.set_execution_plan_sync_error(exc)
             raise RuntimeError(f"Could not commit calibrated execution-plan revision: {exc}") from exc
-        self._execution_plan_snapshot = candidate
-        self._execution_plan_source = "calibration_revision"
-        self._project_reconstructed_execution_plan(candidate)
-        self._apply_plan_targets_to_runtime(candidate)
-        try:
-            if normalize_printing_mode(printing_mode) == PRINTING_MODE_STREAM:
-                self.mark_manual_refuel_check_required(
-                    stock_id=stock_id,
-                    printer_head_id=str(printer_head_id),
-                    printing_mode=printing_mode,
-                    factor_name=factor_name,
-                    option_name=option_name,
-                    is_fill=is_fill,
-                    applied_record=record.to_dict(),
-                    save=True,
-                )
-        except Exception as exc:
-            self.set_execution_plan_sync_error(exc)
-            raise RuntimeError(
-                f"The calibration revision was committed, but its refuel-check state could not be synchronized: {exc}"
-            ) from exc
         if not cached_commit:
             restored = self._restore_authoritative_session_after_full_revision()
             self._last_authoritative_calibration_transition = {
@@ -17791,6 +17965,9 @@ class ExperimentModel(QObject):
                 "full_validation_count": 1 if restored else 0,
             }
         self.set_execution_plan_sync_error(None)
+        if requantized is not None:
+            self.stock_updated.emit()
+            self._runtime_well_plate.well_state_changed_signal.emit("all")
         self.applied_imaging_calibration_changed.emit(record.to_dict())
         self._audit_execution_plan_event(
             "execution_plan_calibration_revised",
@@ -17826,6 +18003,8 @@ class ExperimentModel(QObject):
             ]
             response.update(
                 {
+                    "requantization_mode": requantized["requantization_mode"],
+                    "achieved_rows": copy.deepcopy(requantized["rows"]),
                     "changed_target_count": len(changed_rows),
                     "count_changes": [
                         {

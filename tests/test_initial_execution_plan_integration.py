@@ -300,6 +300,7 @@ def _configure_calibratable_two_stock_execution(
     *,
     base_replicates=1,
     additional_conditions=None,
+    include_other=False,
 ):
     em = model.experiment_model
     em.factors = []
@@ -318,6 +319,8 @@ def _configure_calibratable_two_stock_execution(
         allow_avoidable_target_grouping=False,
     )
     em.add_additive("Signal", [0.5, 1.0, 5.0, 20.0], "mM", 10.0)
+    if include_other:
+        em.add_additive("Other", [0.1], "mM", 10.0, forced_stock_conc=50.0)
     if additional_conditions is not None:
         em.set_additional_conditions(additional_conditions)
     result = em.optimize_stock_solutions(
@@ -779,7 +782,7 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
 
 
 @pytest.mark.parametrize("blocking_role", ["companion", "fill"])
-def test_two_stock_calibration_application_blocks_affected_stock_progress(
+def test_two_stock_calibration_application_allows_fixed_stock_progress(
     experiment_model_factory,
     blocking_role,
 ):
@@ -812,8 +815,8 @@ def test_two_stock_calibration_application_blocks_affected_stock_progress(
         stock_id=calibrated.stock_id
     )
 
-    assert eligibility["ok"] is False
-    assert eligibility["code"] == "affected_stock_progress"
+    assert eligibility["ok"] is True
+    assert eligibility["code"] == "execution_stock_eligible"
     assert blocking_stock.stock_id in eligibility["affected_stock_ids"]
     assert eligibility["affected_stock_progress"][blocking_stock.stock_id] == 1
 

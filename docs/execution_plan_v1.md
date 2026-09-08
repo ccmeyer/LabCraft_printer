@@ -458,10 +458,12 @@ Applying a distinct calibration creates the next immutable plan revision. It:
 
 - verifies the unchanged `experiment_design.json` hash and frozen execution
   identities;
-- requires the exact loaded stock identity and rejects a selected single stock
+- requires the exact loaded stock identity and rejects a selected stock
   that already has positive printed progress;
-- for a two-stock reagent, requires zero progress for both reagent legs and the
-  fill stock, then jointly re-quantizes the two count maps;
+- for a two-stock reagent with neither leg printed, jointly re-quantizes both
+  committed count maps; once the companion has any printed progress, freezes
+  its **entire** map, including remaining planned drops in every well, and
+  re-quantizes only the selected stock's residual contribution;
 - changes calibration metadata only on the measured stock; the companion stock
   retains its concentration, effective volume, printing mode, printer-head
   reference, and calibration-record reference;
@@ -470,17 +472,46 @@ Applying a distinct calibration creates the next immutable plan revision. It:
 - preserves all counts, including fill, in wells selecting another choice-group
   option; missing reaction records or positive calibrated-stock counts in a
   reaction omitting that option remain integrity errors;
-- recalculates fill from remaining target printed volume, reducing it to zero
-  when calibrated non-fill volume already meets or exceeds that target; and
+- recalculates fill in wells where fill has not started, reducing it to zero
+  when calibrated non-fill volume already meets or exceeds that target;
+  preserves the complete fill allocation in a well once any fill has printed;
 - recomputes exact expected well volumes without re-running the design-time
   optimizer.
 
-Two-stock calibration never increases distinct target-level loss and fails
-closed when no concentration-reachable mapping exists, the bounded pair search
-is exhausted, required stock identities are missing, or execution integrity and
-progress constraints are violated. Neither the recorded design threshold nor
-the final reaction volume independently rejects an otherwise valid in-envelope
-calibration.
+The supported finalized workflow is **calibrate A → print A across the array →
+calibrate B → print B**, in either stock order. Save/reload and explicit runtime
+activation may occur between stages. Partial companion printing is supported;
+its remaining plan is preserved, not recalculated using only the printed drops.
+Repeated calibration is allowed until the selected stock prints.
+
+Preview and Apply use the same execution calculation. Each fixed contribution
+uses its committed count and current calibrated effective volume. Integer counts
+minimize absolute concentration error, then printed reagent volume, count churn,
+and the count tuple for deterministic ties. Zero additional drops is valid,
+including when the fixed contribution already exceeds the target. Approximation,
+grouped target levels, and nonmonotonic achieved levels are diagnostics, not
+rejection conditions. The unchanged ejection-volume envelope (1–250 nL), valid
+measurements, stock identities, frozen design, calibration references and
+execution integrity remain mandatory. Neither the recorded design threshold nor
+the final reaction volume independently rejects an otherwise valid measurement.
+
+The preview's achievable concentration includes starting concentration plus both
+actual calibrated stock contributions, divided by the frozen final reaction
+volume basis. Its signed deviation is achieved minus target. Expected printed
+well volume includes unrelated reagents and the preserved or recalculated fill.
+CSV concentration exports likewise describe planned achieved concentrations,
+not an assertion that targets were met or that every planned drop has printed.
+
+Two-stock previews carry the exact plan and durable/live progress context.
+Apply rejects stale previews, unsaved live progress and pending print commands.
+The context and allocation constraints are rechecked before persistence. Caught
+two-stock publication failures restore the prior plan mirror, calibration
+sidecar, checkpoint, exports and runtime, removing only the unpublished candidate
+revision created by that attempt. Earlier immutable revisions and experiment
+history remain untouched. Notifications and audit delivery follow successful
+publication. If rollback itself fails, the runtime is invalidated and the error
+requires recovery; a process crash/power loss still uses the existing durable
+execution recovery path rather than this in-process rollback.
 
 Before finalization, a mutable two-stock calibration saves the complete stock
 allocation. Later single-stock, fill, or two-stock calibrations refresh that
@@ -491,6 +522,25 @@ and live stock plan before calibration starts; inconsistent active allocations
 are rejected, and unrelated calibrations do not reactivate inactive allocations.
 Allocation export, runtime rebinding, or save failures restore the prior model,
 runtime, and file state through the existing transaction rollback.
+Mutable design optimization retains its existing reachability and grouping
+policy; the execution constraints above apply to finalized executions.
+
+Qualification lives in `tests/test_execution_two_stock_workflow.py`: real model,
+durable print intents, runtime progress and reload paths, plus the actual dialog
+preview/Apply boundary with physical settings calls excluded. It covers both
+stock orders, partial and complete printing, fill states, zero/absent choices,
+replicates, additional conditions, unrelated reagents, fixed overshoot, grouping,
+invalid measurements, stale results and publication fault injection. Run with
+the repository Windows Python, `-B -m pytest -q`, and a unique external
+`--basetemp`; also run the affected execution, persistence, calibration and SIL
+suites. Pi qualification requires a clean pushed exact SHA followed by the
+documented Status → Sync → Validate and no-hardware launch workflow. No physical
+qualification is implied by these tests.
+
+Code rollback is a revert of the execution-aware calibration fix commit. Keep
+experiment artifacts and historical revisions intact. Experiments that already
+used constrained calibration retain authoritative counts and references; older
+code cannot continue calibrating the second stock after companion printing.
 
 After preview and again from the committed candidate, calibration recalculates
 every well's exact printed total. A printed total above target printed volume

@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from ExecutionPlan import ExecutionPlanState
+from ExecutionPlan import ExecutionDispense, ExecutionPlanState
 from ExecutionPlanRevision import (
     build_calibrated_revision,
     build_locked_revision,
@@ -84,6 +84,39 @@ def _prepared_two_stock_plan():
         concentration=0.5,
     )
     return replace(prepared, stocks=(*prepared.stocks, companion))
+
+
+@pytest.mark.parametrize("fault", [None, "companion_remaining", "selected_progress", "fill_underway"])
+def test_revision_builder_respects_execution_progress(fault):
+    active = build_locked_revision(_prepared_two_stock_plan(), reason="calibration_started")
+    primary, companion, fill = "PURE MM_1.00_x", "PURE MM_0.50_x", "Water_1.00_--"
+    well = active.wells[0]
+    # Two equal target wells; only one companion allocation has started.
+    dispenses = (*well.dispenses, ExecutionDispense(companion, 4))
+    volumes = {s.stock_id: s.effective_volume_nL for s in active.stocks}
+    expected = sum(d.target_dispenses * volumes[d.stock_id] for d in dispenses)
+    first = replace(well, dispenses=dispenses, expected_printed_volume_nL=expected)
+    second = replace(first, well_id="A2", reaction_id="R2")
+    active = replace(active, wells=(first, second))
+    targets = {w.well_id: {d.stock_id: d.target_dispenses for d in w.dispenses} for w in active.wells}
+    added = {wid: {sid: 0 for sid in counts} for wid, counts in targets.items()}
+    added["A1"][companion] = 1
+    if fault == "companion_remaining":
+        targets["A2"][companion] += 1
+    elif fault == "selected_progress":
+        added["A1"][primary] = 1
+    elif fault == "fill_underway":
+        added["A1"][fill] = 1
+        targets["A1"][fill] += 1
+    kwargs = dict(stock_id=primary, effective_volume_nL=61.0, printing_mode="stream",
+                  printer_head_id="head", calibration_record_key="d99ef420-efdc-5c07-a30f-3af3330e610d",
+                  target_counts_by_well=targets, added_counts_by_well=added)
+    if fault:
+        with pytest.raises(ValueError, match="companion count map|already dispensed|already underway"):
+            build_calibrated_revision(active, **kwargs)
+    else:
+        candidate = build_calibrated_revision(active, **kwargs)
+        assert candidate.wells[0].dispenses == active.wells[0].dispenses
 
 
 def test_lock_revision_changes_only_lifecycle_fields():

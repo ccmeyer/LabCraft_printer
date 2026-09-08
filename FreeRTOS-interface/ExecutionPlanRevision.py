@@ -224,6 +224,11 @@ def _validate_active_revision_transition(previous: ExecutionPlan, current: Execu
         return
     if new_stock.calibration_record_key is None:
         raise RuntimeError("A calibration revision must reference a calibration record.")
+    if replace(old_stock, effective_volume_nL=new_stock.effective_volume_nL,
+               printing_mode=new_stock.printing_mode,
+               printer_head_id=new_stock.printer_head_id,
+               calibration_record_key=new_stock.calibration_record_key) != new_stock:
+        raise RuntimeError("A calibration revision changes frozen stock identity or concentration.")
     old_targets = _well_target_map(previous)
     new_targets = _well_target_map(current)
     fill_ids = {stock.stock_id for stock in current.stocks if stock.units == "--"}
@@ -318,6 +323,7 @@ def build_calibrated_revision(
     calibration_record_key: str,
     target_counts_by_well: Mapping[str, Mapping[str, int]],
     timestamp_utc: str | None = None,
+    added_counts_by_well: Mapping[str, Mapping[str, int]] | None = None,
 ) -> ExecutionPlan:
     if plan.state is not ExecutionPlanState.ACTIVE:
         raise ValueError("Calibration revisions require an active execution plan.")
@@ -349,6 +355,33 @@ def build_calibrated_revision(
     expected_wells = {well.well_id for well in plan.wells}
     if set(target_counts_by_well) != expected_wells:
         raise ValueError("Calibration target map must contain exactly the execution-plan wells.")
+
+    if added_counts_by_well is not None:
+        if set(added_counts_by_well) != expected_wells:
+            raise ValueError("Calibration progress must contain exactly the execution-plan wells.")
+        related = {s.stock_id for s in plan.stocks
+                   if s.factor_name == stock_lookup[stock_id].factor_name
+                   and s.option_name == stock_lookup[stock_id].option_name}
+        started = set()
+        for well in plan.wells:
+            old = {d.stock_id: d.target_dispenses for d in well.dispenses}
+            added = added_counts_by_well[well.well_id]
+            if set(added) != set(old):
+                raise ValueError("Calibration progress stock identities differ from the plan.")
+            for sid, count in added.items():
+                if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= old[sid]:
+                    raise ValueError("Calibration progress count is invalid.")
+                if count:
+                    started.add(sid)
+                    if target_counts_by_well[well.well_id].get(sid, 0) != old[sid]:
+                        raise ValueError("Calibration changes an allocation already underway.")
+        if stock_id in started:
+            raise ValueError("The calibrated stock has already dispensed droplets.")
+        for well in plan.wells:
+            old = {d.stock_id: d.target_dispenses for d in well.dispenses}
+            for sid in related & started:
+                if target_counts_by_well[well.well_id].get(sid, 0) != old.get(sid, 0):
+                    raise ValueError("Calibration changes the committed companion count map.")
 
     wells = []
     for old_well in plan.wells:

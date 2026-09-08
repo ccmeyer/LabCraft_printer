@@ -14384,6 +14384,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "new_droplet_nL": float(preview.get("new_droplet_nL", mean_nL)),
             "n_stocks": int(preview.get("n_stocks", 1)),
             "stock_id": eligibility.get("stock_id"),
+            "execution_context": copy.deepcopy(preview.get("execution_context")),
         }
         can_apply = bool(eligibility.get("ok")) and self._bridge_preview_payload["n_stocks"] in (1, 2)
         self.bridge_apply_btn.setEnabled(can_apply)
@@ -14673,6 +14674,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         applied_calibration["original_printing_mode"] = original_mode
         applied_calibration["applied_printing_mode"] = applied_mode
         applied_calibration["printing_mode"] = applied_mode
+        applied_calibration["execution_context"] = payload.get("execution_context")
         applied_calibration["stock_id"] = (
             payload.get("stock_id") or eligibility.get("stock_id")
         )
@@ -14734,10 +14736,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 if changed_target_count is not None
                 else ""
             )
-            message = (
-                f"{message}\nJointly re-quantized both stock legs{changed_text}; "
-                f"{companion_stock_id} kept its existing ejection volume."
-            )
+            if (apply_result or {}).get("requantization_mode") == "constrained":
+                message = (f"{message}\nRe-quantized the calibrated stock{changed_text}; "
+                           f"{companion_stock_id} kept its committed counts and progress.")
+            else:
+                message = (
+                    f"{message}\nJointly re-quantized both stock legs{changed_text}; "
+                    f"{companion_stock_id} kept its existing ejection volume."
+                )
         mode_switch_formatter = getattr(self, "_bridge_mode_switch_text", None)
         mode_switch_text = (
             mode_switch_formatter(original_mode, applied_mode)
@@ -16060,6 +16066,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "original_printing_mode": original_mode,
             "applied_printing_mode": applied_mode,
             "stock_id": eligibility.get("stock_id"),
+            "execution_context": copy.deepcopy(preview.get("execution_context")),
             "volume_warning": copy.deepcopy(preview.get("volume_warning")),
         }
         can_apply = self._bridge_preview_payload["n_stocks"] in (1, 2)
