@@ -550,9 +550,27 @@ Readers accept versions 1–3 without changing their record IDs; reapplying an o
 result appends a new policy-qualified record and plan revision, preserving the
 measurement provenance and old immutable revisions. Repeating that application
 under the same policy is idempotent. Do not edit plan or progress files to repair
-them. Older software cannot read version 4 calibration documents: rollback code
-only before adopting new experiment documents, or retain the updated reader and
-the experiment history. Never downgrade or rewrite those documents in place.
+them. Older software cannot read version 4 calibration documents. Releases with
+`FreeRTOS-interface/execution_data_compatibility.json` require the version-4
+reader and `execution_volume_budget_v1` policy in every update/rollback target,
+including that target's own rollback floor. The updater checks the exact target
+commit during online/offline selection and again before installation. An
+incompatible target is unavailable while the app stays open; if a later check
+fails after closure, use **Reopen Current Version** when offered. A compatible,
+qualified release or bundle is the supported rollback route. No experiment
+conversion, history rewrite, or restored pre-calibration backup is required.
+
+This floor applies even before saving a version-4 experiment: experiments can
+reside outside the default folder or on disconnected media, so an empty folder
+scan cannot prove downgrade safety. Historical releases without the declaration
+retain their previous update behavior. The first release carrying this floor
+must not advertise an older incompatible release as a usable rollback target;
+release preparation must qualify a target with both capabilities, or explicitly
+document that no older compatible release is available and retain the current
+version. A declaration is a release contract, not proof of reader correctness;
+the target reader, allocation behavior and resume workflow must be tested.
+Never downgrade or rewrite experiment documents in place, manually switch code,
+or remove the declaration to bypass a blocked rollback.
 
 Single-stock, two-stock and fill previews carry the exact plan and durable/live progress context.
 The model refuses stale previews, unsaved live progress and pending print commands.

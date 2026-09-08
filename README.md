@@ -4962,6 +4962,18 @@ recovery procedures.
 
 ### Controlled release rollback
 
+Version-4 execution calibration files require a compatible reader and the
+volume-bounded allocation policy. Declaring releases enforce
+`FreeRTOS-interface/execution_data_compatibility.json` during online/offline
+update and rollback selection and again before installation. Incompatible
+targets leave Restore disabled while the current app stays open. If a later
+check stops the standalone updater before installation, use **Reopen Current
+Version** when offered, or obtain a qualified compatible release/bundle. Do not
+downgrade experiment files or restore older progress to force a rollback. This
+floor also applies before the first version-4 save because experiments may be
+stored on external media. See
+`docs/machine_data_update_and_rollback_runbook.md` for the complete recovery path.
+
 The Firmware tab includes support-guided rollback controls for restoring a previous application version without allowing arbitrary tag selection. Use rollback only with support guidance after confirming the machine is idle and no print, calibration, capture, or firmware operation is active.
 
 Expected UI flow:

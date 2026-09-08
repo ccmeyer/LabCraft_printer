@@ -520,6 +520,22 @@ Nested version folders require manual manifest selection from the app.
 
 Release manifests must define `rollback_version` deliberately.
 
+For a release carrying `FreeRTOS-interface/execution_data_compatibility.json`,
+qualify the rollback target's declaration and implementation as well. It must
+support the source release's required capabilities and retain those requirements
+in its own rollback floor. The first version-4 calibration release requires
+`execution_calibrations_v4` and `execution_volume_budget_v1`. An old machine-data
+preservation contract alone does not establish experiment compatibility.
+
+Run an isolated upgrade -> calibrate/save version 4 -> rollback -> reload/resume
+campaign against the exact proposed compatible target, plus refusal coverage for
+an incompatible online/offline target. Verify unchanged measurements, committed
+counts, progress, immutable revisions, and a valid deployment receipt. A target
+without that evidence is not a qualified fallback. If no compatible older release
+exists, use no configured rollback target (null where supported) and explain the
+current-version/compatible-bundle recovery route; do not advertise an unusable
+historical rollback or rewrite experiment documents to make it load.
+
 Stable releases normally roll back to the previous stable release.
 
 Release candidates normally roll back to the current stable release, not to the

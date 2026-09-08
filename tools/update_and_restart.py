@@ -68,6 +68,7 @@ SUPPORTED_RELEASE_MANIFEST_SCHEMA_VERSIONS = frozenset(
 )
 UPDATE_COMPATIBILITY_SCHEMA_VERSION = "labcraft_update_compatibility_v1"
 RELEASE_INDEX_PATH = "releases/latest.json"
+EXECUTION_DATA_COMPATIBILITY_PATH = "FreeRTOS-interface/execution_data_compatibility.json"
 RELEASE_VERSION_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?")
 RELEASE_CANDIDATE_PREFIX_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}-rc\.")
 QT_ENV_VARS_TO_REMOVE_FOR_GUI = (
@@ -707,6 +708,68 @@ def _validate_release_manifest(
     )
 
 
+def _parse_execution_data_compatibility(payload: object) -> tuple[set[str], set[str]]:
+    fields = {"schema_name", "schema_version", "capabilities", "required_capabilities"}
+    if (not isinstance(payload, dict) or set(payload) != fields
+            or payload.get("schema_name") != "labcraft.execution_data_compatibility"
+            or type(payload.get("schema_version")) is not int or payload["schema_version"] != 1):
+        raise ValueError("invalid execution-data compatibility declaration")
+    sets = []
+    for field in ("capabilities", "required_capabilities"):
+        values = payload[field]
+        if (not isinstance(values, list) or not values
+                or any(not isinstance(v, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", v) for v in values)
+                or len(set(values)) != len(values)):
+            raise ValueError(f"invalid {field}")
+        sets.append(set(values))
+    if not sets[1] <= sets[0]:
+        raise ValueError("required capabilities exceed supported capabilities")
+    return sets[0], sets[1]
+
+
+def _validate_execution_data_target(
+    repo_root: Path, target: ReleaseTargetInfo | None, *, config: UpdaterConfig,
+    command_runner: CommandRunner, log: _LogBuffer,
+    progress_callback: ProgressCallback | None = None,
+) -> bool:
+    """Keep the execution-data floor across installs, including chained rollback.
+
+    Experiments may live outside the machine store or on removable media. A scan
+    cannot prove an older reader safe. Releases predating this declaration retain
+    their existing update behavior; declaring releases require the floor even
+    before the first experiment is saved. Never execute code from the target.
+    """
+    path = repo_root / EXECUTION_DATA_COMPATIBILITY_PATH
+    recovery = (
+        "This installation requires version-4 execution calibration support and "
+        "volume-bounded allocation. Keep using the current version, or choose a "
+        "qualified release/bundle with those capabilities. If the app has closed, "
+        "use Reopen Current Version. Experiment files must not be downgraded."
+    )
+    try:
+        if path.is_symlink():
+            raise ValueError("source compatibility declaration is a symbolic link")
+        try:
+            source_text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return False
+        _, required = _parse_execution_data_compatibility(json.loads(source_text))
+        if target is None or not re.fullmatch(r"[0-9a-fA-F]{40}", target.sha):
+            raise ValueError("target has no exact release commit")
+        payload = _load_git_json(
+            repo_root, ref=target.sha, path=EXECUTION_DATA_COMPATIBILITY_PATH,
+            config=config, command_runner=command_runner, log=log,
+            progress_callback=progress_callback,
+        )
+        supported, target_floor = _parse_execution_data_compatibility(payload)
+        if not required <= supported or not required <= target_floor:
+            raise ValueError("target does not preserve the required execution-data capabilities")
+    except (OSError, ValueError, ReleaseMetadataError) as exc:
+        raise ReleaseMetadataError(f"Execution-data compatibility check failed: {exc}. {recovery}") from exc
+    log.add(f"execution_data_compatibility: {target.sha} preserves {', '.join(sorted(required))}")
+    return True
+
+
 def _resolve_release_tag(
     repo_root: Path,
     *,
@@ -732,7 +795,7 @@ def _resolve_release_tag(
 
     manifest = _load_git_json(
         repo_root,
-        ref=tag,
+        ref=sha if (repo_root / EXECUTION_DATA_COMPATIBILITY_PATH).exists() else tag,
         path=f"releases/{version}.json",
         config=config,
         command_runner=command_runner,
@@ -740,7 +803,12 @@ def _resolve_release_tag(
         progress_callback=progress_callback,
     )
     info = _validate_release_manifest(manifest, expected_version=version, expected_channel=expected_channel)
-    return replace(info, sha=sha)
+    info = replace(info, sha=sha)
+    _validate_execution_data_target(
+        repo_root, info, config=config, command_runner=command_runner, log=log,
+        progress_callback=progress_callback,
+    )
+    return info
 
 
 def _release_candidate_series_from_index(index: dict) -> tuple[str, str, int] | None:
@@ -1119,6 +1187,13 @@ def _prepare_offline_update_ref(
     if fetched_sha.lower() != info.head_sha.lower():
         raise OfflineBundleError("Fetched offline update ref does not match the manifest head_sha.")
 
+    try:
+        _validate_execution_data_target(
+            repo_root, info.release_info, config=config, command_runner=command_runner,
+            log=log, progress_callback=progress_callback,
+        )
+    except ReleaseMetadataError as exc:
+        raise OfflineBundleError(exc.message) from exc
     return info
 
 
@@ -2093,6 +2168,43 @@ def _begin_machine_data_protection(
     except Exception:
         prepared.close()
         raise
+
+
+def _execution_data_install_preflight(
+    config, *, repo_root, target_info, before_sha, before_release_version,
+    operation, update_source, offline_manifest_path, log_path, command_runner,
+    log, progress_callback, prepared,
+):
+    """Recheck after backup; close any preservation transaction on refusal."""
+    try:
+        enforced = _validate_execution_data_target(
+            repo_root, target_info, config=config, command_runner=command_runner,
+            log=log, progress_callback=progress_callback,
+        )
+        return enforced, None
+    except ReleaseMetadataError as exc:
+        evidence_path = None
+        recovery_required = False
+        message = exc.message
+        if prepared is not None:
+            try:
+                evidence_path = prepared.fail(message, recovery_required=False)
+            except Exception as receipt_error:
+                recovery_required = True
+                message += f" Preservation failure receipt could not be completed: {receipt_error}"
+            finally:
+                prepared.close()
+        status = (STATUS_RECOVERY_REQUIRED if recovery_required else
+                  STATUS_ROLLBACK_TARGET_INVALID if operation == OPERATION_ROLLBACK else
+                  STATUS_GIT_PULL_FAILED)
+        return False, _make_result(
+            status, message, repo_root=repo_root, before_sha=before_sha, after_sha=before_sha,
+            log_path=log_path, update_source=update_source, offline_manifest_path=offline_manifest_path,
+            operation=operation, before_release_version=before_release_version,
+            relaunch_authorized=False, safe_to_reopen_current=not recovery_required,
+            machine_data_update_id=prepared.update_id if prepared is not None else "",
+            machine_data_evidence_path=evidence_path, **_release_fields(target_info),
+        )
 
 
 def _checkout_is_unchanged_after_failed_git(
@@ -3158,6 +3270,17 @@ def run_rollback(
             )
             return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
 
+    enforce_execution_floor, refusal = _execution_data_install_preflight(
+        config, repo_root=repo_root, target_info=release_info, before_sha=before_sha,
+        before_release_version=before_release_version, operation=OPERATION_ROLLBACK,
+        update_source=update_source, offline_manifest_path=offline_manifest_path,
+        log_path=log_path, command_runner=command_runner, log=log,
+        progress_callback=progress_callback, prepared=prepared,
+    )
+    if refusal is not None:
+        return _finish_failure_result(refusal, repo_root, config, log, launcher, log_path, progress_callback)
+    if enforce_execution_floor:
+        reset_ref = release_info.sha
     _emit_progress(
         progress_callback,
         "applying_rollback",
@@ -3623,6 +3746,17 @@ def run_update(
             )
             return _finish_failure_result(result, repo_root, config, log, launcher, log_path, progress_callback)
 
+    enforce_execution_floor, refusal = _execution_data_install_preflight(
+        config, repo_root=repo_root, target_info=release_info, before_sha=before_sha,
+        before_release_version=before_release_version, operation=OPERATION_UPDATE,
+        update_source=update_source, offline_manifest_path=offline_manifest_path,
+        log_path=log_path, command_runner=command_runner, log=log,
+        progress_callback=progress_callback, prepared=prepared,
+    )
+    if refusal is not None:
+        return _finish_failure_result(refusal, repo_root, config, log, launcher, log_path, progress_callback)
+    if enforce_execution_floor:
+        merge_ref = release_info.sha
     _emit_progress(
         progress_callback,
         "applying_update",
