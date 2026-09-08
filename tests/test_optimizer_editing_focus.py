@@ -509,3 +509,31 @@ def test_count_only_auto_retains_allocation_shortcut(qapp, real_editor, monkeypa
     wait_for(qapp, lambda: outcomes)
     assert outcomes[0][0] and outcomes[0][1]["stock_allocation_reused"]
     assert len(editor.model._reactions_df) == 8
+
+
+def test_workflow_driver_waits_for_inline_worker_publication(qapp, real_editor, monkeypatch):
+    from types import SimpleNamespace
+    from PySide6 import QtCore, QtTest
+    from tools.virtual_workflows.actions import ScenarioDeadline, _wait_for_editor_progress_dialogs
+    editor = real_editor
+    editor.show()
+    qapp.processEvents()
+    qapp.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    original = ExperimentModel.optimize_stock_solutions
+    release = threading.Event()
+    outcomes = []
+    def delayed(draft, **kwargs):
+        assert release.wait(5)
+        return original(draft, **kwargs)
+    monkeypatch.setattr(ExperimentModel, "optimize_stock_solutions", delayed)
+    editor.optimization_finished.connect(lambda *args: outcomes.append(args))
+    editor._run_design_optimization_flow()
+    context = SimpleNamespace(app=qapp, qt_core=QtCore, deadline=ScenarioDeadline.start(10))
+    QtCore.QTimer.singleShot(200, release.set)
+    try:
+        _wait_for_editor_progress_dialogs(context, QtTest, "editor.optimize_generate_via_ui")
+        assert outcomes and outcomes[0][0]
+        assert not optimization_job_manager().busy
+        assert not editor._design_optimization_dirty
+    finally:
+        release.set()

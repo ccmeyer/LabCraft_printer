@@ -299,6 +299,24 @@ def test_release_bundle_rejects_invalid_schema_channel_pair(tmp_path, schema, ch
     assert not (tmp_path / "out").exists()
 
 
+@pytest.mark.parametrize("conflicting", [False, True])
+def test_bundle_duplicate_heads_require_identical_objects(tmp_path, conflicting):
+    original = FakeGitRunner(tmp_path)
+    def runner(args, cwd):
+        result = original(args, cwd)
+        if tuple(args)[1:3] == ("bundle", "list-heads"):
+            extra = result.stdout.replace(RELEASE_SHA, HEAD_SHA) if conflicting else result.stdout
+            return bundler.CommandResult(result.args, 0, stdout=result.stdout + extra)
+        return result
+    config = bundler.BundleConfig(repo_root=tmp_path, output_dir=tmp_path / "out", release="v1.1.2")
+    if conflicting:
+        with pytest.raises(bundler.BundleCreateError, match="resolved commit"):
+            bundler.create_update_bundle(config, command_runner=runner)
+        assert not list((tmp_path / "out").glob("*.json"))
+    else:
+        assert bundler.create_update_bundle(config, command_runner=runner).manifest["head_sha"] == RELEASE_SHA
+
+
 def test_fetch_runs_by_default_and_can_be_skipped(tmp_path):
     default_runner = FakeGitRunner(tmp_path)
     bundler.create_update_bundle(

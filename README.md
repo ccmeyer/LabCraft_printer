@@ -101,6 +101,8 @@ worker. Automatic calculations allow continued editing; explicit calculations,
 import, Save, preview, and finalize pause design edits until publication. Cancel preserves the previous
 results. Save, preview, and finalize wait for successful publication. Calibration
 transactions and non-UI model APIs remain synchronous.
+Composed software-workflow checks wait for the optimizer and its UI publication
+to settle; completion no longer depends on a transient progress window.
 
 Automatic updates wait while you type in the same field, including pauses
 within a comma-separated target list. Leaving that field, including Tab into

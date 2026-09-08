@@ -487,7 +487,9 @@ def create_update_bundle(
     # Verify the ref actually captured in the bundle, including annotated tags.
     # A moving producer ref must never yield a manifest describing other bytes.
     heads = _run_git(repo_root, ["bundle", "list-heads", str(bundle_path), source_ref], command_runner)
-    entries = [line.split() for line in heads.stdout.splitlines() if line.strip()]
+    # Older Git versions emit the same tag twice when it is both explicit and
+    # included by --tags. Deduplicate identical pairs, never conflicting refs.
+    entries = sorted({tuple(line.split()) for line in heads.stdout.splitlines() if line.strip()})
     if heads.returncode != 0 or len(entries) != 1 or len(entries[0]) != 2 or entries[0][1] != source_ref:
         raise BundleCreateError(STATUS_BUNDLE_VERIFY_FAILED, "Bundle does not contain the resolved commit ref.", command_result=heads)
     captured = _run_git(repo_root, ["rev-parse", f"{entries[0][0]}^{{commit}}"], command_runner)

@@ -2093,9 +2093,10 @@ def _wait_for_editor_progress_dialogs(
     QtTest: Any,
     action_id: str,
 ) -> None:
-    """Wait for the editor's expected transient progress dialog to settle."""
+    """Wait for computation/publication and any legacy progress dialog to settle."""
 
     from PySide6 import QtWidgets
+    from OptimizationJobs import optimization_job_manager
 
     quiet_since: float | None = None
     while True:
@@ -2109,7 +2110,7 @@ def _wait_for_editor_progress_dialogs(
             if isinstance(widget, QtWidgets.QProgressDialog)
             and widget.isVisible()
         ]
-        if visible:
+        if visible or optimization_job_manager().busy:
             quiet_since = None
         elif quiet_since is None:
             quiet_since = time.monotonic()
@@ -2118,7 +2119,7 @@ def _wait_for_editor_progress_dialogs(
         if context.deadline.remaining_seconds() <= 0:
             raise ScenarioActionError(
                 action_id,
-                "editor progress dialog did not close before the deadline",
+                "editor optimization did not settle before the deadline",
                 stage="timeout",
                 evidence={
                     "progress_dialogs": [
@@ -2126,7 +2127,9 @@ def _wait_for_editor_progress_dialogs(
                     ]
                 },
             )
-        QtTest.QTest.qWait(5)
+        # QTest.qWait can retain the GIL on supported PySide builds. The editor
+        # worker needs a Python thread turn as well as the Qt events above.
+        time.sleep(0.005)
 
 
 @contextmanager
