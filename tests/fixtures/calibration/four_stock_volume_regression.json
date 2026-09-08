@@ -1,0 +1,1755 @@
+{
+  "description": "Pre-calibration design and initial plan reproducing the attended four-stock allocation failure; no machine data or calibration recordings.",
+  "design": {
+    "metadata": {
+      "name": "two_stock_test-20260908_110342",
+      "replicates": 2,
+      "use_subset_design": false,
+      "allow_two_stock_solutions": true,
+      "allow_avoidable_target_grouping": false,
+      "reduction_factor": 1,
+      "target_reaction_volume_nL": 200.0,
+      "printed_volume_tolerance_nL": 50.0,
+      "final_reaction_volume_nL": 200.0,
+      "fill_reagent_name": "Water",
+      "fill_printing_mode": "droplet",
+      "fill_droplet_volume_nL": 9.0,
+      "randomize_assignments": false,
+      "random_seed": null,
+      "start_row": 0,
+      "start_col": 0,
+      "well_selection": {
+        "mode": "start_offset",
+        "included_wells": null
+      },
+      "plate_name": "shallow-384_well_plate",
+      "plate_rows": 16,
+      "plate_columns": 24
+    },
+    "calibration_storage": {
+      "schema_name": "labcraft.calibration_storage.policy",
+      "schema_version": 1,
+      "legacy_writer_mode": "canonical_only"
+    },
+    "stock_prep": {
+      "version": 1,
+      "defaults": {
+        "dead_volume_extra_uL": 20.0,
+        "calibration_extra_uL": 10.0
+      },
+      "entries": {}
+    },
+    "applied_imaging_calibrations": {
+      "schema_version": 1,
+      "records": {}
+    },
+    "calibration_volume_warning_audits": {
+      "schema_version": 1,
+      "events": {}
+    },
+    "calibrated_stock_allocation": {
+      "schema_version": 1,
+      "active": false
+    },
+    "manual_refuel_checks": {
+      "schema_version": 1,
+      "records": {}
+    },
+    "factors": [
+      {
+        "name": "reagent-1",
+        "kind": "additive",
+        "options": [
+          {
+            "name": "reagent-1",
+            "targets": [
+              0.0,
+              1.0,
+              2.0,
+              5.0,
+              100.0,
+              101.0,
+              206.0
+            ],
+            "units": "mM",
+            "droplet_nL": 9.0,
+            "printing_mode": "droplet",
+            "starting_conc": 0.0,
+            "reagent_id": "reagent_1",
+            "reagent_display_name": "reagent-1",
+            "intended_head_type_id": null,
+            "intended_head_type_display_name": null,
+            "forced_stock_conc": null,
+            "max_stock_conc": 1200.0
+          }
+        ]
+      },
+      {
+        "name": "reagent-2",
+        "kind": "additive",
+        "options": [
+          {
+            "name": "reagent-2",
+            "targets": [
+              0.0,
+              1.0,
+              2.0,
+              5.0,
+              100.0,
+              101.0,
+              206.0
+            ],
+            "units": "mM",
+            "droplet_nL": 9.0,
+            "printing_mode": "droplet",
+            "starting_conc": 0.0,
+            "reagent_id": "reagent_1",
+            "reagent_display_name": "reagent-1",
+            "intended_head_type_id": null,
+            "intended_head_type_display_name": null,
+            "forced_stock_conc": null,
+            "max_stock_conc": 1200.0
+          }
+        ]
+      }
+    ],
+    "additional_conditions": {
+      "schema_version": 1,
+      "conditions": []
+    }
+  },
+  "plan": {
+    "created_at_utc": "2026-09-08T18:08:37.023249Z",
+    "design_sha256": "e0bedb2b516c8c24d6c41a3aa8735ca4f22f91ebb7952b6af138b453662c7766",
+    "lock_reason": null,
+    "locked_at_utc": null,
+    "plan_id": "0e71339a-460f-46e0-b44d-37c30ebb4651",
+    "plan_revision": 1,
+    "plate": {
+      "columns": 24,
+      "name": "shallow-384_well_plate",
+      "rows": 16
+    },
+    "schema_name": "labcraft.execution_plan",
+    "schema_version": 1,
+    "state": "prepared",
+    "stocks": {
+      "Water_1.00_--": {
+        "calibration_record_key": null,
+        "concentration": 1.0,
+        "effective_volume_nL": 9.0,
+        "factor_name": "Water",
+        "intended_volume_nL": 9.0,
+        "option_name": null,
+        "printer_head_id": null,
+        "printing_mode": "droplet",
+        "reagent_name": "Water",
+        "units": "--"
+      },
+      "reagent-1_1111.11_mM": {
+        "calibration_record_key": null,
+        "concentration": 1111.111111111111,
+        "effective_volume_nL": 9.0,
+        "factor_name": "reagent-1",
+        "intended_volume_nL": 9.0,
+        "option_name": null,
+        "printer_head_id": null,
+        "printing_mode": "droplet",
+        "reagent_name": "reagent-1",
+        "units": "mM"
+      },
+      "reagent-1_27.78_mM": {
+        "calibration_record_key": null,
+        "concentration": 27.77777777777778,
+        "effective_volume_nL": 9.0,
+        "factor_name": "reagent-1",
+        "intended_volume_nL": 9.0,
+        "option_name": null,
+        "printer_head_id": null,
+        "printing_mode": "droplet",
+        "reagent_name": "reagent-1",
+        "units": "mM"
+      },
+      "reagent-2_22.22_mM": {
+        "calibration_record_key": null,
+        "concentration": 22.22222222222222,
+        "effective_volume_nL": 9.0,
+        "factor_name": "reagent-2",
+        "intended_volume_nL": 9.0,
+        "option_name": null,
+        "printer_head_id": null,
+        "printing_mode": "droplet",
+        "reagent_name": "reagent-2",
+        "units": "mM"
+      },
+      "reagent-2_444.44_mM": {
+        "calibration_record_key": null,
+        "concentration": 444.44444444444446,
+        "effective_volume_nL": 9.0,
+        "factor_name": "reagent-2",
+        "intended_volume_nL": 9.0,
+        "option_name": null,
+        "printer_head_id": null,
+        "printing_mode": "droplet",
+        "reagent_name": "reagent-2",
+        "units": "mM"
+      }
+    },
+    "updated_at_utc": "2026-09-08T18:08:37.023249Z",
+    "volume_basis": {
+      "design_optimization_tolerance_nL": 50.0,
+      "final_reaction_volume_nL": 200.0,
+      "target_printed_volume_nL": 200.0
+    },
+    "wells": {
+      "A1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R1",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 22
+          }
+        }
+      },
+      "A2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R32",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 15
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "A3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R33",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 15
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "A4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R64",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 20
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "A5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R65",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 19
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "A6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R96",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 8
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "A7": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R97",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 7
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "B1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R2",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 21
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "B2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R31",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 18
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "B3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R34",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 14
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "B4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R63",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 5
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "B5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R66",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 18
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "B6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R95",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 8
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "B7": {
+        "expected_printed_volume_nL": 225.0,
+        "reaction_id": "R98",
+        "reagents": {
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "C1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R3",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 20
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "C2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R30",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 19
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "C3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R35",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 4
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "C4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R62",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 15
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "C5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R67",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 15
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "C6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R94",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 11
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "D1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R4",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 17
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "D2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R29",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 20
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "D3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R36",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 19
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "D4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R61",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 16
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "D5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R68",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 15
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "D6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R93",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 12
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "E1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R5",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 17
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "E2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R28",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "E3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R37",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 18
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "E4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R60",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 16
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "E5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R69",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 14
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "E6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R92",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 13
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "F1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R6",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 16
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "F2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R27",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 12
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "F3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R38",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 17
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "F4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R59",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 19
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "F5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R70",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "F6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R91",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 3
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "G1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R7",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 6
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "G2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R26",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 13
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "G3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R39",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 14
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "G4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R58",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 20
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "G5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R71",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 18
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          }
+        }
+      },
+      "G6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R90",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 13
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "H1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R8",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 21
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "H2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R25",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 13
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "H3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R40",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 14
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "H4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R57",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 21
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "H5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R72",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 17
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "H6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R89",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 14
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "I1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R9",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 20
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "I2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R24",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 16
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "I3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R41",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 13
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "I4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R56",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 6
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "I5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R73",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 16
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "I6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R88",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 14
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "J1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R10",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 19
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "J2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R23",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 17
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "J3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R42",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 3
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "J4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R55",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 16
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "J5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R74",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 13
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "J6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R87",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 17
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "K1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R11",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 16
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "K2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R22",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 18
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          }
+        }
+      },
+      "K3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R43",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 13
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "K4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R54",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 17
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "K5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R75",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 13
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "K6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R86",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 18
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "L1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R12",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 16
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "L2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R21",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "L3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R44",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 12
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "L4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R53",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 17
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "L5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R76",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 12
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "L6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R85",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 19
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "M1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R13",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 15
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "M2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R20",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 14
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "M3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R45",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 11
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "M4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R52",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 20
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "M5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R77",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 2
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "M6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R84",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 4
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "N1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R14",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 5
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "N2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R19",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 15
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "N3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R46",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 8
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "N4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R51",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 21
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "N5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R78",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 20
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "N6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R83",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 14
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "O1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R15",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 20
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "O2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R18",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 15
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "O3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R47",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 8
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "O4": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R50",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 22
+          }
+        }
+      },
+      "O5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R79",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 19
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "O6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R82",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 15
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "P1": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R16",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 19
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          }
+        }
+      },
+      "P2": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R17",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 18
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "P3": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R48",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 7
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 1
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 5
+          }
+        }
+      },
+      "P4": {
+        "expected_printed_volume_nL": 225.0,
+        "reaction_id": "R49",
+        "reagents": {
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 4
+          },
+          "reagent-1_27.78_mM": {
+            "target_dispenses": 5
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 6
+          },
+          "reagent-2_444.44_mM": {
+            "target_dispenses": 10
+          }
+        }
+      },
+      "P5": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R80",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 18
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 2
+          }
+        }
+      },
+      "P6": {
+        "expected_printed_volume_nL": 198.0,
+        "reaction_id": "R81",
+        "reagents": {
+          "Water_1.00_--": {
+            "target_dispenses": 15
+          },
+          "reagent-1_1111.11_mM": {
+            "target_dispenses": 2
+          },
+          "reagent-2_22.22_mM": {
+            "target_dispenses": 5
+          }
+        }
+      }
+    }
+  }
+}

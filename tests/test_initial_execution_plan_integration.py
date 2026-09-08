@@ -618,6 +618,15 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
 ):
     model = experiment_model_factory()
     em = _configure_calibratable_two_stock_execution(model)
+    # An unavoidable excess must still be accepted/audited. Create it through
+    # real fill calibration and printing, rather than unconstrained pair search.
+    from test_execution_fill_workflow import _apply_fill
+    from test_execution_two_stock_workflow import _print
+    em.ensure_execution_resume_checkpoint()
+    _apply_fill(em, 125.0)
+    fill = next(s for s in em.get_execution_plan_snapshot().stocks if s.units == "--")
+    _print(em, fill.stock_id)
+    prior_warning_ids = set(load_execution_calibrations(em.execution_calibrations_file_path).volume_warning_audits)
     audit_owner = SimpleNamespace(experiment_model=em)
     audit_log = ExperimentAuditLog(model=audit_owner)
     audit_owner.record_experiment_audit_event = audit_log.record
@@ -719,12 +728,11 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
         for row in audit_rows
         if row.event_type == "calibration_volume_tolerance_exceeded"
     ]
-    assert len(warning_rows) == 1
+    assert len(warning_rows) == len(prior_warning_ids) + 1
     sidecar = load_execution_calibrations(em.execution_calibrations_file_path)
-    assert list(sidecar.volume_warning_audits) == [
-        result["volume_warning_audit_event_id"]
-    ]
-    audit_row = warning_rows[0]
+    assert set(sidecar.volume_warning_audits) == prior_warning_ids | {
+        result["volume_warning_audit_event_id"]}
+    audit_row = next(row for row in warning_rows if row.event["details"].get("stock_id") == calibrated.stock_id)
     assert audit_row.is_valid is True
     assert audit_row.level == "warning"
     details = audit_row.event["details"]
@@ -770,12 +778,12 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
         ).read_rows()
         if row.event_type == "calibration_volume_tolerance_exceeded"
     ]
-    assert len(repaired_warning_rows) == 1
+    assert len(repaired_warning_rows) == len(prior_warning_ids) + 1
     assert len(
         load_execution_calibrations(
             em.execution_calibrations_file_path
         ).volume_warning_audits
-    ) == 1
+    ) == len(prior_warning_ids) + 1
 
 
     assert details["plan_revision"] == revised.plan_revision

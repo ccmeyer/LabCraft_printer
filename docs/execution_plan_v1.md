@@ -441,10 +441,12 @@ activation and resume flow described below.
 ## Execution calibration sidecar
 
 `execution_calibrations.json` uses schema
-`labcraft.execution_calibrations`, version 3. Its root contains the schema
+`labcraft.execution_calibrations`, version 4. Its root contains the schema
 identity, `plan_id`, deterministic calibration records, manual-refuel checks,
-and immutable `volume_warning_audits`. Readers continue to accept version 1
-and 2 sidecars as empty warning-outbox inputs. Unknown, missing, malformed, or
+and immutable `volume_warning_audits`. Records also identify the allocation
+policy, independently of measurement provenance. Readers continue to accept
+version 1 and 2 sidecars as empty warning-outbox inputs, and version 3 records
+with no allocation-policy identity. Unknown, missing, malformed, or
 duplicate fields fail closed.
 
 Calibration-record UUIDs are deterministic UUID5 values derived from the plan,
@@ -499,9 +501,19 @@ shortfall. Preview and Apply report per-well expected volumes and shortfalls;
 the committed plan and exports retain those actual counts and volumes.
 
 Preview and Apply use the same execution calculation. Each fixed contribution
-uses its committed count and current calibrated effective volume. Integer counts
-minimize absolute concentration error, then printed reagent volume, count churn,
-and the count tuple for deterministic ties. Zero additional drops is valid,
+uses its committed count and current calibrated effective volume. Two-stock
+execution calibration first limits reagent volume to the remaining printed-volume
+allowance (target plus configured design tolerance), reserving unrelated reagent
+counts and the entire fill allocation in every well where fill has started.
+The tightest allowance for a target level keeps that level's count mapping
+consistent across replicates and other conditions. Within that allowance, integer
+counts minimize concentration error on the design final-volume basis, then
+reagent volume, count churn, and the count tuple for deterministic ties.
+The search includes concentrated-stock candidates that overshoot the target;
+it must not substitute dozens of dilute drops solely for a closer concentration.
+If fixed contributions already exhaust the allowance, the movable contribution
+is zero. This is an allocation preference with a valid fallback, not a new
+measurement-rejection guard. Zero additional drops is valid,
 including when the fixed contribution already exceeds the target. Approximation,
 grouped target levels, and nonmonotonic achieved levels are diagnostics, not
 rejection conditions. The unchanged ejection-volume envelope (1–250 nL), valid
@@ -509,12 +521,38 @@ measurements, stock identities, frozen design, calibration references and
 execution integrity remain mandatory. Neither the recorded design threshold nor
 the final reaction volume independently rejects an otherwise valid measurement.
 
-The preview's achievable concentration includes starting concentration plus both
-actual calibrated stock contributions, divided by the frozen final reaction
-volume basis. Its signed deviation is achieved minus target. Expected printed
-well volume includes unrelated reagents and the preserved or recalculated fill.
-CSV concentration exports likewise describe planned achieved concentrations,
-not an assertion that targets were met or that every planned drop has printed.
+Execution previews show a row for each well because fill rounding or started
+allocations can give wells at the same target different achieved concentrations.
+Achievable concentration, signed deviation, CSV exports, and well displays use
+the projected actual final volume: the sum of all planned calibrated dispense
+volumes plus `max(0, design final volume - target printed volume)` of configured
+nonprinted liquid. Starting concentration is converted to an amount on the
+design final-volume basis and diluted by that projected volume. Empty wells with
+zero projected liquid volume have undefined concentration (a dash in preview,
+blank CSV cell), rather than implying that a target was achieved.
+The numerical preview's internal `rows` retain the design-basis target mapping;
+`per_well_rows` and Apply's `achieved_rows` contain projected mixture results.
+Expected printed well volume includes unrelated reagents and preserved or
+recalculated fill. These are estimates for the committed plan, not measurements
+of completed dispensing. Mutable-design optimizer semantics are unchanged.
+
+The attended four-stock regression uses 98 wells, 200 nL target volume, 50 nL
+design tolerance, and a measured concentrated-stock volume of
+9.572595895181557 nL. Previously, a 100 mM level changed from two concentrated
+drops to 80 dilute drops, producing a 765 nL well and a maximum of 873 nL.
+`tests/test_execution_calibration_volume_budget.py` covers this saved design,
+bounded-search optimality, stock/fill orders, partial and complete progress,
+reload, reporting and rollback. Saved affected experiments retain their history;
+reapply the saved result for an eligible unprinted stock through the normal
+application workflow after upgrading. Calibration document version 4 records
+`allocation_policy=execution_volume_budget_v1` in new two-stock record identities.
+Readers accept versions 1–3 without changing their record IDs; reapplying an old
+result appends a new policy-qualified record and plan revision, preserving the
+measurement provenance and old immutable revisions. Repeating that application
+under the same policy is idempotent. Do not edit plan or progress files to repair
+them. Older software cannot read version 4 calibration documents: rollback code
+only before adopting new experiment documents, or retain the updated reader and
+the experiment history. Never downgrade or rewrite those documents in place.
 
 Single-stock, two-stock and fill previews carry the exact plan and durable/live progress context.
 The model refuses stale previews, unsaved live progress and pending print commands.

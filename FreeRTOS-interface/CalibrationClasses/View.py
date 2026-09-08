@@ -10162,7 +10162,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         applied = self._get_saved_applied_summary_row_fingerprint()
         if applied is None:
             return False
-        return tuple(self._summary_row_fingerprint(raw)) == tuple(applied)
+        if tuple(self._summary_row_fingerprint(raw)) != tuple(applied):
+            return False
+        policy = (getattr(self, "_bridge_preview_payload", None) or {}).get("allocation_policy")
+        if policy:
+            record = self._get_applied_imaging_calibration_record() or {}
+            return record.get("allocation_policy") == policy
+        return True
 
     def _set_bridge_apply_button_state(self, state, reason=None):
         button = getattr(self, "bridge_apply_btn", None)
@@ -14192,7 +14198,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
     #     self.bridge_apply_btn.setEnabled(True)
 
     def _bridge_fill_preview_table(self, preview: dict):
-        rows = preview.get("rows") or []
+        rows = preview.get("per_well_rows") or preview.get("rows") or []
         nstocks = preview.get("n_stocks", 1)
         self.bridge_table.clearContents()
         self.bridge_table.setRowCount(len(rows))
@@ -14225,6 +14231,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 self.bridge_table.setItem(r, 5, QtWidgets.QTableWidgetItem(_format_bridge_number(row["printed_nL_new"], 2, suffix=" nL")))
                 self.bridge_table.setItem(r, 6, QtWidgets.QTableWidgetItem(_format_bridge_number(row["printed_nL_shift"], 2, signed=True, suffix=" nL")))
 
+        self._label_execution_preview_rows(rows)
         self.bridge_table.resizeColumnsToContents()
         self.bridge_table.resizeRowsToContents()
 
@@ -14232,7 +14239,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._bridge_clear_preview_with_status()
 
     def _populate_bridge_preview_table(self, preview: dict):
-        rows = preview.get("rows", [])
+        rows = preview.get("per_well_rows") or preview.get("rows", [])
         self.bridge_table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             # small helpers
@@ -14258,6 +14265,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
             self.bridge_table.setItem(i, 5, it(_format_bridge_number(r["printed_nL_new"], 2)))
             self.bridge_table.setItem(i, 6, it(_format_bridge_number(r["printed_nL_shift"], 2, signed=True)))
+
+        self._label_execution_preview_rows(rows)
+
+    def _label_execution_preview_rows(self, rows):
+        self.bridge_table.setVerticalHeaderLabels([
+            str(row.get("well_id") or i + 1) for i, row in enumerate(rows)])
+        for i, row in enumerate(rows):
+            if "projected_final_volume_nL" not in row:
+                continue
+            tooltip = (f"Well {row['well_id']}: projected final volume "
+                       f"{row['projected_final_volume_nL']:.6g} nL. "
+                       "Concentrations use planned calibrated drops plus configured nonprinted liquid.")
+            for column in (1, 2, 4):
+                item = self.bridge_table.item(i, column)
+                if item is not None:
+                    item.setToolTip(tooltip)
+                    if not row.get("concentration_defined", True):
+                        item.setText("—")
 
     def _bridge_preview_from_last_char(self):
         _, raw = self._selected_summary_row()
@@ -14388,6 +14413,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "option_name": key[1],
             "new_droplet_nL": float(preview.get("new_droplet_nL", mean_nL)),
             "n_stocks": int(preview.get("n_stocks", 1)),
+            "allocation_policy": preview.get("allocation_policy"),
             "stock_id": eligibility.get("stock_id"),
             "execution_context": copy.deepcopy(preview.get("execution_context")),
         }
@@ -16195,6 +16221,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "option_name": key[1],
             "new_droplet_nL": float(preview.get("new_droplet_nL", mean_nL)),
             "n_stocks": int(preview.get("n_stocks", 1)),
+            "allocation_policy": preview.get("allocation_policy"),
             "source_row_fingerprint": selected_fingerprint,
             "original_printing_mode": original_mode,
             "applied_printing_mode": applied_mode,

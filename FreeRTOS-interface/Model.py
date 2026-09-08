@@ -536,6 +536,9 @@ class _PlanResolutionScore:
 # Experiment Model (v2)
 # --------------------------
 
+EXECUTION_CALIBRATION_ALLOCATION_POLICY = "execution_volume_budget_v1"
+
+
 class ExperimentModel(QObject):
     MAX_GENERATED_REACTIONS = 10_000
     MAX_SUBSET_SOURCE_COMBINATIONS = 10_000
@@ -10656,12 +10659,89 @@ class ExperimentModel(QObject):
                 "fill_available": any(s.units == "--" and s.factor_name == self.get_fill_reagent_name()
                                       for s in plan.stocks)}
 
+    def _execution_concentration_details(self, plan, counts=None, overrides=None):
+        """Projected mixture concentrations; immutable design volume is not a denominator.
+
+        Starting concentrations describe amounts on the design final-volume basis.
+        Preserve those amounts and the configured nonprinted liquid volume.
+        """
+        volumes = {s.stock_id: s.effective_volume_nL for s in plan.stocks}
+        volumes.update(overrides or {})
+        stocks = {s.stock_id: s for s in plan.stocks}
+        final = plan.volume_basis.final_reaction_volume_nL
+        nonprinted = max(0.0, final - plan.volume_basis.target_printed_volume_nL)
+        results = {}
+        for well in plan.wells:
+            allocation = (counts[well.well_id] if counts is not None else
+                          {d.stock_id: d.target_dispenses for d in well.dispenses})
+            printed = sum(n * volumes[sid] for sid, n in allocation.items())
+            projected = printed + nonprinted
+            contributions, concentrations = {}, {}
+            for sid, n in allocation.items():
+                stock = stocks[sid]
+                value = stock.concentration * n * volumes[sid] / projected if projected > 0 else 0.0
+                contributions[sid] = value
+                header = f"{stock.reagent_name}_{stock.units}"
+                concentrations[header] = concentrations.get(header, 0.0) + value
+            for factor in self.factors:
+                for option in factor.options:
+                    if factor.kind == "choice" and not any(
+                        stocks[sid].factor_name == factor.name
+                        and stocks[sid].option_name == option.name for sid in allocation
+                    ):
+                        continue
+                    starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
+                    header = f"{option.name}_{option.units}"
+                    concentrations[header] = concentrations.get(header, 0.0) + (
+                        starting * final / projected if projected > 0 else 0.0)
+            results[well.well_id] = {
+                "total_volume_nL": printed, "projected_final_volume_nL": projected,
+                "concentration_defined": projected > 0,
+                "stock_contributions": contributions, "concentrations": concentrations,
+            }
+        return results
+
+    def _execution_calibration_preview_rows(self, plan, counts, key, rows, overrides):
+        details = self._execution_concentration_details(plan, counts, overrides)
+        targets = {f"R{i+1}": spec["reaction"]
+                   for i, spec in enumerate(self._iter_reaction_run_specs())}
+        by_target = {self._normalize_target_key(r["target_final"]): r for r in rows}
+        pair = [s for s in plan.stocks if (s.factor_name, s.option_name) == key]
+        # Match the calibration plan's leg order, which need not be stock-id order.
+        ids = [s["stock_id"] for s in self._calibration_plan_with_stock_ids(key)["stocks"]]
+        by_id = {s.stock_id: s for s in pair}
+        result = []
+        for well in plan.wells:
+            target = targets.get(well.reaction_id, {}).get(key)
+            if target is None:
+                continue
+            row = dict(by_target[self._normalize_target_key(target)])
+            detail = details[well.well_id]
+            projected = detail["projected_final_volume_nL"]
+            scale = plan.volume_basis.final_reaction_volume_nL / projected if projected > 0 else 0.0
+            drops = tuple(counts[well.well_id].get(sid, 0) for sid in ids)
+            achieved = row["starting"] * scale + sum(detail["stock_contributions"].get(sid, 0.0) for sid in ids)
+            row.update(well_id=well.well_id, reaction_id=well.reaction_id,
+                       nominal_achieved_final=row["achieved_final"],
+                       achieved_final=achieved, error=achieved - target,
+                       drops=drops if len(ids) == 2 else drops[0],
+                       concentration_defined=detail["concentration_defined"],
+                       projected_final_volume_nL=projected,
+                       total_volume_nL=detail["total_volume_nL"])
+            for i, sid in enumerate(ids):
+                field = f"delta_per_drop_leg{i+1}" if len(ids) == 2 else "delta_per_drop"
+                row[field] = by_id[sid].concentration * overrides.get(sid, by_id[sid].effective_volume_nL) / projected if projected > 0 else 0.0
+            result.append(row)
+        return result
+
     @staticmethod
-    def _nearest_execution_pair(target, deltas, volumes, current, fixed_index=None):
-        """Minimize concentration error, then volume, count churn and counts.
+    def _nearest_execution_pair(target, deltas, volumes, current, fixed_index=None,
+                                volume_limit=None):
+        """Minimize concentration error within the remaining volume allowance.
 
         For a fixed leg, only floor/ceil of the nonnegative residual can win.
-        Joint search enumerates the coarser leg and rounds the finer leg.
+        Joint search enumerates the coarser leg and rounds/clips the finer leg.
+        An already over-budget fixed leg is retained with zero movable drops.
         Zero is a candidate; target separation is a diagnostic, not a guard.
         """
         if fixed_index is not None:
@@ -10669,14 +10749,22 @@ class ExperimentModel(QObject):
             outer_counts = (int(current[outer]),)
         else:
             outer = 0 if deltas[0] >= deltas[1] else 1
-            # Larger contributions cannot beat rounding the finer leg alone.
-            limit = target + min(target, 0.5 * min(deltas))
-            outer_counts = range(max(0, int(math.floor(limit / deltas[outer]))) + 1)
+            # Include overshooting concentrated-stock candidates: the dilute
+            # stock alone may be infeasible under the well's volume allowance.
+            maximum = max(0, int(math.ceil(target / deltas[outer])))
+            if volume_limit is not None:
+                maximum = min(maximum, max(0, int(math.floor(
+                    (volume_limit + 1e-9) / volumes[outer]))))
+            outer_counts = range(maximum + 1)
         inner = 1 - outer
         best = None
         evaluations = 0
         for count in outer_counts:
             residual = max(0.0, (target - count * deltas[outer]) / deltas[inner])
+            if volume_limit is not None:
+                available = max(0.0, volume_limit - count * volumes[outer])
+                residual = min(residual, max(0, int(math.floor(
+                    (available + 1e-9) / volumes[inner]))))
             for other in {int(math.floor(residual)), int(math.ceil(residual))}:
                 evaluations += 1
                 pair = [0, 0]
@@ -10847,6 +10935,22 @@ class ExperimentModel(QObject):
         for run_row in run_rows:
             rows_by_target.setdefault(run_row["target_key"], []).append(run_row)
 
+        pair_volume_limits = {}
+        if authoritative_execution:
+            for run_row in run_rows:
+                well = execution_plan.wells[int(run_row["index"])]
+                fixed_fill = sum(
+                    self._preserve_started_fill_count(
+                        well, fill.stock_id, 0, execution_context["progress"]
+                    ) * fill.effective_volume_nL
+                    for fill in fill_candidates
+                )
+                allowance = (warning_threshold
+                             - run_row["other_nonfill_volume_nL"] - fixed_fill)
+                target_key = run_row["target_key"]
+                pair_volume_limits[target_key] = min(
+                    pair_volume_limits.get(target_key, float("inf")), allowance)
+
         def _pair_has_available_fill(target_key: float, pair_volume: float) -> bool:
             for run_row in rows_by_target.get(target_key, []):
                 nonfill = float(run_row["other_nonfill_volume_nL"]) + pair_volume
@@ -10896,6 +11000,7 @@ class ExperimentModel(QObject):
                 counts, evaluations = self._nearest_execution_pair(
                     target_add, deltas, volumes, current_counts,
                     companion_index if fixed_companion else None,
+                    volume_limit=pair_volume_limits[target_key],
                 )
                 pair_evaluations += evaluations
                 achieved = sum(counts[i] * deltas[i] for i in range(2))
@@ -11197,6 +11302,7 @@ class ExperimentModel(QObject):
             "pair_evaluations": int(pair_evaluations),
             "volume_warning": volume_warning,
             "source_plan": plan,
+            "allocation_policy": EXECUTION_CALIBRATION_ALLOCATION_POLICY if authoritative_execution else None,
             "execution_context": execution_context,
             "requantization_mode": "constrained" if fixed_companion else "joint",
             "volume_rows": volume_rows,
@@ -11368,6 +11474,10 @@ class ExperimentModel(QObject):
                 "volume_warning": volume_warning,
                 "execution_context": execution_context,
                 "target_counts_by_well": target_counts,
+                "per_well_rows": (self._execution_calibration_preview_rows(
+                    execution_plan, target_counts, key, rows,
+                    {matching[0].stock_id: float(new_droplet_nL)})
+                    if execution_context is not None else None),
                 "volume_shortfall": (self._calibration_volume_shortfall(
                     execution_plan, target_counts, {matching[0].stock_id: float(new_droplet_nL)}
                 ) if execution_context is not None else None),
@@ -11402,6 +11512,9 @@ class ExperimentModel(QObject):
             counts = self._calibrated_two_stock_target_counts(execution_plan, requantized)
             requantized["volume_shortfall"] = self._calibration_volume_shortfall(
                 execution_plan, counts, {calibrated_stock_id: float(new_droplet_nL)})
+            requantized["per_well_rows"] = self._execution_calibration_preview_rows(
+                execution_plan, counts, key, requantized["rows"],
+                {calibrated_stock_id: float(new_droplet_nL)})
         return requantized
 
     def find_key_for_reagent(self, reagent_name: str, group_name: str | None = None) -> tuple[str, str | None]:
@@ -16455,57 +16568,27 @@ class ExperimentModel(QObject):
         self._progress_execution_reference = decoded.reference
         return payload
 
+    def _execution_concentration_dataframe(self, plan):
+        details = self._execution_concentration_details(plan)
+        headers = sorted({name for row in details.values() for name in row["concentrations"]})
+        rows = {wid: {name: row["concentrations"].get(name, 0.0)
+                      if row["concentration_defined"] else float("nan") for name in headers}
+                for wid, row in details.items()}
+        frame = pd.DataFrame.from_dict(rows, orient="index")
+        return frame.reindex(sorted(frame.columns), axis=1)
+
     def _write_execution_plan_exports(self, plan, design_payload: dict) -> None:
         if not self.key_file_path or not self.concentration_key_file_path:
             raise RuntimeError("Execution export paths are unavailable.")
-        stock_lookup = {stock.stock_id: stock for stock in plan.stocks}
-        key_rows = {}
-        concentration_rows = {}
-        for well in plan.wells:
-            key_row = {}
-            concentration_row = {}
-            for dispense in well.dispenses:
-                stock = stock_lookup[dispense.stock_id]
-                header = f"{stock.stock_id}_{stock.effective_volume_nL:.1f}nL"
-                key_row[header] = dispense.target_dispenses
-                concentration_header = f"{stock.reagent_name}_{stock.units}"
-                contribution = (
-                    stock.concentration
-                    * dispense.target_dispenses
-                    * stock.effective_volume_nL
-                    / plan.volume_basis.final_reaction_volume_nL
-                )
-                concentration_row[concentration_header] = (
-                    concentration_row.get(concentration_header, 0.0) + contribution
-                )
-            present_stock_ids = {dispense.stock_id for dispense in well.dispenses}
-            for factor in self.factors:
-                options = factor.options[:1] if factor.kind == "additive" else factor.options
-                for option in options:
-                    if factor.kind == "choice" and not any(
-                        item.stock_id in present_stock_ids
-                        and item.factor_name == factor.name
-                        and item.option_name == option.name
-                        for item in plan.stocks
-                    ):
-                        continue
-                    starting = float(getattr(option, "starting_conc", 0.0) or 0.0)
-                    if starting == 0.0:
-                        continue
-                    header = f"{option.name}_{option.units}"
-                    concentration_row[header] = concentration_row.get(header, 0.0) + starting
-            key_rows[well.well_id] = key_row
-            concentration_rows[well.well_id] = concentration_row
-        key_df = pd.DataFrame.from_dict(key_rows, orient="index").fillna(0).astype(int)
-        concentration_df = pd.DataFrame.from_dict(
-            concentration_rows, orient="index"
-        ).fillna(0.0)
+        stocks = {s.stock_id: s for s in plan.stocks}
+        rows = {well.well_id: {
+            f"{d.stock_id}_{stocks[d.stock_id].effective_volume_nL:.1f}nL": d.target_dispenses
+            for d in well.dispenses} for well in plan.wells}
+        key_df = pd.DataFrame.from_dict(rows, orient="index").fillna(0).astype(int)
         key_df = key_df.reindex(sorted(key_df.columns), axis=1)
-        concentration_df = concentration_df.reindex(
-            sorted(concentration_df.columns), axis=1
-        )
         self._atomic_dataframe_csv(key_df, self.key_file_path)
-        self._atomic_dataframe_csv(concentration_df, self.concentration_key_file_path)
+        self._atomic_dataframe_csv(self._execution_concentration_dataframe(plan),
+                                   self.concentration_key_file_path)
 
     @staticmethod
     def _atomic_dataframe_csv(dataframe, path: str) -> None:
@@ -17775,6 +17858,7 @@ class ExperimentModel(QObject):
             "result_sha256": _text_or_none(calibration_payload.get("result_sha256")),
             "process_run_id": _text_or_none(calibration_payload.get("process_run_id")),
             "update_id": _text_or_none(calibration_payload.get("update_id")),
+            "allocation_policy": EXECUTION_CALIBRATION_ALLOCATION_POLICY if len(identity_matches) == 2 else None,
             "original_printing_mode": normalize_printing_mode(
                 calibration_payload.get("original_printing_mode"),
                 fallback=stock.printing_mode,
@@ -17797,30 +17881,35 @@ class ExperimentModel(QObject):
             and stock.printing_mode == printing_mode
             and stock.printer_head_id == str(printer_head_id)
         ):
+            context = self._calibration_execution_context()
+            self._calibration_write_started = False
             try:
-                self._write_progress_for_execution_plan(plan)
-                self.synchronize_execution_resume_revision(plan)
-                self._write_execution_plan_exports(plan, design_payload)
-                if normalize_printing_mode(printing_mode) == PRINTING_MODE_STREAM:
-                    self.mark_manual_refuel_check_required(
-                        stock_id=stock_id,
-                        printer_head_id=str(printer_head_id),
-                        printing_mode=printing_mode,
-                        factor_name=factor_name,
-                        option_name=option_name,
-                        is_fill=is_fill,
-                        applied_record=record.to_dict(),
-                        save=True,
-                    )
+                with self._calibration_publication(plan, context):
+                    self.validate_calibration_execution_context(context)
+                    self._calibration_write_started = True
+                    # This is an idempotent result: counts/progress/resume already
+                    # match. Rewriting them invalidates the active session cache.
+                    self._write_execution_plan_exports(plan, design_payload)
+                    if normalize_printing_mode(printing_mode) == PRINTING_MODE_STREAM:
+                        self.mark_manual_refuel_check_required(
+                            stock_id=stock_id,
+                            printer_head_id=str(printer_head_id),
+                            printing_mode=printing_mode,
+                            factor_name=factor_name,
+                            option_name=option_name,
+                            is_fill=is_fill,
+                            applied_record=record.to_dict(),
+                            save=True,
+                        )
+                    self._execution_plan_snapshot = plan
+                    self._execution_plan_source = "calibration_revision"
+                    self._project_reconstructed_execution_plan(plan)
+                    self._apply_plan_targets_to_runtime(plan)
             except Exception as exc:
-                self.set_execution_plan_sync_error(exc)
+                self._calibration_retry_safe = not self.get_execution_plan_sync_error()
                 raise RuntimeError(
                     f"Could not synchronize the calibrated execution plan: {exc}"
                 ) from exc
-            self._execution_plan_snapshot = plan
-            self._execution_plan_source = "calibration_revision"
-            self._project_reconstructed_execution_plan(plan)
-            self._apply_plan_targets_to_runtime(plan)
             self._restore_authoritative_session_after_full_revision()
             self._last_authoritative_calibration_transition = {
                 "cache_path": "reused_full_sync",
@@ -17891,6 +17980,10 @@ class ExperimentModel(QObject):
                 plan, stock, float(new_effective_volume_nL),
                 execution_context=calculation_context,
             )
+        achieved_rows = (self._execution_calibration_preview_rows(
+            plan, target_counts, (stock.factor_name, stock.option_name),
+            requantized["rows"], {stock.stock_id: float(new_effective_volume_nL)})
+            if requantized is not None else [])
         required_unprinted_stock_ids: set[str] = {stock.stock_id}
         if requantized is not None and requantized["requantization_mode"] == "joint":
             required_unprinted_stock_ids.update(requantized["stock_ids"])
@@ -18037,7 +18130,7 @@ class ExperimentModel(QObject):
             response.update(
                 {
                     "requantization_mode": requantized["requantization_mode"],
-                    "achieved_rows": copy.deepcopy(requantized["rows"]),
+                    "achieved_rows": achieved_rows,
                     "changed_target_count": len(changed_rows),
                     "count_changes": [
                         {
@@ -18501,6 +18594,9 @@ class ExperimentModel(QObject):
         Wide CSV with wells as rows and columns "<reagent_name>_<units>",
         containing the final concentrations in each well = starting + added.
         """
+        plan = self.get_execution_plan_snapshot()
+        if plan is not None and self.get_execution_plan_source() != "legacy_reconstruction":
+            return self._execution_concentration_dataframe(plan)
         V_final_nL = float(self.metadata.get(
             "final_reaction_volume_nL",
             self.metadata.get("target_reaction_volume_nL", 2000.0)
@@ -24788,6 +24884,12 @@ class Model(QObject):
         Return estimated final concentration contribution for a specific stock in a well.
         Uses target droplets and stock concentration against final reaction volume metadata.
         """
+        plan = self.experiment_model.get_execution_plan_snapshot()
+        if plan is not None and self.experiment_model.get_execution_plan_source() != "legacy_reconstruction":
+            row = self.experiment_model._execution_concentration_details(plan).get(well_id)
+            if row is None or not row["concentration_defined"]:
+                return None
+            return row["stock_contributions"].get(stock_id, 0.0)
         well = self.well_plate.get_well(well_id)
         if well is None or well.get_assigned_reaction() is None:
             return None

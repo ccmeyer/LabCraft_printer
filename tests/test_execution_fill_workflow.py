@@ -82,8 +82,12 @@ def test_single_stock_preserves_started_fill_per_well(experiment_model_factory, 
         row = rows[targets[well.reaction_id]]
         assert row["achieved_final"] == pytest.approx(achieved)
         assert row["error"] == pytest.approx(achieved - targets[well.reaction_id])
-        assert csv.loc[well.well_id, "Signal_mM"] == pytest.approx(achieved)
-        assert model.get_well_stock_final_concentration(well.well_id, selected.stock_id) == pytest.approx(achieved)
+        projected = well.expected_printed_volume_nL + 900.0
+        actual = counts[selected.stock_id] * volume * selected.concentration / projected
+        per_well = next(r for r in preview['per_well_rows'] if r['well_id'] == well.well_id)
+        assert per_well['achieved_final'] == pytest.approx(actual)
+        assert csv.loc[well.well_id, "Signal_mM"] == pytest.approx(actual)
+        assert model.get_well_stock_final_concentration(well.well_id, selected.stock_id) == pytest.approx(actual)
     assert _counts(after, _stock(em, "Other").stock_id) == _counts(before, _stock(em, "Other").stock_id)
     _print(em, selected.stock_id)
     _print(em, fill.stock_id)

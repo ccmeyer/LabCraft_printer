@@ -144,11 +144,17 @@ def _assert_reporting(model, preview, selected):
             / plan.volume_basis.final_reaction_volume_nL for sid in preview["stock_ids"])
         assert row["achieved_final"] == pytest.approx(achieved)
         assert row["error"] == pytest.approx(achieved - row["target_final"])
-        assert csv.loc[well.well_id, f"{selected.reagent_name}_{selected.units}"] == pytest.approx(achieved)
+        projected = expected_volume + max(0, plan.volume_basis.final_reaction_volume_nL
+                                         - plan.volume_basis.target_printed_volume_nL)
+        actual = achieved * plan.volume_basis.final_reaction_volume_nL / projected
+        per_well = next(r for r in preview['per_well_rows'] if r['well_id'] == well.well_id)
+        assert per_well['achieved_final'] == pytest.approx(actual)
+        assert per_well['error'] == pytest.approx(actual - row['target_final'])
+        assert csv.loc[well.well_id, f"{selected.reagent_name}_{selected.units}"] == pytest.approx(actual)
         for sid in preview["stock_ids"]:
             assert model.get_well_stock_final_concentration(well.well_id, sid) == pytest.approx(
                 counts.get(sid, 0) * lookup[sid].effective_volume_nL * lookup[sid].concentration
-                / plan.volume_basis.final_reaction_volume_nL)
+                / projected)
         volume_row = next(r for r in preview["volume_rows"] if r["well_id"] == well.well_id)
         assert volume_row["total_volume_nL"] == pytest.approx(expected_volume)
 

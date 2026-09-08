@@ -98,7 +98,7 @@ def test_schema_v1_loads_with_null_canonical_references_and_upgrades_on_write(tm
     ).to_dict()
     payload["schema_version"] = 1
     payload.pop("volume_warning_audits")
-    for name in ("result_id", "result_sha256", "process_run_id", "update_id"):
+    for name in ("result_id", "result_sha256", "process_run_id", "update_id", "allocation_policy"):
         payload["records"][record.record_id].pop(name)
     path = tmp_path / "execution_calibrations.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -107,7 +107,7 @@ def test_schema_v1_loads_with_null_canonical_references_and_upgrades_on_write(tm
     assert loaded.records[record.record_id].result_id is None
     save_execution_calibrations(path, loaded)
     upgraded = json.loads(path.read_text(encoding="utf-8"))
-    assert upgraded["schema_version"] == 3
+    assert upgraded["schema_version"] == 4
     assert upgraded["records"][record.record_id]["result_id"] is None
     assert upgraded["volume_warning_audits"] == {}
 
@@ -118,12 +118,33 @@ def test_schema_v2_loads_with_empty_warning_outbox(tmp_path):
     ).to_dict()
     payload["schema_version"] = 2
     payload.pop("volume_warning_audits")
+    payload["records"][record.record_id].pop("allocation_policy")
     path = tmp_path / "execution_calibrations.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     loaded = load_execution_calibrations(path)
 
     assert loaded.volume_warning_audits == {}
+
+
+def test_v3_policy_upgrade_preserves_old_record_identity_and_measurement(tmp_path):
+    from dataclasses import replace
+    old = _record()
+    payload = ExecutionCalibrationDocument(plan_id=PLAN_ID, records={old.record_id: old}).to_dict()
+    payload['schema_version'] = 3
+    payload['records'][old.record_id].pop('allocation_policy')
+    loaded = ExecutionCalibrationDocument.from_dict(payload)
+    assert loaded.records[old.record_id] == old
+    values = {**old.to_dict(), 'allocation_policy': 'execution_volume_budget_v1'}
+    new_id = deterministic_calibration_record_id(PLAN_ID, values)
+    assert new_id != old.record_id
+    new = replace(old, record_id=new_id, allocation_policy='execution_volume_budget_v1')
+    loaded.records[new_id] = new
+    path = tmp_path / 'execution_calibrations.json'
+    save_execution_calibrations(path, loaded)
+    assert load_execution_calibrations(path).records == {old.record_id: old, new_id: new}
+    with pytest.raises(ValueError, match='allocation policy'):
+        replace(new, allocation_policy='unknown')
 
 
 def test_volume_warning_outbox_round_trips_and_requires_matching_key(tmp_path):
