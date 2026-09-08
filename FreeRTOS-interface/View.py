@@ -12580,17 +12580,21 @@ class _DesignEditGuard(QtCore.QObject):
         self.editing_field = None
         self.owner._auto_timer.stop()
 
+    @QtCore.Slot()
     def resume(self):
         owner = self.owner
+        if not isValid(owner):
+            return
         manager = optimization_job_manager()
         if (self.pending and owner.isVisible() and owner._auto_update_enabled()
                 and not owner._auto_update_suspended and not manager.busy
                 and not manager._shutting_down):
             owner._schedule_auto_update(mark_dirty=False)
 
+    @QtCore.Slot(QtWidgets.QWidget, QtWidgets.QWidget)
     def _focus_changed(self, _old, new):
         owner = self.owner
-        if (not owner.isVisible() or owner._auto_update_suspended
+        if (not isValid(owner) or not owner.isVisible() or owner._auto_update_suspended
                 or not owner._auto_update_enabled()):
             return
         if self.pending and not self.editing():

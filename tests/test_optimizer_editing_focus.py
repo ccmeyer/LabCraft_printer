@@ -33,6 +33,27 @@ def begin_edit(qapp, editor):
     return target
 
 
+def test_destroyed_editor_ignores_application_focus_and_worker_settlement(qapp, real_editor):
+    from shiboken6 import delete, isValid
+    from tests.test_experiment_design_reagent_headtype_integration import _build_real_dialog
+    editor = _build_real_dialog(real_editor.model)
+    editor._auto_timer.stop()
+    editor.auto_update_chk.setChecked(False)
+    guard = editor._auto_edit_guard
+    guard.pending = True
+    editor._allow_close_without_prompt = True
+    editor.close()
+    delete(editor)
+    assert not isValid(editor)
+    # Retained Python wrappers may outlive their C++ owners during teardown.
+    guard._focus_changed(None, real_editor)
+    guard.resume()
+    qapp.focusChanged.emit(None, real_editor)
+    optimization_job_manager().settled.emit()
+    qapp.processEvents()
+    assert not optimization_job_manager().busy
+
+
 def test_typing_pauses_defer_but_tab_commits_without_losing_focus(qapp, real_editor):
     editor = real_editor
     target = begin_edit(qapp, editor)

@@ -14,6 +14,7 @@
 - Calibration publication failures restore the prior files and runtime. Stale previews refresh without applying; saved execution activation and one bounded I/O retry use existing eligibility and integrity checks. Retry also refuses an experiment replaced while confirmation is open.
 - Release-aware bundles accept RC schemas v1/v2, restrict v2 to RCs, read metadata at the resolved commit, and verify the commit captured in the bundle before publishing its manifest.
 - Updated the composed software-workflow driver to wait for the inline optimizer and publication to finish. Bundle verification accepts identical duplicate tag entries emitted by older Git versions while rejecting conflicting entries.
+- Editor focus and worker-settlement callbacks ignore deleted Qt owners. Frozen schema-v2 safeguard fixtures retain their reviewed bytes when the current calibration writer advances to version 4.
 
 ### Recovery and release status
 

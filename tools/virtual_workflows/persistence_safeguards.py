@@ -337,6 +337,9 @@ def _write_pristine_bundle(root: Path, *, baseline_kind: str, name: str) -> None
         ).to_dict()
         calibration_payload["schema_version"] = 2
         calibration_payload.pop("volume_warning_audits")
+        for record in calibration_payload["records"].values():
+            # This frozen v2 fixture predates execution allocation policies.
+            record.pop("allocation_policy")
         (root / "execution_calibrations.json").write_text(
             json.dumps(
                 calibration_payload,

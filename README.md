@@ -3294,6 +3294,8 @@ history. Structured persistence remains mandatory and capture retention remains
 independent.
 
 Milestone 7 retired the emergency writer and legacy-primary-reader switches.
+The frozen persistence-safeguard fixtures retain their original schema-v2
+record shape and reviewed hashes independently of the current version-4 writer.
 `LABCRAFT_CALIBRATION_LEGACY_WRITER=1`,
 `LABCRAFT_CALIBRATION_STORE_AUTHORITATIVE=0`, or a legacy primary/secondary
 reader selection now blocks new calibration startup until the value is removed
