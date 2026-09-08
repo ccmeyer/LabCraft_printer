@@ -15,7 +15,7 @@ from ExecutionPlan import canonical_sha256
 
 
 SCHEMA_NAME = "labcraft.execution_calibrations"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 CALIBRATION_RECORD_NAMESPACE = uuid.UUID("54945835-c76e-4ccf-94c4-9fa9a78e034a")
 PRINTING_MODES = {"droplet", "stream"}
 
@@ -44,8 +44,10 @@ CALIBRATION_FIELDS = {
     "result_sha256",
     "process_run_id",
     "update_id",
+    "allocation_policy",
 }
-CALIBRATION_FIELDS_V1 = CALIBRATION_FIELDS - {
+CALIBRATION_FIELDS_V3 = CALIBRATION_FIELDS - {"allocation_policy"}
+CALIBRATION_FIELDS_V1 = CALIBRATION_FIELDS_V3 - {
     "result_id", "result_sha256", "process_run_id", "update_id"
 }
 
@@ -157,6 +159,7 @@ class ExecutionCalibrationRecord:
     result_sha256: str | None = None
     process_run_id: str | None = None
     update_id: str | None = None
+    allocation_policy: str | None = None
 
     def __post_init__(self) -> None:
         _canonical_uuid(self.record_id, "calibration.record_id")
@@ -180,6 +183,8 @@ class ExecutionCalibrationRecord:
         object.__setattr__(self, "pressure_psi", _optional_number(self.pressure_psi, "calibration.pressure_psi"))
         for name in ("run_id", "phase", "timestamp"):
             object.__setattr__(self, name, _optional_string(getattr(self, name), f"calibration.{name}"))
+        if self.allocation_policy not in (None, "execution_volume_budget_v1"):
+            raise ValueError("Unsupported calibration allocation policy.")
         for name in ("result_id", "result_sha256", "process_run_id", "update_id"):
             object.__setattr__(self, name, _optional_string(getattr(self, name), f"calibration.{name}"))
         if self.result_sha256 is not None and (
@@ -231,13 +236,15 @@ class ExecutionCalibrationRecord:
             "result_sha256": self.result_sha256,
             "process_run_id": self.process_run_id,
             "update_id": self.update_id,
+            "allocation_policy": self.allocation_policy,
         }
 
     @classmethod
     def from_dict(cls, payload: Any, *, schema_version: int = SCHEMA_VERSION) -> "ExecutionCalibrationRecord":
         if not isinstance(payload, Mapping):
             raise ValueError("calibration record must be an object")
-        expected = CALIBRATION_FIELDS_V1 if int(schema_version) == 1 else CALIBRATION_FIELDS
+        expected = (CALIBRATION_FIELDS_V1 if int(schema_version) == 1 else
+                    CALIBRATION_FIELDS_V3 if int(schema_version) < 4 else CALIBRATION_FIELDS)
         _require_exact_fields(payload, expected, "calibration record")
         fingerprint = payload["source_row_fingerprint"]
         if fingerprint is not None and not isinstance(fingerprint, list):
@@ -268,6 +275,8 @@ def deterministic_calibration_record_id(plan_id: str, payload: Mapping[str, Any]
             "original_printing_mode", "applied_printing_mode",
         )
     }
+    if payload.get("allocation_policy") is not None:
+        identity["allocation_policy"] = payload["allocation_policy"]
     return str(uuid.uuid5(CALIBRATION_RECORD_NAMESPACE, f"{plan_id}:{canonical_sha256(identity)}"))
 
 
@@ -383,10 +392,10 @@ class ExecutionCalibrationDocument:
             "records",
             "manual_refuel_checks",
         }
-        if schema_version == SCHEMA_VERSION:
+        if schema_version in {3, SCHEMA_VERSION}:
             expected_fields.add("volume_warning_audits")
         _require_exact_fields(payload, expected_fields, "execution_calibrations")
-        if payload["schema_name"] != SCHEMA_NAME or schema_version not in {1, 2, SCHEMA_VERSION}:
+        if payload["schema_name"] != SCHEMA_NAME or schema_version not in {1, 2, 3, SCHEMA_VERSION}:
             raise ValueError("Unsupported execution-calibration schema name or version.")
         if not isinstance(payload["records"], Mapping) or not isinstance(payload["manual_refuel_checks"], Mapping):
             raise ValueError("Execution-calibration records and manual checks must be objects.")

@@ -105,8 +105,8 @@ def test_live_slow_pause_and_cancel_keep_last_allocation(qapp, real_editor, monk
         ui.cancel()
         ui.phase("Queued obsolete phase")
         ui.refresh()
-        assert ui.dialog.labelText() == "Canceling…"
-        assert ui.dialog.isVisible()
+        assert ui.progress.label.text() == "Canceling…"
+        assert not ui.progress.isHidden()
         release.set()
         wait_for(qapp, lambda: outcomes)
         assert ui.finished and (not isValid(ui.timer) or not ui.timer.isActive())
@@ -158,21 +158,135 @@ def test_progress_details_delayed_and_updates_coalesced(qapp, real_editor, monke
         assert ui.timer.interval() == 500
         ui.phase("Preparing candidates")
         # Phase signals only update the mailbox, never repaint each candidate.
-        assert ui.dialog.labelText() == "Updating…"
+        assert ui.progress.label.text() == "Updating…"
         clock[0] = 100.99
         ui.refresh()
-        assert ui.dialog.labelText() == "Preparing candidates"
+        assert ui.progress.label.text() == "Preparing candidates"
         monkeypatch.setattr(optimization_job_manager(), "activity_snapshot",
                             lambda owner: ("Preparing candidates", "stock pairs considered", 2400, None))
         clock[0] = 101
         ui.refresh()
-        assert "2,400 stock pairs considered" in ui.dialog.labelText()
-        assert "1 second elapsed" in ui.dialog.labelText()
+        assert "2,400 stock pairs considered" in ui.progress.label.text()
+        assert "1 second elapsed" in ui.progress.label.text()
         ui.phase("Generating reactions")
         ui.refresh()
-        assert "stock pairs" not in ui.dialog.labelText()
+        assert "stock pairs" not in ui.progress.label.text()
     finally:
         ui.finish(None)
+
+
+@pytest.mark.parametrize("terminal", ["completed", "cancelled", "superseded"])
+def test_quick_jobs_never_animate_or_show_late_busy_feedback(qapp, real_editor, monkeypatch, terminal):
+    import View
+    clock = [100.0]
+    monkeypatch.setattr(View.time, "monotonic", lambda: clock[0])
+    editor = real_editor
+    ui = View._AsyncOptimizationUi(editor, [editor.save_btn], lambda *_: None,
+                                   lambda: None, lambda _: None, editable=True)
+    assert not editor.save_btn.isEnabled()
+    assert ui.progress.cancel_button.isEnabled()
+    assert ui.progress.bar.maximum() == 1
+    assert not ui.progress.label.styleSheet()
+    clock[0] = 100.499
+    ui.phase("Preparing candidates")
+    ui.refresh()
+    assert ui.progress.label.text() == "Updating…"
+    assert ui.progress.bar.maximum() == 1
+    if terminal == "cancelled":
+        ui.cancel()
+    elif terminal == "superseded":
+        ui.supersede()
+    if terminal != "completed":
+        clock[0] = 102
+        ui.refresh()
+        assert ui.progress.label.text() == "Canceling…"
+        assert ui.progress.bar.maximum() == 1
+    ui.finish(None)
+    qapp.processEvents()
+    clock[0] = 103
+    ui.phase("Generating reactions")
+    ui.refresh()
+    assert ui.progress.bar.maximum() == 1
+    assert not ui.progress.label.styleSheet()
+
+
+def test_busy_animation_starts_at_threshold_and_stops_on_finish(qapp, real_editor, monkeypatch):
+    import View
+    clock = [100.0]
+    monkeypatch.setattr(View.time, "monotonic", lambda: clock[0])
+    ui = View._AsyncOptimizationUi(real_editor, [], lambda *_: None, lambda: None, lambda _: None)
+    try:
+        ui.phase("Preparing candidates")
+        clock[0] = 100.5
+        ui.refresh()
+        assert ui.progress.bar.maximum() == 0
+        assert "#1e64b4" in ui.progress.label.styleSheet()
+        assert ui.progress.label.text() == "Preparing candidates"
+    finally:
+        ui.finish(None)
+    assert ui.progress.bar.maximum() == 1
+    assert not ui.progress.label.styleSheet()
+
+
+def test_publication_callback_failure_is_immediately_red(qapp, real_editor):
+    from View import _AsyncOptimizationUi
+    def fail(_outcome):
+        raise ValueError("injected publication callback failure")
+    ui = _AsyncOptimizationUi(real_editor, [], real_editor._set_status, lambda: None, fail)
+    ui.finish(None)
+    assert real_editor.status_heading_lbl.text() == "Error"
+    assert "injected publication callback failure" in real_editor.status_lbl.text()
+    assert ui.progress.bar.maximum() == 1
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_running_design_is_neutral_and_real_failure_is_red(qapp, real_editor, monkeypatch, failure):
+    editor = real_editor
+    entered, release = threading.Event(), threading.Event()
+    original = ExperimentModel.optimize_stock_solutions
+    def optimize(draft, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        if failure:
+            raise RuntimeError("injected optimizer failure")
+        return original(draft, **kwargs)
+    monkeypatch.setattr(ExperimentModel, "optimize_stock_solutions", optimize)
+    editor._set_status("Previous invalid inputs.", severity="error")
+    outcomes = []
+    editor.optimization_finished.connect(lambda *args: outcomes.append(args))
+    editor._run_design_optimization_flow()
+    try:
+        wait_for(qapp, entered.is_set)
+        assert editor._stock_table_stale_active
+        assert editor.status_heading_lbl.text() == "Status"
+        assert "#8a0303" not in editor.design_information_panel.styleSheet()
+        assert not editor.stock_table.styleSheet()
+        assert editor.stock_warning_heading_lbl.text() == "Stock Results"
+    finally:
+        release.set()
+    wait_for(qapp, lambda: outcomes)
+    assert outcomes[0][0] is (not failure)
+    if failure:
+        assert editor.status_heading_lbl.text() == "Error"
+        assert "injected optimizer failure" in editor.status_lbl.text()
+        assert "#8a0303" in editor.stock_table.styleSheet()
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+def test_pending_edits_are_informational(qapp, real_editor, automatic):
+    editor = real_editor
+    editor.show()
+    editor.activateWindow()
+    editor.auto_update_chk.setChecked(automatic)
+    target = editor._reagent_cell_widget(0, editor.COL_TARGETS)
+    target.setFocus()
+    wait_for(qapp, target.hasFocus)
+    editor._set_status("Previous update completed.", severity="success")
+    editor._schedule_auto_update()
+    editor._auto_timer.stop()
+    assert editor.status_heading_lbl.text() == "Status"
+    assert "border:2px solid #8c8c8c" in editor.design_information_panel.styleSheet()
+    assert not editor.stock_table.styleSheet()
 
 
 def test_generation_activity_total_is_actual_reactions():

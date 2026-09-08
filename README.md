@@ -97,11 +97,33 @@ On this Windows checkout, use the repo virtual environment directly:
 Avoid `py -m pytest -q` here unless the Windows Python launcher has been verified; in some agent shells it fails with `No installed Python found!`.
 
 The editor and import wizard calculate stock allocations on a dedicated Qt
-worker. Design edits pause during calculation; Cancel preserves the previous
+worker. Automatic calculations allow continued editing; explicit calculations,
+import, Save, preview, and finalize pause design edits until publication. Cancel preserves the previous
 results. Save, preview, and finalize wait for successful publication. Calibration
 transactions and non-UI model APIs remain synchronous.
+Composed software-workflow checks wait for the optimizer and its UI publication
+to settle; completion no longer depends on a transient progress window.
 
-After one second the busy display adds elapsed time and phase-specific activity
+Automatic updates wait while you type in the same field, including pauses
+within a comma-separated target list. Leaving that field, including Tab into
+another input, starts a short debounce. New typing cancels obsolete work and
+defers its replacement until that field is committed. Only one job runs, and
+only results matching the current editor inputs can publish. **Recalculate
+Stocks** commits the current inputs explicitly. Pending edits mark stock results
+as out of date. Turning automatic updates off permits explicit recalculation only.
+
+Calculation progress occupies a permanently reserved footer in the editor and
+import wizard. Status, a short progress bar, and Cancel share one fixed-height
+row; the full status is also available in a tooltip. Idle controls retain their
+space, preventing layout movement as jobs start and stop. The editor uses more
+available desktop height; its left settings and design tools scroll when needed,
+while Save/Finalize and the other experiment actions stay visible below them.
+Expanded Advanced Settings never compress the buttons. Updating text and Cancel
+are available immediately; animation and blue footer text appear only after
+500 ms, so quick updates stay quiet. The Design Information panel stays neutral
+during normal processing: out-of-date results alone are not an error. Actual
+validation or computation failures appear immediately in red. After one second
+the footer adds elapsed time and phase-specific activity
 counts, refreshed twice per second. Automatic stock calculations reaching three
 seconds pause future automatic updates for that design and explain how to use
 **Recalculate Stocks**. Re-enabling Auto-update honors that choice for the rest
@@ -3272,6 +3294,10 @@ history. Structured persistence remains mandatory and capture retention remains
 independent.
 
 Milestone 7 retired the emergency writer and legacy-primary-reader switches.
+The frozen persistence-safeguard fixtures retain their original schema-v2
+record shape and reviewed hashes independently of the current version-4 writer.
+Qt test cleanup also shuts down the application optimizer through its bounded
+shutdown protocol before deleting widgets; a smoke subprocess must exit cleanly.
 `LABCRAFT_CALIBRATION_LEGACY_WRITER=1`,
 `LABCRAFT_CALIBRATION_STORE_AUTHORITATIVE=0`, or a legacy primary/secondary
 reader selection now blocks new calibration startup until the value is removed
@@ -4941,6 +4967,24 @@ apply. See `docs/machine_data_update_and_rollback_runbook.md` for support and
 recovery procedures.
 
 ### Controlled release rollback
+
+Prepared rc.12 has no configured historical rollback target. Retain the current
+version or obtain a qualified compatible release-aware bundle through the
+protected updater. Release bundle creation now supports RC manifest schemas
+v1/v2 and verifies the captured commit; the recipient branch must match
+`--branch`. See [release preparation and packaging](docs/release_process.md).
+
+Version-4 execution calibration files require a compatible reader and the
+volume-bounded allocation policy. Declaring releases enforce
+`FreeRTOS-interface/execution_data_compatibility.json` during online/offline
+update and rollback selection and again before installation. Incompatible
+targets leave Restore disabled while the current app stays open. If a later
+check stops the standalone updater before installation, use **Reopen Current
+Version** when offered, or obtain a qualified compatible release/bundle. Do not
+downgrade experiment files or restore older progress to force a rollback. This
+floor also applies before the first version-4 save because experiments may be
+stored on external media. See
+`docs/machine_data_update_and_rollback_runbook.md` for the complete recovery path.
 
 The Firmware tab includes support-guided rollback controls for restoring a previous application version without allowing arbitrary tag selection. Use rollback only with support guidance after confirming the machine is idle and no print, calibration, capture, or firmware operation is active.
 

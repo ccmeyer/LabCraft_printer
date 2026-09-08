@@ -474,6 +474,28 @@ example `v1.2.0`.
 ## Offline Update Bundles
 
 Create release-aware bundles from a checkout that has the target tag.
+The builder supports stable schema-v1 and release-candidate schema-v1/v2
+manifests; schema v2 remains reserved for RCs. It reads release metadata at the
+resolved commit and verifies the ref captured in the generated bundle before
+writing the sidecar manifest. A changed ref fails packaging instead of producing
+a sidecar for different bytes. `--branch` binds the intended recipient checkout
+branch even when `--release` selects the source tag.
+
+During preparation without tag authority, retain a tag-free source archive and
+Git review bundle outside the repository. These are review artifacts, not
+installable offline update packages. Do not create a release tag or synthesize
+an updater manifest to bypass approval. After approval, tag the exact accepted
+metadata revision, run `validate_release_metadata.py --check-tags`, and generate
+the release-aware package. For rc.12, on an authorized stable-branch recipient:
+
+```powershell
+.\env\Scripts\python.exe -B tools\create_update_bundle.py --release v1.3.0-rc.12 --branch stable --output-dir <external-package-directory>
+```
+
+Rc.12 uses `rollback_version: null`. No historical release qualifies as a
+version-4 recovery target. Use the current-version/qualified-compatible-bundle
+recovery route described below. Keep the exact legacy index pointer at rc.11;
+modern RC series discovery selects rc.12 only once its tag is published.
 
 Full release bundle:
 
@@ -519,6 +541,22 @@ Nested version folders require manual manifest selection from the app.
 ## Online Rollback And Offline Rollback
 
 Release manifests must define `rollback_version` deliberately.
+
+For a release carrying `FreeRTOS-interface/execution_data_compatibility.json`,
+qualify the rollback target's declaration and implementation as well. It must
+support the source release's required capabilities and retain those requirements
+in its own rollback floor. The first version-4 calibration release requires
+`execution_calibrations_v4` and `execution_volume_budget_v1`. An old machine-data
+preservation contract alone does not establish experiment compatibility.
+
+Run an isolated upgrade -> calibrate/save version 4 -> rollback -> reload/resume
+campaign against the exact proposed compatible target, plus refusal coverage for
+an incompatible online/offline target. Verify unchanged measurements, committed
+counts, progress, immutable revisions, and a valid deployment receipt. A target
+without that evidence is not a qualified fallback. If no compatible older release
+exists, use no configured rollback target (null where supported) and explain the
+current-version/compatible-bundle recovery route; do not advertise an unusable
+historical rollback or rewrite experiment documents to make it load.
 
 Stable releases normally roll back to the previous stable release.
 

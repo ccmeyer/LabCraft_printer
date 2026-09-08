@@ -230,6 +230,24 @@ def _isolate_qt_top_level_widgets(request):
     app = QtWidgets.QApplication.instance()
     if app is None:
         return
+    # Test applications do not run QApplication.exec()/Quit, so the normal
+    # application quit filter cannot stop the process-wide optimizer thread.
+    # Drain its existing shutdown protocol before deleting callback owners.
+    manager = getattr(app, "_optimization_job_manager", None)
+    if manager is not None:
+        import time
+
+        stopped = []
+        manager.shutdown(lambda: stopped.append(True))
+        deadline = time.monotonic() + 30.0
+        while not stopped:
+            app.processEvents()
+            if time.monotonic() >= deadline:
+                pytest.fail("Application optimizer did not shut down during test cleanup")
+            time.sleep(0.002)
+        app.removeEventFilter(manager)
+        app._optimization_job_manager = None
+        manager.deleteLater()
     for widget in list(app.topLevelWidgets()):
         signal_sources = [widget]
         try:
@@ -281,6 +299,7 @@ def fake_serial_factory():
 @pytest.fixture
 def experiment_model_factory(tmp_path):
     import json
+    import itertools
     from types import SimpleNamespace
 
     from hardware.profile import CURRENT_PROFILE
@@ -294,6 +313,7 @@ def experiment_model_factory(tmp_path):
 
     plates_src = REPO_ROOT / "FreeRTOS-interface" / "Presets" / "Plates.json"
     plates_data = json.loads(plates_src.read_text(encoding="utf-8"))
+    experiment_numbers = itertools.count()
 
     def _make(*, plate_data_override=None):
         m = Model.__new__(Model)
@@ -315,8 +335,10 @@ def experiment_model_factory(tmp_path):
         )
         m.assign_printer_heads = lambda: None
 
-        exp_dir = tmp_path / f"exp_{id(m)}"
-        exp_dir.mkdir(exist_ok=True)
+        # A caller may retain only m.experiment_model, letting Python reuse
+        # id(m). Never let a later fixture overwrite that experiment's files.
+        exp_dir = tmp_path / f"exp_{next(experiment_numbers)}"
+        exp_dir.mkdir()
         m.experiment_model.experiment_dir_path = str(exp_dir)
         m.experiment_model.update_all_paths()
 

@@ -1,0 +1,6 @@
+{
+  "schema_name": "labcraft.execution_data_compatibility",
+  "schema_version": 1,
+  "capabilities": ["execution_calibrations_v4", "execution_volume_budget_v1"],
+  "required_capabilities": ["execution_calibrations_v4", "execution_volume_budget_v1"]
+}

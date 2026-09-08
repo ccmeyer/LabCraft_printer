@@ -384,6 +384,11 @@ def test_apply_previewed_droplet_volume_refreshes_recommendation(monkeypatch, qa
     dialog._set_saved_applied_summary_row_fingerprint = lambda fingerprint: None
     dialog._sync_applied_summary_row_highlight = lambda: None
     dialog._apply_print_settings_for_applied_calibration = lambda *args, **kwargs: {"ok": True, "message": ""}
+    dialog._selected_summary_row = lambda: (None, None)
+    dialog._bridge_shortfall_text = DropletImagingDialog._bridge_shortfall_text
+    dialog._apply_calibration_with_retry = (
+        DropletImagingDialog._apply_calibration_with_retry.__get__(dialog, DropletImagingDialog)
+    )
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
     monkeypatch.setattr(calibration_view.QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)

@@ -7564,13 +7564,13 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             state = well.assigned_reaction.check_stock_complete(stock_id)
             outline = 'white' if state else 'black'
             if concentration is not None:
-                opacity = 0 if max_concentration == 0 else concentration / max_concentration
+                opacity = (0 if max_concentration <= 0 else
+                           min(1.0, max(0.0, concentration / max_concentration)))
                 well_color = QtGui.QColor(color)
                 well_color.setAlphaF(opacity)
-                rgba_color = (
-                    f"rgba({well_color.red()},{well_color.green()},"
-                    f"{well_color.blue()},{well_color.alpha()})"
-                )
+                # QSS interprets rgba(...,1) as 100% opacity, not 1/255.
+                # ARGB hex preserves low integer alpha values unambiguously.
+                rgba_color = well_color.name(QtGui.QColor.HexArgb)
                 label.setStyleSheet(
                     f"background-color: {rgba_color}; border: 1px solid {outline};"
                 )
@@ -12476,9 +12476,151 @@ class _BusyUiContext:
         return False
 
 
+class _OptimizationProgress(QWidget):
+    """Inline job feedback; never creates or activates a separate window."""
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.setObjectName("optimization_progress")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(8)
+        self.label = QLabel("Ready.", self)
+        self.label.setTextFormat(Qt.PlainText)
+        self.label.setWordWrap(False)
+        self.label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        layout.addWidget(self.label, 1)
+        self.bar = QtWidgets.QProgressBar(self)
+        self.bar.setRange(0, 1)
+        self.bar.setTextVisible(False)
+        self.bar.setFixedWidth(180)
+        self.bar.setFixedHeight(self.label.fontMetrics().lineSpacing())
+        layout.addWidget(self.bar)
+        self.cancel_button = QPushButton("Cancel calculation", self)
+        self.cancel_button.setAutoDefault(False)
+        layout.addWidget(self.cancel_button)
+        owner._optimization_progress_layout.addWidget(self)
+        self.setFixedHeight(self.sizeHint().height())
+        self.reset()
+
+    def set_status(self, text):
+        self.label.setText(text.replace("\n", " · "))
+        self.label.setToolTip(text)
+
+    def reset(self):
+        self.set_status("Changes pending." if getattr(self.parent(), "_design_optimization_dirty", False)
+                        else "Ready.")
+        self.stop_activity()
+        self.cancel_button.setEnabled(False)
+
+    def start(self):
+        self.stop_activity()
+        self.set_status("Updating…")
+        self.cancel_button.setEnabled(True)
+
+    def show_activity(self):
+        if self.bar.maximum() != 0:
+            self.bar.setRange(0, 0)
+            self.label.setStyleSheet("color:#1e64b4;")
+
+    def stop_activity(self):
+        self.bar.setRange(0, 1)
+        self.bar.setValue(0)
+        self.label.setStyleSheet("")
+
+
+class _DesignEditGuard(QtCore.QObject):
+    """Commit on field changes and coalesce edits behind the single worker."""
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner = owner
+        self.pending = False
+        self.editing_field = None
+        app = QApplication.instance()
+        app.focusChanged.connect(self._focus_changed)
+        owner.installEventFilter(self)
+        optimization_job_manager().settled.connect(self.resume)
+
+    def _is_input(self, widget):
+        if widget is None or not self.owner.isAncestorOf(widget):
+            return False
+        while widget is not self.owner:
+            if (isinstance(widget, (QLineEdit, QtWidgets.QAbstractSpinBox, QComboBox))
+                    or widget is self.owner.reagent_table):
+                return True
+            widget = widget.parentWidget()
+        return False
+
+    def editing(self):
+        app = QApplication.instance()
+        # Opening another dialog, a combo popup, or switching applications is
+        # not a commitment of the current edit.
+        return ((self.editing_field is not None and isValid(self.editing_field)
+                 and self.editing_field.hasFocus())
+                or app.activePopupWidget() is not None
+                or app.activeModalWidget() not in (None, self.owner)
+                or (self.owner.isVisible() and not self.owner.isActiveWindow()))
+
+    def defer_if_editing(self):
+        if self.editing():
+            self.owner._auto_timer.stop()
+            return True
+        return False
+
+    def note_edit(self):
+        self.pending = True
+        focus = QApplication.focusWidget()
+        self.editing_field = focus if self._is_input(focus) and isinstance(
+            focus, (QLineEdit, QtWidgets.QAbstractSpinBox)
+        ) else None
+
+    def consume(self):
+        self.pending = False
+        self.editing_field = None
+        self.owner._auto_timer.stop()
+
+    @QtCore.Slot()
+    def resume(self):
+        owner = self.owner
+        if not isValid(owner):
+            return
+        manager = optimization_job_manager()
+        if (self.pending and owner.isVisible() and owner._auto_update_enabled()
+                and not owner._auto_update_suspended and not manager.busy
+                and not manager._shutting_down):
+            owner._schedule_auto_update(mark_dirty=False)
+
+    @QtCore.Slot(QtWidgets.QWidget, QtWidgets.QWidget)
+    def _focus_changed(self, _old, new):
+        owner = self.owner
+        if (not isValid(owner) or not owner.isVisible() or owner._auto_update_suspended
+                or not owner._auto_update_enabled()):
+            return
+        if self.pending and not self.editing():
+            self.editing_field = None
+            if owner._design_optimization_dirty:
+                owner._schedule_auto_update(mark_dirty=False)
+            else:
+                self.pending = False
+
+    def eventFilter(self, watched, event):
+        if watched is self.owner and event.type() == QtCore.QEvent.Type.Hide:
+            # QDialog.reject() can hide without invoking closeEvent().
+            self.consume()
+        if (event.type() == QtCore.QEvent.Type.MouseButtonPress
+                and watched is self.owner
+                and self._is_input(QApplication.focusWidget())
+                and not self._is_input(self.owner.childAt(event.position().toPoint()))):
+            # Labels and empty background need not accept keyboard focus.
+            # Clicking them still explicitly leaves the design inputs.
+            self.owner.setFocus(Qt.MouseFocusReason)
+        return False
+
+
 class _AsyncOptimizationUi:
     """Nonblocking busy state shared by the editor and import wizard."""
-    def __init__(self, owner, widgets, status, restore, completed):
+    def __init__(self, owner, widgets, status, restore, completed, *, editable=False):
         self.owner = owner
         self.status = status
         self.restore = restore
@@ -12486,12 +12628,25 @@ class _AsyncOptimizationUi:
         self.close_after = None
         self.canceling = False
         self.finished = False
+        self.editable = editable
+        self.superseded = False
         self.started = time.monotonic()
         self.phase_text = "Updating…"
         inputs = owner.findChildren(QtWidgets.QWidget)
         editable_types = (QtWidgets.QAbstractButton, QtWidgets.QAbstractSpinBox,
                           QLineEdit, QComboBox, QTableWidget)
-        controls = list(widgets) + [w for w in inputs if isinstance(w, editable_types)]
+        if editable:
+            # Keep text, numeric and selection inputs usable during automatic
+            # work. Lifecycle/structural actions still wait for the worker.
+            keep_enabled = [getattr(owner, name, None) for name in (
+                "randomization_options_row", "subset_design_options_row", "auto_update_chk",
+            )]
+            controls = [w for w in widgets if w not in keep_enabled]
+        else:
+            controls = list(widgets) + [w for w in inputs if isinstance(w, editable_types)]
+        progress = owner._optimization_progress
+        controls = [w for w in controls if w is not None and w is not progress
+                    and not progress.isAncestorOf(w)]
         close_button = getattr(owner, "cancel_btn", None)
         controls = list(dict.fromkeys(w for w in controls if w is not None and w is not close_button))
         control_set = set(controls)
@@ -12506,20 +12661,16 @@ class _AsyncOptimizationUi:
         # child separately triggers redundant style/layout work on the Pi.
         self.states = [(w, w.isEnabled()) for w in controls if not covered_by_parent(w)]
         self.previous_suspend = getattr(owner, "_auto_update_suspended", False)
-        owner._auto_update_suspended = True
+        owner._auto_update_suspended = self.previous_suspend or not editable
         owner._optimization_ui = self
         timer = getattr(owner, "_auto_timer", None)
         if timer is not None:
             timer.stop()
         for widget, _ in self.states:
             widget.setEnabled(False)
-        self.dialog = QtWidgets.QProgressDialog("Updating…", "Cancel", 0, 0, owner)
-        self.dialog.setWindowModality(Qt.NonModal)
-        self.dialog.setAutoClose(False)
-        self.dialog.setAutoReset(False)
-        self.dialog.setMinimumDuration(0)
-        self.dialog.canceled.connect(self.cancel)
-        self.dialog.show()
+        self.progress = progress
+        self.progress.cancel_button.clicked.connect(self.cancel)
+        self.progress.start()
         self.timer = QTimer(owner)
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.setInterval(500)
@@ -12531,14 +12682,19 @@ class _AsyncOptimizationUi:
             self.phase_text = text
 
     def refresh(self):
-        if self.finished or not isValid(self.dialog):
+        if self.finished or not isValid(self.progress):
             return
         if self.canceling:
-            self.dialog.setLabelText("Canceling…")
-            self.dialog.show()
+            self.progress.stop_activity()
+            self.progress.set_status("Canceling…")
             return
         text = self.phase_text
         elapsed = time.monotonic() - self.started
+        # Fast updates remain quiet. This gates presentation only; the worker,
+        # Cancel and action interlocks have all been active since submission.
+        if elapsed < 0.5:
+            return
+        self.progress.show_activity()
         if elapsed >= 1.0:
             seconds = int(elapsed)
             detail = f"{seconds:,} {'second' if seconds == 1 else 'seconds'} elapsed"
@@ -12548,18 +12704,29 @@ class _AsyncOptimizationUi:
                 counts = f"{count:,}" if total is None else f"{count:,} of {total:,}"
                 detail = f"{counts} {label} · {detail}"
             text += "\n" + detail
-        self.dialog.setLabelText(text)
+        self.progress.set_status(text)
 
     def cancel(self):
+        self.superseded = False
+        self.progress.cancel_button.setEnabled(False)
+        edit_guard = getattr(self.owner, "_auto_edit_guard", None)
+        if edit_guard is not None:
+            edit_guard.consume()
+        self._cancel()
+
+    def supersede(self):
+        if self.editable and not self.finished:
+            self.superseded = True
+            self._cancel()
+
+    def _cancel(self):
         if self.finished or self.canceling:
             return
         self.canceling = True
         optimization_job_manager().cancel(self.owner)
         self.status("Canceling optimization…")
-        self.dialog.setCancelButton(None)
-        # QProgressDialog hides itself after emitting canceled. Re-show only
-        # while this job is still unwinding, without a nested event loop.
-        QTimer.singleShot(0, self.refresh)
+        self.progress.cancel_button.setEnabled(self.superseded)
+        self.refresh()
 
     def close_when_finished(self, callback):
         self.close_after = callback
@@ -12569,16 +12736,20 @@ class _AsyncOptimizationUi:
         self.finished = True
         self.timer.stop()
         self.timer.deleteLater()
-        self.dialog.blockSignals(True)
-        self.dialog.setCancelButton(None)
-        self.dialog.setLabelText("Finishing display update…")
+        self.progress.stop_activity()
+        self.progress.cancel_button.setEnabled(False)
+        self.progress.set_status("Finishing display update…")
         manager = optimization_job_manager()
         manager.begin_publication()
         try:
             result = self.completed(outcome)
         except Exception as exc:
             result = (False, {"reason": str(exc), "status": "failed"})
-            self.status(str(exc))
+            error_status = getattr(self.owner, "_set_status", None)
+            if error_status is not None:
+                error_status(str(exc), severity="error")
+            else:
+                self.status(str(exc))
         # Let Qt paint the completed table before enabling its child controls.
         # Combining both style/layout passes can exceed one UI frame on the Pi.
         QTimer.singleShot(1, lambda: self._restore_after_publication(result, manager))
@@ -12587,8 +12758,8 @@ class _AsyncOptimizationUi:
         try:
             if not isValid(self.owner):
                 return
-            self.dialog.close()
-            self.dialog.deleteLater()
+            self.progress.cancel_button.clicked.disconnect(self.cancel)
+            self.progress.reset()
             for widget, enabled in self.states:
                 if isValid(widget):
                     widget.setEnabled(enabled)
@@ -12618,17 +12789,24 @@ def _submit_optimization_ui_job(owner, kind, options, widgets, status, restore, 
     source_session = session_identity()
     snapshot = source_model.capture_optimization_inputs()
     fingerprint = input_fingerprint(snapshot)
+    editor_revision = getattr(owner, "_editor_input_revision", 0)
+    raw_signature = owner._optimization_input_signature() if kind == "design" else None
     request = OptimizationRequest(snapshot, kind=kind, options=copy.deepcopy(options))
 
     def publish(outcome):
         if ui.canceling:
-            outcome = OptimizationOutcome(request.job_id, "cancelled")
+            outcome = OptimizationOutcome(request.job_id, "superseded" if ui.superseded else "cancelled")
         if outcome.status == "succeeded":
             try:
                 if owner.model is not source_model or session_identity() != source_session or not guard():
                     raise ValueError("The experiment is no longer available for this update.")
                 if input_fingerprint(source_model.capture_optimization_inputs()) != fingerprint:
                     raise ValueError("The experiment changed during optimization.")
+                if kind == "design" and (
+                    getattr(owner, "_editor_input_revision", 0) != editor_revision
+                    or owner._optimization_input_signature() != raw_signature
+                ):
+                    raise ValueError("The editor inputs changed during optimization.")
                 owner._installing_job_result = True
                 if outcome.result.get("best"):
                     if kind == "design":
@@ -12646,11 +12824,14 @@ def _submit_optimization_ui_job(owner, kind, options, widgets, status, restore, 
                 owner._installing_job_result = False
         return completed(outcome)
 
-    ui = _AsyncOptimizationUi(owner, widgets, status, restore, publish)
+    ui = _AsyncOptimizationUi(owner, widgets, status, restore, publish,
+                              editable=bool(kind == "design" and options.get("editable")))
     def slow_optimizer():
         if (kind == "design" and options.get("automatic")
                 and owner.model is source_model and session_identity() == source_session
                 and guard()
+                and getattr(owner, "_editor_input_revision", 0) == editor_revision
+                and owner._optimization_input_signature() == raw_signature
                 and input_fingerprint(source_model.capture_optimization_inputs()) == fingerprint):
             owner._pause_slow_auto_update()
     try:
@@ -12716,7 +12897,9 @@ class ExperimentImportWizard(QDialog):
         self._has_calculated_report = False
         self._pending_change_message = ""
 
-        root = QHBoxLayout(self)
+        outer = QVBoxLayout(self)
+        root = QHBoxLayout()
+        outer.addLayout(root, 1)
         left = QVBoxLayout()
         right = QVBoxLayout()
         root.addLayout(left, stretch=1)
@@ -12784,6 +12967,7 @@ class ExperimentImportWizard(QDialog):
         self.status_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.status_lbl.setStyleSheet("color:#666; font-style: italic;")
         left.addWidget(self.status_lbl)
+        self._optimization_progress_layout = outer
         left.addStretch(1)
 
         self.calculate_btn = QPushButton("Calculate Feasibility")
@@ -12798,6 +12982,7 @@ class ExperimentImportWizard(QDialog):
         buttons.addWidget(self.cancel_btn)
         buttons.addWidget(self.apply_btn)
         left.addLayout(buttons)
+        self._optimization_progress = _OptimizationProgress(self)
 
         right.addWidget(QLabel("Imported Formulations"))
         self.composition_table = QTableWidget(0, 0, self)
@@ -14076,8 +14261,11 @@ class ExperimentDesignDialog(QDialog):
         self.default_droplet_volume_nL = printing_mode_default_ejection_volume_nl(PRINTING_MODE_DROPLET)
 
         self.setWindowTitle("Experiment Design (v2)")
-        self.setMinimumSize(1560, 840)
-        self.resize(1760, 900)
+        # Leave room for the desktop panel and window decorations. Shorter
+        # displays scroll the settings rather than compressing their controls.
+        available_height = self.screen().availableGeometry().height() - 60
+        self.setMinimumSize(1560, min(720, available_height))
+        self.resize(1760, min(1000, available_height))
 
         self.model: ExperimentModel = model
         self.runtime_model = getattr(self.main_window, "model", None)
@@ -14120,6 +14308,7 @@ class ExperimentDesignDialog(QDialog):
         # Root layout: lifecycle banner over LEFT (organized controls) | RIGHT (wide tables)
         # -------------------------
         outer_root = QVBoxLayout(self)
+        self._optimization_progress_layout = outer_root
         self.lifecycle_banner = QLabel("")
         self.lifecycle_banner.setObjectName("experiment_lifecycle_banner")
         self.lifecycle_banner.setWordWrap(True)
@@ -14211,7 +14400,17 @@ class ExperimentDesignDialog(QDialog):
         self.stock_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
 
         # ---------- Organized controls (left) ----------
-        controls_col = left
+        self.controls_scroll = QScrollArea(left_panel)
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        controls_content = QWidget(self.controls_scroll)
+        controls_col = QVBoxLayout(controls_content)
+        controls_col.setContentsMargins(0, 0, 4, 0)
+        controls_col.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinAndMaxSize)
+        self.controls_scroll.setWidget(controls_content)
+        left.addWidget(self.controls_scroll, stretch=1)
 
         experiment_group = QGroupBox("Experiment")
         experiment_form = QFormLayout(experiment_group)
@@ -14473,8 +14672,9 @@ class ExperimentDesignDialog(QDialog):
         self._slow_auto_update_override = False
         self.auto_update_chk.setChecked(True)
         self.auto_update_chk.setToolTip(
-            "When enabled, edits automatically recalculate reactions and stock solutions "
-            "after a short delay. Recalculation does not save the experiment. Turn this "
+            "When enabled, leaving a field (including Tab) schedules recalculation "
+            "after a short delay. You can keep editing during automatic calculations; "
+            "new edits cancel obsolete work. Recalculation does not save the experiment. Turn this "
             "off to make several edits before pressing Recalculate Stocks. Slow automatic "
             "stock calculations pause future automatic updates for this design."
         )
@@ -14486,6 +14686,9 @@ class ExperimentDesignDialog(QDialog):
             "Make your changes, then click Recalculate Stocks."
         )
         self.slow_auto_update_notice.setWordWrap(True)
+        notice_policy = self.slow_auto_update_notice.sizePolicy()
+        notice_policy.setRetainSizeWhenHidden(True)
+        self.slow_auto_update_notice.setSizePolicy(notice_policy)
         self.slow_auto_update_notice.hide()
         self.design_tools_layout.addWidget(self.slow_auto_update_notice, 4, 0, 1, 2)
 
@@ -14498,6 +14701,7 @@ class ExperimentDesignDialog(QDialog):
 
         # --- Experiment lifecycle actions ---
         experiment_actions_group = QGroupBox("Experiment Actions")
+        self.experiment_actions_panel = experiment_actions_group
         experiment_actions_layout = QGridLayout(experiment_actions_group)
         experiment_actions_layout.setColumnStretch(0, 1)
         experiment_actions_layout.setColumnStretch(1, 1)
@@ -14523,7 +14727,8 @@ class ExperimentDesignDialog(QDialog):
         self.finish_btn.setStyleSheet(f"background-color: {self.color_dict['dark_blue']}; color: white;")
         self.finish_btn.clicked.connect(self._on_finish)
         experiment_actions_layout.addWidget(self.finish_btn, 2, 0, 1, 2)
-        controls_col.addWidget(experiment_actions_group)
+        experiment_actions_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        left.addWidget(experiment_actions_group)
 
         # Fixed-size information panel beside the stock table. Variable-length
         # messages scroll inside this panel and cannot resize the controls column.
@@ -14630,6 +14835,13 @@ class ExperimentDesignDialog(QDialog):
         self._refresh_design_information_style()
         right.addWidget(self.stock_information_region, stretch=1)
 
+        # Reserve the scrollbar width up front, including the collapsed advanced
+        # panel's minimum width. Showing it must not clip fields horizontally.
+        controls_width = max(controls_col.itemAt(i).widget().minimumSizeHint().width()
+                             for i in range(controls_col.count()))
+        left_panel.setFixedWidth(max(
+            430, controls_width + 4 + 8 + self.controls_scroll.verticalScrollBar().sizeHint().width()
+        ))
         controls_col.addStretch(1)
 
         # ---- Auto-update bindings ----
@@ -14679,6 +14891,8 @@ class ExperimentDesignDialog(QDialog):
         self._gripper_lock_connection = self.main_window.model.rack_model.gripper_updated.connect(
             self._refresh_all_lock_states
         )
+        self._auto_edit_guard = _DesignEditGuard(self)
+        self._optimization_progress = _OptimizationProgress(self)
 
 
     # -----------------------------
@@ -15266,6 +15480,9 @@ class ExperimentDesignDialog(QDialog):
     def _on_experiment_name_changed(self, text: str):
         self.model.set_metadata(name=str(text).strip() or "Untitled")
         self._mark_draft_dirty()
+        ui = getattr(self, "_optimization_ui", None)
+        if ui is not None and ui.editable:
+            self._schedule_auto_update(dirty_domain="count")
 
     def _make_group_combo(self) -> QComboBox:
         combo = QComboBox()
@@ -15628,7 +15845,7 @@ class ExperimentDesignDialog(QDialog):
             if getattr(self, "_design_optimization_dirty", False):
                 self._set_status(
                     "Experiment changes are pending. Press Recalculate Stocks to apply them.",
-                    severity="warning",
+                    severity="info",
                 )
             self._update_run_button_dirty_state()
             return
@@ -15662,6 +15879,7 @@ class ExperimentDesignDialog(QDialog):
         self._update_run_button_dirty_state()
 
     def _mark_design_optimization_dirty(self, domain: str = "stock"):
+        self._editor_input_revision = getattr(self, "_editor_input_revision", 0) + 1
         domain = str(domain or "stock").strip().casefold()
         if domain == "layout":
             self._reaction_layout_dirty = True
@@ -15773,6 +15991,12 @@ class ExperimentDesignDialog(QDialog):
         if mark_dirty:
             self._mark_design_optimization_dirty(dirty_domain)
             self._mark_draft_dirty()
+            edit_guard = getattr(self, "_auto_edit_guard", None)
+            if edit_guard is not None:
+                edit_guard.note_edit()
+            ui = getattr(self, "_optimization_ui", None)
+            if ui is not None:
+                ui.supersede()
 
         if (
             getattr(self, "_uploaded_design_active", False)
@@ -15788,9 +16012,19 @@ class ExperimentDesignDialog(QDialog):
             if getattr(self, "_design_optimization_dirty", False):
                 self._set_status(
                     "Experiment changes are pending. Press Recalculate Stocks to apply them.",
-                    severity="warning",
+                    severity="info",
                 )
             self._update_run_button_dirty_state()
+            return
+
+        guard = getattr(self, "_auto_edit_guard", None)
+        if guard is not None and guard.defer_if_editing():
+            message = "Changes pending. Leave this field or click Recalculate Stocks."
+            # Avoid restyling every stock-table cell on each keystroke.
+            if self.stock_table_status_lbl.text() != message:
+                self._set_stock_table_stale(True, message)
+            if getattr(self, "_optimization_ui", None) is None:
+                self._optimization_progress.set_status(message)
             return
 
         # Debounce rapid edits
@@ -15801,6 +16035,11 @@ class ExperimentDesignDialog(QDialog):
     def _recompute_silent(self):
         if not self._auto_update_enabled():
             return
+        guard = getattr(self, "_auto_edit_guard", None)
+        if guard is not None and guard.defer_if_editing():
+            return
+        if optimization_job_manager().busy:
+            return  # The edit guard resumes the latest request when settled.
         if (
             self._gripper_edit_lock_is_active()
             or self._model_execution_is_read_only(getattr(self, "model", None))
@@ -16426,12 +16665,15 @@ class ExperimentDesignDialog(QDialog):
             imported_well_ids=self.model.extract_uploaded_design_well_ids_from_dataframe(df) or [],
         )
         self._set_stock_table_stale(True, "Applying imported formulations…")
+        self._set_status("Applying imported formulations…")
 
         def finished(outcome):
             if outcome.status != "succeeded" or not outcome.result.get("best"):
                 self._mark_design_optimization_dirty()
                 message = outcome.error or outcome.result.get("reason") or "Import canceled. Previous design retained."
-                self._set_status(message, severity="warning")
+                self._set_status(message, severity=(
+                    "info" if outcome.status in ("cancelled", "superseded") else "error"
+                ))
                 return False, {"reason": message, "status": outcome.status}
             self._reset_auto_update_session()
             self._uploaded_design_active = True
@@ -17033,6 +17275,21 @@ class ExperimentDesignDialog(QDialog):
             max_stock_edit: QLineEdit = self._reagent_cell_widget(row, self.COL_MAX_STOCK)
             label = self._key_label(key) if not key[0].startswith("__row_") else f"Row {row + 1}"
 
+            targets_edit = self._reagent_cell_widget(row, self.COL_TARGETS)
+            if targets_edit is not None:
+                parts = targets_edit.text().replace(",", " ").split()
+                try:
+                    valid_targets = bool(parts) and all(
+                        math.isfinite(float(part)) and float(part) >= 0 for part in parts
+                    )
+                except ValueError:
+                    valid_targets = False
+                if not valid_targets:
+                    issues.setdefault(key, []).append({
+                        "field": "targets", "severity": "error", "code": "invalid_targets",
+                        "message": f"{label}: enter complete, nonnegative target concentrations.",
+                    })
+
             for field_name, widget in (("fixed_stock", stock_edit), ("max_stock", max_stock_edit)):
                 if widget is None:
                     continue
@@ -17193,11 +17450,6 @@ class ExperimentDesignDialog(QDialog):
         heading = getattr(self, "stock_warning_heading_lbl", None)
         if heading is not None:
             heading.setVisible(bool(stale and message))
-        if hasattr(self, "stock_table") and self.stock_table is not None:
-            self.stock_table.setStyleSheet(
-                "QTableWidget { border:1px solid #8a0303; }"
-                if stale else ""
-            )
         self._refresh_design_information_style()
         
     def _rebuild_model_from_table(self):
@@ -17695,6 +17947,25 @@ class ExperimentDesignDialog(QDialog):
             "duplicate_reagent_rows": sorted(duplicate_rows),
         }
 
+    def _optimization_input_signature(self):
+        """Raw UI state catches even programmatic changes without edit signals."""
+        values = []
+        for widget in self.findChildren(QWidget):
+            if isinstance(widget, QLineEdit):
+                value = widget.text()
+            elif isinstance(widget, QtWidgets.QAbstractSpinBox):
+                value = widget.text()
+            elif isinstance(widget, QComboBox):
+                value = (widget.currentIndex(), widget.currentText(), repr(widget.currentData()))
+            elif isinstance(widget, QtWidgets.QAbstractButton) and widget.isCheckable():
+                if widget is getattr(self, "auto_update_chk", None):
+                    continue  # Scheduling preference is not computation input.
+                value = widget.isChecked()
+            else:
+                continue
+            values.append((id(widget), value))
+        return tuple(values)
+
     def _run_design_optimization_flow(
         self,
         *,
@@ -17710,6 +17981,9 @@ class ExperimentDesignDialog(QDialog):
     ) -> tuple[bool, dict | None]:
         if optimization_job_manager().busy:
             return False, {"best": None, "pending": True}
+        guard = getattr(self, "_auto_edit_guard", None)
+        if guard is not None:
+            guard.consume()
         if self._gripper_edit_lock_is_active():
             message = self.GRIPPER_LOCK_STATUS
             self._set_status(message, severity="warning")
@@ -17802,11 +18076,13 @@ class ExperimentDesignDialog(QDialog):
 
         options = {
             "allow_two": self._allow_two_setting(),
+            "editable": bool(automatic),
             "automatic": bool(automatic and not reuse_stock_allocation),
             "reuse_allocation": reuse_stock_allocation,
             "previous_result": copy.deepcopy(getattr(self, "_last_optimization_result", None)),
         }
         self._set_stock_table_stale(True, "Updating reactions and stock solutions…")
+        self._set_status("Updating reactions and stock solutions…")
 
         def finished(outcome):
             res = outcome.result
@@ -17817,8 +18093,14 @@ class ExperimentDesignDialog(QDialog):
                         True,
                         "Stock results are out of date. Click Recalculate Stocks to update this design.",
                     )
-                    message = outcome.error or "Optimization canceled. Previous results retained."
-                    self._set_status(message, severity="warning")
+                    message = outcome.error or (
+                        "Inputs changed. Previous results retained until the next update."
+                        if outcome.status == "superseded" else
+                        "Optimization canceled. Previous results retained."
+                    )
+                    self._set_status(message, severity=(
+                        "info" if outcome.status in ("cancelled", "superseded") else "error"
+                    ))
                     return False, {"reason": message, "status": outcome.status}
                 ok, res = self._complete_design_optimization_flow(
                     res, size_estimate=size_estimate,
@@ -19290,13 +19572,26 @@ class ExperimentDesignDialog(QDialog):
         self.accept()
 
     def _effective_status_severity(self) -> str:
-        if bool(getattr(self, "_stock_table_stale_active", False)):
-            return "error"
         severity = str(getattr(self, "_status_severity", "info") or "info")
+        if severity == "success" and getattr(self, "_stock_table_stale_active", False):
+            return "info"  # Old results are not ready for the current inputs.
         return severity if severity in self.STATUS_SEVERITIES else "info"
 
     def _refresh_design_information_style(self):
         severity = self._effective_status_severity()
+        table = getattr(self, "stock_table", None)
+        if table is not None:
+            table_style = ("QTableWidget { border:1px solid #8a0303; }"
+                           if severity == "error" and getattr(self, "_stock_table_stale_active", False)
+                           else "")
+            if table.styleSheet() != table_style:
+                table.setStyleSheet(table_style)
+        stock_heading = getattr(self, "stock_warning_heading_lbl", None)
+        if stock_heading is not None:
+            stock_heading.setText("Stock Solution Warning" if severity == "error" else "Stock Results")
+            stock_heading.setStyleSheet(
+                "color:#8a0303; font-weight:600;" if severity == "error" else "font-weight:600;"
+            )
         border_color = {
             "error": "#8a0303",
             "warning": "#c58a00",

@@ -4497,6 +4497,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
         )
         bridge_v.addWidget(self.bridge_status_label)
         bridge_v.addWidget(self.bridge_apply_btn)
+        self.bridge_recover_btn = QtWidgets.QPushButton("Refresh / recover calibration")
+        self.bridge_recover_btn.setObjectName("recoverCalibrationApplicationButton")
+        self.bridge_recover_btn.clicked.connect(self._recover_calibration_application)
+        bridge_v.addWidget(self.bridge_recover_btn)
 
         self.diff_widget = QWidget()
         self.diff_layout = QGridLayout(self.diff_widget)
@@ -10158,7 +10162,13 @@ class DropletImagingDialog(QtWidgets.QDialog):
         applied = self._get_saved_applied_summary_row_fingerprint()
         if applied is None:
             return False
-        return tuple(self._summary_row_fingerprint(raw)) == tuple(applied)
+        if tuple(self._summary_row_fingerprint(raw)) != tuple(applied):
+            return False
+        policy = (getattr(self, "_bridge_preview_payload", None) or {}).get("allocation_policy")
+        if policy:
+            record = self._get_applied_imaging_calibration_record() or {}
+            return record.get("allocation_policy") == policy
+        return True
 
     def _set_bridge_apply_button_state(self, state, reason=None):
         button = getattr(self, "bridge_apply_btn", None)
@@ -14188,7 +14198,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
     #     self.bridge_apply_btn.setEnabled(True)
 
     def _bridge_fill_preview_table(self, preview: dict):
-        rows = preview.get("rows") or []
+        rows = preview.get("per_well_rows") or preview.get("rows") or []
         nstocks = preview.get("n_stocks", 1)
         self.bridge_table.clearContents()
         self.bridge_table.setRowCount(len(rows))
@@ -14221,6 +14231,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 self.bridge_table.setItem(r, 5, QtWidgets.QTableWidgetItem(_format_bridge_number(row["printed_nL_new"], 2, suffix=" nL")))
                 self.bridge_table.setItem(r, 6, QtWidgets.QTableWidgetItem(_format_bridge_number(row["printed_nL_shift"], 2, signed=True, suffix=" nL")))
 
+        self._label_execution_preview_rows(rows)
         self.bridge_table.resizeColumnsToContents()
         self.bridge_table.resizeRowsToContents()
 
@@ -14228,7 +14239,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
         self._bridge_clear_preview_with_status()
 
     def _populate_bridge_preview_table(self, preview: dict):
-        rows = preview.get("rows", [])
+        rows = preview.get("per_well_rows") or preview.get("rows", [])
         self.bridge_table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             # small helpers
@@ -14254,6 +14265,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
 
             self.bridge_table.setItem(i, 5, it(_format_bridge_number(r["printed_nL_new"], 2)))
             self.bridge_table.setItem(i, 6, it(_format_bridge_number(r["printed_nL_shift"], 2, signed=True)))
+
+        self._label_execution_preview_rows(rows)
+
+    def _label_execution_preview_rows(self, rows):
+        self.bridge_table.setVerticalHeaderLabels([
+            str(row.get("well_id") or i + 1) for i, row in enumerate(rows)])
+        for i, row in enumerate(rows):
+            if "projected_final_volume_nL" not in row:
+                continue
+            tooltip = (f"Well {row['well_id']}: projected final volume "
+                       f"{row['projected_final_volume_nL']:.6g} nL. "
+                       "Concentrations use planned calibrated drops plus configured nonprinted liquid.")
+            for column in (1, 2, 4):
+                item = self.bridge_table.item(i, column)
+                if item is not None:
+                    item.setToolTip(tooltip)
+                    if not row.get("concentration_defined", True):
+                        item.setText("—")
 
     def _bridge_preview_from_last_char(self):
         _, raw = self._selected_summary_row()
@@ -14345,6 +14374,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._bridge_preview_payload = {
                 "is_fill": True,
                 "new_fill_nL": float(mean_nL),
+                "execution_context": copy.deepcopy(preview.get("execution_context")),
             }
             self.bridge_apply_btn.setEnabled(True)
             self.bridge_apply_btn.setToolTip("")
@@ -14383,7 +14413,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "option_name": key[1],
             "new_droplet_nL": float(preview.get("new_droplet_nL", mean_nL)),
             "n_stocks": int(preview.get("n_stocks", 1)),
+            "allocation_policy": preview.get("allocation_policy"),
             "stock_id": eligibility.get("stock_id"),
+            "execution_context": copy.deepcopy(preview.get("execution_context")),
         }
         can_apply = bool(eligibility.get("ok")) and self._bridge_preview_payload["n_stocks"] in (1, 2)
         self.bridge_apply_btn.setEnabled(can_apply)
@@ -14397,6 +14429,127 @@ class DropletImagingDialog(QtWidgets.QDialog):
             )
         )
         self.stageLabel.setText(f"Status: Preview using {'selected row' if source=='selected' else 'latest'} ({mean_nL:.3f} nL)")
+
+    @staticmethod
+    def _bridge_shortfall_text(shortfall):
+        if not shortfall:
+            return ""
+        prefix = "No fill stock is present. " if not shortfall["fill_available"] else ""
+        return (f"{prefix}{len(shortfall['affected_rows'])} well(s) remain below the planned "
+                f"printed volume; maximum shortfall {shortfall['max_shortfall_nL']:.3f} nL. "
+                "The measurement can still be applied.")
+
+    def _calibration_recovery_idle(self):
+        state = getattr(self.controller, "get_array_run_state", lambda: "unknown")()
+        checker = getattr(self.controller, "check_if_all_completed", None)
+        if not callable(checker):
+            checker = getattr(getattr(self.controller, "machine", None), "check_if_all_completed", None)
+        return state in {"idle", "resume_ready"} and callable(checker) and bool(checker())
+
+    def _recover_calibration_application(self):
+        """Refresh presentation or explicitly activate saved state; never actuate."""
+        blocked = self._selected_result_action_block_state()
+        if blocked:
+            self._set_bridge_status_message(blocked["preview_message"] +
+                " The selected measurement is retained. Use Refresh / recover after this operation finishes.")
+            return
+        em = self.model.experiment_model
+        eligibility = self._get_bridge_apply_eligibility()
+        resume = em.get_execution_resume_eligibility() or {}
+        can_activate = (em.get_execution_plan_source() == "persisted_execution_plan"
+                        and not em.is_authoritative_execution_runtime_active()
+                        and resume.get("can_activate_runtime"))
+        if can_activate:
+            if not self._calibration_recovery_idle():
+                self._set_bridge_status_message("Waiting for the array to be idle and its command queue to finish. "
+                                               "The measurement is retained; then use Refresh / recover.")
+                return
+            activate = getattr(self.main_window, "activate_authoritative_execution", None)
+            if not callable(activate):
+                self._set_bridge_status_message("Saved execution activation is unavailable in this window.")
+                return
+            expected_plan = em.get_execution_plan_snapshot()
+            try:
+                expected_context = em.calibration_activation_context()
+            except Exception as exc:
+                self._set_bridge_status_message(f"Saved execution needs investigation: {exc}")
+                return
+            answer = QtWidgets.QMessageBox.question(self, "Activate saved execution?",
+                "Validate and activate this saved execution so calibration can continue? "
+                "Saved counts and progress will be preserved. This does not start printing.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No, QtWidgets.QMessageBox.No)
+            if answer != QtWidgets.QMessageBox.Yes:
+                return
+            # The confirmation dialog runs the event loop: recheck before publication.
+            if not self._calibration_recovery_idle():
+                self._set_bridge_status_message("Execution became busy. Activation was not performed; try again when idle.")
+                return
+            if self.model.experiment_model is not em or em.get_execution_plan_snapshot() != expected_plan:
+                self._set_bridge_status_message("The experiment changed. Review the current execution before activating it.")
+                return
+            try:
+                if em.calibration_activation_context() != expected_context:
+                    self._set_bridge_status_message("Execution files or progress changed during confirmation. "
+                                                   "Activation was not performed; use Refresh / recover again.")
+                    return
+                activate()
+            except Exception as exc:
+                self._set_bridge_status_message(f"Saved execution could not be activated: {exc}")
+                return
+        self._invalidate_selected_characterization_readiness_cache()
+        # Resolve the selected result again without resetting table filters or
+        # losing the operator's selection during a runtime recovery.
+        self._refresh_bridge_preview_from_selection()
+
+    def _apply_calibration_with_retry(self, callback, *, source_experiment):
+        """Offer one retry for I/O failure after guarded rollback; never loop."""
+        if self.model.experiment_model is not source_experiment:
+            raise RuntimeError("The experiment changed. Review its preview before applying.")
+        _, selected = self._selected_summary_row()
+        fingerprint = self._summary_row_fingerprint(selected) if selected else None
+        try:
+            return callback()
+        except Exception as exc:
+            cause = exc
+            io_failure = False
+            while cause is not None:
+                io_failure |= isinstance(cause, OSError)
+                cause = cause.__cause__
+            em = self.model.experiment_model
+            if (not io_failure or not getattr(em, "_calibration_retry_safe", False)
+                    or em.get_execution_plan_snapshot() is None
+                    or em.get_execution_plan_sync_error()):
+                raise
+            answer = QtWidgets.QMessageBox.question(self, "Retry calibration save?",
+                f"Calibration could not be saved: {exc}\n\n"
+                "The attempted revision was rolled back. Retry this measurement once?",
+                QtWidgets.QMessageBox.Retry | QtWidgets.QMessageBox.Cancel, QtWidgets.QMessageBox.Cancel)
+            if answer != QtWidgets.QMessageBox.Retry:
+                raise
+            if self.model.experiment_model is not source_experiment:
+                raise RuntimeError("The experiment changed. Review its preview before applying.") from exc
+            _, current = self._selected_summary_row()
+            if not current or self._summary_row_fingerprint(current) != fingerprint:
+                raise RuntimeError("The selected measurement changed. Review its preview before applying.") from exc
+            validation = self._validate_selected_characterization_candidate(current, require_idle=True)
+            if not validation.get("ok"):
+                raise RuntimeError(validation.get("message") or "The selected result is unavailable.") from exc
+            return callback()
+
+    def _handle_calibration_apply_error(self, exc, payload):
+        em = self.model.experiment_model
+        checker = getattr(em, "calibration_preview_needs_refresh", None)
+        try:
+            stale = callable(checker) and checker(payload.get("execution_context"))
+        except Exception:
+            stale = False
+        if stale:
+            self._refresh_bridge_preview_from_selection()
+            self.bridge_status_label.setText(self.bridge_status_label.text() +
+                " Execution changed after calibration preview. Preview refreshed; review the counts and click Apply again.")
+            return
+        self._set_bridge_status_message(f"Calibration not applied: {exc}\n"
+            "The selected measurement is retained. Use Refresh / recover calibration to check again.")
 
     def _apply_previewed_droplet_volume(self):
         payload = getattr(self, "_bridge_preview_payload", None)
@@ -14537,15 +14690,16 @@ class DropletImagingDialog(QtWidgets.QDialog):
             applied_calibration["original_printing_mode"] = original_mode
             applied_calibration["applied_printing_mode"] = applied_mode
             applied_calibration["printing_mode"] = applied_mode
+            applied_calibration["execution_context"] = payload.get("execution_context")
             try:
-                out = em.apply_fill_droplet_volume(
+                out = self._apply_calibration_with_retry(lambda: em.apply_fill_droplet_volume(
                     new_fill_nL,
                     write_keys_if_assigned=True,
                     applied_calibration=applied_calibration,
                     printing_mode=applied_mode,
-                )
+                ), source_experiment=em)
             except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Apply failed", f"{e}")
+                self._handle_calibration_apply_error(e, payload)
                 return
             sync_mode = getattr(self, "_sync_loaded_printer_head_printing_mode", None)
             if callable(sync_mode):
@@ -14588,7 +14742,10 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 f"({out['total_drops_delta']:+d})"
             )
             volume_warning = (out or {}).get("volume_warning")
+            shortfall_text = self._bridge_shortfall_text((out or {}).get("volume_shortfall"))
             warning_text = DropletImagingDialog._bridge_volume_warning_text(volume_warning)
+            if shortfall_text:
+                warning_text = (warning_text + "\n" + shortfall_text).strip()
             if warning_text:
                 fill_message = f"{fill_message}\n\n{warning_text}"
             audit_pending_text = _audit_pending_text(out)
@@ -14673,23 +14830,24 @@ class DropletImagingDialog(QtWidgets.QDialog):
         applied_calibration["original_printing_mode"] = original_mode
         applied_calibration["applied_printing_mode"] = applied_mode
         applied_calibration["printing_mode"] = applied_mode
+        applied_calibration["execution_context"] = payload.get("execution_context")
         applied_calibration["stock_id"] = (
             payload.get("stock_id") or eligibility.get("stock_id")
         )
         try:
-            apply_result = em.apply_droplet_volume_for_option(
+            apply_result = self._apply_calibration_with_retry(lambda: em.apply_droplet_volume_for_option(
                 payload["factor_name"],
                 payload["option_name"],
                 new_dv,
                 write_keys_if_assigned=True,
                 applied_calibration=applied_calibration,
                 printing_mode=applied_mode,
-            )
+            ), source_experiment=em)
         except NotImplementedError as e:
             QtWidgets.QMessageBox.warning(self, "Apply failed", str(e))
             return
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Apply failed", f"{e}")
+            self._handle_calibration_apply_error(e, payload)
             return
         sync_mode = getattr(self, "_sync_loaded_printer_head_printing_mode", None)
         if callable(sync_mode):
@@ -14734,10 +14892,14 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 if changed_target_count is not None
                 else ""
             )
-            message = (
-                f"{message}\nJointly re-quantized both stock legs{changed_text}; "
-                f"{companion_stock_id} kept its existing ejection volume."
-            )
+            if (apply_result or {}).get("requantization_mode") == "constrained":
+                message = (f"{message}\nRe-quantized the calibrated stock{changed_text}; "
+                           f"{companion_stock_id} kept its committed counts and progress.")
+            else:
+                message = (
+                    f"{message}\nJointly re-quantized both stock legs{changed_text}; "
+                    f"{companion_stock_id} kept its existing ejection volume."
+                )
         mode_switch_formatter = getattr(self, "_bridge_mode_switch_text", None)
         mode_switch_text = (
             mode_switch_formatter(original_mode, applied_mode)
@@ -14747,6 +14909,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
         if mode_switch_text:
             message = f"{message}\n{mode_switch_text}."
         volume_warning = (apply_result or {}).get("volume_warning")
+        shortfall_text = self._bridge_shortfall_text((apply_result or {}).get("volume_shortfall"))
+        if shortfall_text:
+            message += "\n\n" + shortfall_text
         warning_text = DropletImagingDialog._bridge_volume_warning_text(volume_warning)
         if warning_text:
             message = (
@@ -15992,6 +16157,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._bridge_preview_payload = {
                 "is_fill": True,
                 "new_fill_nL": float(mean_nL),
+                "execution_context": copy.deepcopy(preview.get("execution_context")),
                 "source_row_fingerprint": selected_fingerprint,
                 "original_printing_mode": original_mode,
                 "applied_printing_mode": applied_mode,
@@ -16011,6 +16177,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 f"{status_prefix}Preview uses the selected result ejection volume of {mean_nL:.3f} nL."
                 f"{mode_switch_suffix}"
             )
+            shortfall_text = self._bridge_shortfall_text(preview.get("volume_shortfall"))
+            if shortfall_text:
+                status += " " + shortfall_text
             self._set_bridge_status_message(
                 self._bridge_status_with_apply_eligibility(status, eligibility),
                 preview.get("volume_warning"),
@@ -16056,10 +16225,12 @@ class DropletImagingDialog(QtWidgets.QDialog):
             "option_name": key[1],
             "new_droplet_nL": float(preview.get("new_droplet_nL", mean_nL)),
             "n_stocks": int(preview.get("n_stocks", 1)),
+            "allocation_policy": preview.get("allocation_policy"),
             "source_row_fingerprint": selected_fingerprint,
             "original_printing_mode": original_mode,
             "applied_printing_mode": applied_mode,
             "stock_id": eligibility.get("stock_id"),
+            "execution_context": copy.deepcopy(preview.get("execution_context")),
             "volume_warning": copy.deepcopy(preview.get("volume_warning")),
         }
         can_apply = self._bridge_preview_payload["n_stocks"] in (1, 2)
@@ -16082,6 +16253,9 @@ class DropletImagingDialog(QtWidgets.QDialog):
                 f"{status_prefix}Preview uses the selected result ejection volume of {mean_nL:.3f} nL."
                 f"{mode_switch_suffix}"
             )
+            shortfall_text = self._bridge_shortfall_text(preview.get("volume_shortfall"))
+            if shortfall_text:
+                status += " " + shortfall_text
             self._set_bridge_status_message(
                 self._bridge_status_with_apply_eligibility(status, eligibility),
                 preview.get("volume_warning"),

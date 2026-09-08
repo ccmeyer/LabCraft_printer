@@ -203,6 +203,43 @@ authorization. An unknown adapter or any semantic drift remains
 
 The rc.2, rc.3, and rc.4 releases declare `transition: none`.
 
+## Execution calibration compatibility during rollback
+
+Releases carrying `FreeRTOS-interface/execution_data_compatibility.json` require
+`execution_calibrations_v4` and `execution_volume_budget_v1`. The declaration
+describes supported capabilities and a minimum set that subsequent installations
+must preserve. Targets must preserve both the reader/allocation capabilities and
+the rollback floor, preventing a chained rollback through an intermediate reader
+into incompatible software.
+
+**Check Rollback** validates this contract at the exact resolved target commit.
+The same rule applies to online updates, explicitly selected releases and offline
+bundles. Missing, malformed, unreadable or insufficient target declarations stop
+selection. The current app stays open and its Restore button remains disabled.
+Continue the experiment on the current version, or select a qualified compatible
+release/bundle. There is no prompt that overrides compatibility.
+
+The standalone updater resolves the target again after the app closes, rechecks
+compatibility after the protected backup, and installs the verified SHA rather
+than a moving tag/ref. A compatibility refusal before Git changes preserves
+experiment bytes and the current deployment. If a backup transaction has already
+started, it records a terminal failure and releases its locks. Use **Reopen
+Current Version** when offered. If writing that failure receipt fails, normal
+reopen remains blocked under the existing recovery procedure; preserve evidence.
+
+The check deliberately does not inventory experiment folders. Experiments can
+be opened from external locations or disconnected drives. Therefore the floor
+applies to declaring releases even when no version-4 files have yet been saved.
+It does not rewrite files, restore old progress, change calibration references,
+or relax the machine-data/firmware authorization gates. Development applications
+continue to block all updater actions.
+
+The first release with this floor may have no older compatible release. State
+that limitation during release preparation; do not label a historical incompatible
+version as a usable rollback. A subsequent compatible rollback target must be
+qualified with version-4 load, calibration, progress and resume tests. Immutable
+historical releases and their tags are not modified to add declarations.
+
 ## Legacy rollback
 
 The normal UI deliberately disables one-click rollback when the target lacks

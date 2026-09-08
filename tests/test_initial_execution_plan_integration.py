@@ -300,6 +300,8 @@ def _configure_calibratable_two_stock_execution(
     *,
     base_replicates=1,
     additional_conditions=None,
+    include_other=False,
+    fill_volume=10.0,
 ):
     em = model.experiment_model
     em.factors = []
@@ -313,11 +315,13 @@ def _configure_calibratable_two_stock_execution(
         final_reaction_volume_nL=5000.0,
         printed_volume_tolerance_nL=0.0,
         fill_reagent_name="Water",
-        fill_droplet_volume_nL=10.0,
+        fill_droplet_volume_nL=fill_volume,
         allow_two_stock_solutions=True,
         allow_avoidable_target_grouping=False,
     )
     em.add_additive("Signal", [0.5, 1.0, 5.0, 20.0], "mM", 10.0)
+    if include_other:
+        em.add_additive("Other", [0.1], "mM", 10.0, forced_stock_conc=50.0)
     if additional_conditions is not None:
         em.set_additional_conditions(additional_conditions)
     result = em.optimize_stock_solutions(
@@ -614,6 +618,15 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
 ):
     model = experiment_model_factory()
     em = _configure_calibratable_two_stock_execution(model)
+    # An unavoidable excess must still be accepted/audited. Create it through
+    # real fill calibration and printing, rather than unconstrained pair search.
+    from test_execution_fill_workflow import _apply_fill
+    from test_execution_two_stock_workflow import _print
+    em.ensure_execution_resume_checkpoint()
+    _apply_fill(em, 125.0)
+    fill = next(s for s in em.get_execution_plan_snapshot().stocks if s.units == "--")
+    _print(em, fill.stock_id)
+    prior_warning_ids = set(load_execution_calibrations(em.execution_calibrations_file_path).volume_warning_audits)
     audit_owner = SimpleNamespace(experiment_model=em)
     audit_log = ExperimentAuditLog(model=audit_owner)
     audit_owner.record_experiment_audit_event = audit_log.record
@@ -715,12 +728,11 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
         for row in audit_rows
         if row.event_type == "calibration_volume_tolerance_exceeded"
     ]
-    assert len(warning_rows) == 1
+    assert len(warning_rows) == len(prior_warning_ids) + 1
     sidecar = load_execution_calibrations(em.execution_calibrations_file_path)
-    assert list(sidecar.volume_warning_audits) == [
-        result["volume_warning_audit_event_id"]
-    ]
-    audit_row = warning_rows[0]
+    assert set(sidecar.volume_warning_audits) == prior_warning_ids | {
+        result["volume_warning_audit_event_id"]}
+    audit_row = next(row for row in warning_rows if row.event["details"].get("stock_id") == calibrated.stock_id)
     assert audit_row.is_valid is True
     assert audit_row.level == "warning"
     details = audit_row.event["details"]
@@ -766,12 +778,12 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
         ).read_rows()
         if row.event_type == "calibration_volume_tolerance_exceeded"
     ]
-    assert len(repaired_warning_rows) == 1
+    assert len(repaired_warning_rows) == len(prior_warning_ids) + 1
     assert len(
         load_execution_calibrations(
             em.execution_calibrations_file_path
         ).volume_warning_audits
-    ) == 1
+    ) == len(prior_warning_ids) + 1
 
 
     assert details["plan_revision"] == revised.plan_revision
@@ -779,7 +791,7 @@ def test_finalized_two_stock_stream_volume_warning_is_committed_and_audited(
 
 
 @pytest.mark.parametrize("blocking_role", ["companion", "fill"])
-def test_two_stock_calibration_application_blocks_affected_stock_progress(
+def test_two_stock_calibration_application_allows_fixed_stock_progress(
     experiment_model_factory,
     blocking_role,
 ):
@@ -812,8 +824,8 @@ def test_two_stock_calibration_application_blocks_affected_stock_progress(
         stock_id=calibrated.stock_id
     )
 
-    assert eligibility["ok"] is False
-    assert eligibility["code"] == "affected_stock_progress"
+    assert eligibility["ok"] is True
+    assert eligibility["code"] == "execution_stock_eligible"
     assert blocking_stock.stock_id in eligibility["affected_stock_ids"]
     assert eligibility["affected_stock_progress"][blocking_stock.stock_id] == 1
 
@@ -1407,45 +1419,31 @@ def test_calibration_revision_accepts_plan_with_no_required_fill_stock(
     assert set(document.records) == {result["record"]["record_id"]}
 
 
-def test_calibration_revision_rejects_missing_fill_stock_when_fill_is_required(
-    experiment_model_factory,
-):
+def test_calibration_accepts_no_fill_stock_and_reports_shortfall(experiment_model_factory):
     model = experiment_model_factory()
     em = model.experiment_model
     _configure_zero_fill_design(em)
     Model.load_experiment_from_model(model, finalize_execution_plan=True)
-    prepared = load_execution_plan(em.execution_plan_file_path)
-    stock = prepared.stocks[0]
-    active = em.lock_execution_plan(
-        "calibration_started",
-        timestamp_utc=prepared.created_at_utc,
+    before = em.lock_execution_plan("calibration_started")
+    stock = before.stocks[0]
+    preview = em.preview_requantized_for_option((stock.factor_name, stock.option_name), 20.0)
+    assert preview["ok"], preview
+    result = em.apply_execution_calibration(
+        stock_id=stock.stock_id, new_effective_volume_nL=20.0,
+        printing_mode="droplet", printer_head_id="head-zero-fill",
+        factor_name=stock.factor_name, option_name=None, is_fill=False,
+        calibration_payload={"measured_volume_nL": 20.0, "pw_us": 1800,
+                             "pressure_psi": 0.6, "original_printing_mode": "droplet"},
     )
-    before = _directory_bytes(Path(em.experiment_dir_path))
-
-    with pytest.raises(
-        RuntimeError,
-        match="would require a fill stock that is absent",
-    ):
-        em.apply_execution_calibration(
-            stock_id=stock.stock_id,
-            new_effective_volume_nL=20.0,
-            printing_mode="droplet",
-            printer_head_id="head-zero-fill",
-            factor_name="reagent-1",
-            option_name=None,
-            is_fill=False,
-            calibration_payload={
-                "measured_volume_nL": 20.0,
-                "pw_us": 1800,
-                "pressure_psi": 0.6,
-                "original_printing_mode": "droplet",
-            },
-            timestamp_utc=active.updated_at_utc,
-        )
-
-    assert em.get_execution_plan_snapshot() == active
-    assert _directory_bytes(Path(em.experiment_dir_path)) == before
-    assert not Path(em.execution_calibrations_file_path).exists()
+    after = result["plan"]
+    assert [s.stock_id for s in after.stocks] == [s.stock_id for s in before.stocks]
+    assert all(w.expected_printed_volume_nL == 0 for w in after.wells)
+    assert preview["volume_shortfall"] == result["volume_shortfall"]
+    assert result["volume_shortfall"]["max_shortfall_nL"] == 9.0
+    assert not result["volume_shortfall"]["fill_available"]
+    assert em.get_execution_plan_sync_error() is None
+    bundle = inspect_authoritative_execution(em.experiment_dir_path, json.loads(Path(em.experiment_file_path).read_text()))
+    assert bundle.valid, bundle.issues
 
 
 def test_calibration_rejects_stock_with_printed_progress_without_new_revision(
@@ -1854,7 +1852,7 @@ def test_active_plan_reload_is_nonmutating_read_only_and_cannot_resume(
         loaded.lock_execution_plan("printing_started")
 
 
-def test_calibration_retry_reuses_committed_revision_after_export_failure(
+def test_calibration_export_failure_rolls_back_before_retry(
     experiment_model_factory, monkeypatch
 ):
     model = experiment_model_factory()
@@ -1893,22 +1891,13 @@ def test_calibration_retry_reuses_committed_revision_after_export_failure(
     with pytest.raises(RuntimeError, match="key export unavailable"):
         em.apply_execution_calibration(**kwargs)
 
-    committed = load_execution_plan(em.execution_plan_file_path)
-    assert committed.plan_revision == 3
-    assert em.get_execution_plan_sync_error()
-    revision_bytes = Path(
-        em.execution_plan_revisions_dir_path,
-        "revision_000003.json",
-    ).read_bytes()
-
+    assert load_execution_plan(em.execution_plan_file_path) == active
+    assert em.get_execution_plan_sync_error() is None
+    assert not Path(em.execution_plan_revisions_dir_path, "revision_000003.json").exists()
     retry = em.apply_execution_calibration(**kwargs)
-
-    assert retry["status"] == "reused"
-    assert retry["plan"] == committed
-    assert Path(
-        em.execution_plan_revisions_dir_path,
-        "revision_000003.json",
-    ).read_bytes() == revision_bytes
+    assert retry["status"] == "created"
+    committed = retry["plan"]
+    assert committed.plan_revision == active.plan_revision + 1
     assert em.get_execution_plan_sync_error() is None
     runtime_reaction = next(
         reaction

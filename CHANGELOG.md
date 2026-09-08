@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.3.0-rc.12 - 2026-09-08
+
+### Changed
+
+- Added execution-aware two-stock calibration in either print order. A started companion retains its complete count map; fill retains printed and remaining counts in each started well. Measurements can be applied without a fill stock, with shortfalls reported.
+- Bounded two-stock integer allocation by remaining well volume, reserving unrelated reagent and started fill contributions. Concentration previews, exports and tooltips use projected actual final volume, including configured nonprinted liquid and starting amounts.
+- Added version-4 calibration records with allocation-policy identity. Older records remain readable and immutable; eligible saved results can be reapplied as a new revision. Online/offline updates and rollback enforce the required reader, allocation policy and continuing compatibility floor at the exact installed SHA.
+- Kept automatic optimization editable with deferred field commits, obsolete-work cancellation, a fixed progress footer, accessible experiment actions and scrolling settings. Corrected low-count well opacity.
+
+### Fixed
+
+- Calibration publication failures restore the prior files and runtime. Stale previews refresh without applying; saved execution activation and one bounded I/O retry use existing eligibility and integrity checks. Retry also refuses an experiment replaced while confirmation is open.
+- Release-aware bundles accept RC schemas v1/v2, restrict v2 to RCs, read metadata at the resolved commit, and verify the commit captured in the bundle before publishing its manifest.
+- Updated the composed software-workflow driver to wait for the inline optimizer and publication to finish. Bundle verification accepts identical duplicate tag entries emitted by older Git versions while rejecting conflicting entries.
+- Editor focus and worker-settlement callbacks ignore deleted Qt owners. Frozen schema-v2 safeguard fixtures retain their reviewed bytes when the current calibration writer advances to version 4.
+- Qt test cleanup drains the application optimizer before deleting widgets, including a real smoke subprocess exit check.
+
+### Recovery and release status
+
+- Rollback is deliberately unconfigured: no historical release preserves the execution-data capabilities. Keep the current version or use a qualified compatible release-aware bundle through the authorized protected updater. Use **Reopen Current Version** when offered; recovery-required receipts need the support runbook. Do not rewrite experiment history, restore older progress, remove the compatibility floor or manually change production code.
+- This is prepared candidate metadata. Release tagging, publication and deployment require separate approval. The exact legacy update pointer remains rc.11; modern clients discover rc.12 only after its tag is approved and published. Stable remains v1.2.0.
+- Full-suite, focused package/updater/rollback, metadata and exact-SHA Pi no-hardware evidence is recorded externally for the reviewed candidate. Tag-aware validation and installable release-bundle creation follow tag approval.
+- Firmware source/artifact, protocol and dependencies are unchanged. The earlier attended calibration check is supporting evidence, not physical qualification of this candidate. The reported transient editor stall and existing checkout-local watchdog log path remain separate follow-up limitations.
+
 ## v1.3.0-rc.11 - 2026-08-27
 
 ### Fixed

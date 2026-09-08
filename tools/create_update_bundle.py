@@ -21,6 +21,7 @@ DEFAULT_REMOTE = "origin"
 DEFAULT_OUTPUT_DIR = Path("local") / "LabCraftUpdates"
 PRODUCER = "tools/create_update_bundle.py"
 RELEASE_MANIFEST_SCHEMA_VERSION = "labcraft_release_v1"
+RELEASE_MANIFEST_SCHEMA_VERSION_V2 = "labcraft_release_v2"
 RELEASE_VERSION_RE = re.compile(r"v[0-9]+(?:\.[0-9]+){2}(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?")
 
 STATUS_CREATED = "created"
@@ -235,7 +236,8 @@ def _load_release_manifest(repo_root: Path, *, version: str, tag: str, command_r
 
 
 def _validate_release_manifest(manifest: dict, *, expected_version: str, expected_tag: str) -> str:
-    if manifest.get("schema_version") != RELEASE_MANIFEST_SCHEMA_VERSION:
+    schema = manifest.get("schema_version")
+    if schema not in {RELEASE_MANIFEST_SCHEMA_VERSION, RELEASE_MANIFEST_SCHEMA_VERSION_V2}:
         raise BundleCreateError(STATUS_RELEASE_METADATA_INVALID, "Release manifest has an unsupported schema_version.")
     version = _normalize_release_version(manifest.get("version"), context="release manifest version")
     tag = _normalize_release_version(manifest.get("tag"), context="release manifest tag")
@@ -244,8 +246,10 @@ def _validate_release_manifest(manifest: dict, *, expected_version: str, expecte
     if tag != expected_tag:
         raise BundleCreateError(STATUS_RELEASE_METADATA_INVALID, "Release manifest tag does not match --release.")
     channel = str(manifest.get("channel") or "").strip()
-    if channel and channel != "stable":
-        raise BundleCreateError(STATUS_RELEASE_METADATA_INVALID, "Release manifest channel is not stable.")
+    if channel not in {"stable", "release_candidate"}:
+        raise BundleCreateError(STATUS_RELEASE_METADATA_INVALID, "Release manifest channel is invalid.")
+    if schema == RELEASE_MANIFEST_SCHEMA_VERSION_V2 and channel != "release_candidate":
+        raise BundleCreateError(STATUS_RELEASE_METADATA_INVALID, "Release manifest schema v2 is reserved for release_candidate updates.")
     return _release_rollback_version(manifest)
 
 
@@ -265,7 +269,7 @@ def _resolve_release_bundle_info(
             command_result=tag_result,
         )
     sha = tag_result.stdout.strip()
-    manifest = _load_release_manifest(repo_root, version=version, tag=tag, command_runner=command_runner)
+    manifest = _load_release_manifest(repo_root, version=version, tag=sha, command_runner=command_runner)
     rollback_version = _validate_release_manifest(manifest, expected_version=version, expected_tag=tag)
     return ReleaseBundleInfo(
         version=version,
@@ -479,6 +483,18 @@ def create_update_bundle(
             "Git could not verify the created update bundle.",
             command_result=verify_result,
         )
+
+    # Verify the ref actually captured in the bundle, including annotated tags.
+    # A moving producer ref must never yield a manifest describing other bytes.
+    heads = _run_git(repo_root, ["bundle", "list-heads", str(bundle_path), source_ref], command_runner)
+    # Older Git versions emit the same tag twice when it is both explicit and
+    # included by --tags. Deduplicate identical pairs, never conflicting refs.
+    entries = sorted({tuple(line.split()) for line in heads.stdout.splitlines() if line.strip()})
+    if heads.returncode != 0 or len(entries) != 1 or len(entries[0]) != 2 or entries[0][1] != source_ref:
+        raise BundleCreateError(STATUS_BUNDLE_VERIFY_FAILED, "Bundle does not contain the resolved commit ref.", command_result=heads)
+    captured = _run_git(repo_root, ["rev-parse", f"{entries[0][0]}^{{commit}}"], command_runner)
+    if captured.returncode != 0 or captured.stdout.strip().lower() != head_sha.lower():
+        raise BundleCreateError(STATUS_BUNDLE_VERIFY_FAILED, "Bundle target differs from the resolved commit.", command_result=captured)
 
     bundle_sha256 = _sha256_file(bundle_path)
     bundle_size = bundle_path.stat().st_size

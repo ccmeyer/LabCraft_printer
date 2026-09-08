@@ -234,23 +234,61 @@ evaluated row batch, even when an early match could end a scalar scan sooner.
 comparison block. These counters do not consume the existing resolution work
 allowance or change stopping decisions; paths that do not filter report zero.
 
+Well shading represents the selected stock's target dispense count relative to
+its maximum across the plate. Opacity is clamped to the display range and encoded
+as ARGB hex: low alpha values must not become fully opaque through Qt's special
+interpretation of `rgba(...,1)`. This display encoding does not modify counts,
+concentrations or execution progress; tooltips retain exact numeric counts.
+
 Editor updates and import feasibility calculations run on one dedicated Qt
 worker thread. The worker owns a detached input snapshot and computes both the
 allocation and generated reaction data. It cannot write experiment files or
 access live runtime bindings. The main thread publishes complete results only
 while the request's inputs, owner, and editing interlocks remain current.
-Design inputs and dependent actions are paused during calculation; Cancel
+Explicit calculation and import jobs pause design inputs and dependent actions; Cancel
 retains the previous published results and leaves the edited inputs dirty.
 Save, preview, and finalize continue only after successful publication.
 
-The busy display shows the current phase immediately on its next half-second
-refresh. After one second it also shows total elapsed job time and, where
+Automatic calculation waits while editing the same field. Leaving that field,
+including Tab into the next cell, starts the existing 350 ms debounce. Typing in
+the next field stops pending work and cooperatively cancels an obsolete job.
+Automatic jobs leave input fields editable, but dependent lifecycle actions stay
+locked. One pending flag coalesces edits behind the single worker; replacement
+work starts only after the current field is committed and the worker settles.
+Opening another dialog or switching applications does not commit an unfinished
+edit. Incomplete target tokens are rejected instead of silently dropping them.
+
+Publication checks the model snapshot fingerprint, session, current interlocks,
+editor revision, and raw control values. Even a programmatic control change
+without an edit signal invalidates the result. Obsolete results leave previous
+allocations intact and inputs dirty. Explicit Recalculate Stocks, Save, preview,
+and finalize retain their input locks, validation and continuations. Cancel or
+close consumes the pending automatic request; it does not restart without
+another edit or explicit request. Turning Auto off prevents pending replacements.
+
+A permanently allocated footer in the editor and import wizard shows quiet
+"Updating" text immediately. On the first half-second refresh at or after 500 ms,
+it shows the current phase in blue and starts the progress animation. Jobs that
+finish sooner never animate; completion and cancellation suppress late busy
+feedback. Cancel and operation guards take effect immediately, independently
+of this presentation delay. Normal processing leaves Design Information and
+the stock table neutral. Result freshness does not imply an error; actual input,
+computation, or publication errors are shown immediately in red.
+After one second the footer also shows total elapsed job time and, where
 available, one activity count: single-stock candidates considered, stock pairs
 considered, candidates filtered, complete allocations evaluated, or reactions
 generated. Search counters describe work in the current phase, not percent
 complete or a prediction of remaining time. Only reaction generation has a
 known total. A bounded shared snapshot coalesces activity; Qt refreshes the
-small busy display at most twice per second. Canceling remains visible until
+footer at most twice per second. Status, a short progress bar, and Cancel occupy
+one fixed-height row, with the full status available in a tooltip. Their space
+remains allocated when idle, so starting and stopping jobs do not move the
+window contents. The editor's initial height uses available desktop space up to
+1,000 logical pixels, leaving room for window decorations. Its settings and
+design tools scroll vertically rather than compress when Advanced Settings is
+expanded or the window is short. Experiment lifecycle actions, including Save
+and Finalize, stay outside that scroll area. It never opens or activates a
+separate progress window. Canceling remains visible until
 the worker's terminal outcome, and late phase updates cannot overwrite it.
 
 Automatic editor stock calculations reaching three seconds pause future
@@ -403,10 +441,12 @@ activation and resume flow described below.
 ## Execution calibration sidecar
 
 `execution_calibrations.json` uses schema
-`labcraft.execution_calibrations`, version 3. Its root contains the schema
+`labcraft.execution_calibrations`, version 4. Its root contains the schema
 identity, `plan_id`, deterministic calibration records, manual-refuel checks,
-and immutable `volume_warning_audits`. Readers continue to accept version 1
-and 2 sidecars as empty warning-outbox inputs. Unknown, missing, malformed, or
+and immutable `volume_warning_audits`. Records also identify the allocation
+policy, independently of measurement provenance. Readers continue to accept
+version 1 and 2 sidecars as empty warning-outbox inputs, and version 3 records
+with no allocation-policy identity. Unknown, missing, malformed, or
 duplicate fields fail closed.
 
 Calibration-record UUIDs are deterministic UUID5 values derived from the plan,
@@ -420,10 +460,12 @@ Applying a distinct calibration creates the next immutable plan revision. It:
 
 - verifies the unchanged `experiment_design.json` hash and frozen execution
   identities;
-- requires the exact loaded stock identity and rejects a selected single stock
+- requires the exact loaded stock identity and rejects a selected stock
   that already has positive printed progress;
-- for a two-stock reagent, requires zero progress for both reagent legs and the
-  fill stock, then jointly re-quantizes the two count maps;
+- for a two-stock reagent with neither leg printed, jointly re-quantizes both
+  committed count maps; once the companion has any printed progress, freezes
+  its **entire** map, including remaining planned drops in every well, and
+  re-quantizes only the selected stock's residual contribution;
 - changes calibration metadata only on the measured stock; the companion stock
   retains its concentration, effective volume, printing mode, printer-head
   reference, and calibration-record reference;
@@ -432,17 +474,149 @@ Applying a distinct calibration creates the next immutable plan revision. It:
 - preserves all counts, including fill, in wells selecting another choice-group
   option; missing reaction records or positive calibrated-stock counts in a
   reaction omitting that option remain integrity errors;
-- recalculates fill from remaining target printed volume, reducing it to zero
-  when calibrated non-fill volume already meets or exceeds that target; and
+- recalculates fill in wells where fill has not started, reducing it to zero
+  when calibrated non-fill volume already meets or exceeds that target;
+  preserves the complete fill allocation in a well once any fill has printed;
 - recomputes exact expected well volumes without re-running the design-time
   optimizer.
 
-Two-stock calibration never increases distinct target-level loss and fails
-closed when no concentration-reachable mapping exists, the bounded pair search
-is exhausted, required stock identities are missing, or execution integrity and
-progress constraints are violated. Neither the recorded design threshold nor
-the final reaction volume independently rejects an otherwise valid in-envelope
-calibration.
+The supported finalized workflow is **calibrate A → print A across the array →
+calibrate B → print B**, in either stock order. Save/reload and explicit runtime
+activation may occur between stages. Partial companion printing is supported;
+its remaining plan is preserved, not recalculated using only the printed drops.
+Repeated calibration is allowed until the selected stock prints.
+
+Fill may be calibrated and printed first, between reagent stocks, or last.
+The per-well fill rule applies to both single-stock and two-stock reagent
+calibration: a well with no printed fill is still re-quantized using the current
+calibrated fill volume; any positive fill progress freezes that well's complete
+fill allocation, including remaining drops. It does not freeze fill in other
+wells. A zero-count fill allocation has not started and may gain drops later.
+Preserving fill can leave a volume excess or shortfall after a later reagent
+measurement; this is reported, not grounds to reject the measurement. Calibrating
+fill itself remains possible only before any of that stock has printed.
+If the finalized plan contains no fill stock, calibration leaves fill absent.
+It does not add an identity or reject a valid measurement to eliminate a volume
+shortfall. Preview and Apply report per-well expected volumes and shortfalls;
+the committed plan and exports retain those actual counts and volumes.
+
+Preview and Apply use the same execution calculation. Each fixed contribution
+uses its committed count and current calibrated effective volume. Two-stock
+execution calibration first limits reagent volume to the remaining printed-volume
+allowance (target plus configured design tolerance), reserving unrelated reagent
+counts and the entire fill allocation in every well where fill has started.
+The tightest allowance for a target level keeps that level's count mapping
+consistent across replicates and other conditions. Within that allowance, integer
+counts minimize concentration error on the design final-volume basis, then
+reagent volume, count churn, and the count tuple for deterministic ties.
+The search includes concentrated-stock candidates that overshoot the target;
+it must not substitute dozens of dilute drops solely for a closer concentration.
+If fixed contributions already exhaust the allowance, the movable contribution
+is zero. This is an allocation preference with a valid fallback, not a new
+measurement-rejection guard. Zero additional drops is valid,
+including when the fixed contribution already exceeds the target. Approximation,
+grouped target levels, and nonmonotonic achieved levels are diagnostics, not
+rejection conditions. The unchanged ejection-volume envelope (1–250 nL), valid
+measurements, stock identities, frozen design, calibration references and
+execution integrity remain mandatory. Neither the recorded design threshold nor
+the final reaction volume independently rejects an otherwise valid measurement.
+
+Execution previews show a row for each well because fill rounding or started
+allocations can give wells at the same target different achieved concentrations.
+Achievable concentration, signed deviation, CSV exports, and well displays use
+the projected actual final volume: the sum of all planned calibrated dispense
+volumes plus `max(0, design final volume - target printed volume)` of configured
+nonprinted liquid. Starting concentration is converted to an amount on the
+design final-volume basis and diluted by that projected volume. Empty wells with
+zero projected liquid volume have undefined concentration (a dash in preview,
+blank CSV cell), rather than implying that a target was achieved.
+The numerical preview's internal `rows` retain the design-basis target mapping;
+`per_well_rows` and Apply's `achieved_rows` contain projected mixture results.
+Expected printed well volume includes unrelated reagents and preserved or
+recalculated fill. These are estimates for the committed plan, not measurements
+of completed dispensing. Mutable-design optimizer semantics are unchanged.
+
+The attended four-stock regression uses 98 wells, 200 nL target volume, 50 nL
+design tolerance, and a measured concentrated-stock volume of
+9.572595895181557 nL. Previously, a 100 mM level changed from two concentrated
+drops to 80 dilute drops, producing a 765 nL well and a maximum of 873 nL.
+`tests/test_execution_calibration_volume_budget.py` covers this saved design,
+bounded-search optimality, stock/fill orders, partial and complete progress,
+reload, reporting and rollback. Saved affected experiments retain their history;
+reapply the saved result for an eligible unprinted stock through the normal
+application workflow after upgrading. Calibration document version 4 records
+`allocation_policy=execution_volume_budget_v1` in new two-stock record identities.
+Readers accept versions 1–3 without changing their record IDs; reapplying an old
+result appends a new policy-qualified record and plan revision, preserving the
+measurement provenance and old immutable revisions. Repeating that application
+under the same policy is idempotent. Do not edit plan or progress files to repair
+them. Older software cannot read version 4 calibration documents. Releases with
+`FreeRTOS-interface/execution_data_compatibility.json` require the version-4
+reader and `execution_volume_budget_v1` policy in every update/rollback target,
+including that target's own rollback floor. The updater checks the exact target
+commit during online/offline selection and again before installation. An
+incompatible target is unavailable while the app stays open; if a later check
+fails after closure, use **Reopen Current Version** when offered. A compatible,
+qualified release or bundle is the supported rollback route. No experiment
+conversion, history rewrite, or restored pre-calibration backup is required.
+
+This floor applies even before saving a version-4 experiment: experiments can
+reside outside the default folder or on disconnected media, so an empty folder
+scan cannot prove downgrade safety. Historical releases without the declaration
+retain their previous update behavior. The first release carrying this floor
+must not advertise an older incompatible release as a usable rollback target;
+release preparation must qualify a target with both capabilities, or explicitly
+document that no older compatible release is available and retain the current
+version. A declaration is a release contract, not proof of reader correctness;
+the target reader, allocation behavior and resume workflow must be tested.
+Never downgrade or rewrite experiment documents in place, manually switch code,
+or remove the declaration to bypass a blocked rollback.
+
+Single-stock, two-stock and fill previews carry the exact plan and durable/live progress context.
+The model refuses stale previews, unsaved live progress and pending print commands.
+The dialog automatically refreshes a stale preview without committing it; review
+the updated counts and click Apply again. After progress changes,
+progress on another reagent or on fill does not itself make the selected
+unprinted reagent ineligible. Pending commands must finish and uncertain
+execution state must be reconciled before changing allocations.
+The context and allocation constraints are rechecked before persistence. Caught
+single-stock, two-stock and fill publication failures restore the prior plan mirror, calibration
+sidecar, checkpoint, exports and runtime, removing only the unpublished candidate
+revision created by that attempt. Earlier immutable revisions and experiment
+history remain untouched. Notifications and audit delivery follow successful
+publication. If rollback itself fails, the runtime is invalidated and the error
+requires recovery; a process crash/power loss still uses the existing durable
+execution recovery path rather than this in-process rollback.
+A candidate rejected before writing does not mark an unchanged execution out
+of sync. The existing durable recovery path remains for interruptions from older
+versions and process crashes; this is not crash-atomic multi-file storage.
+
+The calibration panel's **Refresh / recover calibration** action revalidates the
+selected saved result and recalculates its preview without losing the selection.
+Use it after a pending print command or calibration/capture finishes. It never
+clears a pending command, marks uncertain drops as printed, or applies a result
+later without another click. Busy and hardware-recovery states retain the result
+and explain what is still waiting.
+
+For a valid saved execution that has not been activated, the same action offers
+**Activate saved execution?**. This uses the existing validated runtime activation
+path only with an idle/resume-ready array and an empty command queue, rechecked
+after confirmation. Execution file identities and live print evidence are also
+bound to that confirmation and rechecked before activation. It preserves saved progress and does not start printing.
+Missing/ambiguous progress and invalid bundles cannot be activated this way.
+
+After a caught file I/O failure with successful rollback, **Retry calibration
+save?** offers one retry or Cancel. The selected result and execution context are
+revalidated on retry. A second failure retains the result and reports the error;
+there is no automatic retry loop. Incomplete rollback blocks this retry and
+invalidates the runtime. A hardware-settings failure after successful calibration
+is still reported separately and does not undo or duplicate the calibration.
+
+Recovery does not waive measurement bounds, change identities, overwrite live
+progress with a saved checkpoint, reopen terminal histories, reconnect/reset
+hardware, or clear a camera/flash fault. These need their existing explicit
+operator workflows or investigation. Refresh cannot repair missing or corrupt
+measurement evidence; select another valid result or perform an authorized recheck.
 
 Before finalization, a mutable two-stock calibration saves the complete stock
 allocation. Later single-stock, fill, or two-stock calibrations refresh that
@@ -453,6 +627,35 @@ and live stock plan before calibration starts; inconsistent active allocations
 are rejected, and unrelated calibrations do not reactivate inactive allocations.
 Allocation export, runtime rebinding, or save failures restore the prior model,
 runtime, and file state through the existing transaction rollback.
+Mutable design optimization retains its existing reachability and grouping
+policy; the execution constraints above apply to finalized executions.
+
+Qualification lives in `tests/test_execution_two_stock_workflow.py` and
+`tests/test_execution_fill_workflow.py`, with recovery qualification in
+`tests/test_calibration_application_recovery.py`: real model,
+durable print intents, runtime progress and reload paths, plus the actual dialog
+preview/Apply boundary with physical settings calls excluded. It covers both
+stock orders, partial and complete printing, fill states, zero/absent choices,
+replicates, additional conditions, unrelated reagents, fixed overshoot, grouping,
+invalid measurements, stale results and publication fault injection. The fill
+suite additionally covers all six calibrate/print permutations for single-stock
+reagents and for a two-stock reagent, with reload between stages, repeated
+measurements, zero-drop results, and the single-stock/fill dialog boundaries. Run with
+the repository Windows Python, `-B -m pytest -q`, and a unique external
+`--basetemp`; also run the affected execution, persistence, calibration and SIL
+suites. Pi qualification requires a clean pushed exact SHA followed by the
+documented Status → Sync → Validate and no-hardware launch workflow. No physical
+qualification is implied by these tests.
+
+Rc.12 has no configured historical rollback target. A code revert is not a
+supported recovery for installations that may contain version-4 experiments.
+Keep the current version, reopen it when the updater explicitly permits it,
+or use a qualified compatible release-aware bundle through the protected updater.
+Every recovery target must retain the version-4 reader, allocation policy,
+execution progress semantics and continuing compatibility floor. Preserve all
+experiment artifacts and historical revisions; never restore older progress or
+remove the declaration to make a downgrade pass. See the machine-data update
+and rollback runbook for recovery-required receipts.
 
 After preview and again from the committed candidate, calibration recalculates
 every well's exact printed total. A printed total above target printed volume
