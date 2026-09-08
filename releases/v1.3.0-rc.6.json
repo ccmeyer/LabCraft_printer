@@ -1,0 +1,38 @@
+{
+  "channel": "release_candidate",
+  "machine_data": {
+    "data_schema_version": 1,
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "transition": "none",
+    "transition_id": null
+  },
+  "notes": [
+    "Debounces X/Y optical limits with a continuously running 1 MHz TIM5 service and bounded 15 ms confirmation used by coordinated and direct motion paths.",
+    "Replans the exact remaining endpoint after pause, rearms disabled stepper drivers once with a bounded powered-settle interval, and guards queue clear and Resume against stale terminal plans.",
+    "Canonicalizes host motion endpoints and requires a coherent post-motion X/Y/Z telemetry generation before position capture or dependent workflow progress.",
+    "Makes plate calibration Controller-owned and safe-height-first, with manual first-point alignment for unverified plates, token-bound remaining-corner travel, and fail-closed interruption handling.",
+    "Atomically verifies successful rack and plate calibrations, supports zero-motion review of eligible historical calibration evidence, replaces typed save phrases with proposal-bound acknowledgement, and repaints the current well preview after calibration.",
+    "The bundled firmware differs from v1.3.0-rc.5. Deploy and verify the exact 366144-byte artifact with SHA-256 CFC1103B7A4EAB58688CDD3303DB0174C8B3FDF8887FA0C7C90B931FDB87DFA5 for upgrades from v1.2.0, v1.2.0-rc.6, or v1.3.0-rc.1 through rc.5."
+  ],
+  "previous_version": "v1.3.0-rc.5",
+  "release_date": "2026-08-24",
+  "requires_firmware": {
+    "artifact": "firmware/artifacts/LabCraft_firmware.bin",
+    "note": "Firmware changes X/Y limit debounce and pause/resume recovery. Deploy and verify the exact rc.6 artifact; the application update does not itself establish installed-firmware provenance."
+  },
+  "rollback_version": "v1.2.0",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Release candidate hardening limit-switch debounce, pause/resume recovery, and controlled calibration motion safety.",
+  "tag": "v1.3.0-rc.6",
+  "validation": [
+    "Complete Python suite: 5686 passed, 156 skipped via .\\env\\Scripts\\python.exe -m pytest -q",
+    "powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug",
+    "Affected branch test modules: 697 passed across 36 files",
+    ".\\env\\Scripts\\python.exe tools\\validate_release_metadata.py",
+    "Exact-candidate Pi development SAFE 30/30 followed by exact v1.3.0-rc.5 released restoration SAFE 30/30 and protected-invariance postflight",
+    "Attended isolated-development safe-height plate entry, controlled plate/rack calibration, cancellation, and well-preview repaint qualification at implementation checkpoint 02fdd92c",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.3.0-rc.6"
+}

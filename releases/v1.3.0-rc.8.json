@@ -1,0 +1,36 @@
+{
+  "channel": "release_candidate",
+  "machine_data": {
+    "data_schema_version": 1,
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "transition": "none",
+    "transition_id": null
+  },
+  "notes": [
+    "Allows rc.8 to create a genesis deployment anchor for a currently reviewed first-start migration from v1.2.0, v1.2.0-rc.6, or v1.3.0-rc.1 only when exact migration, backup, identity, activation, verification, version, and commit evidence agree.",
+    "Creates and validates the genesis anchor before publishing the active-machine pointer, so enrollment rejection or interruption cannot leave an apparently active machine without deployment authority.",
+    "Keeps ordinary startup fail-closed: a missing or deleted anchor cannot be recreated even by the same rc.8 commit, and unsupported source releases cannot request genesis enrollment.",
+    "Adds an isolated exact-tag rehearsal for each legacy cohort using its original updater, a locked reviewed source, independent cancellation and activation destinations, exact config comparison, and second-checkout reuse.",
+    "The bundled firmware is byte-identical to v1.3.0-rc.7: 367968 bytes with SHA-256 1FEC7C6C8D3C0022844695CDF51A860539BCFBDA291BB18C12A99062C7A32577. Direct legacy upgrades must deploy and verify this exact artifact."
+  ],
+  "previous_version": "v1.3.0-rc.7",
+  "release_date": "2026-08-24",
+  "requires_firmware": {
+    "artifact": "firmware/artifacts/LabCraft_firmware.bin",
+    "note": "Firmware bytes are unchanged from rc.7. Legacy-source machines must deploy and verify the exact rc.7/rc.8 artifact; the application updater does not establish installed-firmware provenance."
+  },
+  "rollback_version": "v1.2.0",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Corrected release candidate for activation-only direct legacy migration and exact-tag rollout rehearsal.",
+  "tag": "v1.3.0-rc.8",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q",
+    ".\\env\\Scripts\\python.exe tools\\validate_release_metadata.py",
+    "Focused bootstrap, migration, deployment-anchor, recovery, updater-rehearsal, and wrapper tests",
+    "Exact correction commit Pi Status/Sync/Validate, focused no-hardware tests, and five-second isolated offscreen launch",
+    "Fresh exact-tag rc.1 and rc.6 public-updater cancellation, activation, exact migration comparison, and second-checkout reuse before fleet rollout",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.3.0-rc.8"
+}

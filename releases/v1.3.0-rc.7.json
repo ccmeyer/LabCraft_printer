@@ -1,0 +1,38 @@
+{
+  "channel": "release_candidate",
+  "machine_data": {
+    "data_schema_version": 1,
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "transition": "none",
+    "transition_id": null
+  },
+  "notes": [
+    "Waits for exact firmware and host endpoint completion before accepting coordinated XY motion as complete, preserving the commanded endpoint across pause, resume, and terminal telemetry reconciliation.",
+    "Treats guarded Save New Location and Modify Location captures as verified only when they retain fresh machine-bound telemetry and motion-trust evidence; ordinary historical verification now presents read-only values with an explicit acknowledgement instead of requiring JSON transcription.",
+    "Adds a pre-motion plate-installed acknowledgement, derives Pause Z atomically from the calibrated plate top-left while preserving Pause X/Y, and authorizes the resulting plate and Pause values from the same controlled-calibration evidence.",
+    "Requires a fresh all-axis post-home telemetry barrier and reports a missing calibration head deterministically before configuration-reconciliation diagnostics can obscure it.",
+    "Moves rack calibration into a token-bound Controller workflow whose entry, inter-anchor, Back, and final routes prove Z=500 before rack-directed XY travel and fail closed on interruption, mismatch, timeout, or stale callbacks.",
+    "The bundled firmware differs from v1.3.0-rc.6. Deploy and verify the exact 367968-byte artifact with SHA-256 1FEC7C6C8D3C0022844695CDF51A860539BCFBDA291BB18C12A99062C7A32577."
+  ],
+  "previous_version": "v1.3.0-rc.6",
+  "release_date": "2026-08-24",
+  "requires_firmware": {
+    "artifact": "firmware/artifacts/LabCraft_firmware.bin",
+    "note": "Firmware changes coordinated-motion endpoint completion and pause/resume terminal handling. Deploy and verify the exact rc.7 artifact; the application update does not itself establish installed-firmware provenance."
+  },
+  "rollback_version": "v1.2.0",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Release candidate hardening endpoint-complete motion, physical position verification, and fail-closed calibration travel.",
+  "tag": "v1.3.0-rc.7",
+  "validation": [
+    "Complete Python suite via .\\env\\Scripts\\python.exe -m pytest -q",
+    "powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug",
+    "Focused updater, release-metadata, and Pi development workflow tests",
+    ".\\env\\Scripts\\python.exe tools\\validate_release_metadata.py",
+    "Attended isolated-development plate/rack entry, controlled verification, cancellation, and safe-travel qualification at implementation checkpoint 3e568726",
+    "Exact-candidate Pi development synchronization, no-hardware launch, SAFE 30/30 firmware roundtrip, released restoration, and protected-invariance postflight",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.3.0-rc.7"
+}

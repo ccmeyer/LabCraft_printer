@@ -1,0 +1,36 @@
+{
+  "channel": "release_candidate",
+  "machine_data": {
+    "data_schema_version": 1,
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "transition": "none",
+    "transition_id": null
+  },
+  "notes": [
+    "Uses the immutable finalized execution plan for fill calibration preview and application so sparse explicit well assignments, droplet counts, and committed totals remain identical.",
+    "Makes calibration identity durable across reconstructed printer-head objects and refreshes an open dialog automatically after workflow interruption and reconnect.",
+    "Adds explicit default-cancelled consent before recording diagnostic-only calibration results for progressed, terminal, or known out-of-plan stocks without weakening Apply eligibility.",
+    "Makes machine interruption cleanup immediate and idempotent and prevents late capture or process callbacks from reviving queued calibration work.",
+    "The bundled firmware is byte-identical to v1.3.0-rc.7, v1.3.0-rc.8, and v1.3.0-rc.9: 367968 bytes with SHA-256 1FEC7C6C8D3C0022844695CDF51A860539BCFBDA291BB18C12A99062C7A32577. Direct legacy upgrades must deploy and verify this exact artifact."
+  ],
+  "previous_version": "v1.3.0-rc.9",
+  "release_date": "2026-08-25",
+  "requires_firmware": {
+    "artifact": "firmware/artifacts/LabCraft_firmware.bin",
+    "note": "Firmware bytes are unchanged from rc.7 through rc.9. Legacy-source machines must deploy and verify the exact rc.7/rc.8/rc.9/rc.10 artifact; the application updater does not establish installed-firmware provenance."
+  },
+  "rollback_version": "v1.2.0",
+  "schema_version": "labcraft_release_v1",
+  "summary": "Makes fill calibration application reliable across sparse uploaded designs, reconstructed printer heads, and interrupted or reconnected sessions.",
+  "tag": "v1.3.0-rc.10",
+  "validation": [
+    ".\\env\\Scripts\\python.exe -m pytest -q",
+    ".\\env\\Scripts\\python.exe tools\\validate_release_metadata.py",
+    "Focused fill lifecycle SIL, fill requantization matrix, calibration identity/audit, interruption/capture, reconnect UI, and virtual-workflow harness tests",
+    "Attended LC-001 simulated-workflow verification at exact pushed implementation commit 465446ba; separate hardware-capable window-only launch followed by normal exit, exact released-firmware restoration with strict SAFE 30/30, production-ready final status, and zero related processes",
+    "Firmware artifact byte identity, 367968-byte size, and SHA-256 comparison against v1.3.0-rc.9",
+    "git diff --check",
+    "Get-ChildItem releases\\*.json | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json | Out-Null }"
+  ],
+  "version": "v1.3.0-rc.10"
+}
