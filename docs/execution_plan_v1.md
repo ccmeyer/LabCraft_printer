@@ -484,6 +484,16 @@ activation may occur between stages. Partial companion printing is supported;
 its remaining plan is preserved, not recalculated using only the printed drops.
 Repeated calibration is allowed until the selected stock prints.
 
+Fill may be calibrated and printed first, between reagent stocks, or last.
+The per-well fill rule applies to both single-stock and two-stock reagent
+calibration: a well with no printed fill is still re-quantized using the current
+calibrated fill volume; any positive fill progress freezes that well's complete
+fill allocation, including remaining drops. It does not freeze fill in other
+wells. A zero-count fill allocation has not started and may gain drops later.
+Preserving fill can leave a volume excess or shortfall after a later reagent
+measurement; this is reported, not grounds to reject the measurement. Calibrating
+fill itself remains possible only before any of that stock has printed.
+
 Preview and Apply use the same execution calculation. Each fixed contribution
 uses its committed count and current calibrated effective volume. Integer counts
 minimize absolute concentration error, then printed reagent volume, count churn,
@@ -502,8 +512,12 @@ well volume includes unrelated reagents and the preserved or recalculated fill.
 CSV concentration exports likewise describe planned achieved concentrations,
 not an assertion that targets were met or that every planned drop has printed.
 
-Two-stock previews carry the exact plan and durable/live progress context.
+Single-stock, two-stock and fill previews carry the exact plan and durable/live progress context.
 Apply rejects stale previews, unsaved live progress and pending print commands.
+After progress changes, refresh the preview and apply the measurement again;
+progress on another reagent or on fill does not itself make the selected
+unprinted reagent ineligible. Pending commands must finish and uncertain
+execution state must be reconciled before changing allocations.
 The context and allocation constraints are rechecked before persistence. Caught
 two-stock publication failures restore the prior plan mirror, calibration
 sidecar, checkpoint, exports and runtime, removing only the unpublished candidate
@@ -512,6 +526,10 @@ history remain untouched. Notifications and audit delivery follow successful
 publication. If rollback itself fails, the runtime is invalidated and the error
 requires recovery; a process crash/power loss still uses the existing durable
 execution recovery path rather than this in-process rollback.
+Single-stock and fill publication retain their existing durable retry/recovery
+path for interrupted writes; this change does not replace that persistence
+contract. A candidate rejected before writing does not mark an unchanged
+execution out of sync. Recovery preserves started fill allocations as well.
 
 Before finalization, a mutable two-stock calibration saves the complete stock
 allocation. Later single-stock, fill, or two-stock calibrations refresh that
@@ -525,12 +543,16 @@ runtime, and file state through the existing transaction rollback.
 Mutable design optimization retains its existing reachability and grouping
 policy; the execution constraints above apply to finalized executions.
 
-Qualification lives in `tests/test_execution_two_stock_workflow.py`: real model,
+Qualification lives in `tests/test_execution_two_stock_workflow.py` and
+`tests/test_execution_fill_workflow.py`: real model,
 durable print intents, runtime progress and reload paths, plus the actual dialog
 preview/Apply boundary with physical settings calls excluded. It covers both
 stock orders, partial and complete printing, fill states, zero/absent choices,
 replicates, additional conditions, unrelated reagents, fixed overshoot, grouping,
-invalid measurements, stale results and publication fault injection. Run with
+invalid measurements, stale results and publication fault injection. The fill
+suite additionally covers all six calibrate/print permutations for single-stock
+reagents and for a two-stock reagent, with reload between stages, repeated
+measurements, zero-drop results, and the single-stock/fill dialog boundaries. Run with
 the repository Windows Python, `-B -m pytest -q`, and a unique external
 `--basetemp`; also run the affected execution, persistence, calibration and SIL
 suites. Pi qualification requires a clean pushed exact SHA followed by the
@@ -541,6 +563,8 @@ Code rollback is a revert of the execution-aware calibration fix commit. Keep
 experiment artifacts and historical revisions intact. Experiments that already
 used constrained calibration retain authoritative counts and references; older
 code cannot continue calibrating the second stock after companion printing.
+Reverting only the fill-policy follow-up restores the earlier single-stock fill
+recalculation behavior, so qualify a rollback before resuming those workflows.
 
 After preview and again from the committed candidate, calibration recalculates
 every well's exact printed total. A printed total above target printed volume

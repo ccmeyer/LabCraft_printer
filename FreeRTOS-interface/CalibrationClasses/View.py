@@ -14345,6 +14345,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._bridge_preview_payload = {
                 "is_fill": True,
                 "new_fill_nL": float(mean_nL),
+                "execution_context": copy.deepcopy(preview.get("execution_context")),
             }
             self.bridge_apply_btn.setEnabled(True)
             self.bridge_apply_btn.setToolTip("")
@@ -14538,6 +14539,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             applied_calibration["original_printing_mode"] = original_mode
             applied_calibration["applied_printing_mode"] = applied_mode
             applied_calibration["printing_mode"] = applied_mode
+            applied_calibration["execution_context"] = payload.get("execution_context")
             try:
                 out = em.apply_fill_droplet_volume(
                     new_fill_nL,
@@ -15998,6 +16000,7 @@ class DropletImagingDialog(QtWidgets.QDialog):
             self._bridge_preview_payload = {
                 "is_fill": True,
                 "new_fill_nL": float(mean_nL),
+                "execution_context": copy.deepcopy(preview.get("execution_context")),
                 "source_row_fingerprint": selected_fingerprint,
                 "original_printing_mode": original_mode,
                 "applied_printing_mode": applied_mode,

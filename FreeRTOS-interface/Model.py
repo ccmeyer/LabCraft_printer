@@ -11106,10 +11106,10 @@ class ExperimentModel(QObject):
                 }
             if authoritative_execution and fill_candidates:
                 fill_id = fill_candidates[0].stock_id
-                progress_row = self._well_entries_from_progress_payload(execution_context["progress"]).get(run_row["well_id"], {})
-                if progress_row.get("reagents", {}).get(fill_id, {}).get("added_droplets", 0) > 0:
-                    well = execution_plan.wells[int(run_row["index"])]
-                    fill_count = next((d.target_dispenses for d in well.dispenses if d.stock_id == fill_id), 0)
+                fill_count = self._preserve_started_fill_count(
+                    execution_plan.wells[int(run_row["index"])], fill_id,
+                    fill_count, execution_context["progress"],
+                )
             total = nonfill + fill_count * fill_volume
             reaction_id = (
                 run_row.get("reaction_id")
@@ -11221,6 +11221,8 @@ class ExperimentModel(QObject):
 
         if plan["n_stocks"] == 1:
             st0 = plan["stocks"][0]
+            execution_context = None
+            target_counts = None
             c_stock = float(st0["stock_concentration"])
             d_new = (c_stock * new_droplet_nL) / V_final  # new delta per drop (final-units)
             for t in targets_final:
@@ -11260,10 +11262,12 @@ class ExperimentModel(QObject):
                         "ok": False,
                         "reason": "The calibrated reagent does not map to exactly one execution stock.",
                     }
+                execution_context = self._calibration_execution_context()
                 target_counts = self._calibrated_target_counts(
                     execution_plan,
                     matching[0],
                     float(new_droplet_nL),
+                    execution_context=execution_context,
                 )
                 volume_warning = self._calibration_volume_warning_for_execution_counts(
                     execution_plan,
@@ -11328,6 +11332,8 @@ class ExperimentModel(QObject):
                 "units": units,
                 "new_droplet_nL": float(new_droplet_nL),
                 "volume_warning": volume_warning,
+                "execution_context": execution_context,
+                "target_counts_by_well": target_counts,
             }
 
         # Two stock legs correspond to separate physical stocks/heads.  A
@@ -17255,7 +17261,23 @@ class ExperimentModel(QObject):
         if runtime_stock_ids != plan_stock_ids:
             raise RuntimeError("Runtime stock identities no longer match the execution plan.")
 
-    def _calibrated_target_counts(self, plan, stock, new_volume_nL: float) -> dict:
+    @staticmethod
+    def _preserve_started_fill_count(well, fill_stock_id, proposed_count, progress) -> int:
+        """Once fill starts in a well, its printed and remaining allocation is fixed."""
+        added = progress.get(well.well_id, {}).get("reagents", {}).get(
+            fill_stock_id, {}
+        ).get("added_droplets", 0)
+        if added > 0:
+            return next((d.target_dispenses for d in well.dispenses
+                         if d.stock_id == fill_stock_id), 0)
+        return proposed_count
+
+    def _calibrated_target_counts(
+        self, plan, stock, new_volume_nL: float, *, execution_context=None,
+    ) -> dict:
+        if execution_context is None:
+            execution_context = self._calibration_execution_context()
+        progress = (execution_context or {}).get("progress", {})
         fill_stocks = [
             item
             for item in plan.stocks
@@ -17359,6 +17381,9 @@ class ExperimentModel(QObject):
             else:
                 fill_volume = stock_volumes[fill_stock.stock_id]
                 fill_count = max(0, int(round(remaining / fill_volume)))
+                fill_count = self._preserve_started_fill_count(
+                    well, fill_stock.stock_id, fill_count, progress,
+                )
                 if fill_count > 0 or fill_stock.stock_id in counts:
                     counts[fill_stock.stock_id] = fill_count
                 else:
@@ -17479,9 +17504,9 @@ class ExperimentModel(QObject):
                     fill_volume_nL=fill_volume,
                     fill_is_calibrated=bool(fill_stock.calibration_record_key),
                 )
-                added_fill = progress.get(well.well_id, {}).get("reagents", {}).get(fill_stock.stock_id, {}).get("added_droplets", 0)
-                if added_fill > 0:
-                    fill_count = counts.get(fill_stock.stock_id, 0)
+                fill_count = self._preserve_started_fill_count(
+                    well, fill_stock.stock_id, fill_count, progress,
+                )
                 if fill_count > 0 or fill_stock.stock_id in counts:
                     counts[fill_stock.stock_id] = fill_count
                 else:
@@ -17855,7 +17880,8 @@ class ExperimentModel(QObject):
             )
         else:
             target_counts = self._calibrated_target_counts(
-                plan, stock, float(new_effective_volume_nL)
+                plan, stock, float(new_effective_volume_nL),
+                execution_context=calculation_context,
             )
         required_unprinted_stock_ids: set[str] = {stock.stock_id}
         if requantized is not None and requantized["requantization_mode"] == "joint":
@@ -17864,7 +17890,7 @@ class ExperimentModel(QObject):
             plan,
             target_counts,
             required_unprinted_stock_ids=required_unprinted_stock_ids,
-            preserve_started_allocations=requantized is not None,
+            preserve_started_allocations=True,
         )
         candidate = build_calibrated_revision(
             plan,
@@ -17879,7 +17905,7 @@ class ExperimentModel(QObject):
                 {well_id: {sid: int(details["added_droplets"])
                            for sid, details in row["reagents"].items()}
                  for well_id, row in calculation_context["progress"].items()}
-                if requantized is not None else None
+                if calculation_context is not None else None
             ),
         )
         volume_warning = self._calibration_volume_warning_for_execution_plan(candidate)
@@ -17909,12 +17935,13 @@ class ExperimentModel(QObject):
         )
         publication = (self._execution_pair_publication(candidate, calculation_context)
                        if requantized is not None else nullcontext())
+        self._execution_pair_write_started = False
         try:
             with publication:
                 self.validate_calibration_execution_context(calculation_context)
                 self._validate_calibrated_target_counts_against_progress(
                     plan, target_counts, required_unprinted_stock_ids=required_unprinted_stock_ids,
-                    preserve_started_allocations=requantized is not None,
+                    preserve_started_allocations=True,
                 )
                 existing_record = document.records.get(record_id)
                 if existing_record is not None and existing_record != record:
@@ -17952,7 +17979,9 @@ class ExperimentModel(QObject):
                         save=True,
                     )
         except Exception as exc:
-            if requantized is None:
+            # A rejected candidate before persistence leaves the active execution
+            # intact. Only a potentially partial write requires durable recovery.
+            if requantized is None and self._execution_pair_write_started:
                 self.set_execution_plan_sync_error(exc)
             raise RuntimeError(f"Could not commit calibrated execution-plan revision: {exc}") from exc
         if not cached_commit:
@@ -19075,10 +19104,12 @@ class ExperimentModel(QObject):
                 }
             fill_stock = matching[0]
             try:
+                execution_context = self._calibration_execution_context()
                 new_counts = self._calibrated_target_counts(
                     plan,
                     fill_stock,
                     new_fill_droplet_nL,
+                    execution_context=execution_context,
                 )
             except Exception as exc:
                 return {"ok": False, "reason": str(exc)}
@@ -19128,6 +19159,7 @@ class ExperimentModel(QObject):
                 "plan_id": plan.plan_id,
                 "plan_revision": plan.plan_revision,
                 "volume_warning": volume_warning,
+                "execution_context": execution_context,
             }
 
         # Ensure we have a current reactions frame with nonfill volumes.
