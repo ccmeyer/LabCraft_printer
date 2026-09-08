@@ -647,15 +647,15 @@ suites. Pi qualification requires a clean pushed exact SHA followed by the
 documented Status → Sync → Validate and no-hardware launch workflow. No physical
 qualification is implied by these tests.
 
-Code rollback is a revert of the execution-aware calibration fix commit. Keep
-experiment artifacts and historical revisions intact. Experiments that already
-used constrained calibration retain authoritative counts and references; older
-code cannot continue calibrating the second stock after companion printing.
-Reverting only the fill-policy follow-up restores the earlier single-stock fill
-recalculation behavior, so qualify a rollback before resuming those workflows.
-Reverting the no-fill/recovery follow-up restores the no-fill rejection and older
-single-stock failure behavior. Keep execution/calibration files intact, validate
-the rollback revision, push it, and use Status -> Sync -> Validate for Pi rollback.
+Rc.12 has no configured historical rollback target. A code revert is not a
+supported recovery for installations that may contain version-4 experiments.
+Keep the current version, reopen it when the updater explicitly permits it,
+or use a qualified compatible release-aware bundle through the protected updater.
+Every recovery target must retain the version-4 reader, allocation policy,
+execution progress semantics and continuing compatibility floor. Preserve all
+experiment artifacts and historical revisions; never restore older progress or
+remove the declaration to make a downgrade pass. See the machine-data update
+and rollback runbook for recovery-required receipts.
 
 After preview and again from the committed candidate, calibration recalculates
 every well's exact printed total. A printed total above target printed volume

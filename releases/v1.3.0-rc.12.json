@@ -1,0 +1,35 @@
+{
+  "schema_version": "labcraft_release_v2",
+  "version": "v1.3.0-rc.12",
+  "tag": "v1.3.0-rc.12",
+  "channel": "release_candidate",
+  "release_date": "2026-09-08",
+  "previous_version": "v1.3.0-rc.11",
+  "rollback_version": null,
+  "requires_firmware": null,
+  "machine_data": {
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "data_schema_version": 1,
+    "transition": "none",
+    "transition_id": null
+  },
+  "summary": "Execution-aware calibration preserves printed and remaining allocations, bounds two-stock volume, and protects version-4 experiment history.",
+  "notes": [
+    "Calibrate and print either two-stock leg first. Once the companion starts, its entire allocation remains fixed; started fill allocations remain fixed per well.",
+    "Two-stock integer allocation reserves unrelated reagents and started fill within the available volume. Previews, concentration exports and well tooltips report projected actual mixture concentrations.",
+    "Calibration can continue without a fill stock, with reported shortfalls. Stale previews require review again; Refresh / recover validates saved execution, and one guarded save retry preserves the original experiment identity.",
+    "Automatic stock calculations preserve editing focus, cancel obsolete work, and display progress in a fixed footer. Settings scroll while experiment actions remain accessible; low-count well shading is corrected.",
+    "Execution-calibration documents use version 4; versions 1 through 3 remain readable. Online/offline installation requires both execution_calibrations_v4 and execution_volume_budget_v1, including the target's rollback floor.",
+    "No historical published release is a qualified rollback target. Continue on this version, use Reopen Current Version when offered, or obtain a qualified compatible release-aware bundle through the protected updater. Never downgrade experiment documents, restore older progress, remove compatibility declarations, or manually switch production code.",
+    "Legacy clients must use the pinned rc.11 bridge before this schema-v2 release. The stable and legacy release-index pointers remain unchanged. No direct legacy bridge is authorized by this release.",
+    "Release-aware offline packaging supports RC manifests and verifies the captured bundle commit. Firmware bytes, device protocol, shared dependencies and canonical machine-data schema are unchanged. Physical qualification is not implied by software validation."
+  ],
+  "validation": [
+    ".\\env\\Scripts\\python.exe -B -m pytest -q with a unique external --basetemp and JUnit evidence",
+    "Focused real calibration model/runtime/UI recovery, updater, rollback, full/incremental RC package, metadata and legacy bridge gates",
+    ".\\env\\Scripts\\python.exe -B tools\\validate_release_metadata.py",
+    "Exact pushed feature SHA: Pi wrapper Status -> Sync -> Validate -> offscreen no-hardware Launch -> final Status",
+    "git diff --check; strict release JSON parsing; unchanged firmware tree/artifact comparison",
+    "After explicit tag approval: metadata --check-tags and release-aware bundle generation and verification"
+  ]
+}

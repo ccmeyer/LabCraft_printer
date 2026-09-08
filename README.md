@@ -4962,6 +4962,12 @@ recovery procedures.
 
 ### Controlled release rollback
 
+Prepared rc.12 has no configured historical rollback target. Retain the current
+version or obtain a qualified compatible release-aware bundle through the
+protected updater. Release bundle creation now supports RC manifest schemas
+v1/v2 and verifies the captured commit; the recipient branch must match
+`--branch`. See [release preparation and packaging](docs/release_process.md).
+
 Version-4 execution calibration files require a compatible reader and the
 volume-bounded allocation policy. Declaring releases enforce
 `FreeRTOS-interface/execution_data_compatibility.json` during online/offline
