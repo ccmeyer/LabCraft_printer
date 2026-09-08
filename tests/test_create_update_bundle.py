@@ -98,7 +98,7 @@ class FakeGitRunner:
                 return bundler.CommandResult(args_tuple, self.release_tag_returncode, stderr="bad release tag")
             return bundler.CommandResult(args_tuple, 0, stdout=f"{self.release_sha}\n")
 
-        if git_args == ("show", f"{self.release_version}:releases/{self.release_version}.json"):
+        if git_args == ("show", f"{self.release_sha}:releases/{self.release_version}.json"):
             if self.release_manifest_returncode:
                 return bundler.CommandResult(args_tuple, self.release_manifest_returncode, stderr="missing manifest")
             payload = self.release_manifest_payload or {
@@ -149,6 +149,13 @@ class FakeGitRunner:
             if self.verify_returncode:
                 return bundler.CommandResult(args_tuple, self.verify_returncode, stderr="verify failed")
             return bundler.CommandResult(args_tuple, 0, stdout="The bundle is okay\n")
+
+        if len(git_args) == 4 and git_args[:2] == ("bundle", "list-heads"):
+            sha = self.release_sha if git_args[3].startswith("refs/tags/") else self.head_sha
+            return bundler.CommandResult(args_tuple, 0, stdout=f"{sha} {git_args[3]}\n")
+        if git_args in (("rev-parse", f"{self.release_sha}^{{commit}}"),
+                        ("rev-parse", f"{self.head_sha}^{{commit}}")):
+            return bundler.CommandResult(args_tuple, 0, stdout=git_args[1].split("^")[0] + "\n")
 
         return bundler.CommandResult(args_tuple, 99, stderr=f"unexpected command: {git_args!r}")
 
@@ -273,6 +280,23 @@ def test_release_bundle_rejects_missing_tag(tmp_path):
         )
 
     assert exc_info.value.status == bundler.STATUS_REF_RESOLVE_FAILED
+
+
+@pytest.mark.parametrize("schema,channel", [
+    ("labcraft_release_v2", "stable"), ("labcraft_release_v3", "release_candidate"),
+    ("labcraft_release_v1", ""), ("labcraft_release_v2", "unknown"),
+])
+def test_release_bundle_rejects_invalid_schema_channel_pair(tmp_path, schema, channel):
+    runner = FakeGitRunner(tmp_path, release_manifest_payload={
+        "schema_version": schema, "channel": channel,
+        "version": "v1.1.2", "tag": "v1.1.2", "rollback_version": None,
+    })
+    with pytest.raises(bundler.BundleCreateError) as exc_info:
+        bundler.create_update_bundle(bundler.BundleConfig(
+            repo_root=tmp_path, output_dir=tmp_path / "out", release="v1.1.2"),
+            command_runner=runner)
+    assert exc_info.value.status == bundler.STATUS_RELEASE_METADATA_INVALID
+    assert not (tmp_path / "out").exists()
 
 
 def test_fetch_runs_by_default_and_can_be_skipped(tmp_path):

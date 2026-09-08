@@ -21,13 +21,13 @@ POLICY = {
 }
 
 
-def _release(repo, version, rollback, policy):
+def _release(repo, version, rollback, policy, *, schema="labcraft_release_v1", channel="stable"):
     (repo / "VERSION").write_text(version + "\n")
     releases = repo / "releases"
     releases.mkdir(exist_ok=True)
     manifest = {
-        "schema_version": "labcraft_release_v1", "version": version, "tag": version,
-        "channel": "stable", "release_date": "2026-09-08",
+        "schema_version": schema, "version": version, "tag": version,
+        "channel": channel, "release_date": "2026-09-08",
         "previous_version": rollback, "rollback_version": rollback,
         "requires_firmware": None, "summary": "Compatibility test release",
         "notes": [], "validation": ["isolated Git workflow"],
@@ -46,7 +46,7 @@ def _release(repo, version, rollback, policy):
             (path.parent / name).write_bytes((Path(__file__).parents[1] / "FreeRTOS-interface" / name).read_bytes())
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", version)
-    _git(repo, "tag", version)
+    _git(repo, "tag", "-a", version, "-m", version)
     return _git(repo, "rev-parse", "HEAD").stdout.strip()
 
 
@@ -313,3 +313,43 @@ def test_compatible_offline_rollback_remains_available(tmp_path):
     result = updater.run_rollback(config)
     assert result.status == updater.STATUS_ROLLED_BACK
     assert _git(repo, "rev-parse", "HEAD").stdout.strip() == target
+
+
+@pytest.mark.parametrize("incremental", [False, True])
+@pytest.mark.parametrize("schema", ["labcraft_release_v1", "labcraft_release_v2"])
+def test_rc_bundle_protected_install_and_current_version_recovery(tmp_path, incremental, schema):
+    source, repo, _, current, config = _repositories(tmp_path)
+    version = "v9.1.0-rc.1"
+    target = _release(source, version, None, POLICY, schema=schema, channel="release_candidate")
+    _git(source, "push", "origin", "stable", "--tags")
+    bundle = create_update_bundle.create_update_bundle(create_update_bundle.BundleConfig(
+        repo_root=source, output_dir=tmp_path / "rc-bundle", release=version,
+        since=current if incremental else None))
+    assert bundle.manifest["head_sha"] == target
+    assert bundle.manifest["release_manifest"]["rollback_version"] is None
+    config, paths = _protected_config(tmp_path, config, current)
+    config = replace(config, rollback=False, offline_manifest_path=bundle.manifest_path)
+    result = updater.run_update(config)
+    assert result.status == updater.STATUS_UPDATED, result.message
+    assert result.after_sha == target and result.relaunch_authorized
+    assert json.loads(paths.deployment_anchor_path.read_text())["app_commit"] == target
+    assert updater.run_rollback_check(replace(config, offline_manifest_path=None)).status == updater.STATUS_ROLLBACK_NOT_CONFIGURED
+    # Recovery uses the same compatible package and the protected receipt path.
+    result = updater.run_rollback(replace(config, rollback=True, source_commit=target,
+        source_app_version=version, update_request_id="00000000-0000-0000-0000-000000000101"))
+    assert result.status == updater.STATUS_ALREADY_CURRENT, result.message
+    assert result.after_sha == target and result.relaunch_authorized
+
+
+def test_packaging_ref_change_cannot_publish_mismatched_manifest(tmp_path):
+    source, _, _, current, _ = _repositories(tmp_path, target_policy=POLICY)
+    def runner(args, cwd):
+        if tuple(args)[1:3] == ("bundle", "create"):
+            # Simulate another process changing a synthetic test ref while packing.
+            _git(source, "update-ref", "refs/tags/v9.0.1", current)
+        return create_update_bundle.default_command_runner(args, cwd)
+    output = tmp_path / "raced-bundle"
+    with pytest.raises(create_update_bundle.BundleCreateError, match="resolved commit"):
+        create_update_bundle.create_update_bundle(create_update_bundle.BundleConfig(
+            repo_root=source, output_dir=output, release="v9.0.1"), command_runner=runner)
+    assert not list(output.glob("*.json"))
