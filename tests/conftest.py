@@ -230,6 +230,24 @@ def _isolate_qt_top_level_widgets(request):
     app = QtWidgets.QApplication.instance()
     if app is None:
         return
+    # Test applications do not run QApplication.exec()/Quit, so the normal
+    # application quit filter cannot stop the process-wide optimizer thread.
+    # Drain its existing shutdown protocol before deleting callback owners.
+    manager = getattr(app, "_optimization_job_manager", None)
+    if manager is not None:
+        import time
+
+        stopped = []
+        manager.shutdown(lambda: stopped.append(True))
+        deadline = time.monotonic() + 30.0
+        while not stopped:
+            app.processEvents()
+            if time.monotonic() >= deadline:
+                pytest.fail("Application optimizer did not shut down during test cleanup")
+            time.sleep(0.002)
+        app.removeEventFilter(manager)
+        app._optimization_job_manager = None
+        manager.deleteLater()
     for widget in list(app.topLevelWidgets()):
         signal_sources = [widget]
         try:

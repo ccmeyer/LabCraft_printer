@@ -54,6 +54,22 @@ def test_destroyed_editor_ignores_application_focus_and_worker_settlement(qapp, 
     assert not optimization_job_manager().busy
 
 
+def test_smoke_process_shuts_down_application_optimizer(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    result = subprocess.run(
+        [sys.executable, "-B", "-m", "pytest", "-q",
+         "tests/system/test_virtual_workflow_smoke.py",
+         "--basetemp", str(tmp_path / "smoke-child")],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True, text=True, timeout=90,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "2 passed" in result.stdout
+
+
 def test_typing_pauses_defer_but_tab_commits_without_losing_focus(qapp, real_editor):
     editor = real_editor
     target = begin_edit(qapp, editor)

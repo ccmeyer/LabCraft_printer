@@ -3296,6 +3296,8 @@ independent.
 Milestone 7 retired the emergency writer and legacy-primary-reader switches.
 The frozen persistence-safeguard fixtures retain their original schema-v2
 record shape and reviewed hashes independently of the current version-4 writer.
+Qt test cleanup also shuts down the application optimizer through its bounded
+shutdown protocol before deleting widgets; a smoke subprocess must exit cleanly.
 `LABCRAFT_CALIBRATION_LEGACY_WRITER=1`,
 `LABCRAFT_CALIBRATION_STORE_AUTHORITATIVE=0`, or a legacy primary/secondary
 reader selection now blocks new calibration startup until the value is removed
