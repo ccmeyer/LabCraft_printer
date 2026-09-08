@@ -10618,6 +10618,44 @@ class ExperimentModel(QObject):
                 "Execution progress or plan changed after calibration preview; refresh the preview."
             )
 
+    def calibration_preview_needs_refresh(self, expected) -> bool:
+        """Read-only stale check; integrity and pending-command guards still apply."""
+        return expected is not None and expected != self._calibration_execution_context()
+
+    def calibration_activation_context(self):
+        """Bind an activation confirmation to saved files and any live print evidence."""
+        plan = self.get_execution_plan_snapshot()
+        if plan is None or load_execution_plan(self.execution_plan_file_path) != plan:
+            raise RuntimeError("The saved execution changed; reload it before activation.")
+        identities, revisions = self._capture_authoritative_runtime_files()
+        with open(self.progress_file_path, encoding="utf-8") as handle:
+            saved = decode_execution_progress(plan, json.load(handle)).progress_wells
+        live = self._well_entries_from_progress_payload(self._build_progress_payload_from_runtime())
+        for well_id, row in live.items():
+            for sid, details in row.get("reagents", {}).items():
+                added = details.get("added_droplets", 0)
+                recorded = saved.get(well_id, {}).get("reagents", {}).get(sid, {}).get("added_droplets", 0)
+                if added > 0 and added != recorded:
+                    raise RuntimeError("Live printed progress differs from saved progress; activation cannot discard it.")
+        return {"plan": plan, "files": identities, "revisions": revisions, "live": copy.deepcopy(live)}
+
+    def _calibration_volume_shortfall(self, plan, counts, overrides=None):
+        volumes = {s.stock_id: s.effective_volume_nL for s in plan.stocks}
+        volumes.update(overrides or {})
+        target = plan.volume_basis.target_printed_volume_nL
+        rows = []
+        for well in plan.wells:
+            total = sum(n * volumes[sid] for sid, n in counts[well.well_id].items())
+            if total < target - 1e-9:
+                rows.append({"well_id": well.well_id, "total_volume_nL": total,
+                             "shortfall_nL": target - total})
+        if not rows:
+            return None
+        return {"target_printed_volume_nL": target, "affected_rows": rows,
+                "max_shortfall_nL": max(r["shortfall_nL"] for r in rows),
+                "fill_available": any(s.units == "--" and s.factor_name == self.get_fill_reagent_name()
+                                      for s in plan.stocks)}
+
     @staticmethod
     def _nearest_execution_pair(target, deltas, volumes, current, fixed_index=None):
         """Minimize concentration error, then volume, count churn and counts.
@@ -11098,12 +11136,8 @@ class ExperimentModel(QObject):
                 fill_volume_nL=fill_volume,
                 fill_is_calibrated=fill_is_calibrated,
             )
-            if not fill_available and fill_count > 0:
-                return {
-                    "ok": False,
-                    "code": "missing_fill_stock",
-                    "reason": "The calibrated mapping would require a fill stock that is unavailable.",
-                }
+            if authoritative_execution and not fill_available:
+                fill_count = 0
             if authoritative_execution and fill_candidates:
                 fill_id = fill_candidates[0].stock_id
                 fill_count = self._preserve_started_fill_count(
@@ -11334,6 +11368,9 @@ class ExperimentModel(QObject):
                 "volume_warning": volume_warning,
                 "execution_context": execution_context,
                 "target_counts_by_well": target_counts,
+                "volume_shortfall": (self._calibration_volume_shortfall(
+                    execution_plan, target_counts, {matching[0].stock_id: float(new_droplet_nL)}
+                ) if execution_context is not None else None),
             }
 
         # Two stock legs correspond to separate physical stocks/heads.  A
@@ -11360,6 +11397,11 @@ class ExperimentModel(QObject):
         )
         requantized["units"] = units
         requantized["new_droplet_nL"] = float(new_droplet_nL)
+        execution_plan = self.get_execution_plan_snapshot()
+        if requantized.get("execution_context") is not None:
+            counts = self._calibrated_two_stock_target_counts(execution_plan, requantized)
+            requantized["volume_shortfall"] = self._calibration_volume_shortfall(
+                execution_plan, counts, {calibrated_stock_id: float(new_droplet_nL)})
         return requantized
 
     def find_key_for_reagent(self, reagent_name: str, group_name: str | None = None) -> tuple[str, str | None]:
@@ -13220,6 +13262,7 @@ class ExperimentModel(QObject):
                 "achieved_rows": copy.deepcopy(result.get("achieved_rows") or []),
                 "changed_target_count": result.get("changed_target_count"),
                 "volume_warning": copy.deepcopy(result.get("volume_warning")),
+                "volume_shortfall": copy.deepcopy(result.get("volume_shortfall")),
                 "volume_warning_audit_event_id": result.get("volume_warning_audit_event_id"),
                 "volume_warning_audit_status": result.get("volume_warning_audit_status"),
                 "volume_warning_audit_error": result.get("volume_warning_audit_error"),
@@ -15300,7 +15343,7 @@ class ExperimentModel(QObject):
                 "execution_resume.json",
             }
             self.validate_calibration_execution_context(execution_context)
-            self._execution_pair_write_started = True
+            self._calibration_write_started = True
             write_started = True
             self._write_authoritative_calibration_document(calibration_document)
             self._persist_authoritative_calibration_immutable_revision(candidate_plan)
@@ -17286,21 +17329,6 @@ class ExperimentModel(QObject):
         if len(fill_stocks) > 1:
             raise RuntimeError("The execution plan must contain exactly one identifiable fill stock.")
         fill_stock = fill_stocks[0] if fill_stocks else None
-        missing_fill_volume = None
-        if fill_stock is None:
-            try:
-                missing_fill_volume = float(
-                    self.metadata.get(
-                        "fill_droplet_volume_nL",
-                        self._default_fill_droplet_volume_nl(),
-                    )
-                )
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(
-                    "The finalized fill-droplet volume is invalid."
-                ) from exc
-            if not math.isfinite(missing_fill_volume) or missing_fill_volume <= 0:
-                raise RuntimeError("The finalized fill-droplet volume is invalid.")
         stock_volumes = {
             item.stock_id: (float(new_volume_nL) if item.stock_id == stock.stock_id else item.effective_volume_nL)
             for item in plan.stocks
@@ -17371,14 +17399,7 @@ class ExperimentModel(QObject):
                 if fill_stock is None or stock_id != fill_stock.stock_id
             )
             remaining = max(0.0, plan.volume_basis.target_printed_volume_nL - nonfill_volume)
-            if fill_stock is None:
-                fill_count = max(0, int(round(remaining / missing_fill_volume)))
-                if fill_count > 0:
-                    raise RuntimeError(
-                        f"Calibrating stock {stock.stock_id!r} would require a fill stock "
-                        "that is absent from the finalized execution plan."
-                    )
-            else:
+            if fill_stock is not None:
                 fill_volume = stock_volumes[fill_stock.stock_id]
                 fill_count = max(0, int(round(remaining / fill_volume)))
                 fill_count = self._preserve_started_fill_count(
@@ -17477,23 +17498,7 @@ class ExperimentModel(QObject):
                 for stock_id, count in counts.items()
                 if fill_stock is None or stock_id != fill_stock.stock_id
             )
-            if fill_stock is None:
-                default_fill_volume = float(self._default_fill_droplet_volume_nl())
-                required_fill = self._calibration_fill_count(
-                    target_printed_volume_nL=float(
-                        plan.volume_basis.target_printed_volume_nL
-                    ),
-                    warning_threshold_nL=warning_threshold,
-                    nonfill_volume_nL=nonfill,
-                    fill_volume_nL=default_fill_volume,
-                    fill_is_calibrated=False,
-                )
-                if required_fill > 0:
-                    raise RuntimeError(
-                        "The calibrated two-stock mapping would require a fill stock "
-                        "that is absent from the finalized execution plan."
-                    )
-            else:
+            if fill_stock is not None:
                 fill_volume = volumes[fill_stock.stock_id]
                 fill_count = self._calibration_fill_count(
                     target_printed_volume_nL=float(
@@ -17607,7 +17612,7 @@ class ExperimentModel(QObject):
             signal.emit("all")
 
     @contextmanager
-    def _execution_pair_publication(self, candidate, context):
+    def _calibration_publication(self, candidate, context):
         """Roll back this candidate's files and live publication as one operation.
 
         Only the new candidate revision belongs to this transaction. Historical
@@ -17629,11 +17634,11 @@ class ExperimentModel(QObject):
                       "contents": Path(path).read_bytes() if os.path.isfile(path) else None}
                      for path in paths if path]
         blockers = [QtCore.QSignalBlocker(self), QtCore.QSignalBlocker(self._runtime_well_plate)]
-        self._execution_pair_write_started = False
+        self._calibration_write_started = False
         try:
             yield
         except Exception as original:
-            if not self._execution_pair_write_started:
+            if not self._calibration_write_started:
                 raise
             try:
                 self._restore_mutable_calibration_files(snapshots)
@@ -17670,6 +17675,7 @@ class ExperimentModel(QObject):
         calibration_payload: dict,
         timestamp_utc: str | None = None,
     ) -> dict:
+        self._calibration_retry_safe = False
         self.validate_calibration_execution_context(calibration_payload.get("execution_context"))
         eligibility = self.get_calibration_application_eligibility(stock_id=stock_id)
         if not eligibility["ok"]:
@@ -17845,6 +17851,8 @@ class ExperimentModel(QObject):
                 "record": record.to_dict(),
                 "status": "reused",
                 "volume_warning": volume_warning,
+                "volume_shortfall": self._calibration_volume_shortfall(plan, {
+                    w.well_id: {d.stock_id: d.target_dispenses for d in w.dispenses} for w in plan.wells}),
             }
             response.update(
                 self._calibration_volume_warning_audit_result(
@@ -17933,9 +17941,8 @@ class ExperimentModel(QObject):
             is not None
             and not self.get_execution_plan_sync_error()
         )
-        publication = (self._execution_pair_publication(candidate, calculation_context)
-                       if requantized is not None else nullcontext())
-        self._execution_pair_write_started = False
+        publication = self._calibration_publication(candidate, calculation_context)
+        self._calibration_write_started = False
         try:
             with publication:
                 self.validate_calibration_execution_context(calculation_context)
@@ -17957,7 +17964,7 @@ class ExperimentModel(QObject):
                     )
                 else:
                     self.validate_calibration_execution_context(calculation_context)
-                    self._execution_pair_write_started = True
+                    self._calibration_write_started = True
                     save_execution_calibrations(self.execution_calibrations_file_path, document)
                     status = self._commit_plan_revision(plan, candidate)
                     self._write_progress_for_execution_plan(candidate)
@@ -17979,10 +17986,7 @@ class ExperimentModel(QObject):
                         save=True,
                     )
         except Exception as exc:
-            # A rejected candidate before persistence leaves the active execution
-            # intact. Only a potentially partial write requires durable recovery.
-            if requantized is None and self._execution_pair_write_started:
-                self.set_execution_plan_sync_error(exc)
+            self._calibration_retry_safe = not self.get_execution_plan_sync_error()
             raise RuntimeError(f"Could not commit calibrated execution-plan revision: {exc}") from exc
         if not cached_commit:
             restored = self._restore_authoritative_session_after_full_revision()
@@ -17994,9 +17998,8 @@ class ExperimentModel(QObject):
                 "full_validation_count": 1 if restored else 0,
             }
         self.set_execution_plan_sync_error(None)
-        if requantized is not None:
-            self.stock_updated.emit()
-            self._runtime_well_plate.well_state_changed_signal.emit("all")
+        self.stock_updated.emit()
+        self._runtime_well_plate.well_state_changed_signal.emit("all")
         self.applied_imaging_calibration_changed.emit(record.to_dict())
         self._audit_execution_plan_event(
             "execution_plan_calibration_revised",
@@ -18017,6 +18020,7 @@ class ExperimentModel(QObject):
             "record": record.to_dict(),
             "status": status,
             "volume_warning": volume_warning,
+            "volume_shortfall": self._calibration_volume_shortfall(candidate, target_counts),
         }
         response.update(
             self._calibration_volume_warning_audit_result(
@@ -19160,6 +19164,8 @@ class ExperimentModel(QObject):
                 "plan_revision": plan.plan_revision,
                 "volume_warning": volume_warning,
                 "execution_context": execution_context,
+                "volume_shortfall": self._calibration_volume_shortfall(
+                    plan, new_counts, {fill_stock.stock_id: new_fill_droplet_nL}),
             }
 
         # Ensure we have a current reactions frame with nonfill volumes.
@@ -19311,6 +19317,7 @@ class ExperimentModel(QObject):
                 "applied_imaging_calibration_recorded": True,
                 "execution_plan_revision": result["plan"].plan_revision,
                 "volume_warning": copy.deepcopy(result.get("volume_warning")),
+                "volume_shortfall": copy.deepcopy(result.get("volume_shortfall")),
                 "volume_warning_audit_event_id": result.get("volume_warning_audit_event_id"),
                 "volume_warning_audit_status": result.get("volume_warning_audit_status"),
                 "volume_warning_audit_error": result.get("volume_warning_audit_error"),

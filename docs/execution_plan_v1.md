@@ -493,6 +493,10 @@ wells. A zero-count fill allocation has not started and may gain drops later.
 Preserving fill can leave a volume excess or shortfall after a later reagent
 measurement; this is reported, not grounds to reject the measurement. Calibrating
 fill itself remains possible only before any of that stock has printed.
+If the finalized plan contains no fill stock, calibration leaves fill absent.
+It does not add an identity or reject a valid measurement to eliminate a volume
+shortfall. Preview and Apply report per-well expected volumes and shortfalls;
+the committed plan and exports retain those actual counts and volumes.
 
 Preview and Apply use the same execution calculation. Each fixed contribution
 uses its committed count and current calibrated effective volume. Integer counts
@@ -513,23 +517,50 @@ CSV concentration exports likewise describe planned achieved concentrations,
 not an assertion that targets were met or that every planned drop has printed.
 
 Single-stock, two-stock and fill previews carry the exact plan and durable/live progress context.
-Apply rejects stale previews, unsaved live progress and pending print commands.
-After progress changes, refresh the preview and apply the measurement again;
+The model refuses stale previews, unsaved live progress and pending print commands.
+The dialog automatically refreshes a stale preview without committing it; review
+the updated counts and click Apply again. After progress changes,
 progress on another reagent or on fill does not itself make the selected
 unprinted reagent ineligible. Pending commands must finish and uncertain
 execution state must be reconciled before changing allocations.
 The context and allocation constraints are rechecked before persistence. Caught
-two-stock publication failures restore the prior plan mirror, calibration
+single-stock, two-stock and fill publication failures restore the prior plan mirror, calibration
 sidecar, checkpoint, exports and runtime, removing only the unpublished candidate
 revision created by that attempt. Earlier immutable revisions and experiment
 history remain untouched. Notifications and audit delivery follow successful
 publication. If rollback itself fails, the runtime is invalidated and the error
 requires recovery; a process crash/power loss still uses the existing durable
 execution recovery path rather than this in-process rollback.
-Single-stock and fill publication retain their existing durable retry/recovery
-path for interrupted writes; this change does not replace that persistence
-contract. A candidate rejected before writing does not mark an unchanged
-execution out of sync. Recovery preserves started fill allocations as well.
+A candidate rejected before writing does not mark an unchanged execution out
+of sync. The existing durable recovery path remains for interruptions from older
+versions and process crashes; this is not crash-atomic multi-file storage.
+
+The calibration panel's **Refresh / recover calibration** action revalidates the
+selected saved result and recalculates its preview without losing the selection.
+Use it after a pending print command or calibration/capture finishes. It never
+clears a pending command, marks uncertain drops as printed, or applies a result
+later without another click. Busy and hardware-recovery states retain the result
+and explain what is still waiting.
+
+For a valid saved execution that has not been activated, the same action offers
+**Activate saved execution?**. This uses the existing validated runtime activation
+path only with an idle/resume-ready array and an empty command queue, rechecked
+after confirmation. Execution file identities and live print evidence are also
+bound to that confirmation and rechecked before activation. It preserves saved progress and does not start printing.
+Missing/ambiguous progress and invalid bundles cannot be activated this way.
+
+After a caught file I/O failure with successful rollback, **Retry calibration
+save?** offers one retry or Cancel. The selected result and execution context are
+revalidated on retry. A second failure retains the result and reports the error;
+there is no automatic retry loop. Incomplete rollback blocks this retry and
+invalidates the runtime. A hardware-settings failure after successful calibration
+is still reported separately and does not undo or duplicate the calibration.
+
+Recovery does not waive measurement bounds, change identities, overwrite live
+progress with a saved checkpoint, reopen terminal histories, reconnect/reset
+hardware, or clear a camera/flash fault. These need their existing explicit
+operator workflows or investigation. Refresh cannot repair missing or corrupt
+measurement evidence; select another valid result or perform an authorized recheck.
 
 Before finalization, a mutable two-stock calibration saves the complete stock
 allocation. Later single-stock, fill, or two-stock calibrations refresh that
@@ -544,7 +575,8 @@ Mutable design optimization retains its existing reachability and grouping
 policy; the execution constraints above apply to finalized executions.
 
 Qualification lives in `tests/test_execution_two_stock_workflow.py` and
-`tests/test_execution_fill_workflow.py`: real model,
+`tests/test_execution_fill_workflow.py`, with recovery qualification in
+`tests/test_calibration_application_recovery.py`: real model,
 durable print intents, runtime progress and reload paths, plus the actual dialog
 preview/Apply boundary with physical settings calls excluded. It covers both
 stock orders, partial and complete printing, fill states, zero/absent choices,
@@ -565,6 +597,9 @@ used constrained calibration retain authoritative counts and references; older
 code cannot continue calibrating the second stock after companion printing.
 Reverting only the fill-policy follow-up restores the earlier single-stock fill
 recalculation behavior, so qualify a rollback before resuming those workflows.
+Reverting the no-fill/recovery follow-up restores the no-fill rejection and older
+single-stock failure behavior. Keep execution/calibration files intact, validate
+the rollback revision, push it, and use Status -> Sync -> Validate for Pi rollback.
 
 After preview and again from the committed candidate, calibration recalculates
 every well's exact printed total. A printed total above target printed volume

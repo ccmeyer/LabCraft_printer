@@ -340,7 +340,9 @@ def test_real_dialog_preview_apply_uses_execution_progress(
         if stale:
             assert em.get_execution_plan_snapshot() == before
             assert _files(em) == files
-            assert any("changed after calibration preview" in message for message in messages)
+            assert "changed after calibration preview" in dialog.bridge_status_label.text()
+            assert dialog.bridge_apply_btn.isEnabled()
+            assert dialog._bridge_preview_payload["execution_context"] == em._calibration_execution_context()
         else:
             assert em.get_execution_plan_snapshot().plan_revision == before.plan_revision + 1
             assert any("kept its committed counts and progress" in message for message in messages)

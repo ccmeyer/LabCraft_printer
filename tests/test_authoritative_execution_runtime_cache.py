@@ -310,7 +310,7 @@ def test_calibration_revision_uses_guarded_successor_without_full_history_reload
         "_accept_authoritative_calibration_writes",
     ],
 )
-def test_calibration_partial_write_failure_invalidates_cache_and_full_retry_recovers(
+def test_calibration_partial_write_failure_rolls_back_and_retry_recovers(
     experiment_model_factory,
     monkeypatch,
     method_name,
@@ -319,6 +319,10 @@ def test_calibration_partial_write_failure_invalidates_cache_and_full_retry_reco
         experiment_model_factory
     )
     revision_dir = Path(experiment_model.execution_plan_revisions_dir_path)
+    from test_execution_two_stock_workflow import _files
+    before_files = _files(experiment_model)
+    before_plan = experiment_model.get_execution_plan_snapshot()
+    before_runtime = experiment_model._build_progress_payload_from_runtime()
     original = getattr(experiment_model, method_name)
     calls = {"count": 0}
 
@@ -336,8 +340,11 @@ def test_calibration_partial_write_failure_invalidates_cache_and_full_retry_reco
         path.name: path.read_bytes()
         for path in revision_dir.glob("revision_*.json")
     }
-    assert experiment_model._active_authoritative_execution_session is None
-    assert method_name in experiment_model.get_execution_plan_sync_error()
+    assert _files(experiment_model) == before_files
+    assert experiment_model.get_execution_plan_snapshot() == before_plan
+    assert experiment_model._build_progress_payload_from_runtime() == before_runtime
+    assert experiment_model._active_authoritative_execution_session is not None
+    assert experiment_model.get_execution_plan_sync_error() is None
 
     recovered = _apply_cached_calibration(experiment_model)
 

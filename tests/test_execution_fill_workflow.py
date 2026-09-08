@@ -274,7 +274,9 @@ def test_dialog_single_and_fill_preview_context(
         if stale:
             assert em.get_execution_plan_snapshot() == before
             assert _files(em) == files
-            assert any("changed after calibration preview" in message for message in messages)
+            assert "changed after calibration preview" in dialog.bridge_status_label.text()
+            assert dialog.bridge_apply_btn.isEnabled()
+            assert dialog._bridge_preview_payload["execution_context"] == em._calibration_execution_context()
         else:
             assert _stock(em, selected.factor_name).effective_volume_nL == volume
             assert em.get_execution_plan_snapshot().plan_revision > before.plan_revision
