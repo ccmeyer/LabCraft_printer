@@ -97,18 +97,22 @@ On this Windows checkout, use the repo virtual environment directly:
 Avoid `py -m pytest -q` here unless the Windows Python launcher has been verified; in some agent shells it fails with `No installed Python found!`.
 
 The editor and import wizard calculate stock allocations on a dedicated Qt
-worker. Design edits pause during calculation; Cancel preserves the previous
+worker. Automatic calculations allow continued editing; explicit calculations,
+import, Save, preview, and finalize pause design edits until publication. Cancel preserves the previous
 results. Save, preview, and finalize wait for successful publication. Calibration
 transactions and non-UI model APIs remain synchronous.
 
-Automatic updates wait while you type or Tab between design inputs, including
-pauses within a comma-separated target list. Leaving the inputs starts a short
-debounce; **Recalculate Stocks** commits the current inputs and calculates
-immediately. Pending edits mark stock results as out of date. Turning automatic
-updates off still allows several edits before explicit recalculation.
+Automatic updates wait while you type in the same field, including pauses
+within a comma-separated target list. Leaving that field, including Tab into
+another input, starts a short debounce. New typing cancels obsolete work and
+defers its replacement until that field is committed. Only one job runs, and
+only results matching the current editor inputs can publish. **Recalculate
+Stocks** commits the current inputs explicitly. Pending edits mark stock results
+as out of date. Turning automatic updates off permits explicit recalculation only.
 
-Calculation progress appears inside the editor or import wizard, without a
-separate window taking focus. After one second it adds elapsed time and phase-specific activity
+Calculation progress occupies a permanently reserved footer in the editor and
+import wizard. Its fixed height and idle controls prevent layout movement as
+jobs start and stop. After one second it adds elapsed time and phase-specific activity
 counts, refreshed twice per second. Automatic stock calculations reaching three
 seconds pause future automatic updates for that design and explain how to use
 **Recalculate Stocks**. Re-enabling Auto-update honors that choice for the rest

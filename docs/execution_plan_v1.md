@@ -239,29 +239,37 @@ worker thread. The worker owns a detached input snapshot and computes both the
 allocation and generated reaction data. It cannot write experiment files or
 access live runtime bindings. The main thread publishes complete results only
 while the request's inputs, owner, and editing interlocks remain current.
-Design inputs and dependent actions are paused during calculation; Cancel
+Explicit calculation and import jobs pause design inputs and dependent actions; Cancel
 retains the previous published results and leaves the edited inputs dirty.
 Save, preview, and finalize continue only after successful publication.
 
-Automatic calculation is deferred for the entire input editing session: pauses
-within a target list and Tab between cells do not submit a job. Edits immediately
-mark results dirty. Leaving the design inputs starts the existing 350 ms
-debounce; returning to an input stops it. Opening another dialog or switching
-applications does not commit an unfinished edit. Explicit Recalculate Stocks,
-Save, preview, and finalize actions retain their validation and continuation
-paths. Cancellation consumes the pending automatic request and does not restart
-it without another edit or explicit request.
+Automatic calculation waits while editing the same field. Leaving that field,
+including Tab into the next cell, starts the existing 350 ms debounce. Typing in
+the next field stops pending work and cooperatively cancels an obsolete job.
+Automatic jobs leave input fields editable, but dependent lifecycle actions stay
+locked. One pending flag coalesces edits behind the single worker; replacement
+work starts only after the current field is committed and the worker settles.
+Opening another dialog or switching applications does not commit an unfinished
+edit. Incomplete target tokens are rejected instead of silently dropping them.
 
-An inline progress strip in the editor or import wizard shows the current phase on its next half-second
+Publication checks the model snapshot fingerprint, session, current interlocks,
+editor revision, and raw control values. Even a programmatic control change
+without an edit signal invalidates the result. Obsolete results leave previous
+allocations intact and inputs dirty. Explicit Recalculate Stocks, Save, preview,
+and finalize retain their input locks, validation and continuations. Cancel or
+close consumes the pending automatic request; it does not restart without
+another edit or explicit request. Turning Auto off prevents pending replacements.
+
+A permanently allocated footer in the editor and import wizard shows the current phase on its next half-second
 refresh. After one second it also shows total elapsed job time and, where
 available, one activity count: single-stock candidates considered, stock pairs
 considered, candidates filtered, complete allocations evaluated, or reactions
 generated. Search counters describe work in the current phase, not percent
 complete or a prediction of remaining time. Only reaction generation has a
 known total. A bounded shared snapshot coalesces activity; Qt refreshes the
-progress strip at most twice per second. It never opens or activates a separate
-window; design inputs remain locked only while the submitted job and publication
-are active. Canceling remains visible until
+footer at most twice per second. Its height, label space, progress bar and Cancel
+button remain allocated when idle, so starting and stopping jobs do not move the
+window contents. It never opens or activates a separate window. Canceling remains visible until
 the worker's terminal outcome, and late phase updates cannot overwrite it.
 
 Automatic editor stock calculations reaching three seconds pause future
