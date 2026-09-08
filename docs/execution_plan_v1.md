@@ -234,6 +234,12 @@ evaluated row batch, even when an early match could end a scalar scan sooner.
 comparison block. These counters do not consume the existing resolution work
 allowance or change stopping decisions; paths that do not filter report zero.
 
+Well shading represents the selected stock's target dispense count relative to
+its maximum across the plate. Opacity is clamped to the display range and encoded
+as ARGB hex: low alpha values must not become fully opaque through Qt's special
+interpretation of `rgba(...,1)`. This display encoding does not modify counts,
+concentrations or execution progress; tooltips retain exact numeric counts.
+
 Editor updates and import feasibility calculations run on one dedicated Qt
 worker thread. The worker owns a detached input snapshot and computes both the
 allocation and generated reaction data. It cannot write experiment files or

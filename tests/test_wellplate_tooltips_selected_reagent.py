@@ -1,6 +1,57 @@
 from types import SimpleNamespace
 
+import pytest
+from PySide6.QtWidgets import QLabel
+
 from View import WellPlateWidget
+
+
+@pytest.mark.parametrize("maximum", [100, 179, 200, 255, 256, 1000])
+def test_rendered_well_opacity_is_monotonic(qapp, maximum):
+    """Qt treats rgba(...,1) as opaque; inspect pixels rather than CSS text."""
+    counts = sorted({0, 1, 2, maximum // 2, maximum})
+    alphas = []
+    for count in counts:
+        label = QLabel()
+        label.resize(40, 40)
+        reaction = SimpleNamespace(
+            get_target_droplets_for_stock=lambda _: count,
+            check_stock_complete=lambda _: False,
+        )
+        well = SimpleNamespace(well_id="A1", row_num=0, col=1, assigned_reaction=reaction)
+        widget = SimpleNamespace(
+            well_labels=[[label]],
+            model=SimpleNamespace(get_well_stock_final_concentration=lambda *_: None),
+        )
+        WellPlateWidget._update_well_label(widget, well, {
+            "stock_id": "R", "max_concentration": maximum,
+            "color": "red", "enable_tooltips": True,
+        })
+        qapp.processEvents()
+        alphas.append(label.grab().toImage().pixelColor(20, 20).alpha())
+        assert f"Target droplets: {count}" in label.toolTip()
+        label.deleteLater()
+    assert alphas == sorted(alphas), list(zip(counts, alphas))
+    assert alphas[0] == 0 and alphas[-1] == 255
+    assert alphas[1] < alphas[-1]
+
+
+@pytest.mark.parametrize("count,maximum,expected", [(-1, 179, 0), (200, 179, 255), (1, 0, 0)])
+def test_well_opacity_clamps_display_bounds(qapp, count, maximum, expected):
+    label = QLabel()
+    label.resize(40, 40)
+    well = SimpleNamespace(well_id="A1", row_num=0, col=1, assigned_reaction=SimpleNamespace(
+        get_target_droplets_for_stock=lambda _: count, check_stock_complete=lambda _: True,
+    ))
+    widget = SimpleNamespace(well_labels=[[label]], model=SimpleNamespace(
+        get_well_stock_final_concentration=lambda *_: None,
+    ))
+    WellPlateWidget._update_well_label(widget, well, {
+        "stock_id": "R", "max_concentration": maximum, "color": "red", "enable_tooltips": True,
+    })
+    assert label.grab().toImage().pixelColor(20, 20).alpha() == expected
+    assert "border: 1px solid white" in label.styleSheet()
+    label.deleteLater()
 
 
 class _Label:
@@ -177,7 +228,7 @@ def test_completed_view_uses_detached_display_head_for_complete_well_color():
 
     WellPlateWidget.update_well_colors(widget)
 
-    assert "rgba(34,68,102" in widget.well_labels[0][0].style
+    assert "#ff224466" in widget.well_labels[0][0].style
     assert "border: 1px solid white" in widget.well_labels[0][0].style
 
 

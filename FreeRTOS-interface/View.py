@@ -7564,13 +7564,13 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             state = well.assigned_reaction.check_stock_complete(stock_id)
             outline = 'white' if state else 'black'
             if concentration is not None:
-                opacity = 0 if max_concentration == 0 else concentration / max_concentration
+                opacity = (0 if max_concentration <= 0 else
+                           min(1.0, max(0.0, concentration / max_concentration)))
                 well_color = QtGui.QColor(color)
                 well_color.setAlphaF(opacity)
-                rgba_color = (
-                    f"rgba({well_color.red()},{well_color.green()},"
-                    f"{well_color.blue()},{well_color.alpha()})"
-                )
+                # QSS interprets rgba(...,1) as 100% opacity, not 1/255.
+                # ARGB hex preserves low integer alpha values unambiguously.
+                rgba_color = well_color.name(QtGui.QColor.HexArgb)
                 label.setStyleSheet(
                     f"background-color: {rgba_color}; border: 1px solid {outline};"
                 )
