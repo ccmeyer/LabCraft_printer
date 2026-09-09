@@ -120,7 +120,17 @@ Regression tests prohibit file reads during repeated availability refreshes,
 check that a removed source disables copying, and reject malformed/replaced
 contents before any prompt, job or destination is created. The existing
 large-copy heartbeat limit remains 250 ms through final UI restoration.
-Windows and repeated Pi qualification of this follow-up are pending.
+
+The first correction passed 110 focused Windows tests. Repeated Pi tests
+still failed (380-441 ms): profiling isolated a second pause in allocation
+input fingerprint preparation. Building all uploaded reaction documents
+without checkpoints allowed garbage collection and serialization to hold
+up Qt consecutively. Per-row cooperative checkpoints and a checkpoint
+before hashing now separate those phases and allow cancellation during
+preparation. Fingerprint contents, canonical encoding and allocation
+validation are unchanged. A regression checks equal controlled/uncontrolled
+documents and hashes, and cancellation before visiting the next row or
+hashing the document. Final Windows and Pi qualification are pending.
 
 The call path is editor UI -> background job -> detached model -> guarded
 publication -> UI refresh; Controller, transport and firmware are unchanged.

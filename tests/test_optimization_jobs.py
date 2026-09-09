@@ -267,6 +267,37 @@ def test_save_optimizer_keeps_simulated_mcu_communication_live(qapp, real_editor
         machine._stop_mcu_response_watchdog()
 
 
+def test_allocation_fingerprint_can_cancel_during_uploaded_row_preparation(monkeypatch):
+    model = ExperimentModel()
+    model.set_uploaded_design_from_dataframe(
+        pd.DataFrame({"Reagent mM": [1.0, 2.0, 3.0]}),
+        units_default="mM", droplet_nL_default=10.04,
+    )
+    expected_document = model._stock_allocation_input_document()
+    expected_hash = model._canonical_payload_sha256(expected_document)
+    control = ComputationControl()
+    model._optimization_control = control
+    assert model.stock_allocation_input_fingerprint() == expected_hash
+    assert model._stock_allocation_input_document() == expected_document
+
+    class CancelAfterFirstRow(dict):
+        def items(self):
+            control.cancelled.set()
+            return super().items()
+
+    class UnexpectedRow(dict):
+        def items(self):
+            pytest.fail("Cancellation must stop before preparing the next row")
+
+    model._uploaded_reactions[0] = CancelAfterFirstRow(model._uploaded_reactions[0])
+    model._uploaded_reactions[1] = UnexpectedRow(model._uploaded_reactions[1])
+    hashed = []
+    monkeypatch.setattr(model, "_canonical_payload_sha256", lambda doc: hashed.append(doc))
+    with pytest.raises(OptimizationCancelled):
+        model.stock_allocation_input_fingerprint()
+    assert not hashed
+
+
 def test_large_editable_copy_keeps_heartbeat_through_publication(qapp, real_editor, tmp_path, monkeypatch):
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QMessageBox

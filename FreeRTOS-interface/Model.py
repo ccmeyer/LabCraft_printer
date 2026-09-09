@@ -8181,6 +8181,9 @@ class ExperimentModel(QObject):
             })
 
         def _reaction_document(reaction: Mapping[Any, Any]) -> List[Dict[str, Any]]:
+            # Large uploads allocate many small objects here. Let Qt run
+            # between rows instead of coupling GC pauses with serialization.
+            self._optimization_checkpoint()
             return [
                 {
                     "key": [str(key[0]), key[1]],
@@ -8227,9 +8230,9 @@ class ExperimentModel(QObject):
         }
 
     def stock_allocation_input_fingerprint(self) -> str:
-        return self._canonical_payload_sha256(
-            self._stock_allocation_input_document()
-        )
+        document = self._stock_allocation_input_document()
+        self._optimization_checkpoint()
+        return self._canonical_payload_sha256(document)
 
     def _stock_allocation_plan_document(
         self,
