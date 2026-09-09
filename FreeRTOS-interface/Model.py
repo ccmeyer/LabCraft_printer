@@ -2971,6 +2971,21 @@ class ExperimentModel(QObject):
         if control is not None:
             control.report(phase) if phase else control.check()
 
+    def _load_optimization_json(self, document):
+        """Decode with the standard parser, yielding between worker-owned objects."""
+        control = getattr(self, "_optimization_control", None)
+        if control is None:
+            return json.loads(document)
+
+        def checked_object(value):
+            control.check()
+            return value
+
+        control.check()
+        result = json.loads(document, object_hook=checked_object)
+        control.check()
+        return result
+
     def _optimization_activity(self, label, **counts):
         control = getattr(self, "_optimization_control", None)
         if control is not None:
@@ -20010,7 +20025,9 @@ class ExperimentModel(QObject):
         if not isinstance(data, dict):
             raise ValueError("Experiment design must be a JSON object.")
 
-        payload = json.loads(json.dumps(data, default=self.convert_to_serializable))
+        self._optimization_checkpoint()
+        serialized = json.dumps(data, default=self.convert_to_serializable)
+        payload = self._load_optimization_json(serialized)
         payload["metadata"] = dict(payload.get("metadata") or {})
         payload["metadata"]["name"] = self.sanitize_experiment_name(new_name)
         if copy_applied_imaging_calibrations:
@@ -20071,8 +20088,11 @@ class ExperimentModel(QObject):
         if destination.exists():
             raise FileExistsError(f"Experiment folder already exists: {destination}")
         source_bytes = source_path.read_bytes()
-        if self._canonical_payload_sha256(json.loads(source_bytes)) != source_fingerprint:
+        source_document_now = self._load_optimization_json(source_bytes)
+        if self._canonical_payload_sha256(source_document_now) != source_fingerprint:
             raise ValueError("The source experiment changed while preparing the editable copy.")
+        del source_document_now
+        self._optimization_checkpoint()
         destination.parent.mkdir(parents=True, exist_ok=True)
         staging_owner = tempfile.TemporaryDirectory(
             prefix=f".{destination.name}.staging-", dir=destination.parent,
@@ -20091,8 +20111,16 @@ class ExperimentModel(QObject):
             # Verify serialization without running another allocation search or
             # reaction generation. Those exact model results were validated above.
             staged_bytes = Path(self.experiment_file_path).read_bytes()
-            if self._canonical_payload_sha256(json.loads(staged_bytes)) != self._canonical_payload_sha256(self.to_dict()):
+            staged_document = self._load_optimization_json(staged_bytes)
+            staged_fingerprint = self._canonical_payload_sha256(staged_document)
+            del staged_document
+            self._optimization_checkpoint()
+            expected_document = self.to_dict()
+            self._optimization_checkpoint()
+            if staged_fingerprint != self._canonical_payload_sha256(expected_document):
                 raise ValueError("The staged editable copy did not validate.")
+            del expected_document
+            self._optimization_checkpoint()
             ExperimentAuditLog(audit_path=staging / ExperimentAuditLog.FILE_NAME).record(
                 "editable_copy_created", "Editable design copy created",
                 details={"source_name": str((source_document.get("metadata") or {}).get("name") or ""),

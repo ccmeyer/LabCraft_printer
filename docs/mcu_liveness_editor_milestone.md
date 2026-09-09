@@ -130,7 +130,17 @@ before hashing now separate those phases and allow cancellation during
 preparation. Fingerprint contents, canonical encoding and allocation
 validation are unchanged. A regression checks equal controlled/uncontrolled
 documents and hashes, and cancellation before visiting the next row or
-hashing the document. Final Windows and Pi qualification are pending.
+hashing the document.
+
+Ordinary repeats still exposed 433-454 ms gaps. Sampling thread stacks
+without wrapping application methods reproduced 459 ms across consecutive
+input JSON decode/encode/decode operations and 398 ms across source
+decode/hash preparation. Worker JSON decoding now uses the standard
+parser's object hook for cooperative checkpoints; serialization and
+verification steps also yield between their large operations. Object values,
+source hashes and serialization validation remain unchanged. Tests cover
+text/byte decoding equality and cancellation before parsing the remaining
+document. Final Windows and Pi qualification are pending.
 
 The call path is editor UI -> background job -> detached model -> guarded
 publication -> UI refresh; Controller, transport and firmware are unchanged.

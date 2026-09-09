@@ -2,7 +2,6 @@
 from dataclasses import dataclass, field
 import copy
 import hashlib
-import json
 import pickle
 import threading
 import time
@@ -146,7 +145,7 @@ class _OptimizationWorker(QObject):
                 options = dict(request.options)
                 if request.kind == "duplicate":
                     control.report("Preparing editable copy")
-                    options["source_document"] = json.loads(options["source_json"])
+                    options["source_document"] = draft._load_optimization_json(options["source_json"])
                     draft.from_dict(draft._duplicate_design_payload(
                         options["source_document"], options["new_name"],
                     ))

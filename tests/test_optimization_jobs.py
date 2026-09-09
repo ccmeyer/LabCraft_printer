@@ -267,6 +267,39 @@ def test_save_optimizer_keeps_simulated_mcu_communication_live(qapp, real_editor
         machine._stop_mcu_response_watchdog()
 
 
+@pytest.mark.parametrize("as_bytes", [False, True])
+def test_worker_json_decode_preserves_standard_json_values(as_bytes):
+    document = '{"metadata":{"name":"µ"},"rows":[{}, {"value":10.04}],"empty":[],"flag":true,"none":null}'
+    if as_bytes:
+        document = document.encode("utf-8")
+    model = ExperimentModel()
+    expected = json.loads(document)
+    assert model._load_optimization_json(document) == expected
+    model._optimization_control = ComputationControl()
+    assert model._load_optimization_json(document) == expected
+
+
+def test_worker_json_decode_can_cancel_before_finishing_document(monkeypatch):
+    model = ExperimentModel()
+    control = ComputationControl()
+    model._optimization_control = control
+    checks = []
+    original = control.check
+
+    def cancel_after_first_object():
+        checks.append(True)
+        if len(checks) == 2:
+            control.cancelled.set()
+        original()
+
+    monkeypatch.setattr(control, "check", cancel_after_first_object)
+    # Cancellation at the first decoded object must precede even parsing the
+    # rest of the document (whose deliberately invalid tail would otherwise fail).
+    with pytest.raises(OptimizationCancelled):
+        model._load_optimization_json('{"rows":[{}, invalid]}')
+    assert len(checks) == 2
+
+
 def test_allocation_fingerprint_can_cancel_during_uploaded_row_preparation(monkeypatch):
     model = ExperimentModel()
     model.set_uploaded_design_from_dataframe(
