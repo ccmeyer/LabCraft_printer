@@ -138,14 +138,20 @@ from ordinary tests (one warm-up and five measured runs per workload):
 ```
 
 Opening an unrun design and **Create Editable Copy** also compute stock
-allocations in the cancellable editor worker. Editable-copy publication checks
-the saved source again and validates the computed allocation before creating the
-destination. Cancel leaves the source and destination unchanged.
+allocations in the cancellable editor worker. Loading uses the saved model's
+precise inputs without rebuilding them from rounded UI controls. Editable copies
+validate allocations, generate reactions, serialize and verify staged files in
+the worker. Publication checks the source bytes and destination again, renames
+the staged folder and adopts the prepared model state. Cancel or rejected
+publication cleans up the owned staging folder and preserves the source.
 
 MCU response monitoring uses validated frame reception in the serial-reader
 thread, independently of Qt callback delivery. The response timeout remains
-2.5 seconds. Queued commands wait while processed frame data is stale; genuine
-silence retains the existing blocked-transport/reconnect behavior. A connection
+2.5 seconds. Queued commands wait until every received frame has completed its
+handler, including any later ACK, status fault or reset report. Each reader has
+a connection generation; callbacks from replaced readers are ignored. A failed
+handler or stopped reader cannot authorize dispatch. Genuine silence retains
+the existing blocked-transport/reconnect behavior. A connection
 loss warning is not itself proof of an MCU reset.
 
 Black-box snapshots now include `transport.response_observation` (reader receipt,

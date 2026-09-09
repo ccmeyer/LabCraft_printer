@@ -1,6 +1,8 @@
 import threading
 import time
 import struct
+import uuid
+from functools import wraps
 from PySide6 import QtCore, QtWidgets, QtGui
 from PySide6.QtCore import QObject, Signal, Slot, QTimer, QThread, QMutex, QMutexLocker
 from PySide6.QtWidgets import QApplication
@@ -42,6 +44,32 @@ from GravimetricLedger import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _reader_callback(handler):
+    """Reject old connections and acknowledge reception only after handling it."""
+    @wraps(handler)
+    def delivered(self, frame):
+        generation = frame.get("__host_rx_generation") if isinstance(frame, dict) else None
+        if generation is None:  # Direct calls in simulated compositions.
+            return handler(self, frame)
+        reader = getattr(self, "reader", None)
+        if (reader is None or getattr(reader, "generation", None) != generation
+                or reader.ser is not self.ser):
+            return
+        try:
+            result = handler(self, frame)
+        except BaseException:
+            reader.fail_delivery()
+            raise
+        # Exceptions deliberately leave a gap: unhandled frames cannot authorize TX.
+        if reader is self.reader and reader.ser is self.ser:
+            sequence = frame.get("__host_rx_sequence")
+            if sequence is not None:
+                reader.complete_frame(sequence)
+                self.pump_send_queue()
+        return result
+    return delivered
 
 LOG_READER_SERIAL_TIMEOUT_S = 0.1
 SERIAL_READER_STOP_WAIT_MS = 250
@@ -3861,7 +3889,11 @@ class SerialReader(QThread):
         # Written by the reader, inspected without waiting for Qt signal delivery.
         # Keep timestamp/kind/count together under a short lock; no I/O under it.
         self._receive_lock = threading.Lock()
-        self._receive_state = {"monotonic_ns": None, "kind": None, "frame_count": 0}
+        self.generation = uuid.uuid4().hex
+        self._completed_frames = set()
+        self._receive_state = {"monotonic_ns": None, "kind": None, "frame_count": 0,
+                               "processed_count": 0, "stopped": False, "delivery_failed": False,
+                               "generation": self.generation}
 
     def receive_snapshot(self):
         with self._receive_lock:
@@ -3871,13 +3903,38 @@ class SerialReader(QThread):
         now_ns = time.monotonic_ns()
         with self._receive_lock:
             self._receive_state = {
+                **self._receive_state,
                 "monotonic_ns": now_ns, "kind": kind,
                 "frame_count": self._receive_state["frame_count"] + 1,
             }
         return now_ns
 
+    def stamp_frame(self, frame, kind):
+        frame["__host_rx_monotonic_ns"] = self._record_valid_frame(kind)
+        frame["__host_rx_generation"] = self.generation
+        frame["__host_rx_sequence"] = self.receive_snapshot()["frame_count"]
+
+    def complete_frame(self, sequence):
+        with self._receive_lock:
+            if self._receive_state["delivery_failed"]:
+                return
+            completed = self._receive_state["processed_count"]
+            if sequence <= completed:
+                return
+            self._completed_frames.add(sequence)
+            while completed + 1 in self._completed_frames:
+                completed += 1
+                self._completed_frames.remove(completed)
+            self._receive_state["processed_count"] = completed
+
+    def fail_delivery(self):
+        with self._receive_lock:
+            self._receive_state["delivery_failed"] = True
+            self._completed_frames.clear()
+
     def _reader_stop_info(self, reason, exc=None):
         info = {
+            "__host_rx_generation": self.generation,
             "reason": str(reason or "unknown"),
             "requested_stop": bool(self._stop_requested),
         }
@@ -4095,12 +4152,12 @@ class SerialReader(QThread):
                 cmd = payload[0]
                 if cmd == CMD_STATUS:
                     data = parse_tlv_payload(payload[1:])
-                    data["__host_rx_monotonic_ns"] = self._record_valid_frame("status")
+                    self.stamp_frame(data, "status")
                     self.status_received.emit(data)
                 elif cmd == RESET_REPORT:
                     report = self._parse_reset_report(payload)
                     if report is not None:
-                        report["__host_rx_monotonic_ns"] = self._record_valid_frame("reset_report")
+                        self.stamp_frame(report, "reset_report")
                         self.resetReportReceived.emit(report)
                 else:
                     # HELLO_ACK, BYE_ACK, CLEAR_ACK, etc
@@ -4108,7 +4165,7 @@ class SerialReader(QThread):
                     ack = self._parse_ack(payload)
                     if ack.get("ack_cmd") is None:
                         continue
-                    ack["__host_rx_monotonic_ns"] = self._record_valid_frame("ack")
+                    self.stamp_frame(ack, "ack")
                     print(f"Ack received: {ack['ack_cmd']} seq8={ack['seq8']} seq32={ack['seq32']}")
                     self.ackReceived.emit(ack)
 
@@ -4119,6 +4176,8 @@ class SerialReader(QThread):
             if stop_info is None:
                 reason = "requested_stop" if self._stop_requested else "completed"
                 stop_info = self._reader_stop_info(reason)
+            with self._receive_lock:
+                self._receive_state["stopped"] = True
             self.readerStopped.emit(stop_info)
 
     def request_stop(self):
@@ -5311,6 +5370,7 @@ class Machine(QObject):
             entry["timer"].deleteLater()
 
     @Slot(object)
+    @_reader_callback
     def _on_any_ack(self, ack: dict):
         """
         ack = {"ack_cmd": int, "seq8": int, "seq32": int|None}
@@ -5877,6 +5937,7 @@ class Machine(QObject):
             print('Serial reader thread already running')
 
     @Slot(dict)
+    @_reader_callback
     def _on_reset_report(self, report):
         report = dict(report or {})
         connection_phase = getattr(
@@ -5909,6 +5970,7 @@ class Machine(QObject):
         self.reset_report_received.emit(dict(report))
 
     @Slot(dict)
+    @_reader_callback
     def _on_serial_reader_stopped(self, info):
         info = dict(info or {})
         self._record_black_box_event("serial_reader_stopped", info)
@@ -6971,6 +7033,8 @@ class Machine(QObject):
             "stall_hint": stall_hint,
         }
 
+    @Slot(object)
+    @_reader_callback
     def update_status(self, data):
         """
         Update the status of the machine with the received data.
@@ -7788,6 +7852,18 @@ class Machine(QObject):
         confirm_timer.start(self._pause_after_confirm_timeout_ms)
         return True
 
+    def _reader_dispatch_ready(self):
+        reader = getattr(self, "reader", None)
+        if not isinstance(reader, SerialReader):
+            return True
+        if reader.ser is not self.ser:
+            return False
+        state = reader.receive_snapshot()
+        age = self._last_mcu_rx_age_ms()
+        return (not state["stopped"] and not state["delivery_failed"]
+                and state["processed_count"] == state["frame_count"]
+                and age is not None and age < self._mcu_response_timeout_ms)
+
     def pump_send_queue(self):
         """
         Fill the transport window with locally queued commands.
@@ -7806,18 +7882,15 @@ class Machine(QObject):
             return
         if getattr(self, "_tx_paused", False) or getattr(self, "_sequence_pause", False):
             return
-        observation = self._mcu_response_observation()
-        if (observation["receive_source"] == "serial_reader"
-                and max(observation["main_thread_frame_age_ms"] or 0,
-                        observation["processed_frame_receive_age_ms"] or 0) >= self._mcu_response_timeout_ms):
-            # Fresh serial traffic proves liveness, not that queued status/fault
-            # callbacks have been applied. Let the GUI catch up before dispatch.
+        if not self._reader_dispatch_ready():
             return
         if getattr(self, "_queue_gap_repair", None):
             self._pump_queue_gap_repair()
             return
 
         while True:
+            if not self._reader_dispatch_ready():
+                return
             command = self.command_queue.get_next_command()
             if not command:
                 return

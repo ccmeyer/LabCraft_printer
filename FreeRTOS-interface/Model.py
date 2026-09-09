@@ -2980,6 +2980,11 @@ class ExperimentModel(QObject):
         return copy.deepcopy({name: getattr(self, name)
                               for name in self._OPTIMIZATION_INPUT_ATTRIBUTES})
 
+    def optimization_inputs_fingerprint(self):
+        # Hash current GUI-owned inputs without making a second large deep copy.
+        return input_fingerprint({name: getattr(self, name)
+                                  for name in self._OPTIMIZATION_INPUT_ATTRIBUTES})
+
     def restore_optimization_inputs(self, snapshot):
         if set(snapshot) != set(self._OPTIMIZATION_INPUT_ATTRIBUTES):
             raise ValueError("Incomplete optimization input snapshot.")
@@ -20045,6 +20050,98 @@ class ExperimentModel(QObject):
         if not reused.get("reused"):
             raise ValueError(f"Editable-copy allocation is invalid: {reused.get('reason')}")
         return reused["result"]
+
+    _COPY_STATE_ATTRIBUTES = tuple(dict.fromkeys(
+        _OPTIMIZATION_INPUT_ATTRIBUTES + _OPTIMIZATION_OUTPUT_ATTRIBUTES + (
+            "calibration_storage_policy", "stock_prep_state", "manual_refuel_checks",
+        )
+    ))
+
+    def prepare_editable_copy_publication(
+        self, source_path, destination, source_fingerprint, source_document,
+    ):
+        """Worker-only preparation on an already validated/generated detached model."""
+        source_path = Path(source_path).resolve()
+        destination = Path(destination).resolve()
+        if destination == source_path.parent or source_path.parent in destination.parents:
+            raise ValueError("Editable-copy destination must not be inside the source folder.")
+        if destination.exists():
+            raise FileExistsError(f"Experiment folder already exists: {destination}")
+        source_bytes = source_path.read_bytes()
+        if self._canonical_payload_sha256(json.loads(source_bytes)) != source_fingerprint:
+            raise ValueError("The source experiment changed while preparing the editable copy.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging_owner = tempfile.TemporaryDirectory(
+            prefix=f".{destination.name}.staging-", dir=destination.parent,
+        )
+        staging = Path(staging_owner.name).resolve()
+        try:
+            self._optimization_checkpoint("Preparing copy files")
+            self.calibration_storage_policy = new_experiment_policy()
+            self.experiment_dir_path = str(staging)
+            self.update_all_paths()
+            if self._uploaded_reactions is not None:
+                if not self._materialize_uploaded_design_csv():
+                    raise ValueError("The uploaded design CSV could not be prepared.")
+            self.save_experiment()
+            self._atomic_json_dump(self.progress_file_path, {})
+            # Verify serialization without running another allocation search or
+            # reaction generation. Those exact model results were validated above.
+            staged_bytes = Path(self.experiment_file_path).read_bytes()
+            if self._canonical_payload_sha256(json.loads(staged_bytes)) != self._canonical_payload_sha256(self.to_dict()):
+                raise ValueError("The staged editable copy did not validate.")
+            ExperimentAuditLog(audit_path=staging / ExperimentAuditLog.FILE_NAME).record(
+                "editable_copy_created", "Editable design copy created",
+                details={"source_name": str((source_document.get("metadata") or {}).get("name") or ""),
+                         "new_name": self.metadata["name"]},
+            )
+            if self._uploaded_design_source:
+                self._uploaded_design_source = str(destination / Path(self._uploaded_design_source).name)
+            if self.STOCK_RESOLUTION_POLICY_METADATA_KEY not in (source_document.get("metadata") or {}):
+                self._stock_allocation_resolution_policy_source = self.STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING
+            self._optimization_checkpoint()
+            return {
+                "staging_owner": staging_owner, "staging": staging,
+                "destination": destination, "source_path": source_path,
+                "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+                "state": {name: getattr(self, name) for name in self._COPY_STATE_ATTRIBUTES},
+            }
+        except BaseException:
+            staging_owner.cleanup()
+            raise
+
+    def publish_editable_copy(self, prepared):
+        """GUI commit: recheck source/destination, rename, then adopt prepared state."""
+        destination, staging = prepared["destination"], prepared["staging"]
+        if destination.exists():
+            raise FileExistsError(f"Experiment folder already exists: {destination}")
+        if staging.parent != destination.parent or staging != Path(prepared["staging_owner"].name).resolve():
+            raise ValueError("Invalid editable-copy staging location.")
+        if hashlib.sha256(prepared["source_path"].read_bytes()).hexdigest() != prepared["source_sha256"]:
+            raise ValueError("The source experiment changed while preparing the editable copy.")
+        state = prepared["state"]
+        if set(state) != set(self._COPY_STATE_ATTRIBUTES):
+            raise ValueError("Incomplete editable-copy state.")
+        require_idle = getattr(self._calibration_manager, "_require_idle_for_experiment_transition", None)
+        if callable(require_idle):
+            require_idle()
+        os.rename(staging, destination)
+        # Transfer ownership of ordinary Python data; no worker QObject crosses
+        # threads and no allocation, serialization or generation repeats here.
+        self._clear_legacy_execution_state()
+        for name, value in state.items():
+            setattr(self, name, value)
+        self._stock_prep_worksheet_state = None
+        self._stock_prep_worksheet_warning = None
+        self._stock_prep_worksheet_source = None
+        self._stock_prep_worksheet_loaded_path = None
+        self.progress_data = {}
+        self.experiment_dir_path = str(destination)
+        self.update_all_paths()
+        self.unsaved_changes = False
+        self.stock_updated.emit()
+        self.experiment_generated.emit(len(self._reactions_df), float(self._last_worst_nonfill_volume_nL or 0))
+        return True
 
     def _write_duplicate_design(
         self,

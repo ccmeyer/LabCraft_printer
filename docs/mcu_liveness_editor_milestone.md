@@ -25,21 +25,33 @@ thread and blocked its heartbeat for 5.5 seconds.
 
 SerialReader -> queued status/ACK/reset signal -> Machine -> Controller -> loss UI.
 Reader reception is liveness evidence, not permission to ignore faults or send
-commands against stale GUI state. Defer queued dispatch while callback processing
-is stale. Real silence keeps the existing timeout, snapshot, cleared host queue,
+commands against stale GUI state. Each reader stamps frames with its generation
+and an increasing sequence. Dispatch waits for the contiguous watermark of
+completed handlers to reach the reader's received count; it cannot resume from
+an earlier ACK while a later received fault remains queued. Replaced-generation
+callbacks are ignored, including reader-stop notifications. Reentrant processing
+cannot skip unfinished handlers, and failed handlers or stopped readers block TX.
+Real silence keeps the existing timeout, snapshot, cleared host queue,
 blocked transport and explicit reconnect behavior. No automatic MCU reset.
 
-Editor -> optimization worker -> detached ExperimentModel -> validated result ->
-GUI publication -> staged experiment save. No controller or firmware calls are
-needed for design computation. Cancellation or stale source must publish no copy.
+Editor -> optimization worker -> detached ExperimentModel -> validated allocation,
+generated reactions and verified staged files -> guarded GUI publication. The GUI
+checks source bytes/destination, renames the staging directory and adopts ordinary
+Python state without repeating allocation validation, generation or serialization.
+The job manager cleans up owned staging files even after late cancellation or
+owner destruction. No worker QObject is installed on the GUI thread.
+No controller or firmware calls are needed for design computation. Cancellation
+or stale source must publish no copy. Loading snapshots exact persisted model
+inputs; UI control rounding is not applied to a loaded design's allocation.
 No protocol, firmware, calibration, machine-data routing or release metadata changes.
 
 The response timeout remains 2.5 seconds. If the entire Python process, including
 the serial reader, cannot run, fresh reception cannot be established; this change
 does not grant an unbounded grace period or suppress real communication loss.
 Queued status processing and physical MCU receipt remain distinct from proof of
-the cause of the September 9 incident. File I/O and result display still occur on
-the GUI thread, now covered by shorter passive diagnostics.
+the cause of the September 9 incident. Final source verification, directory rename
+and result display still occur on the GUI thread; their latency is included in
+the copy heartbeat test and covered by passive diagnostics.
 
 Expected files: `FreeRTOS-interface/{Machine_FreeRTOS,App,OptimizationJobs,Model,View}.py`,
 focused tests under `tests/`, this plan and `README.md`.
@@ -52,33 +64,54 @@ Validate/no-hardware wrappers. A connected editor/save campaign requires fresh
 attended authorization and the repository's restoration/postflight procedure.
 Do not modify the running production session for qualification.
 
-Rollback is a revert of the milestone commit and deployment of the previous
-reviewed application revision. No data migration or firmware rollback is required.
+Rollback uses the previous reviewed application revision or reverts this PR as a
+whole. Do not remove the dispatch watermark while retaining reader-side liveness:
+that combination reintroduces the review's confirmed fault-ordering defect.
+No data migration or firmware rollback is required.
 The original incident must not be described as conclusively reproduced unless
 new evidence establishes that link.
 
+## Independent review corrections
+
+The independent review of `e4c02712` identified an unsafe ACK/fault backlog
+ordering, precision loss from rebuilding loaded inputs from controls, and repeated
+GUI-thread computation during copy publication. The implementation now uses the
+completed-handler watermark, a direct model-input load job, and worker-prepared
+copy files/state described above.
+
+New regression coverage includes mixed ACK/reset and ACK/status-fault ordering,
+old status/ACK/reset/stop callbacks across reader replacement, failed and reentrant
+handlers, and exact synchronous/background load equivalence for 10.04 nL droplets
+and 249.04 nL streams with Auto Update disabled. Copy tests cover late cancellation,
+close requests, changed source bytes/model, occupied destination, active
+calibration rejection and staged-file write failure.
+
+A 10,000-row, 12-reagent uploaded copy test measures Qt heartbeats through job
+submission, worker computation, publication and final display restoration. It
+requires a maximum gap below 250 ms and verifies that allocation validation and
+reaction generation each occur once, on the worker. A focused run measured 57 ms
+submission, 16 ms publication and a 154 ms maximum heartbeat gap. These Windows
+measurements do not qualify Pi timing or establish the original incident's cause.
+
 ## Validation results
 
-Initial focused gate: 89 passed (reader liveness, parser, worker/editor jobs,
-duplicate-design transactions and UI freeze diagnostics). Includes a simulated
-serial stream during a save computation held longer than the production timeout,
-stale callbacks, corrupt frames, connection replacement, cancellation, source
-changes, gripper interlock, occupied destination and uploaded-design preservation.
+The full Windows suite on the review-fix application code passed: **6,467 passed,
+180 skipped**, with 637 deprecation warnings, in 13m38s. It used the repository
+Windows environment, a unique external `--basetemp`, and an external JUnit report.
+No application code changed after that run started.
 
-The full Windows suite completed in 12m56s: 6,448 passed, 180 skipped and three
-failures. All three were plan-dictionary comparisons: the existing reuse validator
-materializes `printing_mode: droplet`, whereas fresh optimizer plans can omit that
-default. The assertions now account for the explicit default while still comparing
-all allocation values; no solver behavior or calibration rules were changed.
+A final owner-destruction cleanup regression added during the full run passed
+separately (1 passed). Earlier focused gates passed 293 affected tests and then
+18 final failure/transition and heartbeat cases; these overlap the full suite.
+`git diff --check` passed.
 
-After that adjustment and the final UI/diagnostic refinements, the affected suite
-passed: 274 tests across the README's focused set plus
-`test_experiment_designer_interlock.py`, `test_experiment_model_runtime_refresh.py`
-and `test_stock_resolution_policy_compatibility.py`. A subsequent explicit stream
-copy case also passed with the eight existing copy cases (9 passed), checking
-printing mode and ejection volume after publication. The full suite was not rerun
-after these focused checks. `git diff --check` passed.
+Coverage includes genuine silence, received-but-undelivered frames, mixed
+ACK/fault ordering, stale connection callbacks, failed/reentrant handlers, exact
+saved-input loading, droplet/stream preservation, staged-copy cancellation and
+failure cleanup, and heartbeat timing through final copy publication/display.
+Tests use simulated serial and offscreen Qt only.
 
 Pi qualification and an attended connected campaign remain release gates;
 Windows tests do not qualify the live printer. No Pi session, firmware, release
-metadata or release tag was changed by this milestone.
+metadata or release tag was changed by this milestone. The original incident's
+precise cause remains unconfirmed.

@@ -4,6 +4,7 @@ import threading
 import time
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pandas as pd
@@ -19,7 +20,8 @@ from OptimizationJobs import (
 from tests.test_stock_optimizer_performance import _dense_target_model, _bnext_model, _large_import_model
 
 
-@pytest.mark.parametrize("change", ["none", "stream", "uploaded", "cancel", "source", "model", "gripper", "destination", "failure"])
+@pytest.mark.parametrize("change", ["none", "stream", "uploaded", "cancel", "source", "model", "gripper", "destination", "failure",
+                                    "cancel_ready", "source_ready", "model_ready", "destination_ready", "close_ready", "calibration_ready", "file_failure"])
 def test_editable_copy_worker_publication_is_guarded(qapp, real_editor, tmp_path, monkeypatch, change):
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QMessageBox
@@ -59,6 +61,35 @@ def test_editable_copy_worker_publication_is_guarded(qapp, real_editor, tmp_path
     outcomes = []
     monkeypatch.setattr(QMessageBox, "warning", lambda *_: None)
     editor.optimization_finished.connect(lambda *args: outcomes.append(args))
+    ready, closed = [], []
+    def copy_ready(_job_id, phase):
+        if phase != "Copy ready":
+            return
+        ready.append(True)
+        assert list(tmp_path.glob(".*.staging-*"))
+        if change == "cancel_ready":
+            editor._optimization_ui.cancel()
+        elif change == "close_ready":
+            editor._optimization_ui.close_when_finished(lambda: closed.append(True))
+        elif change == "source_ready":
+            source_path.write_bytes(original_bytes + b"\n")
+        elif change == "model_ready":
+            model.metadata["name"] = "changed after preparation"
+        elif change == "destination_ready":
+            destination.mkdir()
+            (destination / "keep.txt").write_text("existing user data")
+        elif change == "calibration_ready":
+            def require_idle():
+                raise RuntimeError("A calibration is active.")
+            model._calibration_manager = SimpleNamespace(_require_idle_for_experiment_transition=require_idle)
+    optimization_job_manager().phase_changed.connect(copy_ready)
+    if change == "file_failure":
+        original_save = ExperimentModel.save_experiment
+        def fail_staging_save(draft):
+            if ".staging-" in str(draft.experiment_dir_path):
+                raise OSError("injected staged-file write failure")
+            return original_save(draft)
+        monkeypatch.setattr(ExperimentModel, "save_experiment", fail_staging_save)
 
     def held(draft, **kwargs):
         worker_threads.append(QThread.currentThread())
@@ -115,27 +146,40 @@ def test_editable_copy_worker_publication_is_guarded(qapp, real_editor, tmp_path
         else:
             assert not outcomes[0][0], outcomes
             assert model.experiment_dir_path == str(source_dir)
-            if change == "destination":
+            if change in {"destination", "destination_ready"}:
                 assert (destination / "keep.txt").read_text() == "existing user data"
                 assert len(list(destination.iterdir())) == 1
             else:
                 assert not destination.exists()
-        if change != "source":
+        if change.endswith("_ready"):
+            assert ready
+        if change == "close_ready":
+            wait_for(qapp, lambda: closed)
+        if change not in {"source", "source_ready"}:
             assert source_path.read_bytes() == original_bytes
         assert not list(tmp_path.glob(".*.staging-*"))
     finally:
+        if change == "calibration_ready":
+            model._calibration_manager = None
+        optimization_job_manager().phase_changed.disconnect(copy_ready)
         release.set()
         timer.stop()
 
 
-def test_loading_unrun_design_searches_only_in_worker(qapp, real_editor, tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode,volume", [("droplet", 10.04), ("stream", 249.04)])
+def test_loading_unrun_design_searches_only_in_worker(qapp, real_editor, tmp_path, monkeypatch, mode, volume):
     from test_experiment_duplicate_design import _configure_factor_design
     source = ExperimentModel()
     _configure_factor_design(source)
+    source.factors[0].options[0].droplet_nL = volume
+    source.factors[0].options[0].printing_mode = mode
+    source.metadata["final_reaction_volume_nL"] = 500.04
     source.experiment_dir_path = str(tmp_path)
     source.update_all_paths()
     source.save_experiment()
     before = Path(source.experiment_file_path).read_bytes()
+    synchronous = ExperimentModel()
+    synchronous.load_experiment(source.experiment_file_path, str(tmp_path))
     threads, outcomes = [], []
     original = ExperimentModel.optimize_stock_solutions
 
@@ -145,6 +189,7 @@ def test_loading_unrun_design_searches_only_in_worker(qapp, real_editor, tmp_pat
 
     monkeypatch.setattr(ExperimentModel, "optimize_stock_solutions", tracked)
     editor = real_editor
+    editor.auto_update_chk.setChecked(False)
     editor.optimization_finished.connect(lambda *args: outcomes.append(args))
     ok, pending = editor._load_selected_design(str(tmp_path), source.experiment_file_path)
     assert not ok and pending["pending"]
@@ -153,6 +198,10 @@ def test_loading_unrun_design_searches_only_in_worker(qapp, real_editor, tmp_pat
     assert threads and all(thread != qapp.thread() for thread in threads)
     assert Path(source.experiment_file_path).read_bytes() == before
     assert not editor.model._reactions_df.empty
+    assert editor.model.factors == synchronous.factors
+    assert editor.model.metadata == synchronous.metadata
+    assert editor.model.plans_per_option == synchronous.plans_per_option
+    pd.testing.assert_frame_equal(editor.model._reactions_df, synchronous._reactions_df)
 
 
 def test_save_optimizer_keeps_simulated_mcu_communication_live(qapp, real_editor, test_profile, tmp_path, monkeypatch):
@@ -216,6 +265,107 @@ def test_save_optimizer_keeps_simulated_mcu_communication_live(qapp, real_editor
         reader.request_stop()
         assert reader.wait(5000)
         machine._stop_mcu_response_watchdog()
+
+
+def test_large_editable_copy_keeps_heartbeat_through_publication(qapp, real_editor, tmp_path, monkeypatch):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QMessageBox
+    editor, rows = real_editor, 10000
+    model = editor.model
+    model.factors.clear()
+    model.set_metadata(name="LargeSource", replicates=1, randomize_assignments=False,
+                       target_reaction_volume_nL=500.0, final_reaction_volume_nL=1000.0,
+                       allow_two_stock_solutions=False)
+    model.set_uploaded_design_from_dataframe(
+        pd.DataFrame({f"R{i} mM": [1.0] * rows for i in range(12)}),
+        units_default="mM", droplet_nL_default=10.0,
+    )
+    for factor in model.factors:
+        factor.options[0].forced_stock_conc = 100.0
+    source = tmp_path / "large-source"
+    source.mkdir()
+    model.experiment_dir_path = str(source)
+    model.update_all_paths()
+    model.save_experiment()
+    source_path = Path(model.experiment_file_path)
+    original_bytes = source_path.read_bytes()
+    document = json.loads(original_bytes)
+    destination = tmp_path / "large-copy"
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_: None)
+    computations, publications, outcomes = [], [], []
+    for name in ("optimize_stock_solutions", "install_stock_allocation_reuse_payload", "generate_experiment"):
+        original = getattr(ExperimentModel, name)
+        def tracked(self, *args, _name=name, _original=original, **kwargs):
+            computations.append((_name, QThread.currentThread()))
+            return _original(self, *args, **kwargs)
+        monkeypatch.setattr(ExperimentModel, name, tracked)
+    original_publish = model.publish_editable_copy
+    def publish(prepared):
+        started = time.monotonic()
+        result = original_publish(prepared)
+        publications.append(time.monotonic() - started)
+        return result
+    monkeypatch.setattr(model, "publish_editable_copy", publish)
+    editor.optimization_finished.connect(lambda *args: outcomes.append(args))
+    beats = [time.monotonic()]
+    timer = QTimer()
+    timer.setInterval(5)
+    timer.timeout.connect(lambda: beats.append(time.monotonic()))
+    timer.start()
+    try:
+        editor._start_duplicate_design_job(source_path, source, "LargeCopy", destination, document)
+        startup_elapsed = time.monotonic() - beats[0]
+        wait_for(qapp, lambda: outcomes, timeout=60)
+        # Include final publication, display restoration and the next heartbeat.
+        count = len(beats)
+        wait_for(qapp, lambda: len(beats) > count)
+        assert outcomes[0][0], outcomes
+        assert len(model._reactions_df) == rows
+        assert all(thread != qapp.thread() for _, thread in computations), computations
+        assert [name for name, _ in computations].count("generate_experiment") == 1
+        assert [name for name, _ in computations].count("install_stock_allocation_reuse_payload") == 1
+        assert source_path.read_bytes() == original_bytes
+        assert not list(tmp_path.glob(".*.staging-*"))
+        max_gap = max(b - a for a, b in zip(beats, beats[1:]))
+        print(f"Copy startup: {startup_elapsed:.3f}s; publication: {publications[0]:.3f}s; maximum heartbeat gap: {max_gap:.3f}s")
+        assert max_gap < 0.250
+    finally:
+        timer.stop()
+
+
+def test_destroyed_copy_owner_discards_prepared_files(qapp, manager, tmp_path):
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from test_experiment_duplicate_design import _configure_factor_design
+    model = ExperimentModel()
+    _configure_factor_design(model)
+    source = tmp_path / "source"
+    source.mkdir()
+    model.experiment_dir_path = str(source)
+    model.update_all_paths()
+    model.save_experiment()
+    source_path = Path(model.experiment_file_path)
+    before = source_path.read_bytes()
+    document = json.loads(before)
+    destination = tmp_path / "copy"
+    owner, results, ready = QObject(), [], []
+    def phase_changed(_job_id, phase):
+        if phase == "Copy ready":
+            assert list(tmp_path.glob(".*.staging-*"))
+            ready.append(True)
+            owner.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    manager.phase_changed.connect(phase_changed)
+    request = OptimizationRequest({"legacy_mode": model.legacy_mode}, kind="duplicate", options={
+        "source_json": json.dumps(document), "new_name": "Copy",
+        "source_path": str(source_path), "destination": str(destination),
+        "source_fingerprint": model._canonical_payload_sha256(document),
+    })
+    assert manager.submit(owner, request, results.append, phase_changed=lambda _: None)
+    wait_for(qapp, lambda: not manager.busy)
+    assert ready and not results
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".*.staging-*"))
+    assert source_path.read_bytes() == before
 
 
 def wait_for(qapp, predicate, timeout=30):

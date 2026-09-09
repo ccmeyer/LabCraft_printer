@@ -36,6 +36,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import json
+import hashlib
 import os
 import sys
 import random
@@ -12787,8 +12788,13 @@ def _submit_optimization_ui_job(owner, kind, options, widgets, status, restore, 
             id(getattr(source_model, "_execution_plan_snapshot", None)),
         )
     source_session = session_identity()
-    snapshot = source_model.capture_optimization_inputs()
-    fingerprint = input_fingerprint(snapshot)
+    if kind == "duplicate":
+        # A copy computes from its serialized source, not the current editor.
+        snapshot = {"legacy_mode": source_model.legacy_mode}
+        fingerprint = source_model.optimization_inputs_fingerprint()
+    else:
+        snapshot = source_model.capture_optimization_inputs()
+        fingerprint = input_fingerprint(snapshot)
     editor_revision = getattr(owner, "_editor_input_revision", 0)
     raw_signature = owner._optimization_input_signature() if kind == "design" else None
     request = OptimizationRequest(snapshot, kind=kind, options=copy.deepcopy(options))
@@ -12800,7 +12806,9 @@ def _submit_optimization_ui_job(owner, kind, options, widgets, status, restore, 
             try:
                 if owner.model is not source_model or session_identity() != source_session or not guard():
                     raise ValueError("The experiment is no longer available for this update.")
-                if input_fingerprint(source_model.capture_optimization_inputs()) != fingerprint:
+                current_fingerprint = (source_model.optimization_inputs_fingerprint() if kind == "duplicate"
+                                       else input_fingerprint(source_model.capture_optimization_inputs()))
+                if current_fingerprint != fingerprint:
                     raise ValueError("The experiment changed during optimization.")
                 if kind == "design" and (
                     getattr(owner, "_editor_input_revision", 0) != editor_revision
@@ -12809,7 +12817,7 @@ def _submit_optimization_ui_job(owner, kind, options, widgets, status, restore, 
                     raise ValueError("The editor inputs changed during optimization.")
                 owner._installing_job_result = True
                 if outcome.result.get("best"):
-                    if kind == "design":
+                    if kind in {"design", "load"}:
                         source_model.install_optimization_outputs(outcome.computed, fingerprint)
                     elif kind == "import_apply":
                         available, _ = owner._available_wells_for_selected_plate(
@@ -19169,7 +19177,10 @@ class ExperimentDesignDialog(QDialog):
         )
 
     def _start_duplicate_design_job(self, source_file, source_dir, new_name, new_experiment_path, payload):
-        source_fingerprint = self.model._canonical_payload_sha256(payload)
+        # Immutable serialization avoids repeatedly copying a large uploaded
+        # reaction list at the UI/job-manager boundary.
+        source_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        source_fingerprint = hashlib.sha256(source_json.encode("utf-8")).hexdigest()
 
         def finished(outcome):
             if outcome.status != "succeeded" or not outcome.result.get("best"):
@@ -19177,11 +19188,11 @@ class ExperimentDesignDialog(QDialog):
                 self._set_status(message)
                 return False, {"reason": message, "status": outcome.status}
             try:
-                self.model.duplicate_design_from(
-                    str(source_file), new_name, str(new_experiment_path),
-                    stock_allocation_reuse_payload=outcome.computed,
-                    expected_source_fingerprint=source_fingerprint,
-                )
+                self._installing_job_result = True
+                try:
+                    self.model.publish_editable_copy(outcome.computed)
+                finally:
+                    self._installing_job_result = False
             except Exception as exc:
                 message = str(exc) or "The editable copy could not be created."
                 QMessageBox.warning(self, "Could not create editable copy", message)
@@ -19191,7 +19202,11 @@ class ExperimentDesignDialog(QDialog):
             return True, outcome.result
 
         return _submit_optimization_ui_job(
-            self, "duplicate", {"source_document": payload, "new_name": new_name},
+            self, "duplicate", {
+                "source_json": source_json, "new_name": new_name,
+                "source_path": str(source_file), "destination": str(new_experiment_path),
+                "source_fingerprint": source_fingerprint,
+            },
             self._design_busy_widgets(), self._set_status, self._refresh_all_lock_states,
             finished, lambda: not self._gripper_edit_lock_is_active(),
         )
@@ -19382,11 +19397,29 @@ class ExperimentDesignDialog(QDialog):
             self._set_status(f"Design loaded from: {exp_dir}", severity="success")
         if not (legacy_read_only or execution_locked):
             self._mark_design_optimization_dirty()
-            return self._run_design_optimization_flow(
-                show_failure_dialog=True,
-                busy_message="Calculating reactions and stock solutions for the loaded design…",
-            )
+            return self._start_loaded_design_job()
         return True
+
+    def _start_loaded_design_job(self):
+        """Use exact persisted model inputs; controls are a rounded presentation."""
+        self._set_stock_table_stale(True, "Calculating the loaded design…")
+
+        def finished(outcome):
+            if outcome.status != "succeeded":
+                self._mark_design_optimization_dirty()
+                message = outcome.error or "Loaded-design calculation canceled."
+                self._set_status(message)
+                return False, {"reason": message, "status": outcome.status}
+            return self._complete_design_optimization_flow(
+                outcome.result, show_failure_dialog=True, refresh_lock_states=True,
+            )
+
+        return _submit_optimization_ui_job(
+            self, "load", {"allow_two": self.model._allow_two_from_metadata()},
+            self._design_busy_widgets(), self._set_status, self._refresh_all_lock_states,
+            finished, lambda: not self._gripper_edit_lock_is_active()
+                    and not self._model_execution_is_read_only(self.model),
+        )
 
     def _on_finish(self):
         """
