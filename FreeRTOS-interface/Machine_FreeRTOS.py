@@ -6397,7 +6397,8 @@ class Machine(QObject):
 
     def stop_execution_timer(self):
         print('Stopping execution timer')
-        if self.execution_timer.isActive():
+        # Reset/teardown removes this timer; HELLO_ACK recreates it on reconnect.
+        if self.execution_timer is not None and self.execution_timer.isActive():
             self.execution_timer.stop()
 
     def _coerce_optional_int(self, value):

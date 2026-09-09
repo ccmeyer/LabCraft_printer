@@ -1,7 +1,12 @@
 from collections import deque
 from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+from PySide6.QtCore import QObject
 
 import Machine_FreeRTOS as mfr
+from Controller import Controller
 from Machine_FreeRTOS import Machine
 
 
@@ -430,3 +435,95 @@ def test_disconnect_board_still_sends_goodbye(qapp, test_profile):
 
     assert ser.writes
     assert ser.writes[0][2] == mfr.GOODBYE
+
+
+@pytest.mark.parametrize("cleanup_path", ["reset_mcu", "teardown_then_pending_reconnect"])
+@pytest.mark.parametrize("shutdown_timeout", [False, True])
+def test_controller_disconnect_after_timer_cleanup(
+        qapp, test_profile, tmp_path, monkeypatch, cleanup_path, shutdown_timeout):
+    from test_mcu_reader_liveness import (
+        LiveSerial, _connect_queued_reader, _queue_reader_ack, _queue_reader_status,
+    )
+
+    # Retain real Controller reset/disconnect methods and its production teardown
+    # signal wiring, with fake GPIO/serial and recorded Model notifications.
+    gpio_reset = Mock()
+    monkeypatch.setattr(mfr, "reset_board", gpio_reset)
+    machine = Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
+    controller = Controller.__new__(Controller)
+    QObject.__init__(controller)
+    controller.machine = machine
+    model_disconnect = Mock()
+    controller.model = SimpleNamespace(machine_model=SimpleNamespace(disconnect_machine=model_disconnect))
+    machine.disconnect_complete_signal.connect(controller.reset_board)
+    serial = machine.ser = LiveSerial()
+    machine.port = "COM9"
+    machine._transport_ready = True
+    machine._tx_paused = False
+    machine.begin_execution_timer()
+
+    def finish_shutdown(reader):
+        seq = machine._goodbye_seq32
+        for code in (mfr.BYE_ACK, mfr.BYE_DONE):
+            if shutdown_timeout:
+                machine._ack_timeout_by_key(machine._ack_key(code, seq, None))
+            else:
+                _queue_reader_ack(reader, code, seq)
+                qapp.processEvents()
+
+    if cleanup_path == "reset_mcu":
+        controller.reset_mcu_board()
+        gpio_reset.assert_called_once_with()
+    else:
+        reader = _connect_queued_reader(machine)
+        controller.disconnect_machine()
+        finish_shutdown(reader)
+        model_disconnect.assert_called_once_with()
+        assert not serial.is_open and machine.ser is None
+        serial = LiveSerial()
+        machine._serial_factory = lambda *args, **kwargs: serial
+        machine.begin_reader_thread = lambda: _connect_queued_reader(machine)
+        machine.connect_board("COM9")
+        assert [frame[2] for frame in serial.writes] == [mfr.HELLO]
+        assert any(key[0] == mfr.HELLO_ACK for key in machine._pending_acks)
+
+    assert machine.execution_timer is None
+    assert machine.ser is serial and serial.is_open
+    reader = machine.reader or _connect_queued_reader(machine)
+    for key in list(machine._pending_acks):
+        if key[0] == mfr.HELLO_ACK:
+            _queue_reader_ack(reader, mfr.HELLO_ACK, key[1], capabilities=mfr.REQUIRED_TRANSPORT_CAPS)
+    machine.command_queue.add_command("ABSOLUTE_XY", 10, 20, 0)
+    controller.disconnect_machine()
+    assert machine._disconnect_in_progress and not machine._transport_ready
+    assert machine.execution_timer is None
+    _queue_reader_status(reader)
+    qapp.processEvents()
+    finish_shutdown(reader)
+    expected = [mfr.GOODBYE] if cleanup_path == "reset_mcu" else [mfr.HELLO, mfr.GOODBYE]
+    assert [frame[2] for frame in serial.writes] == expected
+    assert not serial.is_open and machine.ser is None
+    assert not machine._disconnect_in_progress and not machine._transport_ready
+    assert not machine._pending_acks and not machine.command_queue.queue
+    assert machine.execution_timer is None
+    assert model_disconnect.called
+
+    # Repeated cleanup with no timer/serial is harmless, and does not latch out
+    # a subsequent connection. A completed HELLO must recreate the timer.
+    machine.disconnect_handler()
+    controller.disconnect_machine()
+    fresh = LiveSerial()
+    machine._serial_factory = lambda *args, **kwargs: fresh
+    machine.begin_reader_thread = lambda: _connect_queued_reader(machine)
+    machine.connect_board("COM9")
+    assert machine.ser is fresh and machine.execution_timer is None
+    key = next(key for key in machine._pending_acks if key[0] == mfr.HELLO_ACK)
+    _queue_reader_ack(machine.reader, mfr.HELLO_ACK, key[1], capabilities=mfr.REQUIRED_TRANSPORT_CAPS)
+    qapp.processEvents()
+    assert machine.execution_timer is not None and machine.execution_timer.isActive()
+    machine.command_queue.add_command("ABSOLUTE_XY", 30, 40, 0)
+    _queue_reader_status(machine.reader)
+    qapp.processEvents()
+    assert [frame[2] for frame in fresh.writes] == [mfr.HELLO, mfr.CMD_MAP["ABSOLUTE_XY"]]
+    machine.disconnect_handler()
+    assert machine.execution_timer is None and machine.ser is None

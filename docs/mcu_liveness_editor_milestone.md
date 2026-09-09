@@ -95,6 +95,39 @@ measurements do not qualify Pi timing or establish the original incident's cause
 
 ## Validation results
 
+### Absent execution timer correction after review of `996a0f97`
+
+Reset MCU follows View -> Controller.reset_mcu_board -> Machine GPIO reset and
+reset_board cleanup. Normal disconnect completion calls Controller.reset_board,
+which performs the same Machine timer cleanup and updates the Model's connection
+state. The execution timer is absent until a successful HELLO recreates it.
+The review found that the shutdown dispatch guard called stop_execution_timer
+unconditionally, and that method dereferenced the absent timer, preventing GOODBYE
+and leaving the disconnect latch set with an open serial port.
+
+stop_execution_timer now tolerates a None timer, preserving all dispatch guards.
+Four regression cases use the actual Controller reset/disconnect methods and its
+disconnect-completion cleanup connection, with fake GPIO and serial endpoints.
+Both Reset MCU -> Disconnect and completed teardown -> reconnect -> Disconnect
+before HELLO_ACK failed with the reported AttributeError on `996a0f97`.
+They now complete through ACKs or timeouts, close serial, clear pending work and
+the shutdown latch, tolerate repeated teardown, and reconnect successfully with
+a recreated timer. Queued motion remains blocked during shutdown and resumes only
+after the subsequent handshake and status.
+
+The focused gate passed **213 tests**, including the earlier late-motion
+regressions, composed simulated disconnect, background optimization and editable
+copy coverage, with 30 deprecation warnings. The production diff is one guarded
+condition and an explanatory comment; protocol, firmware and shutdown timeouts are
+unchanged. Pi and attended qualification remain pending. Use the complete PR
+rollback described above rather than removing the shutdown dispatch guards.
+
+The final full Windows suite passed **6,479 tests, 180 skipped**, with 637
+deprecation warnings, in **9m35s**. It used the repository environment and a unique
+external temporary directory/JUnit report. All four new lifecycle cases are
+included, and application/test code remained unchanged throughout the run.
+`git diff --check` passed.
+
 ### Disconnect dispatch correction after review of `1ad57a5d`
 
 The review identified that the completed-frame wrapper could pump pending motion
