@@ -95,6 +95,38 @@ measurements do not qualify Pi timing or establish the original incident's cause
 
 ## Validation results
 
+### Large-copy Pi responsiveness follow-up
+
+No-hardware qualification of `3876495e` found a 382 ms maximum Qt heartbeat
+gap for the 10,000-row, 12-reagent copy; five isolated repeats measured
+432-442 ms, failing the unchanged 250 ms limit. The other 212 focused Pi
+tests and all nine standard baseline optimizer workloads passed.
+
+Profiling the unchanged revision traced about 141 ms per lock-state refresh
+to parsing the entire saved design solely to enable Create Editable Copy.
+Copy completion and control restoration both performed that read. The
+measured completion callback took 358-369 ms; guarded model publication
+itself took only 30-31 ms.
+
+Availability refresh now checks the consistent saved file/folder and file
+existence without reading design contents. The copy action reads the file
+once and validates its object/metadata structure before prompting or
+submitting work. An existing malformed file can therefore leave the button
+enabled, but clicking it reports an error and creates nothing. The worker
+and final publication retain their allocation and exact source-byte guards.
+No editing, gripper or execution interlocks were removed.
+
+Regression tests prohibit file reads during repeated availability refreshes,
+check that a removed source disables copying, and reject malformed/replaced
+contents before any prompt, job or destination is created. The existing
+large-copy heartbeat limit remains 250 ms through final UI restoration.
+Windows and repeated Pi qualification of this follow-up are pending.
+
+The call path is editor UI -> background job -> detached model -> guarded
+publication -> UI refresh; Controller, transport and firmware are unchanged.
+Rollback can revert this performance follow-up alone while retaining every
+previous MCU dispatch and teardown protection. No data migration is needed.
+
 ### Absent execution timer correction after review of `996a0f97`
 
 Reset MCU follows View -> Controller.reset_mcu_board -> Machine GPIO reset and

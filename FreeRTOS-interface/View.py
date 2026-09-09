@@ -16315,6 +16315,9 @@ class ExperimentDesignDialog(QDialog):
     def _resolve_current_persisted_design_source(
         self,
     ) -> tuple[Path | None, Path | None, str | None]:
+        # Lock-state refreshes only need file availability. Parsing the full
+        # design here stalls the GUI for large uploaded experiments. Validate
+        # contents when the copy is requested, before submitting any work.
         source_file_raw = getattr(self.model, "experiment_file_path", None)
         source_dir_raw = getattr(self.model, "experiment_dir_path", None)
         if not source_file_raw or not source_dir_raw:
@@ -16341,19 +16344,6 @@ class ExperimentDesignDialog(QDialog):
                 None,
                 None,
                 "The current experiment file is not available.",
-            )
-        try:
-            with source_file.open("r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except Exception as exc:
-            return None, None, f"The current experiment cannot be read: {exc}"
-        if not isinstance(payload, dict) or not isinstance(
-            payload.get("metadata"), dict
-        ):
-            return (
-                None,
-                None,
-                "The current experiment file is not valid.",
             )
         return source_file, source_dir, None
 
@@ -19096,10 +19086,11 @@ class ExperimentDesignDialog(QDialog):
         try:
             with source_file.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
-            if isinstance(payload, dict):
-                metadata = payload.get("metadata") or {}
-            else:
-                metadata = {}
+            if not isinstance(payload, dict) or not isinstance(
+                payload.get("metadata"), dict
+            ):
+                raise ValueError("The current experiment file is not valid.")
+            metadata = payload["metadata"]
         except Exception as exc:
             message = f"The current experiment design cannot be read: {exc}"
             QMessageBox.warning(self, "Editable copy unavailable", message)
