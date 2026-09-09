@@ -14525,6 +14525,8 @@ class ExperimentModel(QObject):
         experiment_dir: str,
         *,
         progress_reset_confirmed: bool = False,
+        stock_allocation_reuse_payload: Mapping[str, Any] | None = None,
+        defer_optimization: bool = False,
     ):
         """Load an unrun design or reconstruct a recorded legacy execution in memory."""
         import json, os
@@ -14611,13 +14613,16 @@ class ExperimentModel(QObject):
         if progress_reset_confirmed:
             self._clear_legacy_execution_state()
 
-        # Recompute plans & grid
-        res = self.optimize_stock_solutions(
-            quantum=0.1,
-            max_refine=60,
-            two_max_refine=40,
-            allow_two=self._allow_two_from_metadata(),
-        )
+        if defer_optimization:
+            # Recorded executions returned above with their authoritative plan.
+            # The editor computes an unrun design through its cancellable worker.
+            if os.path.exists(self.progress_file_path):
+                self.read_progress_file(self.progress_file_path)
+            return reconstruction
+
+        # Editable-copy publication revalidates its worker result rather than
+        # repeating an expensive search on the GUI thread.
+        res = self._resolve_design_allocation(stock_allocation_reuse_payload)
         if not res.get("best"):
             # surface an error in your UI as you prefer
             print("Optimization on load failed:", res.get("reason", "Unknown"))
@@ -20030,6 +20035,17 @@ class ExperimentModel(QObject):
         payload["manual_refuel_checks"] = self._normalize_manual_refuel_checks(None)
         return payload
 
+    def _resolve_design_allocation(self, allocation=None):
+        if allocation is None:
+            return self.optimize_stock_solutions(
+                quantum=0.1, max_refine=60, two_max_refine=40,
+                allow_two=self._allow_two_from_metadata(),
+            )
+        reused = self.install_stock_allocation_reuse_payload(allocation)
+        if not reused.get("reused"):
+            raise ValueError(f"Editable-copy allocation is invalid: {reused.get('reason')}")
+        return reused["result"]
+
     def _write_duplicate_design(
         self,
         data: Dict,
@@ -20037,6 +20053,7 @@ class ExperimentModel(QObject):
         new_experiment_path: str,
         *,
         copy_applied_imaging_calibrations: bool = False,
+        stock_allocation_reuse_payload: Mapping[str, Any] | None = None,
     ) -> bool:
         if not new_experiment_path:
             raise ValueError("A destination experiment path is required.")
@@ -20073,15 +20090,11 @@ class ExperimentModel(QObject):
             draft.from_dict(payload)
             if draft._uploaded_reactions is not None:
                 draft._materialize_uploaded_design_csv()
-            result = draft.optimize_stock_solutions(
-                quantum=0.1,
-                max_refine=60,
-                two_max_refine=40,
-                allow_two=draft._allow_two_from_metadata(),
-            )
+            result = draft._resolve_design_allocation(stock_allocation_reuse_payload)
             if not result.get("best"):
                 raise RuntimeError(f"Optimization failed: {result.get('reason', 'Unknown')}")
             draft.generate_experiment()
+            allocation = draft.export_stock_allocation_reuse_payload(result)
             draft.save_experiment()
             draft._atomic_json_dump(draft.progress_file_path, {})
             with open(draft.experiment_file_path, "r", encoding="utf-8") as handle:
@@ -20090,12 +20103,7 @@ class ExperimentModel(QObject):
             validator.experiment_dir_path = str(staging)
             validator.update_all_paths()
             validator.from_dict(staged_payload)
-            validated = validator.optimize_stock_solutions(
-                quantum=0.1,
-                max_refine=60,
-                two_max_refine=40,
-                allow_two=validator._allow_two_from_metadata(),
-            )
+            validated = validator._resolve_design_allocation(allocation)
             if not validated.get("best"):
                 raise RuntimeError("The staged editable copy did not validate.")
             os.replace(staging, destination)
@@ -20117,6 +20125,7 @@ class ExperimentModel(QObject):
         self.load_experiment(
             str(destination / "experiment_design.json"),
             str(destination),
+            stock_allocation_reuse_payload=allocation,
         )
         if source_missing_resolution_policy:
             # The copy now persists the normalized boolean, but session provenance
@@ -20376,7 +20385,10 @@ class ExperimentModel(QObject):
                 if staging.exists():
                     shutil.rmtree(staging)
 
-    def duplicate_design_from(self, source_design_path: str, new_name: str, new_experiment_path: str) -> bool:
+    def duplicate_design_from(
+        self, source_design_path: str, new_name: str, new_experiment_path: str,
+        *, stock_allocation_reuse_payload=None, expected_source_fingerprint=None,
+    ) -> bool:
         """Create a fresh experiment from another experiment_design.json."""
         import os
 
@@ -20390,11 +20402,15 @@ class ExperimentModel(QObject):
             raise ValueError("Editable-copy destination must not be inside the source folder.")
         with open(source_design_path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if (expected_source_fingerprint is not None
+                and self._canonical_payload_sha256(data) != expected_source_fingerprint):
+            raise ValueError("The source experiment changed while preparing the editable copy.")
         return self._write_duplicate_design(
             data,
             new_name,
             new_experiment_path,
             copy_applied_imaging_calibrations=False,
+            stock_allocation_reuse_payload=stock_allocation_reuse_payload,
         )
 
     def create_editable_design_copy(

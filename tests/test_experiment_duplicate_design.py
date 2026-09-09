@@ -301,6 +301,34 @@ def test_duplicate_missing_source_is_rejected_without_destination(tmp_path):
     assert duplicate.experiment_dir_path is None
 
 
+@pytest.mark.parametrize("corruption", ["targets", "counts"])
+def test_precomputed_copy_rejects_stale_or_corrupt_allocation(tmp_path, corruption):
+    source = ExperimentModel(prof=CURRENT_PROFILE)
+    _configure_factor_design(source)
+    source_dir = tmp_path / "source"
+    _write_source_artifacts(source, source_dir)
+    document = json.loads(Path(source.experiment_file_path).read_text())
+    draft = ExperimentModel(prof=CURRENT_PROFILE)
+    draft.from_dict(draft._duplicate_design_payload(document, "Copy"))
+    result = draft.optimize_stock_solutions()
+    allocation = draft.export_stock_allocation_reuse_payload(result)
+    if corruption == "targets":
+        document["factors"][0]["options"][0]["targets"] = [2.0, 3.0]
+        Path(source.experiment_file_path).write_text(json.dumps(document))
+    else:
+        allocation["plans_per_option"][("Mg", None)]["stocks"][0]["droplets_per_target"] = {1.0: 999}
+    before = Path(source.experiment_file_path).read_bytes()
+    destination = tmp_path / "Copy"
+    with pytest.raises(ValueError, match="allocation is invalid"):
+        source.duplicate_design_from(
+            source.experiment_file_path, "Copy", str(destination),
+            stock_allocation_reuse_payload=allocation,
+        )
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".*.staging-*"))
+    assert Path(source.experiment_file_path).read_bytes() == before
+
+
 def test_copy_calibrations_compatibility_argument_is_rejected(tmp_path):
     model = ExperimentModel(prof=CURRENT_PROFILE)
     _configure_factor_design(model)

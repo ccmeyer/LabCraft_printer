@@ -668,6 +668,7 @@ def test_serial_reader_decodes_queue_ack_result_and_expected_seq32(qapp):
 
     reader.run()
 
+    assert acks[0].pop("__host_rx_monotonic_ns") == reader.receive_snapshot()["monotonic_ns"]
     assert acks == [
         {
             "ack_cmd": mfr.CMD_QUEUE_ACK,

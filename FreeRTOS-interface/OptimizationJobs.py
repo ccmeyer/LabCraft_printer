@@ -135,6 +135,12 @@ class _OptimizationWorker(QObject):
                 outcome.result = draft.build_import_feasibility_report(**request.options)
             else:
                 options = dict(request.options)
+                if request.kind == "duplicate":
+                    control.report("Preparing editable copy")
+                    draft.from_dict(draft._duplicate_design_payload(
+                        options["source_document"], options["new_name"],
+                    ))
+                    options["allow_two"] = draft._allow_two_from_metadata()
                 if request.kind == "import_apply":
                     reuse = draft.prepare_import_application(options["payload"], options["metadata"])
                     available = options.get("available_wells")
@@ -158,8 +164,13 @@ class _OptimizationWorker(QObject):
                     draft.validate_optimization_allocation(outcome.result)
                     control.report("Generating reactions")
                     draft.generate_experiment()
-                    outcome.computed = (draft.capture_import_application() if request.kind == "import_apply"
-                                        else draft.capture_optimization_outputs())
+                    if request.kind == "duplicate":
+                        # No worker filesystem publication: cancellation and stale
+                        # source checks complete on the GUI before creating a copy.
+                        outcome.computed = draft.export_stock_allocation_reuse_payload(outcome.result)
+                    else:
+                        outcome.computed = (draft.capture_import_application() if request.kind == "import_apply"
+                                            else draft.capture_optimization_outputs())
             control.check()
             outcome.status = "succeeded"
         except OptimizationCancelled:

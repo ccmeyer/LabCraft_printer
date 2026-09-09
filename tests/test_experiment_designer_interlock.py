@@ -909,6 +909,7 @@ def test_create_editable_copy_uses_current_source_and_wide_name_dialog(
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     dialog, duplicate, source_path = _build_duplicate_dialog(qapp, source_dir)
+    dialog._start_duplicate_design_job = Mock(return_value=(False, {"pending": True}))
     source_before = source_path.read_bytes()
     observed = {}
 
@@ -931,16 +932,17 @@ def test_create_editable_copy_uses_current_source_and_wide_name_dialog(
 
     ExperimentDesignDialog._on_duplicate_design(dialog)
 
-    duplicate.assert_called_once_with(
-        str(source_path.resolve()),
+    duplicate.assert_not_called()
+    dialog._start_duplicate_design_job.assert_called_once_with(
+        source_path.resolve(), source_dir.resolve(),
         "editable-copy",
-        str((tmp_path / "editable-copy").resolve()),
+        (tmp_path / "editable-copy").resolve(),
+        json.loads(source_before),
     )
     assert source_path.read_bytes() == source_before
     assert observed["minimum_width"] >= 640
     assert observed["name_field_minimum_width"] >= 480
     assert "Current experiment: Current Source" in observed["label"]
-    assert "New experiment" in dialog.status_lbl.text()
 
 
 def test_editable_copy_name_widths_survive_real_modal_layout(qapp):

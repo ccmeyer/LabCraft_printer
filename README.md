@@ -137,7 +137,40 @@ from ordinary tests (one warm-up and five measured runs per workload):
   --output "$env:TEMP\labcraft-optimizer-async.json"
 ```
 
-The harness uses simulated editor dependencies, renders Qt offscreen by default,
+Opening an unrun design and **Create Editable Copy** also compute stock
+allocations in the cancellable editor worker. Editable-copy publication checks
+the saved source again and validates the computed allocation before creating the
+destination. Cancel leaves the source and destination unchanged.
+
+MCU response monitoring uses validated frame reception in the serial-reader
+thread, independently of Qt callback delivery. The response timeout remains
+2.5 seconds. Queued commands wait while processed frame data is stale; genuine
+silence retains the existing blocked-transport/reconnect behavior. A connection
+loss warning is not itself proof of an MCU reset.
+
+Black-box snapshots now include `transport.response_observation` (reader receipt,
+main-thread processing, Qt heartbeat and watchdog-check ages) and `last_ui_stall`
+(the most recent timestamped stack dump, bounded to 64 KiB). A previous stall may
+predate the fault: compare timestamps before attributing causality. Passive UI
+stack capture starts at one second, with the existing repeat limit. The bundle
+includes this evidence through its existing black-box snapshot.
+
+Focused no-hardware regression checks for this behavior:
+
+```powershell
+$mcuTestTemp = Join-Path $env:TEMP ("labcraft-mcu-tests-" + [guid]::NewGuid())
+.\env\Scripts\python.exe -m pytest -q `
+  tests\test_mcu_reader_liveness.py tests\test_host_black_box_log.py `
+  tests\test_serial_reader.py tests\test_serial_reader_failures.py `
+  tests\test_command_queue.py tests\test_app_freeze_watchdog.py `
+  tests\test_optimization_jobs.py tests\test_experiment_duplicate_design.py `
+  --basetemp $mcuTestTemp
+```
+
+See the [MCU/editor milestone](docs/mcu_liveness_editor_milestone.md) for evidence,
+qualification limits and rollback.
+
+The optimizer responsiveness harness uses simulated editor dependencies, renders Qt offscreen by default,
 and requires evidence outside the repository. It measures complete editor
 updates and import calculations against synchronous computation, a 20 ms UI
 heartbeat, cancellation, and phase timing.

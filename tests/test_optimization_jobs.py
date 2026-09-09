@@ -1,4 +1,5 @@
 import copy
+import json
 import threading
 import time
 import subprocess
@@ -16,6 +17,205 @@ from OptimizationJobs import (
     optimization_job_manager,
 )
 from tests.test_stock_optimizer_performance import _dense_target_model, _bnext_model, _large_import_model
+
+
+@pytest.mark.parametrize("change", ["none", "stream", "uploaded", "cancel", "source", "model", "gripper", "destination", "failure"])
+def test_editable_copy_worker_publication_is_guarded(qapp, real_editor, tmp_path, monkeypatch, change):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QMessageBox
+    from test_experiment_duplicate_design import _configure_factor_design
+
+    editor = real_editor
+    model = editor.model
+    model.factors.clear()
+    _configure_factor_design(model)
+    if change == "stream":
+        option = model.factors[0].options[0]
+        option.printing_mode = "stream"
+        option.droplet_nL = 250.0
+        assert model.optimize_stock_solutions()["best"]
+        model.generate_experiment()
+    if change == "uploaded":
+        model.set_uploaded_design_from_dataframe(
+            pd.DataFrame({"Well ID": ["A1", "A2"], "Mg mM": [0.0, 1.0]}),
+            units_default="mM", droplet_nL_default=10.0,
+            source_path=str(tmp_path / "input.csv"),
+        )
+        model.optimize_stock_solutions()
+        model.generate_experiment()
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    model.experiment_dir_path = str(source_dir)
+    model.update_all_paths()
+    model.save_experiment()
+    source_path = Path(model.experiment_file_path)
+    original_bytes = source_path.read_bytes()
+    document = json.loads(original_bytes)
+    destination = tmp_path / "editable"
+    original_optimizer = ExperimentModel.optimize_stock_solutions
+    started = threading.Event()
+    release = threading.Event()
+    worker_threads = []
+    outcomes = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *_: None)
+    editor.optimization_finished.connect(lambda *args: outcomes.append(args))
+
+    def held(draft, **kwargs):
+        worker_threads.append(QThread.currentThread())
+        started.set()
+        while not release.wait(0.005):
+            draft._optimization_checkpoint()
+        if change == "failure":
+            raise ValueError("injected copy optimization failure")
+        return original_optimizer(draft, **kwargs)
+
+    monkeypatch.setattr(ExperimentModel, "optimize_stock_solutions", held)
+    ticks = []
+    timer = QTimer()
+    timer.setInterval(5)
+    timer.timeout.connect(lambda: ticks.append(True))
+    timer.start()
+    try:
+        ok, pending = editor._start_duplicate_design_job(
+            source_path, source_dir, "editable", destination, document,
+        )
+        assert not ok and pending["pending"]
+        wait_for(qapp, lambda: started.is_set() and len(ticks) >= 3)
+        assert not destination.exists()
+        assert model.experiment_dir_path == str(source_dir)
+        if change == "cancel":
+            editor._optimization_ui.cancel()
+        elif change == "source":
+            document["metadata"]["name"] = "externally changed"
+            source_path.write_text(json.dumps(document), encoding="utf-8")
+        elif change == "model":
+            model.metadata["name"] = "changed in memory"
+        elif change == "gripper":
+            monkeypatch.setattr(editor, "_gripper_edit_lock_is_active", lambda: True)
+        elif change == "destination":
+            destination.mkdir()
+            (destination / "keep.txt").write_text("existing user data")
+        release.set()
+        wait_for(qapp, lambda: outcomes)
+        assert worker_threads and all(thread != qapp.thread() for thread in worker_threads)
+        assert len(worker_threads) == 1  # No search during save, validation or reload.
+        if change in ("none", "stream", "uploaded"):
+            assert outcomes[0][0], outcomes
+            assert model.experiment_dir_path == str(destination)
+            assert (destination / "experiment_design.json").exists()
+            assert not model._reactions_df.empty
+            assert not editor._design_optimization_dirty
+            assert editor._last_optimization_result["best"]
+            stocks = model.plans_per_option[("Mg", None)]["stocks"]
+            assert all(s["printing_mode"] == ("stream" if change == "stream" else "droplet") for s in stocks)
+            assert all(s["droplet_volume_nL"] == (250.0 if change == "stream" else 10.0) for s in stocks)
+            if change == "uploaded":
+                assert model._uploaded_well_ids == ["A1", "A2"]
+                assert (destination / "uploaded_design.csv").exists()
+        else:
+            assert not outcomes[0][0], outcomes
+            assert model.experiment_dir_path == str(source_dir)
+            if change == "destination":
+                assert (destination / "keep.txt").read_text() == "existing user data"
+                assert len(list(destination.iterdir())) == 1
+            else:
+                assert not destination.exists()
+        if change != "source":
+            assert source_path.read_bytes() == original_bytes
+        assert not list(tmp_path.glob(".*.staging-*"))
+    finally:
+        release.set()
+        timer.stop()
+
+
+def test_loading_unrun_design_searches_only_in_worker(qapp, real_editor, tmp_path, monkeypatch):
+    from test_experiment_duplicate_design import _configure_factor_design
+    source = ExperimentModel()
+    _configure_factor_design(source)
+    source.experiment_dir_path = str(tmp_path)
+    source.update_all_paths()
+    source.save_experiment()
+    before = Path(source.experiment_file_path).read_bytes()
+    threads, outcomes = [], []
+    original = ExperimentModel.optimize_stock_solutions
+
+    def tracked(model, **kwargs):
+        threads.append(QThread.currentThread())
+        return original(model, **kwargs)
+
+    monkeypatch.setattr(ExperimentModel, "optimize_stock_solutions", tracked)
+    editor = real_editor
+    editor.optimization_finished.connect(lambda *args: outcomes.append(args))
+    ok, pending = editor._load_selected_design(str(tmp_path), source.experiment_file_path)
+    assert not ok and pending["pending"]
+    wait_for(qapp, lambda: outcomes)
+    assert outcomes[0][0], outcomes
+    assert threads and all(thread != qapp.thread() for thread in threads)
+    assert Path(source.experiment_file_path).read_bytes() == before
+    assert not editor.model._reactions_df.empty
+
+
+def test_save_optimizer_keeps_simulated_mcu_communication_live(qapp, real_editor, test_profile, tmp_path, monkeypatch):
+    import Machine_FreeRTOS as mfr
+    from test_mcu_reader_liveness import LiveSerial
+    from test_serial_reader import _frame
+    from test_host_black_box_log import _make_machine
+    from test_experiment_duplicate_design import _configure_factor_design
+
+    editor = real_editor
+    editor.model.factors.clear()
+    _configure_factor_design(editor.model)
+    editor.model.experiment_dir_path = str(tmp_path / "SourceExp")
+    Path(editor.model.experiment_dir_path).mkdir()
+    editor.model.update_all_paths()
+    editor._sync_controls_from_model(recompute=False)
+    editor._load_factors_into_table()
+    editor._mark_design_optimization_dirty()
+    machine = _make_machine(qapp, test_profile, tmp_path / "black-box")
+    machine.ser = LiveSerial()
+    reader = machine.reader = mfr.SerialReader(machine.ser)
+    reader.status_received.connect(machine.update_status)
+    machine._transport_ready = True
+    machine._start_mcu_response_watchdog()
+    lost = []
+    machine.serial_connection_lost.connect(lost.append)
+    stop_feed = threading.Event()
+    def feed():
+        while not stop_feed.wait(0.015):
+            machine.ser.append_inbound(_frame(bytes([mfr.CMD_STATUS])))
+    feeder = threading.Thread(target=feed)
+    original = ExperimentModel.optimize_stock_solutions
+    release = threading.Event()
+    def held(draft, **kwargs):
+        while not release.wait(0.005):
+            draft._optimization_checkpoint()
+        return original(draft, **kwargs)
+    monkeypatch.setattr(ExperimentModel, "optimize_stock_solutions", held)
+    outcomes = []
+    editor.optimization_finished.connect(lambda *args: outcomes.append(args))
+    try:
+        reader.start()
+        feeder.start()
+        wait_for(qapp, lambda: len(machine.status_history) >= 2)
+        editor._on_save_design()
+        # Hold optimization longer than the production MCU timeout while Qt and
+        # the actual serial parser continue servicing simulated traffic.
+        deadline = time.monotonic() + 2.7
+        wait_for(qapp, lambda: time.monotonic() >= deadline)
+        assert not outcomes and not lost and machine._transport_ready
+        assert len(machine.status_history) > 10
+        release.set()
+        wait_for(qapp, lambda: outcomes)
+        assert outcomes[0][0], outcomes
+        assert Path(editor.model.experiment_file_path).exists()
+        assert not lost and not machine.ser.writes
+    finally:
+        release.set()
+        stop_feed.set()
+        feeder.join(5)
+        reader.request_stop()
+        assert reader.wait(5000)
+        machine._stop_mcu_response_watchdog()
 
 
 def wait_for(qapp, predicate, timeout=30):

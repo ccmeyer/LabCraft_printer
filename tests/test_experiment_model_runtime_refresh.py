@@ -438,7 +438,13 @@ def test_fresh_copy_discards_calibrated_allocation(
     reloaded = experiment_model_factory().experiment_model
     reloaded.load_experiment(str(destination / "experiment_design.json"), str(destination))
     assert reloaded.calibrated_stock_allocation_status["active"] is False
-    assert reloaded.plans_per_option[("Signal", None)] == duplicate.plans_per_option[("Signal", None)]
+    # Reused allocations explicitly include the default mode, whereas a fresh
+    # search may omit it. Compare all allocation values with that default filled.
+    reloaded_plan = copy.deepcopy(reloaded.plans_per_option[("Signal", None)])
+    for stock in reloaded_plan["stocks"]:
+        stock.setdefault("printing_mode", "droplet")
+    assert [s["printing_mode"] for s in stocks] == ["droplet", "droplet"]
+    assert reloaded_plan == duplicate.plans_per_option[("Signal", None)]
     # Use editable loading for optimization; file loading is historical inspection.
     editable = experiment_model_factory().experiment_model
     editable.from_dict(payload)

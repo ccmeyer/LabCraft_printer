@@ -19164,20 +19164,39 @@ class ExperimentDesignDialog(QDialog):
             )
             return
 
-        try:
-            self.model.duplicate_design_from(
-                str(source_file),
-                new_name,
-                str(new_experiment_path),
-            )
-        except Exception as e:
-            message = str(e) or "The editable copy could not be created."
-            QMessageBox.warning(self, "Could not create editable copy", message)
-            self._set_status(
-                f"Could not create editable copy: {message}", severity="error"
-            )
-            return
+        return self._start_duplicate_design_job(
+            source_file, source_dir, new_name, new_experiment_path, payload,
+        )
 
+    def _start_duplicate_design_job(self, source_file, source_dir, new_name, new_experiment_path, payload):
+        source_fingerprint = self.model._canonical_payload_sha256(payload)
+
+        def finished(outcome):
+            if outcome.status != "succeeded" or not outcome.result.get("best"):
+                message = outcome.error or outcome.result.get("reason") or "Editable copy canceled."
+                self._set_status(message)
+                return False, {"reason": message, "status": outcome.status}
+            try:
+                self.model.duplicate_design_from(
+                    str(source_file), new_name, str(new_experiment_path),
+                    stock_allocation_reuse_payload=outcome.computed,
+                    expected_source_fingerprint=source_fingerprint,
+                )
+            except Exception as exc:
+                message = str(exc) or "The editable copy could not be created."
+                QMessageBox.warning(self, "Could not create editable copy", message)
+                self._set_status(message, severity="error")
+                return False, {"reason": message}
+            self._finish_duplicate_design(source_dir, new_experiment_path, outcome.result)
+            return True, outcome.result
+
+        return _submit_optimization_ui_job(
+            self, "duplicate", {"source_document": payload, "new_name": new_name},
+            self._design_busy_widgets(), self._set_status, self._refresh_all_lock_states,
+            finished, lambda: not self._gripper_edit_lock_is_active(),
+        )
+
+    def _finish_duplicate_design(self, source_dir, new_experiment_path, optimization_result):
         self._progress_reset_confirmed = False
         self._set_progress_protection(False)
         self._reset_auto_update_session()
@@ -19188,11 +19207,9 @@ class ExperimentDesignDialog(QDialog):
             f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
         )
         self._load_factors_into_table()
-        self._sync_controls_from_model()
-        self._refresh_stock_table()
-        self._update_summary_labels()
+        self._sync_controls_from_model(recompute=False)
+        self._complete_design_optimization_flow(optimization_result)
         self._update_unique_conditions_button_label()
-        self._refresh_all_prior_availability()
         self._refresh_all_lock_states()
         self._apply_requested = False
         self._reset_draft_dirty_from_model()
@@ -19249,6 +19266,7 @@ class ExperimentDesignDialog(QDialog):
             path,
             exp_dir,
             progress_reset_confirmed=progress_policy == self.PROGRESS_POLICY_RESET,
+            defer_optimization=True,
         )
         self._reset_auto_update_session()
         read_only_getter = getattr(self.model, "is_read_only_legacy_execution", None)
@@ -19342,7 +19360,7 @@ class ExperimentDesignDialog(QDialog):
             f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
         )
         self._load_factors_into_table()
-        self._sync_controls_from_model()
+        self._sync_controls_from_model(recompute=False)
         self._refresh_stock_table()
         self._update_summary_labels()
         self._update_unique_conditions_button_label()
@@ -19362,6 +19380,12 @@ class ExperimentDesignDialog(QDialog):
             )
         else:
             self._set_status(f"Design loaded from: {exp_dir}", severity="success")
+        if not (legacy_read_only or execution_locked):
+            self._mark_design_optimization_dirty()
+            return self._run_design_optimization_flow(
+                show_failure_dialog=True,
+                busy_message="Calculating reactions and stock solutions for the loaded design…",
+            )
         return True
 
     def _on_finish(self):
