@@ -95,6 +95,49 @@ measurements do not qualify Pi timing or establish the original incident's cause
 
 ## Validation results
 
+### Disconnect dispatch correction after review of `1ad57a5d`
+
+The review identified that the completed-frame wrapper could pump pending motion
+after `BYE_ACK`, even though Disconnect had stopped the execution timer. A new
+fake-serial regression reproduces `GOODBYE -> ABSOLUTE_XY` on `1ad57a5d` and
+observes only `GOODBYE` with the correction.
+
+The call path is View Disconnect -> Controller workflow interruption -> Machine
+shutdown -> firmware GOODBYE handling. The Model receives the disconnected state
+after teardown; it does not gate serial dispatch. Firmware accepts ordinary
+commands into its queue while paused, so the host must close its dispatch gate
+before writing GOODBYE, rather than relying on firmware pause or timer shutdown.
+
+Disconnect now invalidates transport readiness, stops the watchdog and dispatch
+timer, and cancels outstanding ACK/pause/clear callbacks before sending GOODBYE.
+Connection and reset-recovery entry points remain blocked during shutdown. Delayed
+reset reports are recorded but cannot replace shutdown ACK waits with a HELLO.
+Teardown clears the host queue and leaves transport unready. A fresh successful
+HELLO and its first status frame are required before new queued work can dispatch;
+the existing reception-generation/watermark guards still apply. A serial exception
+or GOODBYE write failure closes the transport and permits explicit reconnect.
+
+Seven new cases cover the exact review reproduction, all combinations of BYE_ACK
+and BYE_DONE delivery/timeouts, delayed status/reset/HELLO callbacks, repeated
+Disconnect, reconnect during shutdown, old callbacks across connection replacement,
+serial failure, and dispatch attempted from inside the GOODBYE write. Tests also
+verify that the previous queue is discarded and fresh motion dispatches after the
+new handshake. The focused gate passed **144 tests**, including the composed
+simulated disconnect workflow (`--run-sil-lifecycle`), with 30 deprecation warnings.
+
+The final full Windows suite passed **6,475 tests, 180 skipped**, with 637
+deprecation warnings, in **9m37s**, using the repository environment and a unique
+external temporary directory/JUnit report. All seven new regressions are included.
+No application or test code changed after the full run started. `git diff --check`
+also passed.
+
+The correction is application-only. No firmware, wire protocol, machine data or
+release metadata changes are needed. Pi and attended qualification remain pending.
+Rollback remains the complete PR rollback described above; removing only this
+shutdown guard would restore the confirmed late-dispatch defect.
+
+### Earlier milestone validation
+
 The full Windows suite on the review-fix application code passed: **6,467 passed,
 180 skipped**, with 637 deprecation warnings, in 13m38s. It used the repository
 Windows environment, a unique external `--basetemp`, and an external JUnit report.

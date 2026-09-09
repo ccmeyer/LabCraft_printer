@@ -138,6 +138,177 @@ class LiveSerial(FakeSerialMain):
         return data
 
 
+def _connect_queued_reader(machine):
+    reader = machine.reader = mfr.SerialReader(machine.ser)
+    reader.ackReceived.connect(machine._on_any_ack, Qt.QueuedConnection)
+    reader.status_received.connect(machine.update_status, Qt.QueuedConnection)
+    reader.resetReportReceived.connect(machine._on_reset_report, Qt.QueuedConnection)
+    return reader
+
+
+def _queue_reader_ack(reader, code, seq, **values):
+    ack = reader._parse_ack(bytes([code, seq & 0xff, mfr.ACK_TLV_SEQ32, 4])
+                            + struct.pack("<I", seq))
+    ack.update(values)
+    reader.stamp_frame(ack, "ack")
+    reader.ackReceived.emit(ack)
+
+
+def _queue_reader_status(reader):
+    status = {"Transport_paused": False, "cmd_depth": 0,
+              "Current_command": 0, "Last_completed": 0, "Last_retired": 0}
+    reader.stamp_frame(status, "status")
+    reader.status_received.emit(status)
+
+
+def test_bye_ack_cannot_send_pending_motion(qapp, test_profile, tmp_path):
+    machine = _make_machine(qapp, test_profile, tmp_path)
+    serial = machine.ser = LiveSerial()
+    reader = _connect_queued_reader(machine)
+    machine._transport_ready = True
+    machine._tx_paused = False
+    machine.command_queue.add_command("ABSOLUTE_XY", 10, 20, 0)
+    try:
+        machine.disconnect_board()
+        _queue_reader_ack(reader, mfr.BYE_ACK, machine._goodbye_seq32)
+        qapp.processEvents()
+        assert [frame[2] for frame in serial.writes] == [mfr.GOODBYE]
+    finally:
+        machine.disconnect_handler()
+
+
+def test_serial_loss_during_goodbye_allows_explicit_reconnect(qapp, test_profile, tmp_path):
+    machine = _make_machine(qapp, test_profile, tmp_path)
+    machine.ser = LiveSerial()
+    reader = _connect_queued_reader(machine)
+    machine._transport_ready = True
+    machine.command_queue.add_command("ABSOLUTE_XY", 10, 20, 0)
+    machine.disconnect_board()
+    machine._on_serial_reader_stopped(reader._reader_stop_info("exception", OSError("lost port")))
+    assert machine.ser is None and not machine._transport_ready
+    assert not machine._pending_acks and not machine.command_queue.queue
+    fresh_serial = LiveSerial()
+    machine._serial_factory = lambda *args, **kwargs: fresh_serial
+    machine.begin_reader_thread = lambda: _connect_queued_reader(machine)
+    machine.connect_board("COM9")
+    assert machine.ser is fresh_serial
+    assert [frame[2] for frame in fresh_serial.writes] == [mfr.HELLO]
+    assert not machine._transport_ready
+    machine.disconnect_handler()
+
+
+@pytest.mark.parametrize("ack_timeout", [False, True])
+@pytest.mark.parametrize("done_timeout", [False, True])
+def test_disconnect_blocks_delayed_frames_until_fresh_handshake(
+        qapp, test_profile, tmp_path, ack_timeout, done_timeout):
+    machine = _make_machine(qapp, test_profile, tmp_path)
+    # Exercise the production recovery entry point as well as the ACK wrapper.
+    del machine._begin_recovery_handshake
+    old_serial = machine.ser = LiveSerial()
+    old = _connect_queued_reader(machine)
+    machine._transport_ready = True
+    machine._tx_paused = False
+    machine.begin_execution_timer()
+    machine.command_queue.add_command("ABSOLUTE_XY", 10, 20, 0)
+    cleared = Mock()
+    machine._waiting_for_post_clear_status = True
+    machine._pending_clear_request = {"handler": cleared}
+    machine._awaiting_first_status_after_hello = True
+    machine._start_ack_wait(mfr.HELLO_ACK, 9, 10000,
+                            on_ok=machine._on_hello_ack, on_timeout=machine._hello_timeout)
+    hello_key = machine._ack_key(mfr.HELLO_ACK, 9, None)
+
+    # These frames have arrived, but their Qt callbacks run after Disconnect.
+    _queue_reader_ack(old, mfr.HELLO_ACK, 9, capabilities=mfr.REQUIRED_TRANSPORT_CAPS)
+    _queue_reader_status(old)
+    machine.disconnect_board()
+    seq = machine._goodbye_seq32
+    assert not machine.execution_timer.isActive()
+    assert not machine._transport_ready
+    assert [frame[2] for frame in old_serial.writes] == [mfr.GOODBYE]
+    machine._ack_timeout_by_key(hello_key)  # Already queued timer callback.
+    assert machine.connect_board("COM9") is False
+    machine.disconnect_board()  # Repeated Disconnect must not replace the wait.
+    qapp.processEvents()
+    cleared.assert_not_called()
+    assert not machine._transport_ready and machine._tx_paused
+    assert not machine.execution_timer.isActive()
+
+    if ack_timeout:
+        machine._ack_timeout_by_key(machine._ack_key(mfr.BYE_ACK, seq, None))
+    else:
+        _queue_reader_ack(old, mfr.BYE_ACK, seq)
+        qapp.processEvents()
+    assert machine._ack_key(mfr.BYE_DONE, seq, None) in machine._pending_acks
+    # Once the watermark catches up to BYE_ACK, the old wrapper would send XY.
+    assert [frame[2] for frame in old_serial.writes] == [mfr.GOODBYE]
+    _queue_reader_status(old)
+    _queue_reader_ack(old, mfr.BYE_ACK, seq)
+    report = old._parse_reset_report(_reset_report_payload(0))
+    old.stamp_frame(report, "reset_report")
+    old.resetReportReceived.emit(report)
+    qapp.processEvents()
+    machine.pump_send_queue()
+    assert machine.resume_commands() is False
+    assert [frame[2] for frame in old_serial.writes] == [mfr.GOODBYE]
+    assert machine._ack_key(mfr.BYE_DONE, seq, None) in machine._pending_acks
+
+    if done_timeout:
+        machine._ack_timeout_by_key(machine._ack_key(mfr.BYE_DONE, seq, None))
+    else:
+        _queue_reader_ack(old, mfr.BYE_DONE, seq)
+        qapp.processEvents()
+    assert machine.ser is None and not old_serial.is_open
+    assert not machine._transport_ready and not machine._pending_acks
+    assert not machine.command_queue.queue
+
+    # Queue old shutdown frames before replacement; deliver after reconnect.
+    _queue_reader_ack(old, mfr.BYE_DONE, seq)
+    _queue_reader_status(old)
+    fresh_serial = LiveSerial()
+    machine._serial_factory = lambda *args, **kwargs: fresh_serial
+    machine.begin_reader_thread = lambda: _connect_queued_reader(machine)
+    machine.connect_board("COM9")
+    fresh = machine.reader
+    machine.command_queue.add_command("ABSOLUTE_XY", 30, 40, 0)
+    _queue_reader_status(fresh)  # Status alone cannot release the transport.
+    qapp.processEvents()
+    assert machine.ser is fresh_serial and not machine._transport_ready
+    assert [frame[2] for frame in fresh_serial.writes] == [mfr.HELLO]
+    hello_key = next(key for key in machine._pending_acks if key[0] == mfr.HELLO_ACK)
+    _queue_reader_ack(fresh, mfr.HELLO_ACK, hello_key[1],
+                      capabilities=mfr.REQUIRED_TRANSPORT_CAPS)
+    qapp.processEvents()
+    assert machine._transport_ready and machine._tx_paused
+    assert [frame[2] for frame in fresh_serial.writes] == [mfr.HELLO]
+    _queue_reader_status(fresh)
+    qapp.processEvents()
+    assert [frame[2] for frame in fresh_serial.writes] == [mfr.HELLO, mfr.CMD_MAP["ABSOLUTE_XY"]]
+    machine.disconnect_handler()
+
+
+def test_disconnect_blocks_dispatch_before_goodbye_write_and_on_write_failure(
+        qapp, test_profile, tmp_path):
+    machine = _make_machine(qapp, test_profile, tmp_path)
+    serial = machine.ser = LiveSerial()
+    machine._transport_ready = True
+    machine._tx_paused = False
+    machine.command_queue.add_command("ABSOLUTE_XY", 10, 20, 0)
+    writes = []
+    def failed_write(frame):
+        writes.append(frame[2])
+        if frame[2] == mfr.GOODBYE:
+            machine.pump_send_queue()
+            assert not machine._transport_ready
+            raise OSError("injected GOODBYE write failure")
+    serial.write = failed_write
+    with pytest.raises(OSError, match="injected GOODBYE write failure"):
+        machine.disconnect_board()
+    assert writes == [mfr.GOODBYE]
+    assert machine.ser is None and not machine._transport_ready
+    assert not machine._pending_acks and not machine.command_queue.queue
+
+
 def test_reader_frames_prevent_false_loss_during_blocked_gui(qapp, test_profile, tmp_path):
     machine = _make_machine(qapp, test_profile, tmp_path)
     machine.ser = LiveSerial(_frame(bytes([mfr.CMD_STATUS])))

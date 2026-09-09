@@ -4751,6 +4751,7 @@ class Machine(QObject):
         self._next_ctl_seq32 = self._control_seq_base
         self._transport_capabilities = 0
         self._transport_ready = False
+        self._disconnect_in_progress = False
         self._queue_ack_timeout_ms = 200
         self._queue_ack_max_retries = 3
         self._queue_gap_repair = None
@@ -5271,6 +5272,7 @@ class Machine(QObject):
         self.ser = None
         self.port = None
         self.reader = None
+        self._disconnect_in_progress = False
         self._stop_mcu_response_watchdog()
 
     def _clear_transport_after_mcu_unresponsive(self):
@@ -5423,6 +5425,8 @@ class Machine(QObject):
             pass
 
     def connect_board(self, port):
+        if self._disconnect_in_progress:
+            return False
         if getattr(self, "_transport_fault_report", None):
             message = (
                 "Command transport is paused after an unrecoverable synchronization fault. "
@@ -5473,6 +5477,8 @@ class Machine(QObject):
             self.machine_connected_signal.emit(False)
 
     def _send_hello(self):
+        if self._disconnect_in_progress:
+            return
         self._hello_connection_phase = (
             HOST_CONNECTION_PHASE_ESTABLISHED
             if self._ever_transport_ready
@@ -5492,6 +5498,8 @@ class Machine(QObject):
 
     @Slot()
     def _on_hello_ack(self, ack=None):
+        if self._disconnect_in_progress:
+            return
         capabilities = int((ack or {}).get("capabilities") or 0)
         missing_caps = REQUIRED_TRANSPORT_CAPS & ~capabilities
         if missing_caps:
@@ -5528,6 +5536,8 @@ class Machine(QObject):
         self._connection_attempts = 0  # reset attempts on success
 
     def _hello_timeout(self):
+        if self._disconnect_in_progress:
+            return
         self.machine_connected_signal.emit(False)
         # Retry to connect
         if self._connection_attempts < 3:
@@ -5730,6 +5740,8 @@ class Machine(QObject):
         self._gripper_ack_required = True
 
     def _begin_recovery_handshake(self):
+        if self._disconnect_in_progress:
+            return
         if self.ser is None or not getattr(self.ser, "is_open", False):
             return
         self._session_recovery_in_progress = True
@@ -5738,7 +5750,25 @@ class Machine(QObject):
     def reset_mcu_board(self):
         reset_board()
         
+    def _block_dispatch_for_disconnect(self):
+        # Timer shutdown alone does not block ACK/status-triggered dispatch.
+        # Invalidate pending work before GOODBYE, including HELLO retries and
+        # CLEAR completion callbacks that could otherwise reopen transport.
+        self._disconnect_in_progress = True
+        self._transport_ready = False
+        self._tx_paused = True
+        self._awaiting_first_status_after_hello = False
+        self._waiting_for_post_clear_status = False
+        self._pending_clear_request = None
+        self._session_recovery_in_progress = False
+        self._cancel_pending_acks()
+        self._cancel_pending_pause_after_requests()
+        self._clear_queue_gap_repair("disconnect_requested")
+        self.stop_execution_timer()
+        self._stop_mcu_response_watchdog()
+
     def disconnect_handler(self):
+        self._block_dispatch_for_disconnect()
         # self.reset_board()
         self._expect_serial_reader_stop("disconnect_handler")
         self._stop_mcu_response_watchdog()
@@ -5762,6 +5792,11 @@ class Machine(QObject):
             self._confirmed_imaging_droplet_count = None
             self._last_acknowledged_imaging_ejection = None
 
+        self.command_queue.clear_queue(reset_counter=True)
+        self.sent_command = None
+        self._goodbye_seq32 = None
+        self._disconnect_in_progress = False
+        # _transport_ready stays false until a new successful HELLO handshake.
         self.disconnect_complete_signal.emit()
 
     def release_serial_for_external_owner(self, reason="external_owner"):
@@ -5856,6 +5891,9 @@ class Machine(QObject):
         return True
 
     def disconnect_board(self, error=False):
+        if self._disconnect_in_progress:
+            return
+        self._block_dispatch_for_disconnect()
         self._record_black_box_event(
             "disconnect_requested",
             {"error": bool(error), "port": getattr(self, "port", None)},
@@ -5864,23 +5902,22 @@ class Machine(QObject):
         if not self.ser:
             self.disconnect_handler()
             return
-        # Optionally pause the execution timer so nothing else writes during bye
-        if hasattr(self, 'execution_timer') and self.execution_timer:
-            try: self.stop_execution_timer()
-            except Exception: pass
-
         # Allocate a unique 32-bit control seq for GOODBYE
         seq = self._alloc_ctl_seq32()
         self._goodbye_seq32 = seq    # keep for BYE_DONE correlation
 
         frame = build_frame(GOODBYE, seq)  # MUST include SEQ32 TLV inside
-        self._write_frame(frame)
+        try:
+            self._write_frame(frame)
+        except Exception:
+            self.disconnect_handler()
+            raise
 
         # Wait for BYE_ACK with the SAME seq32
         self._start_ack_wait(
             BYE_ACK, seq, 1000,
-            on_ok=lambda s=seq: self._on_goodbye_ack_and_wait_done(s),
-            on_timeout=lambda s=seq: self._on_goodbye_ack_and_wait_done(s)  # proceed anyway
+            on_ok=lambda ack=None, s=seq: self._on_goodbye_ack_and_wait_done(s),
+            on_timeout=lambda ack=None, s=seq: self._on_goodbye_ack_and_wait_done(s)  # proceed anyway
         )
 
 
@@ -5965,6 +6002,10 @@ class Machine(QObject):
             )
             if snapshot_result.get("path"):
                 self._pre_reset_mcu_log_history = None
+        if self._disconnect_in_progress:
+            # Preserve shutdown ACK waits; a delayed reset must not send HELLO
+            # while firmware is still completing GOODBYE.
+            return
         self._reset_session_state_for_recovery()
         self._begin_recovery_handshake()
         self.reset_report_received.emit(dict(report))
@@ -7213,6 +7254,8 @@ class Machine(QObject):
 
     def send_command_to_board(self, command):
         """Send a command to the board."""
+        if self._disconnect_in_progress:
+            return False
         try:
             self._write_frame(command.frame)
             self.command_sent.emit({"command": command.get_command()})
@@ -7868,7 +7911,7 @@ class Machine(QObject):
         """
         Fill the transport window with locally queued commands.
         """
-        if not self._transport_ready:
+        if self._disconnect_in_progress or not self._transport_ready:
             return
         recovery_state = self.get_xy_motion_recovery_state()
         blocked_reason = getattr(self, "_command_queue_blocked_reason", None)
@@ -7889,6 +7932,8 @@ class Machine(QObject):
             return
 
         while True:
+            if self._disconnect_in_progress or not self._transport_ready:
+                return
             if not self._reader_dispatch_ready():
                 return
             command = self.command_queue.get_next_command()
