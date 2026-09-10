@@ -1,0 +1,33 @@
+{
+  "schema_version": "labcraft_release_v2",
+  "version": "v1.3.0-rc.14",
+  "tag": "v1.3.0-rc.14",
+  "channel": "release_candidate",
+  "release_date": "2026-09-10",
+  "previous_version": "v1.3.0-rc.13",
+  "rollback_version": null,
+  "requires_firmware": null,
+  "machine_data": {
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "data_schema_version": 1,
+    "transition": "none",
+    "transition_id": null
+  },
+  "summary": "Allow calibration to arm on the first opening after a camera-approach move while preserving MCU dispatch safety.",
+  "notes": [
+    "Calibration and refuel-camera dialogs are scheduled after move-completion status handling returns. A modal window can no longer keep its triggering status frame unfinished and block its own flash-arming commands. The already-at-camera opening path is unchanged.",
+    "Canceled, superseded and destroyed-owner launch requests remain rejected. The rc.13 reader watermark, queued-fault ordering, disconnect blocks and fresh-handshake requirements are unchanged.",
+    "Independent review found no actionable findings; 269 focused tests and 6,498 full-suite tests passed with 180 skips. The attended Pi operator confirmed first opening after moving to the camera and reopening at the camera both worked on reviewed commit a34780bc. Normal exit, exact released restoration, the complete 30-result SAFE inventory and production-ready postflight passed. Separate attended refuel-imaging qualification is not claimed.",
+    "Firmware, wire protocol, dependencies, saved-data schema and execution-calibration version-4 compatibility requirements are unchanged. Rollback remains unconfigured until an exact compatible target is qualified. Preserve execution history and use protected current-version or qualified compatible-bundle recovery.",
+    "Legacy clients continue through the pinned rc.11 bridge. The stable and legacy release-index pointers remain unchanged; this schema-v2 RC does not authorize a new direct legacy bridge.",
+    "The accepted rc.13 large-calculation timing limitation remains. The original rc.12 MCU disconnect cause remains unconfirmed. This metadata prepares a release; merge, tagging, publication and deployment are separate steps."
+  ],
+  "validation": [
+    "Independent reviewed application a34780bc2c3dfd1eb29ca2a1feb40eb5f05c3995: 269 combined focused tests and 6,498 full-suite tests passed, 180 skipped, zero failures/errors",
+    "Released rc.13 versus fixed-code modal launch reproductions; deferred cancellation, stale-launch, owner-destruction and eight-cycle no-hardware reopening coverage",
+    "Exact pushed revision: Pi Status -> Sync -> Validate -> hardware Preflight -> freshly authorized attended Launch -> released Restore/SAFE -> final Status",
+    "Focused release metadata, updater, release-aware packaging and execution-data rollback compatibility checks",
+    ".\\env\\Scripts\\python.exe -B tools\\validate_release_metadata.py; git diff --check; strict release JSON parsing",
+    "After publication authorization: exact tag validation with --check-tags, release-aware bundle generation and verification"
+  ]
+}

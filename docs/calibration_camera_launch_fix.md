@@ -82,13 +82,61 @@ Final combined report: `focused-owned-cleanup.xml`; released-code reproduction:
 `released-repro.xml`. `base-combined.log` is a current-branch comparison without
 the new tests; `released-combined.log` is the separate released-source comparison.
 
-Full-suite and Pi qualification are not claimed by this focused investigation.
-Before another release, obtain independent review, run the final integration
-gate, and qualify the exact pushed revision through the Pi wrappers. An attended
-reproduction must explicitly authorize the camera-approach movement and any
-capture/dispensing scope, compare first-open and already-at-camera reopen, and
-finish with required released restoration, SAFE and postflight. Do not infer
-new hardware authority from the earlier rc.13 campaign.
+Full-suite and Pi qualification were pending at the end of the initial focused
+investigation. Their subsequent results are recorded below. Any further attended
+campaign still requires fresh authorization for camera-approach movement and
+capture/dispensing scope, followed by released restoration, SAFE and postflight.
+
+## Independent review and attended qualification
+
+The independent review of `a34780bc2c3dfd1eb29ca2a1feb40eb5f05c3995` found no
+actionable findings. It verified both reproductions fail with the released
+launch methods and pass with the fix. **269 combined focused tests** passed.
+The independent full Windows suite passed **6,498 tests, 180 skipped**, in
+**10m35s**, with zero failures/errors or Qt crash. Its JUnit report is retained at
+`C:\Users\conar\AppData\Local\Temp\labcraft-camera-full-review-3dd94144-cfe8-4c72-bb7b-494d9dbad654\results.xml`.
+
+The operator then authorized an attended move-and-calibration campaign and
+supplied the fresh exact physical confirmation. The exact reviewed commit was
+pushed and qualified through Status -> Sync -> Validate -> hardware Preflight
+-> Launch. On 2026-09-10 UTC, the operator reported that calibration worked on
+first opening with the move to the camera, and again after closing/reopening
+while remaining at the camera. This is operator-observed qualification of those
+two calibration paths; a separate attended refuel-imaging test is not claimed.
+
+The launch exited normally with code 0. Protected invariants matched and no
+related process remained. Immediate exact released-firmware restoration passed,
+including the strict complete 30-result SAFE inventory. Durable state advanced
+from released revision 190 through recovery-required 191 to released 192.
+Final status reported `production_ready=true`, no blockers or related processes,
+clean worktrees and unchanged production code/data. The two retained additional
+worktrees remained a warning. Recovery used the documented rc.8 firmware binding
+whose bytes match current production/development; production application code
+remained on rc.13 at `67b096c046dd0734c60c853ea917a40e3653a2d9`.
+
+Campaign evidence is external at
+`C:\Users\conar\AppData\Local\Temp\labcraft-rc14-attended-c2bf9cce-997d-490a-b6d4-ef7b9b346ee7`.
+Pi hardware session: `bc546f58-6b96-4ba4-b0a7-e4f07a974d3f`;
+restoration session: `8577ec20-18b6-4c40-85d8-bffe7c9643be`.
+The SAFE report SHA-256 is
+`7ec43a9f8b32b67e63c1af66f462d14cfcc35f36b5d8d79b706d3f7e6ab0f748`.
+
+## rc.14 preparation
+
+The operator requested release preparation after the successful campaign. The
+follow-up changes only VERSION, CHANGELOG, the schema-v2 rc.14 manifest and this
+qualification record. Application/test content remains identical to the reviewed
+and Pi-qualified commit. The stable and pinned legacy rc.11 index routes remain
+unchanged. Rollback stays null pending exact-target compatibility qualification;
+existing rc.13 timing limitations remain documented. Merge, tagging, publication,
+tag-aware validation, installable package generation and production deployment
+remain separate steps. No new hardware activity is implied by this preparation.
+
+The metadata preparation passed **321 focused release/updater/package/rollback
+tests in 72.75 seconds**, plus metadata validation, strict JSON parsing and
+`git diff --check`. The fetched main remains `67b096c0`, already contained in
+the reviewed fix. No application or test changes followed independent full-suite
+validation or the attended Pi campaign.
 
 Rollback is a normal revert of this isolated UI/test/documentation fix. Preserve
 the complete rc.13 reader watermark and disconnect protections. No data migration
