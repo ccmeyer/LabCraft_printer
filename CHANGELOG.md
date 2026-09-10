@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.3.0-rc.14 - 2026-09-10
+
+### Fixed
+
+- Open calibration after a camera-approach move only after the move's MCU status callback returns. The first calibration window can then dispatch flash-arming commands without needing to close and reopen it. Experiment loading and editable-copy workers are not involved in the fault.
+- Apply the same deferred launch to refuel imaging. Pending launch tokens and Qt owner checks still reject canceled, superseded or destroyed-window requests. The rc.13 MCU dispatch and disconnect protections remain intact.
+
+### Qualification and recovery
+
+- Independent review found no actionable findings: 269 focused tests and 6,498 full-suite tests passed, with 180 full-suite skips and no failures, errors or Qt crash. Reproductions fail on released rc.13 and pass with the fix.
+- On reviewed commit `a34780bc`, the operator confirmed calibration worked on first opening after moving to the camera and on reopening while remaining at the camera. The app exited normally; exact released-firmware restoration, the complete 30-result SAFE inventory and production-ready postflight passed. Refuel imaging shares the automated coverage; a separate attended refuel test is not claimed.
+- Firmware, wire protocol, dependencies, execution-data compatibility and saved-data schema are unchanged. The stable and pinned rc.11 legacy release-index routes remain unchanged. Rollback stays unconfigured until an exact compatible target is qualified; preserve execution history and use the protected current-version or qualified compatible-bundle recovery route.
+- The previously accepted rc.13 large-calculation timing limitation remains. This correction does not establish the original rc.12 MCU disconnect's cause. This is release preparation; merge, tagging, publication and deployment remain pending.
+
 ## v1.3.0-rc.13 - 2026-09-10
 
 ### Fixed
