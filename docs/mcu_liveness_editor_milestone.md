@@ -96,6 +96,53 @@ measurements do not qualify Pi timing or establish the original incident's cause
 
 ## Validation results
 
+### Attended launch and authorized rc.13 publication
+
+On 2026-09-10 UTC, operator `conar` supplied a fresh exact physical confirmation
+for candidate `fd0e94c0ee58a38abe5cefb507f94d294d341566`. The wrapper completed
+Status -> Sync -> Validate -> hardware preflight -> attended Launch. The operator
+reported, "Everything ran as intended and I closed the app."
+
+- Launch passed with exit code 0 and normal exit. Protected invariants matched
+  and no related process remained.
+- Mandatory exact released-firmware restoration passed, with the complete
+  strict 30-result SAFE inventory validated. Durable state advanced from released
+  revision 188 through recovery-required 189 to released revision 190.
+- Final status reported `production_ready=true`, no blockers, clean worktrees,
+  unchanged production code/data, and zero related processes. The two retained
+  additional worktrees remained an informational warning.
+- Recovery used the documented rc.8 firmware manifest and artifact SHA-256
+  `1fec7c6c8d3c0022844695cdf51a860539bcfbda291bb18c12a99062c7a32577`, identical
+  to the development and production artifact. Production application code
+  remained at `dc09d89af6d776c283f251cd90a6d49f11eca186`; no app downgrade occurred.
+
+External Windows evidence is under
+`C:\Users\conar\AppData\Local\Temp\labcraft-rc13-attended-4c30536c-6151-49f2-8315-f3b677520a42`
+(`QUALIFICATION.md`, `campaign-summary.json`, `evidence-sha256.json`, and dated
+wrapper reports). The external Pi hardware session is
+`f0afbd21-2417-431e-bfc7-5c20f5e46fb9`; released restoration is firmware session
+`9a326380-c882-493b-a7ca-afaecc68a8eb`. Their structured report hashes are recorded
+in the wrapper evidence; the SAFE report SHA-256 is
+`d99a19fd3f38360924ca829eaecd3a61ee994079741121aeb6151bbf46c6cf0b`.
+
+Specific connected motion or printing steps were not recorded and are not
+claimed as qualified. The original MCU disconnect cause remains unconfirmed.
+After receiving this scoped result, the operator explicitly authorized recording
+the evidence in PR #3 and merging/publishing rc.13. This supersedes the earlier
+pending-publication status below; it does not turn the accepted timing failures
+or unrecorded physical scenarios into passing tests. Production deployment is
+separate from this release publication.
+
+The publication follow-up changes only release metadata and documentation.
+Application, tests, firmware, dependencies and compatibility declarations remain
+identical to the fully tested and Pi-qualified preparation commit. Its final
+full-suite result remains **6,488 passed, 180 skipped**, with the earlier
+timing-only failure and unchanged-code repeat history preserved in PR #3.
+The publication metadata follow-up passed **321 focused tests in 70.22 seconds**
+covering metadata validation, release-aware bundles, execution-data rollback,
+the updater, update requests and the update window. Metadata validation, strict
+release JSON parsing and `git diff --check` also passed.
+
 ### Final realistic/memory qualification and accepted merge limitation
 
 The full Pi campaign on reviewed, pushed revision

@@ -115,9 +115,13 @@ The current bounded Pi memory lane passed two warm-up and six measured rounds:
 median RSS growth was **21.2 MiB** against a **32 MiB** allowance, with zero live
 closed editors at every idle endpoint. The positive RSS slope remains an
 observation for longer sessions, not proof of a leak or of unlimited stability.
-Wrapper smoke and protected-state postflight passed. Attended connected-hardware
-qualification remains pending before publication; software timing acceptance
-does not qualify physical operation. Full evidence and release-preparation status
+Wrapper smoke and protected-state postflight passed. The subsequent attended
+hardware-capable launch on `fd0e94c0` passed with operator-reported expected
+behavior, normal exit, exact released restore, complete SAFE validation and
+production-ready postflight. Specific connected motion or printing scenarios
+were not recorded and are not claimed as qualified. The operator authorized
+merge and RC publication with the recorded limitations. Software timing
+acceptance does not qualify physical operation. Full evidence and release status
 are summarized in `docs/mcu_liveness_editor_milestone.md`.
 
 Rollback the warning/check commit with a normal revert and synchronize the

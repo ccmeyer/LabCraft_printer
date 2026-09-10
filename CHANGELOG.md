@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.3.0-rc.13 - 2026-09-09
+## v1.3.0-rc.13 - 2026-09-10
 
 ### Fixed
 
@@ -17,7 +17,7 @@
 
 ### Recovery and release status
 
-- This is prepared candidate metadata. Attended connected-hardware qualification, release tagging, publication, and deployment remain pending. The original disconnect's precise cause remains unconfirmed.
+- The attended hardware-capable launch on `fd0e94c0` passed with a normal exit and operator-reported expected behavior. Exact released-firmware restoration and the complete 30-result SAFE inventory passed; final status confirmed production readiness, unchanged production code/data and no related processes. Specific connected motion or printing scenarios were not recorded and are not claimed as qualified. The operator authorized RC publication with these limitations; the original disconnect's precise cause remains unconfirmed.
 - The stable and exact legacy release-index pointers remain unchanged. Legacy clients continue through rc.11; modern clients can discover rc.13 only after its schema-v2 tag is approved and published.
 - Execution-calibration version 4 and both execution-data compatibility capabilities are retained. Rollback remains unconfigured until an exact compatible target is qualified; use the protected current-version or compatible-bundle recovery route. Do not downgrade experiment history or manually change production code.
 - Firmware bytes, wire protocol, shared dependencies, and canonical machine-data schema are unchanged. Pi no-hardware checks preserved protected state and left no related processes; the smoke launch added only its expected development-session records.
