@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import pytest
 from types import SimpleNamespace
 
 import App
@@ -93,3 +94,33 @@ def test_install_ui_freeze_watchdog_starts_timer_and_daemon(monkeypatch):
     assert thread.started is True
     assert app._labcraft_ui_freeze_timer is timer
     assert app._labcraft_ui_freeze_watchdog is thread
+    previous = app._labcraft_ui_heartbeat["last"]
+    timer.timeout.emit()
+    assert app._labcraft_ui_heartbeat["last"] >= previous
+
+
+def test_default_ui_stall_capture_precedes_mcu_timeout(qapp, test_profile, tmp_path):
+    from test_host_black_box_log import _make_machine
+    machine = _make_machine(qapp, test_profile, tmp_path)
+    assert App.UI_FREEZE_WATCHDOG_STALL_SECONDS * 1000 < machine._mcu_response_timeout_ms
+
+
+def test_stall_retains_bounded_utf8_evidence_for_fault_snapshot(monkeypatch):
+    monkeypatch.setattr(App, "QTimer", _FakeTimer)
+    monkeypatch.setattr(App.threading, "Thread", _FakeThread)
+    times = iter([100.0, 102.0])
+    monkeypatch.setattr(App.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(App.time, "sleep", lambda _: None)
+    dump = "\u00e9" * 40000
+    monkeypatch.setattr(App, "format_thread_dump", lambda _: dump)
+    written = []
+    monkeypatch.setattr(App, "append_freeze_diagnostics", lambda text, **_: written.append(text))
+    app = SimpleNamespace()
+    _timer, thread = App.install_ui_freeze_watchdog(app)
+    with pytest.raises(StopIteration):
+        thread.target()
+    stall = app._labcraft_ui_heartbeat["last_stall"]
+    assert len(stall["thread_dump"].encode("utf-8")) == 65536
+    assert stall["truncated"]
+    assert stall["monotonic_ns"] == 102_000_000_000
+    assert written == [dump]

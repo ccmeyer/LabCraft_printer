@@ -90,6 +90,11 @@ def test_duplicate_normalizes_missing_policy_and_retains_session_provenance(tmp_
     assert source.optimize_stock_solutions(allow_two=False)["best"]
     source.generate_experiment()
     expected_plans = copy.deepcopy(source.plans_per_option)
+    # Validated reuse makes the default mode explicit; fresh optimizer plans
+    # may omit it. Keep every allocation value in the equality comparison.
+    for plan in expected_plans.values():
+        for stock in plan["stocks"]:
+            stock.setdefault("printing_mode", "droplet")
 
     source_dir = tmp_path / "source"
     source_dir.mkdir()

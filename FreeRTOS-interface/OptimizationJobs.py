@@ -102,6 +102,11 @@ class OptimizationOutcome:
     computed: dict = field(default_factory=dict)
     error: str = ""
 
+    def discard_prepared_files(self):
+        owner = self.computed.get("staging_owner")
+        if owner is not None:
+            owner.cleanup()
+
 
 class _StartOptimizationEvent(QEvent):
     TYPE = QEvent.Type(QEvent.registerEventType())
@@ -127,7 +132,10 @@ class _OptimizationWorker(QObject):
                 control.slow_callback = lambda: self.slow_optimizer.emit(request.job_id)
             control.report("Preparing inputs")
             draft = ExperimentModel()
-            draft.restore_optimization_inputs(request.snapshot)
+            if request.kind == "duplicate":
+                draft.legacy_mode = request.snapshot["legacy_mode"]
+            else:
+                draft.restore_optimization_inputs(request.snapshot)
             draft._optimization_control = control
             draft.blockSignals(True)
             if request.kind == "import":
@@ -135,6 +143,13 @@ class _OptimizationWorker(QObject):
                 outcome.result = draft.build_import_feasibility_report(**request.options)
             else:
                 options = dict(request.options)
+                if request.kind == "duplicate":
+                    control.report("Preparing editable copy")
+                    options["source_document"] = draft._load_optimization_json(options["source_json"])
+                    draft.from_dict(draft._duplicate_design_payload(
+                        options["source_document"], options["new_name"],
+                    ))
+                    options["allow_two"] = draft._allow_two_from_metadata()
                 if request.kind == "import_apply":
                     reuse = draft.prepare_import_application(options["payload"], options["metadata"])
                     available = options.get("available_wells")
@@ -155,11 +170,26 @@ class _OptimizationWorker(QObject):
                     finally:
                         control.end_optimizer()
                 if outcome.result.get("best"):
-                    draft.validate_optimization_allocation(outcome.result)
+                    if request.kind == "duplicate":
+                        control.report("Validating allocation")
+                        validated = draft.install_stock_allocation_reuse_payload(
+                            draft.export_stock_allocation_reuse_payload(outcome.result),
+                        )
+                        if not validated.get("reused"):
+                            raise ValueError(f"Computed allocation failed validation: {validated.get('reason')}")
+                    else:
+                        draft.validate_optimization_allocation(outcome.result)
                     control.report("Generating reactions")
                     draft.generate_experiment()
-                    outcome.computed = (draft.capture_import_application() if request.kind == "import_apply"
-                                        else draft.capture_optimization_outputs())
+                    if request.kind == "duplicate":
+                        outcome.computed = draft.prepare_editable_copy_publication(
+                            options["source_path"], options["destination"],
+                            options["source_fingerprint"], options["source_document"],
+                        )
+                        control.report("Copy ready")
+                    else:
+                        outcome.computed = (draft.capture_import_application() if request.kind == "import_apply"
+                                            else draft.capture_optimization_outputs())
             control.check()
             outcome.status = "succeeded"
         except OptimizationCancelled:
@@ -167,6 +197,8 @@ class _OptimizationWorker(QObject):
         except Exception as exc:
             outcome.error = str(exc) or type(exc).__name__
         finally:
+            if outcome.status != "succeeded":
+                outcome.discard_prepared_files()
             control.phase_callback = None
             control.slow_callback = None
         self.completed.emit(outcome)
@@ -260,14 +292,17 @@ class OptimizationJobManager(QObject):
     def _completed(self, outcome):
         active = self._active
         if not active or active[1] != outcome.job_id:
+            outcome.discard_prepared_files()
             return
         self._active = None
+        original_outcome = outcome
         if active[2].cancelled.is_set():
             outcome = OptimizationOutcome(outcome.job_id, "cancelled")
         try:
             if active[0]() is not None and isValid(active[0]()):
                 active[3](outcome)
         finally:
+            original_outcome.discard_prepared_files()
             if not self._publication_pending:
                 self.settled.emit()
                 if self._shutting_down:

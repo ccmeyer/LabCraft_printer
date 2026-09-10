@@ -22,7 +22,7 @@ EXIT_RECOVERY_REQUIRED = 4
 EXIT_CONFIGURATION_LOCK_UNAVAILABLE = 5
 UI_FREEZE_DIAGNOSTIC_LOG_FILENAME = "ui-freeze-diagnostics.log"
 UI_FREEZE_WATCHDOG_INTERVAL_MS = 500
-UI_FREEZE_WATCHDOG_STALL_SECONDS = 5.0
+UI_FREEZE_WATCHDOG_STALL_SECONDS = 1.0
 UI_FREEZE_WATCHDOG_REPEAT_SECONDS = 30.0
 DEVELOPMENT_AUTOCLOSE_MS_ENV = "LABCRAFT_DEVELOPMENT_AUTOCLOSE_MS"
 DEVELOPMENT_AUTOCLOSE_MIN_MS = 500
@@ -185,6 +185,13 @@ def install_ui_freeze_watchdog(
             heartbeat["last_dump"] = now_s
             reason = f"Qt heartbeat stalled for {stalled_for:.1f}s"
             dump = format_thread_dump(reason)
+            encoded_dump = dump.encode("utf-8")
+            heartbeat["last_stall"] = {
+                "monotonic_ns": int(now_s * 1e9),
+                "reason": reason,
+                "thread_dump": encoded_dump[:65536].decode("utf-8", errors="ignore"),
+                "truncated": len(encoded_dump) > 65536,
+            }
             try:
                 path = append_freeze_diagnostics(dump, log_path=log_path)
                 print(f"[UIWatchdog] {reason}; wrote stack dump to {path}", flush=True)
@@ -197,6 +204,7 @@ def install_ui_freeze_watchdog(
 
     # Keep references alive for the life of QApplication.
     app._labcraft_ui_freeze_timer = timer
+    app._labcraft_ui_heartbeat = heartbeat
     app._labcraft_ui_freeze_watchdog = thread
     return timer, thread
 

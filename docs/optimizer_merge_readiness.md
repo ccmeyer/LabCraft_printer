@@ -99,11 +99,37 @@ Windows/Pi with modest RSS drift and nearly steady Python-block counts; it
 does not prove unlimited-session leak freedom. Native acceleration and further
 cleanup tuning remain deferred. Do not claim full realistic timing qualification.
 
+The subsequent full Pi matrix on reviewed application revision
+`cb9a54bc5c631bc7cc7dfbca5039c380932f2f65` recorded **16 passed and 33 blocked**
+across 49 routes. Fifteen routes exceeded 250 ms, with a maximum **372.7 ms**;
+other overlapping blockers were 14 infeasible single-stock/Apply prerequisites
+and eight unsupported requested import-volume cases. The operator reviewed these
+results and explicitly accepted the remaining large-calculation pauses as
+nonblocking for merge and RC preparation. This extends the earlier acceptance
+to the current measurements without changing the gate or calling it a pass.
+All 380 exercised cancellation checks were below 41.6 ms, with no cancellation
+state failure or two-stock rank regression. Successful allocations matched the
+synchronous reference calculations.
+
+The current bounded Pi memory lane passed two warm-up and six measured rounds:
+median RSS growth was **21.2 MiB** against a **32 MiB** allowance, with zero live
+closed editors at every idle endpoint. The positive RSS slope remains an
+observation for longer sessions, not proof of a leak or of unlimited stability.
+Wrapper smoke and protected-state postflight passed. The subsequent attended
+hardware-capable launch on `fd0e94c0` passed with operator-reported expected
+behavior, normal exit, exact released restore, complete SAFE validation and
+production-ready postflight. Specific connected motion or printing scenarios
+were not recorded and are not claimed as qualified. The operator authorized
+merge and RC publication with the recorded limitations. Software timing
+acceptance does not qualify physical operation. Full evidence and release status
+are summarized in `docs/mcu_liveness_editor_milestone.md`.
+
 Rollback the warning/check commit with a normal revert and synchronize the
 development checkout through the wrapper. No data migration, calibration-history
 rewrite, firmware update or production-environment change is required.
-This is distinct from rolling back the entire feature branch after creating new
-execution-calibration files: the branch writes schema v3 and reads v1/v2/v3,
-whereas the older `main` reader rejects v3. Preserve original history and use a
-compatible reader for those experiments; do not strip audit fields or rewrite
-calibration files to force an older application to load them.
+Current rc.13 preparation retains rc.12's version-4 execution-calibration records
+and both execution-data compatibility requirements. Its release rollback target
+remains null until an exact compatible target is qualified. Preserve original
+history and use the protected current-version or qualified compatible-bundle
+recovery route; do not strip audit fields, rewrite calibration files, or manually
+switch production code to force an older application to load them.

@@ -909,6 +909,7 @@ def test_create_editable_copy_uses_current_source_and_wide_name_dialog(
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     dialog, duplicate, source_path = _build_duplicate_dialog(qapp, source_dir)
+    dialog._start_duplicate_design_job = Mock(return_value=(False, {"pending": True}))
     source_before = source_path.read_bytes()
     observed = {}
 
@@ -931,16 +932,17 @@ def test_create_editable_copy_uses_current_source_and_wide_name_dialog(
 
     ExperimentDesignDialog._on_duplicate_design(dialog)
 
-    duplicate.assert_called_once_with(
-        str(source_path.resolve()),
+    duplicate.assert_not_called()
+    dialog._start_duplicate_design_job.assert_called_once_with(
+        source_path.resolve(), source_dir.resolve(),
         "editable-copy",
-        str((tmp_path / "editable-copy").resolve()),
+        (tmp_path / "editable-copy").resolve(),
+        json.loads(source_before),
     )
     assert source_path.read_bytes() == source_before
     assert observed["minimum_width"] >= 640
     assert observed["name_field_minimum_width"] >= 480
     assert "Current experiment: Current Source" in observed["label"]
-    assert "New experiment" in dialog.status_lbl.text()
 
 
 def test_editable_copy_name_widths_survive_real_modal_layout(qapp):
@@ -1012,6 +1014,52 @@ def test_editable_copy_button_disabled_for_inconsistent_current_paths(
 
     assert dialog.duplicate_btn.isEnabled() is False
     assert "do not identify the same experiment" in dialog.duplicate_btn.toolTip()
+
+
+def test_editable_copy_availability_does_not_read_design_contents(qapp, tmp_path, monkeypatch):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    dialog, _, source_path = _build_duplicate_dialog(qapp, source_dir)
+    dialog.duplicate_btn = QPushButton()
+
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("Refreshing copy availability must not read the design")
+
+    monkeypatch.setattr(Path, "open", unexpected_read)
+    for _ in range(2):
+        dialog._refresh_editable_copy_availability()
+        assert dialog.duplicate_btn.isEnabled()
+    source_path.unlink()
+    dialog._refresh_editable_copy_availability()
+    assert not dialog.duplicate_btn.isEnabled()
+    assert "not available" in dialog.duplicate_btn.toolTip()
+
+
+@pytest.mark.parametrize("contents", ["{invalid", "[]", "{}", '{"metadata": []}'])
+def test_editable_copy_revalidates_contents_after_availability_refresh(
+    qapp, tmp_path, monkeypatch, contents
+):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    dialog, duplicate, source_path = _build_duplicate_dialog(qapp, source_dir)
+    dialog.duplicate_btn = QPushButton()
+    dialog._start_duplicate_design_job = Mock()
+    dialog._refresh_editable_copy_availability()
+    assert dialog.duplicate_btn.isEnabled()
+    source_path.write_text(contents, encoding="utf-8")
+    warning = Mock()
+    prompt = Mock()
+    monkeypatch.setattr(QMessageBox, "warning", warning)
+    monkeypatch.setattr(QInputDialog, "exec", prompt)
+
+    dialog._on_duplicate_design()
+
+    warning.assert_called_once()
+    prompt.assert_not_called()
+    duplicate.assert_not_called()
+    dialog._start_duplicate_design_job.assert_not_called()
+    assert source_path.read_text(encoding="utf-8") == contents
+    assert list(tmp_path.iterdir()) == [source_dir]
 
 
 def test_create_editable_copy_rejects_unwritable_parent_before_model_call(

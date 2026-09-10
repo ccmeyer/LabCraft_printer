@@ -36,6 +36,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import json
+import hashlib
 import os
 import sys
 import random
@@ -12787,8 +12788,13 @@ def _submit_optimization_ui_job(owner, kind, options, widgets, status, restore, 
             id(getattr(source_model, "_execution_plan_snapshot", None)),
         )
     source_session = session_identity()
-    snapshot = source_model.capture_optimization_inputs()
-    fingerprint = input_fingerprint(snapshot)
+    if kind == "duplicate":
+        # A copy computes from its serialized source, not the current editor.
+        snapshot = {"legacy_mode": source_model.legacy_mode}
+        fingerprint = source_model.optimization_inputs_fingerprint()
+    else:
+        snapshot = source_model.capture_optimization_inputs()
+        fingerprint = input_fingerprint(snapshot)
     editor_revision = getattr(owner, "_editor_input_revision", 0)
     raw_signature = owner._optimization_input_signature() if kind == "design" else None
     request = OptimizationRequest(snapshot, kind=kind, options=copy.deepcopy(options))
@@ -12800,7 +12806,9 @@ def _submit_optimization_ui_job(owner, kind, options, widgets, status, restore, 
             try:
                 if owner.model is not source_model or session_identity() != source_session or not guard():
                     raise ValueError("The experiment is no longer available for this update.")
-                if input_fingerprint(source_model.capture_optimization_inputs()) != fingerprint:
+                current_fingerprint = (source_model.optimization_inputs_fingerprint() if kind == "duplicate"
+                                       else input_fingerprint(source_model.capture_optimization_inputs()))
+                if current_fingerprint != fingerprint:
                     raise ValueError("The experiment changed during optimization.")
                 if kind == "design" and (
                     getattr(owner, "_editor_input_revision", 0) != editor_revision
@@ -12809,7 +12817,7 @@ def _submit_optimization_ui_job(owner, kind, options, widgets, status, restore, 
                     raise ValueError("The editor inputs changed during optimization.")
                 owner._installing_job_result = True
                 if outcome.result.get("best"):
-                    if kind == "design":
+                    if kind in {"design", "load"}:
                         source_model.install_optimization_outputs(outcome.computed, fingerprint)
                     elif kind == "import_apply":
                         available, _ = owner._available_wells_for_selected_plate(
@@ -16307,6 +16315,9 @@ class ExperimentDesignDialog(QDialog):
     def _resolve_current_persisted_design_source(
         self,
     ) -> tuple[Path | None, Path | None, str | None]:
+        # Lock-state refreshes only need file availability. Parsing the full
+        # design here stalls the GUI for large uploaded experiments. Validate
+        # contents when the copy is requested, before submitting any work.
         source_file_raw = getattr(self.model, "experiment_file_path", None)
         source_dir_raw = getattr(self.model, "experiment_dir_path", None)
         if not source_file_raw or not source_dir_raw:
@@ -16333,19 +16344,6 @@ class ExperimentDesignDialog(QDialog):
                 None,
                 None,
                 "The current experiment file is not available.",
-            )
-        try:
-            with source_file.open("r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except Exception as exc:
-            return None, None, f"The current experiment cannot be read: {exc}"
-        if not isinstance(payload, dict) or not isinstance(
-            payload.get("metadata"), dict
-        ):
-            return (
-                None,
-                None,
-                "The current experiment file is not valid.",
             )
         return source_file, source_dir, None
 
@@ -19088,10 +19086,11 @@ class ExperimentDesignDialog(QDialog):
         try:
             with source_file.open("r", encoding="utf-8") as handle:
                 payload = json.load(handle)
-            if isinstance(payload, dict):
-                metadata = payload.get("metadata") or {}
-            else:
-                metadata = {}
+            if not isinstance(payload, dict) or not isinstance(
+                payload.get("metadata"), dict
+            ):
+                raise ValueError("The current experiment file is not valid.")
+            metadata = payload["metadata"]
         except Exception as exc:
             message = f"The current experiment design cannot be read: {exc}"
             QMessageBox.warning(self, "Editable copy unavailable", message)
@@ -19164,20 +19163,46 @@ class ExperimentDesignDialog(QDialog):
             )
             return
 
-        try:
-            self.model.duplicate_design_from(
-                str(source_file),
-                new_name,
-                str(new_experiment_path),
-            )
-        except Exception as e:
-            message = str(e) or "The editable copy could not be created."
-            QMessageBox.warning(self, "Could not create editable copy", message)
-            self._set_status(
-                f"Could not create editable copy: {message}", severity="error"
-            )
-            return
+        return self._start_duplicate_design_job(
+            source_file, source_dir, new_name, new_experiment_path, payload,
+        )
 
+    def _start_duplicate_design_job(self, source_file, source_dir, new_name, new_experiment_path, payload):
+        # Immutable serialization avoids repeatedly copying a large uploaded
+        # reaction list at the UI/job-manager boundary.
+        source_json = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        source_fingerprint = hashlib.sha256(source_json.encode("utf-8")).hexdigest()
+
+        def finished(outcome):
+            if outcome.status != "succeeded" or not outcome.result.get("best"):
+                message = outcome.error or outcome.result.get("reason") or "Editable copy canceled."
+                self._set_status(message)
+                return False, {"reason": message, "status": outcome.status}
+            try:
+                self._installing_job_result = True
+                try:
+                    self.model.publish_editable_copy(outcome.computed)
+                finally:
+                    self._installing_job_result = False
+            except Exception as exc:
+                message = str(exc) or "The editable copy could not be created."
+                QMessageBox.warning(self, "Could not create editable copy", message)
+                self._set_status(message, severity="error")
+                return False, {"reason": message}
+            self._finish_duplicate_design(source_dir, new_experiment_path, outcome.result)
+            return True, outcome.result
+
+        return _submit_optimization_ui_job(
+            self, "duplicate", {
+                "source_json": source_json, "new_name": new_name,
+                "source_path": str(source_file), "destination": str(new_experiment_path),
+                "source_fingerprint": source_fingerprint,
+            },
+            self._design_busy_widgets(), self._set_status, self._refresh_all_lock_states,
+            finished, lambda: not self._gripper_edit_lock_is_active(),
+        )
+
+    def _finish_duplicate_design(self, source_dir, new_experiment_path, optimization_result):
         self._progress_reset_confirmed = False
         self._set_progress_protection(False)
         self._reset_auto_update_session()
@@ -19188,11 +19213,9 @@ class ExperimentDesignDialog(QDialog):
             f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
         )
         self._load_factors_into_table()
-        self._sync_controls_from_model()
-        self._refresh_stock_table()
-        self._update_summary_labels()
+        self._sync_controls_from_model(recompute=False)
+        self._complete_design_optimization_flow(optimization_result)
         self._update_unique_conditions_button_label()
-        self._refresh_all_prior_availability()
         self._refresh_all_lock_states()
         self._apply_requested = False
         self._reset_draft_dirty_from_model()
@@ -19249,6 +19272,7 @@ class ExperimentDesignDialog(QDialog):
             path,
             exp_dir,
             progress_reset_confirmed=progress_policy == self.PROGRESS_POLICY_RESET,
+            defer_optimization=True,
         )
         self._reset_auto_update_session()
         read_only_getter = getattr(self.model, "is_read_only_legacy_execution", None)
@@ -19342,7 +19366,7 @@ class ExperimentDesignDialog(QDialog):
             f.name for f in getattr(self.model, "factors", []) if getattr(f, "kind", "") == "choice"
         )
         self._load_factors_into_table()
-        self._sync_controls_from_model()
+        self._sync_controls_from_model(recompute=False)
         self._refresh_stock_table()
         self._update_summary_labels()
         self._update_unique_conditions_button_label()
@@ -19362,7 +19386,31 @@ class ExperimentDesignDialog(QDialog):
             )
         else:
             self._set_status(f"Design loaded from: {exp_dir}", severity="success")
+        if not (legacy_read_only or execution_locked):
+            self._mark_design_optimization_dirty()
+            return self._start_loaded_design_job()
         return True
+
+    def _start_loaded_design_job(self):
+        """Use exact persisted model inputs; controls are a rounded presentation."""
+        self._set_stock_table_stale(True, "Calculating the loaded design…")
+
+        def finished(outcome):
+            if outcome.status != "succeeded":
+                self._mark_design_optimization_dirty()
+                message = outcome.error or "Loaded-design calculation canceled."
+                self._set_status(message)
+                return False, {"reason": message, "status": outcome.status}
+            return self._complete_design_optimization_flow(
+                outcome.result, show_failure_dialog=True, refresh_lock_states=True,
+            )
+
+        return _submit_optimization_ui_job(
+            self, "load", {"allow_two": self.model._allow_two_from_metadata()},
+            self._design_busy_widgets(), self._set_status, self._refresh_all_lock_states,
+            finished, lambda: not self._gripper_edit_lock_is_active()
+                    and not self._model_execution_is_read_only(self.model),
+        )
 
     def _on_finish(self):
         """

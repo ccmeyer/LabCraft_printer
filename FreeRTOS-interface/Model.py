@@ -2971,6 +2971,21 @@ class ExperimentModel(QObject):
         if control is not None:
             control.report(phase) if phase else control.check()
 
+    def _load_optimization_json(self, document):
+        """Decode with the standard parser, yielding between worker-owned objects."""
+        control = getattr(self, "_optimization_control", None)
+        if control is None:
+            return json.loads(document)
+
+        def checked_object(value):
+            control.check()
+            return value
+
+        control.check()
+        result = json.loads(document, object_hook=checked_object)
+        control.check()
+        return result
+
     def _optimization_activity(self, label, **counts):
         control = getattr(self, "_optimization_control", None)
         if control is not None:
@@ -2979,6 +2994,11 @@ class ExperimentModel(QObject):
     def capture_optimization_inputs(self):
         return copy.deepcopy({name: getattr(self, name)
                               for name in self._OPTIMIZATION_INPUT_ATTRIBUTES})
+
+    def optimization_inputs_fingerprint(self):
+        # Hash current GUI-owned inputs without making a second large deep copy.
+        return input_fingerprint({name: getattr(self, name)
+                                  for name in self._OPTIMIZATION_INPUT_ATTRIBUTES})
 
     def restore_optimization_inputs(self, snapshot):
         if set(snapshot) != set(self._OPTIMIZATION_INPUT_ATTRIBUTES):
@@ -8176,6 +8196,9 @@ class ExperimentModel(QObject):
             })
 
         def _reaction_document(reaction: Mapping[Any, Any]) -> List[Dict[str, Any]]:
+            # Large uploads allocate many small objects here. Let Qt run
+            # between rows instead of coupling GC pauses with serialization.
+            self._optimization_checkpoint()
             return [
                 {
                     "key": [str(key[0]), key[1]],
@@ -8222,9 +8245,9 @@ class ExperimentModel(QObject):
         }
 
     def stock_allocation_input_fingerprint(self) -> str:
-        return self._canonical_payload_sha256(
-            self._stock_allocation_input_document()
-        )
+        document = self._stock_allocation_input_document()
+        self._optimization_checkpoint()
+        return self._canonical_payload_sha256(document)
 
     def _stock_allocation_plan_document(
         self,
@@ -14525,6 +14548,8 @@ class ExperimentModel(QObject):
         experiment_dir: str,
         *,
         progress_reset_confirmed: bool = False,
+        stock_allocation_reuse_payload: Mapping[str, Any] | None = None,
+        defer_optimization: bool = False,
     ):
         """Load an unrun design or reconstruct a recorded legacy execution in memory."""
         import json, os
@@ -14611,13 +14636,16 @@ class ExperimentModel(QObject):
         if progress_reset_confirmed:
             self._clear_legacy_execution_state()
 
-        # Recompute plans & grid
-        res = self.optimize_stock_solutions(
-            quantum=0.1,
-            max_refine=60,
-            two_max_refine=40,
-            allow_two=self._allow_two_from_metadata(),
-        )
+        if defer_optimization:
+            # Recorded executions returned above with their authoritative plan.
+            # The editor computes an unrun design through its cancellable worker.
+            if os.path.exists(self.progress_file_path):
+                self.read_progress_file(self.progress_file_path)
+            return reconstruction
+
+        # Editable-copy publication revalidates its worker result rather than
+        # repeating an expensive search on the GUI thread.
+        res = self._resolve_design_allocation(stock_allocation_reuse_payload)
         if not res.get("best"):
             # surface an error in your UI as you prefer
             print("Optimization on load failed:", res.get("reason", "Unknown"))
@@ -19997,7 +20025,9 @@ class ExperimentModel(QObject):
         if not isinstance(data, dict):
             raise ValueError("Experiment design must be a JSON object.")
 
-        payload = json.loads(json.dumps(data, default=self.convert_to_serializable))
+        self._optimization_checkpoint()
+        serialized = json.dumps(data, default=self.convert_to_serializable)
+        payload = self._load_optimization_json(serialized)
         payload["metadata"] = dict(payload.get("metadata") or {})
         payload["metadata"]["name"] = self.sanitize_experiment_name(new_name)
         if copy_applied_imaging_calibrations:
@@ -20030,6 +20060,120 @@ class ExperimentModel(QObject):
         payload["manual_refuel_checks"] = self._normalize_manual_refuel_checks(None)
         return payload
 
+    def _resolve_design_allocation(self, allocation=None):
+        if allocation is None:
+            return self.optimize_stock_solutions(
+                quantum=0.1, max_refine=60, two_max_refine=40,
+                allow_two=self._allow_two_from_metadata(),
+            )
+        reused = self.install_stock_allocation_reuse_payload(allocation)
+        if not reused.get("reused"):
+            raise ValueError(f"Editable-copy allocation is invalid: {reused.get('reason')}")
+        return reused["result"]
+
+    _COPY_STATE_ATTRIBUTES = tuple(dict.fromkeys(
+        _OPTIMIZATION_INPUT_ATTRIBUTES + _OPTIMIZATION_OUTPUT_ATTRIBUTES + (
+            "calibration_storage_policy", "stock_prep_state", "manual_refuel_checks",
+        )
+    ))
+
+    def prepare_editable_copy_publication(
+        self, source_path, destination, source_fingerprint, source_document,
+    ):
+        """Worker-only preparation on an already validated/generated detached model."""
+        source_path = Path(source_path).resolve()
+        destination = Path(destination).resolve()
+        if destination == source_path.parent or source_path.parent in destination.parents:
+            raise ValueError("Editable-copy destination must not be inside the source folder.")
+        if destination.exists():
+            raise FileExistsError(f"Experiment folder already exists: {destination}")
+        source_bytes = source_path.read_bytes()
+        source_document_now = self._load_optimization_json(source_bytes)
+        if self._canonical_payload_sha256(source_document_now) != source_fingerprint:
+            raise ValueError("The source experiment changed while preparing the editable copy.")
+        del source_document_now
+        self._optimization_checkpoint()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging_owner = tempfile.TemporaryDirectory(
+            prefix=f".{destination.name}.staging-", dir=destination.parent,
+        )
+        staging = Path(staging_owner.name).resolve()
+        try:
+            self._optimization_checkpoint("Preparing copy files")
+            self.calibration_storage_policy = new_experiment_policy()
+            self.experiment_dir_path = str(staging)
+            self.update_all_paths()
+            if self._uploaded_reactions is not None:
+                if not self._materialize_uploaded_design_csv():
+                    raise ValueError("The uploaded design CSV could not be prepared.")
+            self.save_experiment()
+            self._atomic_json_dump(self.progress_file_path, {})
+            # Verify serialization without running another allocation search or
+            # reaction generation. Those exact model results were validated above.
+            staged_bytes = Path(self.experiment_file_path).read_bytes()
+            staged_document = self._load_optimization_json(staged_bytes)
+            staged_fingerprint = self._canonical_payload_sha256(staged_document)
+            del staged_document
+            self._optimization_checkpoint()
+            expected_document = self.to_dict()
+            self._optimization_checkpoint()
+            if staged_fingerprint != self._canonical_payload_sha256(expected_document):
+                raise ValueError("The staged editable copy did not validate.")
+            del expected_document
+            self._optimization_checkpoint()
+            ExperimentAuditLog(audit_path=staging / ExperimentAuditLog.FILE_NAME).record(
+                "editable_copy_created", "Editable design copy created",
+                details={"source_name": str((source_document.get("metadata") or {}).get("name") or ""),
+                         "new_name": self.metadata["name"]},
+            )
+            if self._uploaded_design_source:
+                self._uploaded_design_source = str(destination / Path(self._uploaded_design_source).name)
+            if self.STOCK_RESOLUTION_POLICY_METADATA_KEY not in (source_document.get("metadata") or {}):
+                self._stock_allocation_resolution_policy_source = self.STOCK_RESOLUTION_POLICY_SOURCE_LEGACY_MISSING
+            self._optimization_checkpoint()
+            return {
+                "staging_owner": staging_owner, "staging": staging,
+                "destination": destination, "source_path": source_path,
+                "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+                "state": {name: getattr(self, name) for name in self._COPY_STATE_ATTRIBUTES},
+            }
+        except BaseException:
+            staging_owner.cleanup()
+            raise
+
+    def publish_editable_copy(self, prepared):
+        """GUI commit: recheck source/destination, rename, then adopt prepared state."""
+        destination, staging = prepared["destination"], prepared["staging"]
+        if destination.exists():
+            raise FileExistsError(f"Experiment folder already exists: {destination}")
+        if staging.parent != destination.parent or staging != Path(prepared["staging_owner"].name).resolve():
+            raise ValueError("Invalid editable-copy staging location.")
+        if hashlib.sha256(prepared["source_path"].read_bytes()).hexdigest() != prepared["source_sha256"]:
+            raise ValueError("The source experiment changed while preparing the editable copy.")
+        state = prepared["state"]
+        if set(state) != set(self._COPY_STATE_ATTRIBUTES):
+            raise ValueError("Incomplete editable-copy state.")
+        require_idle = getattr(self._calibration_manager, "_require_idle_for_experiment_transition", None)
+        if callable(require_idle):
+            require_idle()
+        os.rename(staging, destination)
+        # Transfer ownership of ordinary Python data; no worker QObject crosses
+        # threads and no allocation, serialization or generation repeats here.
+        self._clear_legacy_execution_state()
+        for name, value in state.items():
+            setattr(self, name, value)
+        self._stock_prep_worksheet_state = None
+        self._stock_prep_worksheet_warning = None
+        self._stock_prep_worksheet_source = None
+        self._stock_prep_worksheet_loaded_path = None
+        self.progress_data = {}
+        self.experiment_dir_path = str(destination)
+        self.update_all_paths()
+        self.unsaved_changes = False
+        self.stock_updated.emit()
+        self.experiment_generated.emit(len(self._reactions_df), float(self._last_worst_nonfill_volume_nL or 0))
+        return True
+
     def _write_duplicate_design(
         self,
         data: Dict,
@@ -20037,6 +20181,7 @@ class ExperimentModel(QObject):
         new_experiment_path: str,
         *,
         copy_applied_imaging_calibrations: bool = False,
+        stock_allocation_reuse_payload: Mapping[str, Any] | None = None,
     ) -> bool:
         if not new_experiment_path:
             raise ValueError("A destination experiment path is required.")
@@ -20073,15 +20218,11 @@ class ExperimentModel(QObject):
             draft.from_dict(payload)
             if draft._uploaded_reactions is not None:
                 draft._materialize_uploaded_design_csv()
-            result = draft.optimize_stock_solutions(
-                quantum=0.1,
-                max_refine=60,
-                two_max_refine=40,
-                allow_two=draft._allow_two_from_metadata(),
-            )
+            result = draft._resolve_design_allocation(stock_allocation_reuse_payload)
             if not result.get("best"):
                 raise RuntimeError(f"Optimization failed: {result.get('reason', 'Unknown')}")
             draft.generate_experiment()
+            allocation = draft.export_stock_allocation_reuse_payload(result)
             draft.save_experiment()
             draft._atomic_json_dump(draft.progress_file_path, {})
             with open(draft.experiment_file_path, "r", encoding="utf-8") as handle:
@@ -20090,12 +20231,7 @@ class ExperimentModel(QObject):
             validator.experiment_dir_path = str(staging)
             validator.update_all_paths()
             validator.from_dict(staged_payload)
-            validated = validator.optimize_stock_solutions(
-                quantum=0.1,
-                max_refine=60,
-                two_max_refine=40,
-                allow_two=validator._allow_two_from_metadata(),
-            )
+            validated = validator._resolve_design_allocation(allocation)
             if not validated.get("best"):
                 raise RuntimeError("The staged editable copy did not validate.")
             os.replace(staging, destination)
@@ -20117,6 +20253,7 @@ class ExperimentModel(QObject):
         self.load_experiment(
             str(destination / "experiment_design.json"),
             str(destination),
+            stock_allocation_reuse_payload=allocation,
         )
         if source_missing_resolution_policy:
             # The copy now persists the normalized boolean, but session provenance
@@ -20376,7 +20513,10 @@ class ExperimentModel(QObject):
                 if staging.exists():
                     shutil.rmtree(staging)
 
-    def duplicate_design_from(self, source_design_path: str, new_name: str, new_experiment_path: str) -> bool:
+    def duplicate_design_from(
+        self, source_design_path: str, new_name: str, new_experiment_path: str,
+        *, stock_allocation_reuse_payload=None, expected_source_fingerprint=None,
+    ) -> bool:
         """Create a fresh experiment from another experiment_design.json."""
         import os
 
@@ -20390,11 +20530,15 @@ class ExperimentModel(QObject):
             raise ValueError("Editable-copy destination must not be inside the source folder.")
         with open(source_design_path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if (expected_source_fingerprint is not None
+                and self._canonical_payload_sha256(data) != expected_source_fingerprint):
+            raise ValueError("The source experiment changed while preparing the editable copy.")
         return self._write_duplicate_design(
             data,
             new_name,
             new_experiment_path,
             copy_applied_imaging_calibrations=False,
+            stock_allocation_reuse_payload=stock_allocation_reuse_payload,
         )
 
     def create_editable_design_copy(
