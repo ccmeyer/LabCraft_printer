@@ -140,7 +140,43 @@ parser's object hook for cooperative checkpoints; serialization and
 verification steps also yield between their large operations. Object values,
 source hashes and serialization validation remain unchanged. Tests cover
 text/byte decoding equality and cancellation before parsing the remaining
-document. Final Windows and Pi qualification are pending.
+document.
+
+Final qualification on application/test revision
+`07b256e9987ce02f4b29fa6207168c7e44fe4cb2` passed:
+
+- Windows full suite: **6,488 passed, 180 skipped**, 637 warnings, **10m28s**;
+  JUnit has zero failures/errors. Repository environment and unique external
+  temporary directory; application/test files stayed unchanged throughout.
+- Pi focused suite: **262 passed**, 22 warnings, **2m10s**, including the
+  composed simulated disconnect lane and editor interlocks.
+- Five ordinary Pi large-copy repetitions: **238, 237, 237, 238, 230 ms**
+  maximum heartbeat gaps, all below the unchanged **250 ms** limit.
+  Startup was 187-190 ms and model publication 30 ms.
+- Nine standard baseline optimizer workloads passed, with one warm-up and
+  five measured runs/cancellations per workload. Maximum heartbeat was
+  **171.6 ms** and maximum cancellation **36.5 ms**.
+- Wrapper offscreen application smoke passed, exit zero, with no forbidden
+  hardware access. Final Validate -> Status confirmed unchanged production
+  checkout/data, released firmware state, shared package inventory, workflow
+  binding and retained worktrees, and no related Pi processes. The development
+  store gained only the two expected smoke-session evidence records.
+- `git diff --check` passed. The follow-up commit recording these results
+  changes documentation only; the Pi remains clean/detached at the exact
+  qualified application/test revision above.
+
+External Windows evidence is under
+`C:\Users\conar\AppData\Local\Temp\labcraft-pr3-copy-fix`
+(`QUALIFICATION.md`, `qualification-summary.json`, `pi-evidence.zip`, and
+wrapper receipts). Raw final Pi test/benchmark evidence is in the external
+development-workflow sessions `pr3-copy-fix-copy-20260909T235731Z-02e312da`,
+`pr3-copy-fix-focused-20260909T235901Z-bceb88cc`, and
+`pr3-copy-fix-baseline-20260910T000128Z-5c90b2a9`.
+
+This closes the measured large-copy pause. It does not establish the original
+MCU disconnect's cause or qualify physical hardware. Independent review of
+this follow-up and a freshly authorized attended connected campaign remain
+pending. The full realistic fixture matrix and memory lane were not run.
 
 The call path is editor UI -> background job -> detached model -> guarded
 publication -> UI refresh; Controller, transport and firmware are unchanged.
