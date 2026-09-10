@@ -6194,7 +6194,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         launch_token = self._set_droplet_imager_launch_pending(True)
 
         def _launch_after_camera_move():
-            if not self._pending_action_token_is_current(
+            if not isValid(self) or not self._pending_action_token_is_current(
                 "_droplet_imager_launch_token",
                 launch_token,
             ):
@@ -6209,7 +6209,10 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         move_queued = self.controller.move_to_location(
             "camera",
             manual=True,
-            on_complete=_launch_after_camera_move,
+            # Command completion runs inside MCU status delivery. Let that
+            # frame finish before exec() opens a nested loop, otherwise the
+            # reader watermark correctly blocks the dialog's arming commands.
+            on_complete=lambda: QtCore.QTimer.singleShot(0, _launch_after_camera_move),
         )
         if move_queued is False:
             self._clear_droplet_imager_launch_state()
@@ -6282,7 +6285,7 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         launch_token = self._set_refuel_camera_launch_pending(True)
 
         def _launch_refuel_after_camera_move():
-            if not self._pending_action_token_is_current(
+            if not isValid(self) or not self._pending_action_token_is_current(
                 "_refuel_camera_launch_token",
                 launch_token,
             ):
@@ -6295,7 +6298,8 @@ class PressurePlotBox(QtWidgets.QGroupBox):
         move_queued = self.controller.move_to_location(
             "camera",
             manual=True,
-            on_complete=_launch_refuel_after_camera_move,
+            # Refuel imaging is modal too; do not retain the status callback.
+            on_complete=lambda: QtCore.QTimer.singleShot(0, _launch_refuel_after_camera_move),
         )
         if move_queued is False:
             self._clear_refuel_camera_launch_state()

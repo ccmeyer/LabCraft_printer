@@ -1443,6 +1443,8 @@ def test_current_profile_calibrate_pressure_rejects_duplicate_while_camera_move_
 
     on_complete = controller.move_to_location.call_args.kwargs["on_complete"]
     on_complete()
+    assert events == []
+    qapp.processEvents()
 
     assert events == [
         "enable_print_profile",
@@ -1627,9 +1629,12 @@ def test_old_camera_completion_cannot_take_over_new_launch(monkeypatch, qapp):
     new_completion = controller.move_to_location.call_args.kwargs["on_complete"]
 
     old_completion()
+    qapp.processEvents()
     assert events == []
 
     new_completion()
+    assert events == []
+    qapp.processEvents()
     assert events == [
         "enable_print_profile",
         "droplet_dialog_init",
@@ -2601,6 +2606,8 @@ def test_current_profile_calibrate_pressure_moves_then_launches_droplet_imager(m
     assert events == []
 
     on_complete()
+    assert events == []
+    qapp.processEvents()
 
     assert events == [
         "enable_print_profile",
@@ -2646,6 +2653,8 @@ def test_current_profile_refuel_camera_moves_then_launches_refuel_dialog(monkeyp
     assert events == []
 
     on_complete()
+    assert events == []
+    qapp.processEvents()
 
     assert events == [
         "enable_print_profile",
@@ -2697,6 +2706,8 @@ def test_current_profile_refuel_camera_rejects_duplicate_while_camera_move_pendi
 
     on_complete = controller.move_to_location.call_args.kwargs["on_complete"]
     on_complete()
+    assert events == []
+    qapp.processEvents()
 
     assert events == [
         "enable_print_profile",
