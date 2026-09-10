@@ -1,0 +1,33 @@
+{
+  "schema_version": "labcraft_release_v2",
+  "version": "v1.3.0-rc.15",
+  "tag": "v1.3.0-rc.15",
+  "channel": "release_candidate",
+  "release_date": "2026-09-10",
+  "previous_version": "v1.3.0-rc.14",
+  "rollback_version": null,
+  "requires_firmware": null,
+  "machine_data": {
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "data_schema_version": 1,
+    "transition": "none",
+    "transition_id": null
+  },
+  "summary": "Remove repeated whole-experiment concentration calculations during dense well-plate refreshes.",
+  "notes": [
+    "Full plate refreshes calculate concentration details once. Printer-head pickup refreshes once even when the preview stock stays the same; disabled tooltips skip concentration lookup. Existing formulas and incremental completion updates are preserved, and refresh-local snapshots avoid stale values after calibration or plan changes.",
+    "The attended Pi operator confirmed that application commit dfc32e2d resolved the reported repaint issue. The app exited normally, protected invariants matched, released restoration and the complete 30-result SAFE inventory passed, and final status was production-ready with no related processes.",
+    "The isolated Windows 384-well/10-stock benchmark measured approximately 15 ms for stock selection and pickup, versus 933 ms and 1889 ms before the fix; all 3840 well/stock display comparisons matched. These are display-path measurements with assumed volume settings, not Pi or full-load timings. Long Pi memory qualification was not rerun at the operator's request.",
+    "Firmware, wire protocol, dependencies, saved-data schema and execution-calibration version-4 compatibility requirements are unchanged. Rollback remains unconfigured pending an exact compatible target qualification; preserve execution history and use protected current-version or qualified compatible-bundle recovery.",
+    "Stable and pinned rc.11 legacy index routes remain unchanged. Modern clients can discover this schema-v2 candidate only after its tag is published. The previously accepted rc.13 optimizer timing limitation remains separate from this display fix.",
+    "Release preparation only: merge, tagging, publication and deployment require the final release decision. Detailed validation and evidence are recorded in docs/plate_refresh_rc15_qualification.md."
+  ],
+  "validation": [
+    "Application dfc32e2d: 166 affected tests passed, followed by a 14-test regression rerun including two additional cases",
+    "Real Qt dense-plate construction, single calculation per load/selection/pickup, legacy lookup, missing values, read-only views, calibration revisions, and incremental well updates",
+    "Exact pushed application: Pi Status -> Sync -> Validate -> hardware Preflight -> attended Launch -> released Restore/SAFE -> final Status",
+    "Full Windows Python suite with rc.15 metadata: 6512 passed, 180 skipped, zero failures/errors; includes release metadata, updater, packaging and execution-data compatibility tests",
+    "Before tagging: tools/validate_release_metadata.py, strict release JSON parsing, git diff --check",
+    "After publication authorization: exact accepted revision tagging, validate_release_metadata.py --check-tags, release-aware bundle creation and verification"
+  ]
+}
