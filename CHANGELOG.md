@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.3.0-rc.13 - 2026-09-09
+
+### Fixed
+
+- Separate validated MCU reception from queued UI frame handling so a busy editor does not by itself make a responsive board appear silent. Command dispatch waits for all received frames to finish handling, including queued faults, and ignores callbacks from replaced connections. The existing silence timeout remains unchanged.
+- Keep command dispatch blocked from Disconnect through teardown and until a fresh handshake and status. Reset, repeated cleanup, and disconnect during a pending reconnect tolerate an absent execution timer; delayed shutdown callbacks cannot send queued motion.
+- Open unrun designs and create editable copies through cancellable background work. Loading preserves exact saved allocation inputs, and copying prepares validated files and reactions before guarded publication.
+- Remove full design reads from copy-button availability refreshes and add cooperative checkpoints during fingerprint and JSON preparation. Source-change checks, cancellation, staging cleanup, and allocation equality remain enforced.
+
+### Accepted performance limitation
+
+- The operator accepted occasional UI pauses during large optimizer calculations as nonblocking for merge and RC preparation. The realistic Pi matrix recorded a maximum 372.7 ms heartbeat gap, with 15 routes above the unchanged 250 ms diagnostic limit. These results remain timing failures; full realistic timing qualification is not claimed.
+- Across all 49 routes, 16 passed and 33 were blocked. Other overlapping blockers were infeasible single-stock/Apply prerequisites and unsupported requested import ejection volumes. Successful allocations matched reference calculations, and 380 exercised cancellation checks stayed below 41.6 ms without changing committed state.
+- The bounded Pi memory lane passed two warm-up and six measured rounds, with 21.2 MiB median RSS growth within its 32 MiB allowance and zero surviving closed editors. This does not establish unlimited-session leak freedom.
+
+### Recovery and release status
+
+- This is prepared candidate metadata. Attended connected-hardware qualification, release tagging, publication, and deployment remain pending. The original disconnect's precise cause remains unconfirmed.
+- The stable and exact legacy release-index pointers remain unchanged. Legacy clients continue through rc.11; modern clients can discover rc.13 only after its schema-v2 tag is approved and published.
+- Execution-calibration version 4 and both execution-data compatibility capabilities are retained. Rollback remains unconfigured until an exact compatible target is qualified; use the protected current-version or compatible-bundle recovery route. Do not downgrade experiment history or manually change production code.
+- Firmware bytes, wire protocol, shared dependencies, and canonical machine-data schema are unchanged. Pi no-hardware checks preserved protected state and left no related processes; the smoke launch added only its expected development-session records.
+
 ## v1.3.0-rc.12 - 2026-09-08
 
 ### Changed

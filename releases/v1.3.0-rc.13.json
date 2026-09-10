@@ -1,0 +1,36 @@
+{
+  "schema_version": "labcraft_release_v2",
+  "version": "v1.3.0-rc.13",
+  "tag": "v1.3.0-rc.13",
+  "channel": "release_candidate",
+  "release_date": "2026-09-09",
+  "previous_version": "v1.3.0-rc.12",
+  "rollback_version": null,
+  "requires_firmware": null,
+  "machine_data": {
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "data_schema_version": 1,
+    "transition": "none",
+    "transition_id": null
+  },
+  "summary": "Keep MCU dispatch ordered through busy editor work and disconnects, and prepare experiment loads and editable copies in cancellable background jobs.",
+  "notes": [
+    "MCU reception and queued frame handling are tracked separately. Commands wait until received frames, including faults, have finished handling; callbacks from replaced connections cannot revive dispatch. The existing silence timeout is unchanged.",
+    "Disconnect blocks queued commands throughout shutdown. Reset, repeated cleanup, and reconnect interrupted before the handshake tolerate an absent timer; dispatch resumes only after a fresh handshake and status.",
+    "Opening unrun designs preserves exact saved allocation inputs. Creating editable copies prepares validated allocations, reactions and staged files in the background, with cancellation, source-change guards and guarded publication.",
+    "Copy-button availability no longer parses the full saved design. Cooperative checkpoints reduce long fingerprint and JSON preparation pauses without changing decoded values or allocation fingerprints.",
+    "Accepted limitation: large optimizer calculations can still briefly pause the UI. The realistic Pi matrix reached 372.7 ms, with 15 routes exceeding the unchanged 250 ms diagnostic limit. The operator accepted this as nonblocking for merge and RC preparation; full realistic timing qualification is not claimed.",
+    "The bounded Pi memory lane passed with 21.2 MiB median RSS growth within its 32 MiB allowance and zero surviving closed editors. No unlimited-session leak guarantee is implied.",
+    "Execution-calibration version 4 and the execution_calibrations_v4 and execution_volume_budget_v1 compatibility requirements remain unchanged. No rollback target is configured until an exact compatible target is qualified. Use protected current-version or compatible-bundle recovery; never downgrade history or manually switch production code.",
+    "Legacy clients must continue through the pinned rc.11 bridge. The stable and legacy release-index pointers are unchanged; this schema-v2 release does not authorize a new direct legacy bridge.",
+    "Firmware, wire protocol, dependencies and canonical machine-data schema are unchanged. Attended connected-hardware qualification remains pending before publication. The original MCU disconnect's precise cause is unconfirmed."
+  ],
+  "validation": [
+    ".\\env\\Scripts\\python.exe -B -m pytest -q with a unique external --basetemp and JUnit evidence",
+    "Focused release metadata, updater, release-aware packaging and execution-data rollback compatibility checks",
+    ".\\env\\Scripts\\python.exe -B tools\\validate_release_metadata.py",
+    "Reviewed application SHA cb9a54bc5c631bc7cc7dfbca5039c380932f2f65: Pi realistic matrix recorded with accepted timing limitations, bounded memory lane passed, wrapper offscreen smoke and protected-state postflight passed",
+    "git diff --check; strict release JSON parsing; unchanged firmware, dependencies, compatibility declaration and release-index comparison",
+    "Before publication: freshly authorized attended connected-hardware campaign; after tag approval: metadata --check-tags and release-aware bundle generation and verification"
+  ]
+}

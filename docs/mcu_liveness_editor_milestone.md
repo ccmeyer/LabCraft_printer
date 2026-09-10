@@ -43,7 +43,8 @@ owner destruction. No worker QObject is installed on the GUI thread.
 No controller or firmware calls are needed for design computation. Cancellation
 or stale source must publish no copy. Loading snapshots exact persisted model
 inputs; UI control rounding is not applied to a loaded design's allocation.
-No protocol, firmware, calibration, machine-data routing or release metadata changes.
+The implementation changes no protocol, firmware, calibration schema or
+machine-data routing. Subsequent RC metadata preparation is recorded below.
 
 The response timeout remains 2.5 seconds. If the entire Python process, including
 the serial reader, cannot run, fresh reception cannot be established; this change
@@ -94,6 +95,75 @@ submission, 16 ms publication and a 154 ms maximum heartbeat gap. These Windows
 measurements do not qualify Pi timing or establish the original incident's cause.
 
 ## Validation results
+
+### Final realistic/memory qualification and accepted merge limitation
+
+The full Pi campaign on reviewed, pushed revision
+`cb9a54bc5c631bc7cc7dfbca5039c380932f2f65` completed on 2026-09-10 UTC:
+
+- Realistic matrix: **16 passed, 33 blocked**, all 49 routes attempted, five
+  measured repetitions where prerequisites permitted, **105m25s**. Fifteen
+  routes exceeded the unchanged 250 ms heartbeat limit; the maximum was
+  **372.7 ms**. The other overlapping blockers were 14 infeasible single-stock
+  or Apply prerequisites and eight unsupported requested import volumes.
+- All four real_68 routes exceeded the heartbeat limit (294.3-329.2 ms);
+  all eight real_25 and real_60 routes passed. The 380 exercised cancellation
+  checks stayed below **41.6 ms**, with no cancellation-state failure or
+  two-stock rank regression. Successful allocations matched reference results.
+- The largest recorded heartbeat intervals did not overlap the instrumented
+  UI table/publication methods. Their responsible call stacks remain unproven;
+  these results do not establish the original MCU disconnect's cause.
+- Bounded memory: **passed**, two warm-up and six measured rounds, 24 workload
+  cycles, **20m08s**. Median RSS increased **21.2 MiB** within the **32 MiB**
+  allowance; peak RSS was **963.8 MiB**, with zero process swap and zero live
+  closed editors at every idle endpoint. Positive RSS drift does not establish
+  unlimited-session stability. Repeated results and committed cancellation
+  state/history remained equal.
+- All six required recipe hashes matched before and after qualification.
+  The two optional legacy-recipe fixtures are outside these benchmark lanes.
+  Wrapper offscreen smoke passed. Production data, released firmware,
+  configuration, shared environment and worktrees were preserved. Only two
+  expected development smoke-session records were added; no related processes
+  remained and no forced process cleanup was needed.
+
+The operator explicitly accepted these remaining large-calculation pauses as
+nonblocking for merge and RC preparation. The timing threshold and raw failures
+remain unchanged; **full realistic timing qualification is not claimed**.
+This acceptance closes additional performance tuning as a prerequisite for this
+milestone. Correct allocation, cancellation and dispatch protections remain
+required, and a freshly authorized attended connected campaign remains pending
+before publication. Independent review of `cb9a54bc` found no actionable defects
+and reported 6,488 Windows passes with 180 skips.
+
+Raw evidence remains in the external Pi qualification session. Only redacted
+timings, counts and hashes were returned for the local report because automatic
+approval review rejected transferring the full recipe-bearing result file.
+Result SHA-256 values:
+
+- Realistic: `9b7aa28371ae2178f7fefc6e0413c3b3f130cae0ca80f87c15575ea64c7d7900`
+- Memory: `425e5c140700c659e8054873f23b1f1b42cc71bf0e751b4d8dfc7461872bb00b`
+
+### rc.13 merge and release preparation
+
+Fetched `origin/main` was `dc09d89af6d776c283f251cd90a6d49f11eca186`, already
+contained in the reviewed branch, and is the published rc.12 target. No incoming
+integration change was required. Rc.13 preparation changes documentation and
+release metadata only: the application, tests, firmware, dependencies and
+execution-data compatibility declarations retain the reviewed bytes.
+
+`VERSION`, the changelog and the new schema-v2 rc.13 manifest form the prepared
+candidate. The release index remains unchanged, including the stable and pinned
+rc.11 legacy routes. Modern discovery can select rc.13 only after its tag is
+approved and published. Rollback remains null under the rc.12 version-4 recovery
+policy; the previous-version field does not itself qualify rc.12 for rollback.
+Preparation validation uses focused metadata/updater checks, the full Windows
+suite, strict metadata parsing and protected-file comparisons. Results are bound
+to the preparation commit in the PR and external evidence.
+
+This preparation creates no release tag, merge, installable release bundle or
+deployment. Refresh the release date and integration checks if publication is
+delayed, and rerun validation for any resulting changes. Attended hardware
+qualification and explicit merge/publication authorization remain outstanding.
 
 ### Large-copy Pi responsiveness follow-up
 
@@ -175,8 +245,9 @@ development-workflow sessions `pr3-copy-fix-copy-20260909T235731Z-02e312da`,
 
 This closes the measured large-copy pause. It does not establish the original
 MCU disconnect's cause or qualify physical hardware. Independent review of
-this follow-up and a freshly authorized attended connected campaign remain
-pending. The full realistic fixture matrix and memory lane were not run.
+this follow-up, the full realistic matrix and memory lane were pending at this
+stage; their subsequent results and accepted limitation are recorded above.
+A freshly authorized attended connected campaign remains pending.
 
 The call path is editor UI -> background job -> detached model -> guarded
 publication -> UI refresh; Controller, transport and firmware are unchanged.
