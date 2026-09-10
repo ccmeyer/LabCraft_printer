@@ -7464,8 +7464,11 @@ class WellPlateWidget(QtWidgets.QGroupBox):
             else:
                 stock_name = printer_head.get_display_stock_name(new_line=False)
                 idx = self.reagent_selection.findText(stock_name)
-            self.reagent_selection.setCurrentIndex(idx)
-            self.update_well_colors()            
+            # Selection changes normally refresh via currentIndexChanged. Keep
+            # pickup to one refresh, including when the stock is already selected.
+            with QSignalBlocker(self.reagent_selection):
+                self.reagent_selection.setCurrentIndex(idx)
+            self.update_well_colors()
 
     def _suspend_well_plate_repaints(self):
         setter = getattr(self, "setUpdatesEnabled", None)
@@ -7565,7 +7568,6 @@ class WellPlateWidget(QtWidgets.QGroupBox):
         label = self.well_labels[well.row_num][well.col-1]
         if well.assigned_reaction:
             concentration = well.assigned_reaction.get_target_droplets_for_stock(stock_id)
-            final_conc = self.model.get_well_stock_final_concentration(well.well_id, stock_id)
             state = well.assigned_reaction.check_stock_complete(stock_id)
             outline = 'white' if state else 'black'
             if concentration is not None:
@@ -7583,15 +7585,19 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 label.setStyleSheet(
                     f"background-color: grey; border: 1px solid {outline};"
                 )
-            if final_conc is None:
-                conc_text = "n/a"
-            else:
-                try:
-                    units = self.model.stock_solutions.get_stock_by_id(stock_id).units
-                except Exception:
-                    units = ""
-                conc_text = f"{final_conc:.4f} {units}".strip()
             if enable_tooltips:
+                if "final_concentrations" in context:
+                    final_conc = context["final_concentrations"].get(well.well_id)
+                else:
+                    final_conc = self.model.get_well_stock_final_concentration(well.well_id, stock_id)
+                if final_conc is None:
+                    conc_text = "n/a"
+                else:
+                    try:
+                        units = self.model.stock_solutions.get_stock_by_id(stock_id).units
+                    except Exception:
+                        units = ""
+                    conc_text = f"{final_conc:.4f} {units}".strip()
                 label.setToolTip(
                     f"Well {well.well_id}\n"
                     f"Target droplets: {int(concentration or 0)}\n"
@@ -7636,9 +7642,16 @@ class WellPlateWidget(QtWidgets.QGroupBox):
                 update()
             return
 
+        wells = list(self.model.well_plate.get_all_wells())
+        concentrations_getter = getattr(self.model, "get_well_stock_final_concentrations", None)
+        if context["enable_tooltips"] and callable(concentrations_getter):
+            context["final_concentrations"] = concentrations_getter(
+                context["stock_id"],
+                (well.well_id for well in wells if well.assigned_reaction),
+            )
         resume_repaints = self._suspend_well_plate_repaints()
         try:
-            for well in self.model.well_plate.get_all_wells():
+            for well in wells:
                 self._update_well_label(well, context)
         finally:
             self._resume_well_plate_repaints(resume_repaints)

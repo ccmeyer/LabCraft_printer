@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from PySide6.QtWidgets import QLabel
@@ -340,7 +341,8 @@ def test_update_well_colors_disables_tooltips_for_plates_larger_than_384():
         ),
         printer_head_manager=SimpleNamespace(get_printer_head_by_id=lambda _: SimpleNamespace(get_color=lambda: "blue")),
         well_plate=SimpleNamespace(get_all_wells=lambda: [well], get_plate_dimensions=lambda: (32, 48)),
-        get_well_stock_final_concentration=lambda wid, sid: 0.12,
+        get_well_stock_final_concentration=Mock(side_effect=AssertionError("disabled tooltip lookup")),
+        get_well_stock_final_concentrations=Mock(side_effect=AssertionError("disabled tooltip batch")),
     )
 
     WellPlateWidget.update_well_colors(widget)

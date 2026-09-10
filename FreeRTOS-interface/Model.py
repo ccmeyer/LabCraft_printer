@@ -25023,6 +25023,27 @@ class Model(QObject):
         if emit_loaded:
             self.experiment_loaded.emit()
 
+    def get_well_stock_final_concentrations(self, stock_id: str, well_ids):
+        """Return a refresh-local snapshot without recalculating the plan per well."""
+        well_ids = tuple(well_ids)
+        if not well_ids:
+            return {}
+        plan = self.experiment_model.get_execution_plan_snapshot()
+        if plan is not None and self.experiment_model.get_execution_plan_source() != "legacy_reconstruction":
+            details = self.experiment_model._execution_concentration_details(plan)
+            return {
+                well_id: (
+                    row["stock_contributions"].get(stock_id, 0.0)
+                    if (row := details.get(well_id)) is not None and row["concentration_defined"]
+                    else None
+                )
+                for well_id in well_ids
+            }
+        return {
+            well_id: self.get_well_stock_final_concentration(well_id, stock_id)
+            for well_id in well_ids
+        }
+
     def get_well_stock_final_concentration(self, well_id: str, stock_id: str):
         """
         Return estimated final concentration contribution for a specific stock in a well.
