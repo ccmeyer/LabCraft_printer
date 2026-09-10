@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.3.0-rc.15 - 2026-09-10
+
+### Fixed
+
+- Remove the dense-plate display slowdown introduced in rc.12: full plate refreshes calculate execution-plan concentrations once instead of once per assigned well. Experiment loading, stock preview selection and printer-head pickup retain the existing concentration formulas, colours and tooltips.
+- Refresh the plate once on head pickup, including when its stock was already selected. Skip concentration calculations when tooltips are disabled; individual well-completion updates remain incremental.
+
+### Qualification and recovery
+
+- On application commit `dfc32e2d`, the attended Pi operator confirmed that the fix resolved the reported issue. Normal app exit, protected-state checks, exact released-firmware restoration, the complete 30-result SAFE inventory and final production-ready status passed with no related processes remaining.
+- The isolated Windows 384-well/10-stock benchmark reduced stock switching from 933 ms to 15 ms and pickup from 1,889 ms to 15 ms. All 3,840 well/stock colour and tooltip comparisons matched. These are local display-path measurements with assumed volume settings, not full import/load or Pi timings. Long Pi memory qualification was not rerun, as requested.
+- The full Windows suite passed 6,512 tests with 180 skips and no failures/errors; release metadata validation and strict parsing of all 38 release JSON files passed. Details are recorded in `docs/plate_refresh_rc15_qualification.md`. The accepted rc.13 optimizer timing limitation remains separate from this display fix.
+- Firmware, protocol, dependencies, saved-data schema and execution-data compatibility are unchanged. Keep the stable and pinned rc.11 legacy index routes unchanged. Rollback remains unconfigured until an exact compatible target is qualified; use protected current-version or qualified compatible-bundle recovery.
+- This is release preparation. Merge, tagging, publication and deployment remain pending.
+
 ## v1.3.0-rc.14 - 2026-09-10
 
 ### Fixed
