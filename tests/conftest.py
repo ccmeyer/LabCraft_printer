@@ -352,11 +352,15 @@ def experiment_model_factory(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _historical_replay_inputs(request, monkeypatch):
+def _historical_replay_inputs(request):
     marker = request.node.get_closest_marker("historical_replay")
     if marker is None:
         yield
         return
+    # Do not eagerly request monkeypatch for unrelated tests: doing so changes
+    # teardown ordering relative to the Qt cleanup fixture, leaving test patches
+    # active while widgets and their asynchronous services are being destroyed.
+    monkeypatch = request.getfixturevalue("monkeypatch")
     from tools.historical_fixtures import external_root, load_manifest, verified_files
     root = external_root(request.config.getoption("--historical-fixture-root"))
     groups = load_manifest()

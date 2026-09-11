@@ -7,6 +7,19 @@ import pytest
 from tools import historical_fixtures as fixtures
 
 
+def test_ordinary_tests_do_not_request_extra_fixtures():
+    from types import SimpleNamespace
+    from tests.conftest import _historical_replay_inputs
+    request = SimpleNamespace(
+        node=SimpleNamespace(get_closest_marker=lambda name: None),
+        getfixturevalue=lambda name: pytest.fail(f"Unexpected fixture activation: {name}"),
+    )
+    lifecycle = _historical_replay_inputs.__wrapped__(request)
+    next(lifecycle)
+    with pytest.raises(StopIteration):
+        next(lifecycle)
+
+
 def test_manifest_is_bounded_and_has_all_replay_groups():
     groups = fixtures.load_manifest()
     assert set(groups) == {"dense_stream", "htps_tail", "focus"}

@@ -245,4 +245,9 @@ def main(argv=None):
 
 if __name__ == "__main__":
     sys.path.insert(0, str(ROOT))
-    raise SystemExit(main())
+    status = main()
+    # Windows native failures arrive as unsigned DWORDs. sys.exit needs the
+    # signed 32-bit representation to preserve those bits rather than exit 1.
+    if os.name == "nt" and 0x80000000 <= status <= 0xFFFFFFFF:
+        status -= 0x100000000
+    raise SystemExit(status)
