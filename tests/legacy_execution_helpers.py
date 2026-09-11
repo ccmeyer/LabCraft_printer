@@ -138,5 +138,3 @@ def _write_folder(
         "Well ID,PURE MM_x\nA1,1\n", encoding="utf-8"
     )
     return design
-
-
