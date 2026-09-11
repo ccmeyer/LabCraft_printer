@@ -13,29 +13,32 @@ from LegacyExecutionMigration import (
 )
 
 
-REPORTED_SOURCE = (
-    Path(__file__).parents[1]
-    / "FreeRTOS-interface"
-    / "Experiments"
-    / "SW_experiment_load_error"
-    / "Labcraft Files, Design will not load into screen preventing analysis"
-)
+from tests.legacy_execution_helpers import _write_folder, _progress
 
 
-def test_reported_legacy_execution_migrates_to_analysis_only_copy(tmp_path):
-    before = hash_directory_files(REPORTED_SOURCE)
+@pytest.fixture
+def legacy_source(tmp_path):
+    source = tmp_path / "legacy"
+    _write_folder(source, progress=_progress())
+    required = {"experiment_design.json", "progress.json", "key.csv", "concentration_key.csv"}
+    assert required <= {path.name for path in source.iterdir() if path.is_file()}
+    return source
+
+
+def test_reported_legacy_execution_migrates_to_analysis_only_copy(tmp_path, legacy_source):
+    before = hash_directory_files(legacy_source)
     destination = tmp_path / "migrated"
 
     result = migrate_legacy_execution_copy(
-        REPORTED_SOURCE,
+        legacy_source,
         destination,
         timestamp_utc="2026-07-17T12:00:00Z",
     )
 
     assert result.destination == destination.resolve()
-    assert hash_directory_files(REPORTED_SOURCE) == before
+    assert hash_directory_files(legacy_source) == before
     design_bytes = (destination / "experiment_design.json").read_bytes()
-    assert design_bytes == (REPORTED_SOURCE / "experiment_design.json").read_bytes()
+    assert design_bytes == (legacy_source / "experiment_design.json").read_bytes()
     design = json.loads(design_bytes)
     bundle = inspect_authoritative_execution(destination, design)
     assert bundle.valid
@@ -67,26 +70,26 @@ def test_migration_manifest_rejects_unknown_fields(tmp_path):
         LegacyMigrationManifest.from_dict(payload)
 
 
-def test_migration_failure_or_collision_leaves_source_unchanged(tmp_path):
-    before = hash_directory_files(REPORTED_SOURCE)
+def test_migration_failure_or_collision_leaves_source_unchanged(tmp_path, legacy_source):
+    before = hash_directory_files(legacy_source)
     collision = tmp_path / "exists"
     collision.mkdir()
     with pytest.raises(FileExistsError):
-        migrate_legacy_execution_copy(REPORTED_SOURCE, collision)
-    assert hash_directory_files(REPORTED_SOURCE) == before
+        migrate_legacy_execution_copy(legacy_source, collision)
+    assert hash_directory_files(legacy_source) == before
 
 
-def test_migration_cancellation_removes_only_staging(tmp_path):
-    before = hash_directory_files(REPORTED_SOURCE)
+def test_migration_cancellation_removes_only_staging(tmp_path, legacy_source):
+    before = hash_directory_files(legacy_source)
     destination = tmp_path / "canceled"
 
     with pytest.raises(RuntimeError, match="canceled"):
         migrate_legacy_execution_copy(
-            REPORTED_SOURCE,
+            legacy_source,
             destination,
             cancel_check=lambda: True,
         )
 
     assert not destination.exists()
     assert not list(tmp_path.glob(".canceled.staging-*"))
-    assert hash_directory_files(REPORTED_SOURCE) == before
+    assert hash_directory_files(legacy_source) == before
