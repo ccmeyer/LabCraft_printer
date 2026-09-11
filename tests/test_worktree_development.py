@@ -116,3 +116,47 @@ def test_git_bash_arguments_are_not_interpolated(tmp_path, monkeypatch):
     dev.git_submodule("status", "--", dev.SUBMODULE, root=tmp_path / "worktree with spaces")
     assert calls[0][2] == 'exec git "$@"'
     assert calls[0][-1] == dev.SUBMODULE
+
+
+def test_child_imports_belong_to_current_worktree():
+    result = subprocess.run([sys.executable, "-c",
+        "import sys,json;from pathlib import Path;"
+        "from tools import worktree_development as d;"
+        "sys.path.insert(0,str(d.ROOT/'FreeRTOS-interface'));import LocalConfig;"
+        "print(json.dumps(dict(root=str(d.ROOT),module=LocalConfig.__file__,prefix=sys.prefix)))"],
+        cwd=dev.ROOT, capture_output=True, text=True, timeout=30, check=True)
+    identity = json.loads(result.stdout)
+    assert Path(identity["root"]).resolve() == dev.ROOT
+    assert Path(identity["module"]).resolve().is_relative_to(dev.ROOT / "FreeRTOS-interface")
+    assert Path(identity["prefix"]).resolve() == dev.ROOT / "env"
+
+
+def test_verify_environment_rejects_another_worktree_prefix(tmp_path, monkeypatch):
+    monkeypatch.setattr(dev, "python_identity", lambda p:
+                        {"prefix": str(tmp_path / "other/env"), "base_prefix": "base"})
+    with pytest.raises(ValueError, match="not this worktree"):
+        dev.verify_environment(tmp_path)
+
+
+def test_verify_environment_rejects_changed_package_version(tmp_path, monkeypatch):
+    monkeypatch.setattr(dev, "python_identity", lambda p:
+                        {"prefix": str(tmp_path / "env"), "base_prefix": "base"})
+    monkeypatch.setattr(dev, "lock_pins", lambda r: {"pytest": "required"})
+    monkeypatch.setattr(dev, "invoke", lambda *a, **k: '{"pytest":"different"}')
+    with pytest.raises(ValueError, match="Environment differs"):
+        dev.verify_environment(tmp_path)
+
+
+@pytest.mark.parametrize("status", ["+wrong commit", "Uconflict", "-uninitialized"])
+def test_firmware_check_refuses_invalid_submodule_without_mutation(tmp_path, monkeypatch, status):
+    cube = tmp_path / "cube"
+    cube.mkdir()
+    (cube / "headless-build.bat").touch()
+    monkeypatch.setattr(dev, "CUBE", cube)
+    monkeypatch.setattr(dev.shutil, "which", lambda n: "available")
+    calls = []
+    monkeypatch.setattr(dev, "git_submodule", lambda *a, **k: calls.append(a) or status)
+    monkeypatch.setattr(dev, "git", lambda *a, **k: "160000 commit abc module")
+    with pytest.raises(ValueError):
+        dev.firmware_preflight(tmp_path, check_only=True)
+    assert len(calls) == 1 and calls[0][0] == "status"
