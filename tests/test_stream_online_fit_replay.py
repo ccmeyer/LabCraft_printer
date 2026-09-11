@@ -13,10 +13,7 @@ from tests.stream_online_replay_helpers import to_int as _to_int
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_ROOT = (
-    REPO_ROOT
-    / "FreeRTOS-interface"
-    / "Experiments"
-    / "Stream_characterization-20260327_225650"
+    Path("Stream_characterization-20260327_225650")
 )
 SUMMARY_CSV = EXPERIMENT_ROOT / "analysis" / "stream_characterization" / "experiment_summary.csv"
 
@@ -51,13 +48,14 @@ def _build_sparse_replay_inputs(run_id: str):
     )
 
 
+@pytest.mark.historical_replay("dense_stream")
 def test_sparse_online_flow_fit_replay_matches_dense_offline_rates():
     if not SUMMARY_CSV.exists():
-        pytest.skip("Archived stream-analysis experiment summary is not available.")
+        pytest.fail("Archived stream-analysis experiment summary is not available.")
 
     for module_name in ("scipy", "scipy.optimize", "scipy.signal", "scipy.stats", "scipy.ndimage"):
         sys.modules.pop(module_name, None)
-    pytest.importorskip("scipy.stats")
+    importlib.import_module("scipy.stats")
     fit_module = importlib.reload(online_fit_mod)
     errors = []
     for row in _read_csv_rows(SUMMARY_CSV):

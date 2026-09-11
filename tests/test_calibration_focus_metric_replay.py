@@ -15,10 +15,12 @@ from CalibrationClasses.Model import NozzleFocusCalibrationProcess
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_ROOTS = {
-    "ribo": REPO_ROOT / "FreeRTOS-interface" / "Experiments" / "Ribo_rep1-20260423_204338",
-    "untitled_old": REPO_ROOT / "FreeRTOS-interface" / "Experiments" / "Untitled-20260424_130613",
-    "untitled_new": REPO_ROOT / "FreeRTOS-interface" / "Experiments" / "Untitled-20260424_141733",
+    "ribo": Path() / "Ribo_rep1-20260423_204338",
+    "untitled_old": Path() / "Untitled-20260424_130613",
+    "untitled_new": Path() / "Untitled-20260424_141733",
 }
+
+pytestmark = pytest.mark.historical_replay("focus")
 
 RUN_SPECS = {
     "run_20260423_204534_8502f998": {
@@ -249,9 +251,9 @@ def _score_run(run_id: str) -> list[dict]:
     experiment_root = EXPERIMENT_ROOTS[spec["experiment_key"]]
     run_dir = experiment_root / "calibration_recordings" / "NozzleFocusCalibrationProcess" / run_id
     if not run_dir.exists():
-        pytest.skip(f"Archived nozzle-focus replay run is not available: {run_id}")
+        pytest.fail(f"Archived nozzle-focus replay run is not available: {run_id}")
     if not spec["background"].exists():
-        pytest.skip(f"Archived nozzle-position background is not available for {run_id}")
+        pytest.fail(f"Archived nozzle-position background is not available for {run_id}")
 
     proc = _new_focus_proc()
     bg = cv2.imread(str(spec["background"]), cv2.IMREAD_COLOR)

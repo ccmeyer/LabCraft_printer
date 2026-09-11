@@ -57,6 +57,33 @@ Use distinct fresh SIL sessions for interactive simulation. Keep acceptance
 benchmarks and timing qualifications separate from competing heavy work.
 Allow at least 15 minutes per full-suite process.
 
+## Historical recording replays
+
+Default tests never discover archived recordings under an ignored checkout.
+Historical tests require `--historical-fixture-root`; synthetic tests still run.
+Stage only the 175 manifest-listed input files once, preserving the originals:
+
+```powershell
+.\env\Scripts\python.exe tools\historical_fixtures.py `
+  --source 'C:\archive\Experiments' --destination 'C:\LabCraft-test-data\historical-v1'
+.\tools\run_worktree_tests.ps1 -PytestArgs @('-q','-m','historical_replay',
+  '--historical-fixture-root','C:\LabCraft-test-data\historical-v1')
+```
+
+The source may be an existing ignored `FreeRTOS-interface/Experiments` archive.
+The destination must be new and outside every registered worktree. Staging
+copies only declared CSV/JSON/image inputs, checks SHA-256 values, and refuses
+existing destinations. Failed staging leaves its partial copy for diagnosis.
+Tests validate the selected replay group's bytes before and after use.
+Missing, altered, or insufficient inputs fail when replay is requested.
+The separate optimizer fixture contract is unchanged.
+
+Known archive limitation: the dense-tail scout/backtrack replay currently yields
+fewer than its required five usable results. This used to skip even with data
+present; the explicit lane now fails visibly. Preserve its numerical assertions;
+additional qualifying archived evidence or a separate analysis investigation
+is needed. The other 25 tests in the three replay modules pass with this dataset.
+
 ## Firmware and shared resources
 
 ```powershell

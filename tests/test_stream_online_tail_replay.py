@@ -17,17 +17,11 @@ from tools.stream_analysis import online_calibration as online_cal_mod
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXPERIMENT_ROOT = (
-    REPO_ROOT
-    / "FreeRTOS-interface"
-    / "Experiments"
-    / "Stream_characterization-20260327_225650"
+    Path("Stream_characterization-20260327_225650")
 )
 SUMMARY_CSV = EXPERIMENT_ROOT / "analysis" / "stream_characterization" / "experiment_summary.csv"
 HTPS_ONLINE_STREAM_ROOT = (
-    REPO_ROOT
-    / "FreeRTOS-interface"
-    / "Experiments"
-    / "HTPS_rep1-20260423_200444"
+    Path("HTPS_rep1-20260423_200444")
     / "calibration_recordings"
     / "OnlineStreamCalibrationProcess"
 )
@@ -64,7 +58,7 @@ def _first_int(*values):
 def _resolve_htps_tail_artifact(run_id: str) -> dict:
     run_dir = HTPS_ONLINE_STREAM_ROOT / run_id
     if not (run_dir / "tail_fit.json").exists():
-        pytest.skip(f"missing HTPS tail artifact: {run_id}")
+        pytest.fail(f"missing HTPS tail artifact: {run_id}")
     tail_artifact = _read_json(run_dir / "tail_fit.json")
     flow_artifact = _read_json(run_dir / "flow_fit.json")
     tail_phase = dict((dict(tail_artifact.get("result") or {}).get("tail_phase") or {}))
@@ -667,6 +661,7 @@ def test_sparse_online_tail_replay_applies_settling_rule_to_long_separated_shoul
         ("run_20260423_201547_0ba2972f", 3950),
     ],
 )
+@pytest.mark.historical_replay("htps_tail")
 def test_htps_tail_replay_keeps_normal_runs_near_prior_behavior(run_id, prior_tail_start_us):
     result = _resolve_htps_tail_artifact(run_id)
     tail_phase = result["tail_phase"]
@@ -684,6 +679,7 @@ def test_htps_tail_replay_keeps_normal_runs_near_prior_behavior(run_id, prior_ta
         ("run_20260423_201613_152ceb5c", 3900),
     ],
 )
+@pytest.mark.historical_replay("htps_tail")
 def test_htps_tail_replay_moves_early_selection_runs_later(run_id, minimum_tail_start_us):
     result = _resolve_htps_tail_artifact(run_id)
     tail_phase = result["tail_phase"]
@@ -692,6 +688,7 @@ def test_htps_tail_replay_moves_early_selection_runs_later(run_id, minimum_tail_
     assert int(tail_phase["tail_start_delay_from_emergence_us"]) >= int(minimum_tail_start_us)
 
 
+@pytest.mark.historical_replay("htps_tail")
 def test_htps_tail_replay_flags_right_extension_for_incomplete_window_run():
     result = _resolve_htps_tail_artifact("run_20260423_203233_f91d1fd4")
     tail_phase = result["tail_phase"]
@@ -701,9 +698,10 @@ def test_htps_tail_replay_flags_right_extension_for_incomplete_window_run():
     assert tail_phase["tail_width_still_falling_at_right_edge"] is True
 
 
+@pytest.mark.historical_replay("dense_stream")
 def test_sparse_online_tail_replay_matches_dense_offline_tail_start_with_scout_backtrack():
     if not SUMMARY_CSV.exists():
-        pytest.skip("Archived stream-analysis experiment summary is not available.")
+        pytest.fail("Archived stream-analysis experiment summary is not available.")
 
     errors = []
     for row in _read_csv_rows(SUMMARY_CSV):
@@ -731,7 +729,7 @@ def test_sparse_online_tail_replay_matches_dense_offline_tail_start_with_scout_b
         errors.append(abs(int(predicted_tail_start_delay_us) - int(gold_tail_start_delay_us)))
 
     if len(errors) < 5:
-        pytest.skip("Archived dense replay set does not yield enough resolved scout/backtrack tail results.")
+        pytest.fail("Archived dense replay set does not yield enough resolved scout/backtrack tail results.")
     sorted_errors = sorted(int(value) for value in errors)
     median_error = sorted_errors[len(sorted_errors) // 2]
     worst_error = max(sorted_errors)
