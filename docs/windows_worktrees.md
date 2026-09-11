@@ -94,6 +94,10 @@ Host build output stays in this worktree and CubeIDE uses a unique temporary
 workspace. The combined gate rebuilds `firmware/artifacts/LabCraft_firmware.bin`;
 review any difference and include the same-build artifact with firmware
 milestone commits. Never reset a changed binary to obtain a clean gate.
+The firmware embeds `__DATE__`/ `__TIME__`, so equivalent builds can differ in
+that diagnostic string. Record exact hashes and inspect differences rather than
+claiming byte reproducibility. The build restores settings only when CubeIDE
+changed generated environment hashes; substantive settings edits are retained.
 
 Git worktrees share refs, repository configuration and object storage. Give each
 worktree a distinct branch, avoid concurrent ref/configuration changes, and do

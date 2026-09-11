@@ -32,12 +32,29 @@ if (-not (Test-Path $headlessBuild)) {
 $Ws = Join-Path $env:TEMP ("cubeide_ws_" + $ProjName + "_" + [guid]::NewGuid().ToString())
 New-Item -ItemType Directory -Force -Path $Ws | Out-Null
 
+# CubeIDE persists environment hashes even for headless builds. Preserve the
+# caller's settings bytes when those generated hashes are the only changes.
+# Substantive concurrent edits remain untouched and visible in Git.
+$languageSettings = Join-Path $ProjectDir ".settings/language.settings.xml"
+$settingsBefore = $null
+if (Test-Path -LiteralPath $languageSettings -PathType Leaf) {
+  $settingsBefore = [System.IO.File]::ReadAllBytes($languageSettings)
+}
 Push-Location $CubeIde
 try {
   & $headlessBuild -no-indexer -data $Ws -import $ProjectDir -cleanBuild "$ProjName/$Config"
   $exit = $LASTEXITCODE
 } finally {
   Pop-Location
+  if ($null -ne $settingsBefore -and (Test-Path -LiteralPath $languageSettings -PathType Leaf)) {
+    $beforeText = [System.Text.Encoding]::UTF8.GetString($settingsBefore)
+    $afterText = [System.IO.File]::ReadAllText($languageSettings)
+    $beforeSemantic = [regex]::Replace($beforeText, 'env-hash="[^"]*"', 'env-hash=""').TrimEnd()
+    $afterSemantic = [regex]::Replace($afterText, 'env-hash="[^"]*"', 'env-hash=""').TrimEnd()
+    if ($beforeSemantic -ceq $afterSemantic) {
+      [System.IO.File]::WriteAllBytes($languageSettings, $settingsBefore)
+    }
+  }
 }
 
 Write-Host "Headless build exit code: $exit"
