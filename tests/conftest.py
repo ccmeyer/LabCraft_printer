@@ -274,6 +274,17 @@ def _isolate_qt_top_level_widgets(request):
     except RuntimeError:
         pass
 
+    # Python cycles can retain QObject wrappers after native widget deletion.
+    # Collect them here, with worker shutdown complete and on the GUI thread,
+    # before allocations in a later worker can trigger their destruction.
+    import gc
+
+    signal_sources = []
+    widget = source = manager = None
+    assert QtCore.QThread.currentThread() == app.thread()
+    gc.collect()
+    app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+
 
 @pytest.fixture
 def test_profile():
