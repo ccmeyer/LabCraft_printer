@@ -95,8 +95,8 @@ def test_reset_report_classifier_rejects_later_and_unsafe_variants():
     )
 
 
-def test_hello_phase_stays_initial_until_transport_has_been_ready(qapp, test_profile):
-    machine = Machine(SimpleNamespace(), profile=test_profile)
+def test_hello_phase_stays_initial_until_transport_has_been_ready(qapp, test_profile, tmp_path):
+    machine = Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     machine._write_frame = lambda _frame: None
     machine._start_ack_wait = lambda *args, **kwargs: None
 
@@ -117,8 +117,8 @@ def test_hello_phase_stays_initial_until_transport_has_been_ready(qapp, test_pro
     assert machine._hello_connection_phase == mfr.HOST_CONNECTION_PHASE_ESTABLISHED
 
 
-def test_machine_on_reset_report_stores_clears_and_restarts_hello(qapp, test_profile):
-    machine = Machine(SimpleNamespace(), profile=test_profile)
+def test_machine_on_reset_report_stores_clears_and_restarts_hello(qapp, test_profile, tmp_path):
+    machine = Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     seen = []
     recovery = []
     machine.reset_report_received.connect(seen.append)

@@ -9,7 +9,7 @@ import Machine_FreeRTOS as mfr
 from GravimetricLedger import ImagingEjectionEvent, ImagingEjectionLifecycle
 
 
-def _make_incident_gap_window(test_profile, *, black_box_log_dir=None):
+def _make_incident_gap_window(test_profile, *, black_box_log_dir):
     """Queue the four-command transport window ending at incident seq32=2860."""
     machine = mfr.Machine(
         SimpleNamespace(),
@@ -132,11 +132,11 @@ def test_command_queue_marks_canceled_commands_from_retired_frontier(qapp):
     assert [cmd.status for cmd in queue.completed] == ["Completed", "Canceled"]
 
 
-def test_machine_dispense_commands_use_configured_frequency(qapp, test_profile):
+def test_machine_dispense_commands_use_configured_frequency(qapp, test_profile, tmp_path):
     model = SimpleNamespace(
         machine_model=SimpleNamespace(get_dispense_frequency_hz=lambda: 10)
     )
-    machine = mfr.Machine(model, profile=test_profile)
+    machine = mfr.Machine(model, profile=test_profile, black_box_log_dir=tmp_path)
 
     dispense = machine.print_droplets(7)
     print_only = machine.print_only(5)
@@ -154,8 +154,9 @@ def test_machine_dispense_commands_use_configured_frequency(qapp, test_profile):
 def test_imaging_droplet_count_is_confirmed_before_completion_callback(
     qapp,
     test_profile,
+    tmp_path,
 ):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     callback_values = []
 
     command = machine.set_imaging_droplets(
@@ -174,8 +175,9 @@ def test_imaging_droplet_count_is_confirmed_before_completion_callback(
 def test_firmware_flash_fault_marks_latest_acknowledged_imaging_attempt_uncertain(
     qapp,
     test_profile,
+    tmp_path,
 ):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     events = []
     machine.imaging_ejection_event.connect(events.append)
     acknowledged = ImagingEjectionEvent(
@@ -205,8 +207,8 @@ def test_firmware_flash_fault_marks_latest_acknowledged_imaging_attempt_uncertai
     assert "print completion timeout" in events[-1].detail
 
 
-def test_acknowledgement_observes_flash_fault_delivered_first(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_acknowledgement_observes_flash_fault_delivered_first(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     machine._flash_state = {
         "flash_session_armed": False,
         "flash_fault_latched": True,
@@ -234,11 +236,11 @@ def test_acknowledgement_observes_flash_fault_delivered_first(qapp, test_profile
     assert "flash cycle fault" in events[-1].detail
 
 
-def test_machine_emits_typed_ejection_lifecycle_without_refuel(qapp, test_profile):
+def test_machine_emits_typed_ejection_lifecycle_without_refuel(qapp, test_profile, tmp_path):
     model = SimpleNamespace(
         machine_model=SimpleNamespace(get_dispense_frequency_hz=lambda: 10)
     )
-    machine = mfr.Machine(model, profile=test_profile)
+    machine = mfr.Machine(model, profile=test_profile, black_box_log_dir=tmp_path)
     events = []
     machine.ejection_command_event.connect(events.append)
 
@@ -268,11 +270,11 @@ def test_machine_emits_typed_ejection_lifecycle_without_refuel(qapp, test_profil
     assert all(event.requested_droplet_count == 7 for event in events)
 
 
-def test_machine_normalizes_canceled_ejection_lifecycle(qapp, test_profile):
+def test_machine_normalizes_canceled_ejection_lifecycle(qapp, test_profile, tmp_path):
     model = SimpleNamespace(
         machine_model=SimpleNamespace(get_dispense_frequency_hz=lambda: 10)
     )
-    machine = mfr.Machine(model, profile=test_profile)
+    machine = mfr.Machine(model, profile=test_profile, black_box_log_dir=tmp_path)
     events = []
     machine.ejection_command_event.connect(events.append)
     first = machine.print_only(4)
@@ -338,8 +340,8 @@ def _register_settings_trace(machine, *, request_id="req-1", settings=None):
     return commands
 
 
-def test_machine_snapshot_classifies_completion_command_not_sent(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_machine_snapshot_classifies_completion_command_not_sent(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     commands = _register_settings_trace(machine)
 
     snapshot = machine.get_settings_trace_snapshot("req-1")
@@ -350,8 +352,8 @@ def test_machine_snapshot_classifies_completion_command_not_sent(qapp, test_prof
     assert snapshot["commands"][-1]["sent_ms"] is None
 
 
-def test_machine_records_untraced_command_events(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_machine_records_untraced_command_events(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
 
     command = machine.command_queue.add_command("LED_ON", 0, 0, 0)
 
@@ -365,8 +367,8 @@ def test_machine_records_untraced_command_events(qapp, test_profile):
     )
 
 
-def test_settings_trace_snapshot_filters_untraced_command_events(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_settings_trace_snapshot_filters_untraced_command_events(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     untraced = machine.command_queue.add_command("LED_ON", 0, 0, 0)
     commands = _register_settings_trace(machine)
 
@@ -379,8 +381,8 @@ def test_settings_trace_snapshot_filters_untraced_command_events(qapp, test_prof
     )
 
 
-def test_machine_snapshot_classifies_completion_command_sent_not_retired(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_machine_snapshot_classifies_completion_command_sent_not_retired(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     commands = _register_settings_trace(machine)
 
     for _ in commands:
@@ -396,8 +398,8 @@ def test_machine_snapshot_classifies_completion_command_sent_not_retired(qapp, t
     assert snapshot["commands"][-1]["completed_ms"] is None
 
 
-def test_machine_snapshot_classifies_state_matches_settings_but_completion_missing(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_machine_snapshot_classifies_state_matches_settings_but_completion_missing(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     commands = _register_settings_trace(machine)
 
     for _ in commands:
@@ -427,8 +429,8 @@ def test_machine_snapshot_classifies_state_matches_settings_but_completion_missi
     assert snapshot["recent_status"]
 
 
-def test_machine_snapshot_classifies_late_completion_after_timeout(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_machine_snapshot_classifies_late_completion_after_timeout(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     commands = _register_settings_trace(machine)
 
     for _ in commands:
@@ -450,8 +452,8 @@ def test_machine_snapshot_classifies_late_completion_after_timeout(qapp, test_pr
     assert any(event["event"] == "completed" for event in snapshot["recent_command_events"])
 
 
-def test_request_pause_after_seq32_write_failure_invokes_failure_callback(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_request_pause_after_seq32_write_failure_invokes_failure_callback(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     machine._write_frame = Mock(side_effect=IOError("port closed"))
     failures = []
     errors = []
@@ -471,8 +473,8 @@ def test_request_pause_after_seq32_write_failure_invokes_failure_callback(qapp, 
     assert errors == []
 
 
-def test_request_pause_after_seq32_ack_rejection_invokes_failure_callback(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_request_pause_after_seq32_ack_rejection_invokes_failure_callback(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     machine._write_frame = Mock()
     failures = []
     errors = []
@@ -494,8 +496,8 @@ def test_request_pause_after_seq32_ack_rejection_invokes_failure_callback(qapp, 
     assert errors == []
 
 
-def test_request_pause_after_seq32_status_confirmation_survives_initial_ack_timeout(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_request_pause_after_seq32_status_confirmation_survives_initial_ack_timeout(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     machine._write_frame = Mock()
     successes = []
     failures = []
@@ -521,8 +523,8 @@ def test_request_pause_after_seq32_status_confirmation_survives_initial_ack_time
     assert seq32 not in machine._pending_pause_after_requests
 
 
-def test_request_pause_after_seq32_not_confirmed_within_grace_window_invokes_failure_callback(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_request_pause_after_seq32_not_confirmed_within_grace_window_invokes_failure_callback(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     machine._write_frame = Mock()
     failures = []
 
@@ -543,8 +545,8 @@ def test_request_pause_after_seq32_not_confirmed_within_grace_window_invokes_fai
     ]
 
 
-def test_request_pause_after_seq32_success_still_invokes_success_callback(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_request_pause_after_seq32_success_still_invokes_success_callback(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     machine._write_frame = Mock()
     successes = []
     failures = []
@@ -597,8 +599,8 @@ def test_queue_gap_below_local_queue_faults_instead_of_resending(qapp, test_prof
     assert len(faults) == 1
 
 
-def test_queue_gap_recovers_when_expected_command_is_still_sent(qapp, test_profile):
-    machine, commands, completions = _make_incident_gap_window(test_profile)
+def test_queue_gap_recovers_when_expected_command_is_still_sent(qapp, test_profile, tmp_path):
+    machine, commands, completions = _make_incident_gap_window(test_profile, black_box_log_dir=tmp_path)
     assert _written_command_numbers(machine, commands) == [2857, 2858, 2859, 2860]
 
     _deliver_queue_ack(machine, 2857, "accepted")
@@ -639,8 +641,8 @@ def test_queue_gap_recovers_when_expected_command_is_still_sent(qapp, test_profi
     assert machine._tx_paused is False
 
 
-def test_queue_gap_repairs_incident_when_expected_is_locally_accepted(qapp, test_profile):
-    machine, commands, _completions = _make_incident_gap_window(test_profile)
+def test_queue_gap_repairs_incident_when_expected_is_locally_accepted(qapp, test_profile, tmp_path):
+    machine, commands, _completions = _make_incident_gap_window(test_profile, black_box_log_dir=tmp_path)
     errors = []
     machine.error_occurred.connect(errors.append)
 
@@ -663,8 +665,8 @@ def test_queue_gap_repairs_incident_when_expected_is_locally_accepted(qapp, test
     assert errors == []
 
 
-def test_queue_gap_requeues_locally_accepted_expected_command(qapp, test_profile):
-    machine, commands, _completions = _make_incident_gap_window(test_profile)
+def test_queue_gap_requeues_locally_accepted_expected_command(qapp, test_profile, tmp_path):
+    machine, commands, _completions = _make_incident_gap_window(test_profile, black_box_log_dir=tmp_path)
     _deliver_queue_ack(machine, 2859, "accepted")
 
     _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
@@ -673,8 +675,8 @@ def test_queue_gap_requeues_locally_accepted_expected_command(qapp, test_profile
     assert machine._queue_gap_repair["cursor_seq32"] == 2859
 
 
-def test_queue_gap_requeues_locally_executing_expected_command(qapp, test_profile):
-    machine, commands, _completions = _make_incident_gap_window(test_profile)
+def test_queue_gap_requeues_locally_executing_expected_command(qapp, test_profile, tmp_path):
+    machine, commands, _completions = _make_incident_gap_window(test_profile, black_box_log_dir=tmp_path)
     commands[2859].mark_as_executing()
 
     _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
@@ -683,8 +685,8 @@ def test_queue_gap_requeues_locally_executing_expected_command(qapp, test_profil
     assert machine._queue_gap_repair["cursor_seq32"] == 2859
 
 
-def test_queue_gap_without_expected_sequence_should_not_resend_later_command(qapp, test_profile):
-    machine, commands, _completions = _make_incident_gap_window(test_profile)
+def test_queue_gap_without_expected_sequence_should_not_resend_later_command(qapp, test_profile, tmp_path):
+    machine, commands, _completions = _make_incident_gap_window(test_profile, black_box_log_dir=tmp_path)
     errors = []
     faults = []
     machine.error_occurred.connect(errors.append)
@@ -701,8 +703,8 @@ def test_queue_gap_without_expected_sequence_should_not_resend_later_command(qap
     assert "expected sequence" in faults[0]["message"].lower()
 
 
-def test_queue_gap_status_frontier_advances_repair_when_ack_is_lost(qapp, test_profile):
-    machine, commands, _completions = _make_incident_gap_window(test_profile)
+def test_queue_gap_status_frontier_advances_repair_when_ack_is_lost(qapp, test_profile, tmp_path):
+    machine, commands, _completions = _make_incident_gap_window(test_profile, black_box_log_dir=tmp_path)
     _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
 
     machine.update_command_numbers(
@@ -716,8 +718,8 @@ def test_queue_gap_status_frontier_advances_repair_when_ack_is_lost(qapp, test_p
     assert _written_command_numbers(machine, commands)[-2:] == [2859, 2860]
 
 
-def test_queue_gap_ignores_later_ack_until_repair_cursor_advances(qapp, test_profile):
-    machine, commands, _completions = _make_incident_gap_window(test_profile)
+def test_queue_gap_ignores_later_ack_until_repair_cursor_advances(qapp, test_profile, tmp_path):
+    machine, commands, _completions = _make_incident_gap_window(test_profile, black_box_log_dir=tmp_path)
     _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
     writes_before_stale_ack = machine._write_frame.call_count
 
@@ -728,8 +730,8 @@ def test_queue_gap_ignores_later_ack_until_repair_cursor_advances(qapp, test_pro
     assert commands[2860].status == "Added"
 
 
-def test_queue_gap_repair_attempts_are_independent_of_lifetime_send_attempts(qapp, test_profile):
-    machine, commands, _completions = _make_incident_gap_window(test_profile)
+def test_queue_gap_repair_attempts_are_independent_of_lifetime_send_attempts(qapp, test_profile, tmp_path):
+    machine, commands, _completions = _make_incident_gap_window(test_profile, black_box_log_dir=tmp_path)
     commands[2859].send_attempts = 10
     _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
 
@@ -741,8 +743,8 @@ def test_queue_gap_repair_attempts_are_independent_of_lifetime_send_attempts(qap
     assert _written_command_numbers(machine, commands)[-2:] == [2859, 2859]
 
 
-def test_queue_gap_repair_rebases_to_an_earlier_retained_expectation(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_queue_gap_repair_rebases_to_an_earlier_retained_expectation(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     machine._transport_ready = False
     machine._write_frame = Mock()
     commands = {seq32: machine.wait_ms(10) for seq32 in range(1, 5)}
@@ -758,8 +760,8 @@ def test_queue_gap_repair_rebases_to_an_earlier_retained_expectation(qapp, test_
     assert _written_command_numbers(machine, commands)[-2:] == [3, 2]
 
 
-def test_queue_gap_repair_excludes_unsent_tail_until_repair_completes(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_queue_gap_repair_excludes_unsent_tail_until_repair_completes(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     machine._transport_ready = False
     machine._write_frame = Mock()
     commands = {seq32: machine.wait_ms(10) for seq32 in range(1, 7)}
@@ -790,8 +792,8 @@ def test_queue_gap_repair_excludes_unsent_tail_until_repair_completes(qapp, test
     assert commands[6].send_attempts == 1
 
 
-def test_queue_clear_discards_active_gap_repair_state(qapp, test_profile):
-    machine, _commands, _completions = _make_incident_gap_window(test_profile)
+def test_queue_clear_discards_active_gap_repair_state(qapp, test_profile, tmp_path):
+    machine, _commands, _completions = _make_incident_gap_window(test_profile, black_box_log_dir=tmp_path)
     _deliver_queue_ack(machine, 2860, "gap", expected_seq32=2859)
     assert machine._queue_gap_repair is not None
 
@@ -800,8 +802,8 @@ def test_queue_clear_discards_active_gap_repair_state(qapp, test_profile):
     assert machine._queue_gap_repair is None
 
 
-def test_queue_busy_resends_are_bounded(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_queue_busy_resends_are_bounded(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     errors = []
     faults = []
     machine.error_occurred.connect(errors.append)
@@ -845,8 +847,8 @@ def test_queue_gap_repair_ack_timeouts_are_bounded(qapp, test_profile, tmp_path)
     assert len(machine.command_queue.queue) == 0
 
 
-def test_queue_ack_timeout_retries_before_transport_loss(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_queue_ack_timeout_retries_before_transport_loss(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     lost_reports = []
     machine.serial_connection_lost.connect(lost_reports.append)
     machine.pump_send_queue = Mock()
@@ -887,8 +889,8 @@ def test_queue_ack_timeout_at_retry_limit_marks_mcu_unresponsive(qapp, test_prof
     assert len(machine.command_queue.queue) == 0
 
 
-def test_command_queue_rejects_commands_after_untrusted_transport(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_command_queue_rejects_commands_after_untrusted_transport(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     errors = []
     machine.error_occurred.connect(errors.append)
     machine._transport_ready = False
@@ -902,8 +904,8 @@ def test_command_queue_rejects_commands_after_untrusted_transport(qapp, test_pro
     assert "machine connection is not trusted" in errors[-1]
 
 
-def test_transport_fault_blocks_new_commands_while_serial_transport_is_ready(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_transport_fault_blocks_new_commands_while_serial_transport_is_ready(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     errors = []
     machine.error_occurred.connect(errors.append)
     machine._transport_ready = True
@@ -923,8 +925,8 @@ def test_transport_fault_blocks_new_commands_while_serial_transport_is_ready(qap
     machine._write_frame.assert_not_called()
 
 
-def test_transport_fault_refuses_in_place_reconnect(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_transport_fault_refuses_in_place_reconnect(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     errors = []
     machine.error_occurred.connect(errors.append)
     machine.ser = _OpenSerial()
@@ -940,8 +942,8 @@ def test_transport_fault_refuses_in_place_reconnect(qapp, test_profile):
     assert "Disconnect the current machine session" in errors[-1]
 
 
-def test_transport_fault_reset_clears_latch(qapp, test_profile):
-    machine = mfr.Machine(SimpleNamespace(), profile=test_profile)
+def test_transport_fault_reset_clears_latch(qapp, test_profile, tmp_path):
+    machine = mfr.Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     machine._handle_transport_fault("queue divergence", fault_code="unexpected_queue_ack")
     assert machine._transport_fault_report is not None
 

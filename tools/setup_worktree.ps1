@@ -10,7 +10,7 @@ if (-not [IO.Path]::IsPathRooted($Python) -or -not (Test-Path -LiteralPath $Pyth
   throw "-Python must name an existing absolute Python executable."
 }
 $tool = Join-Path $PSScriptRoot "worktree_development.py"
-$arguments = @($tool, "setup", "--python", $Python)
+$arguments = @("-B", $tool, "setup", "--python", $Python)
 if ($IncludeFirmware) { $arguments += "--include-firmware" }
 if ($CheckOnly) { $arguments += "--check-only" }
 & $Python @arguments

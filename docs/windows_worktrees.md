@@ -56,6 +56,11 @@ are refused. Invoke only one setup operation per worktree; use separate
 worktrees for concurrent testing. Direct `env\Scripts\python.exe -m pytest`
 remains available for diagnosis; give it a unique external `--basetemp`.
 
+Test fixtures must pass temporary configuration and black-box log roots rather
+than writing the checkout's ignored `local/` or `logs/` directories. The wrappers
+disable source bytecode generation as well. Include ignored outputs in final
+worktree audits: clean tracked Git status alone does not prove output isolation.
+
 Use distinct fresh SIL sessions for interactive simulation. Keep acceptance
 benchmarks and timing qualifications separate from competing heavy work.
 Allow at least 15 minutes per full-suite process.
