@@ -132,6 +132,8 @@ def test_child_imports_belong_to_current_worktree():
 
 
 def test_verify_environment_rejects_another_worktree_prefix(tmp_path, monkeypatch):
+    (tmp_path / "env/Scripts").mkdir(parents=True)
+    (tmp_path / "env/Scripts/python.exe").touch()
     monkeypatch.setattr(dev, "python_identity", lambda p:
                         {"prefix": str(tmp_path / "other/env"), "base_prefix": "base"})
     with pytest.raises(ValueError, match="not this worktree"):
@@ -139,12 +141,24 @@ def test_verify_environment_rejects_another_worktree_prefix(tmp_path, monkeypatc
 
 
 def test_verify_environment_rejects_changed_package_version(tmp_path, monkeypatch):
+    (tmp_path / "env/Scripts").mkdir(parents=True)
+    (tmp_path / "env/Scripts/python.exe").touch()
     monkeypatch.setattr(dev, "python_identity", lambda p:
                         {"prefix": str(tmp_path / "env"), "base_prefix": "base"})
     monkeypatch.setattr(dev, "lock_pins", lambda r: {"pytest": "required"})
     monkeypatch.setattr(dev, "invoke", lambda *a, **k: '{"pytest":"different"}')
     with pytest.raises(ValueError, match="Environment differs"):
         dev.verify_environment(tmp_path)
+
+
+def test_incomplete_environment_names_missing_interpreter_and_preserves_files(tmp_path):
+    (tmp_path / "env").mkdir()
+    marker = tmp_path / "env/partial.txt"
+    marker.write_text("preserve")
+    with pytest.raises(ValueError, match="Environment is missing or incomplete.*python.exe"):
+        dev.verify_environment(tmp_path)
+    assert list((tmp_path / "env").iterdir()) == [marker]
+    assert marker.read_text() == "preserve"
 
 
 @pytest.mark.parametrize("status", ["+wrong commit", "Uconflict", "-uninitialized"])

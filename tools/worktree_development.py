@@ -81,6 +81,9 @@ def verify_environment(root):
     python = directory / "Scripts/python.exe"
     if directory.resolve() != directory or python.resolve() != python:
         raise ValueError("env must be independent, not a junction or symlink")
+    if not python.is_file():
+        raise ValueError(f"Environment is missing or incomplete: {python}. "
+                         "Preserve it for diagnosis and provision a fresh worktree.")
     identity = python_identity(python)
     if Path(identity["prefix"]).resolve() != directory or identity["prefix"] == identity["base_prefix"]:
         raise ValueError("Interpreter is not this worktree's virtual environment")
