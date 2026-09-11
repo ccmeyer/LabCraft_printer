@@ -11,6 +11,9 @@ already used by the firmware build script.
 
 Run in the existing repository, supplying your new branch and destination:
 
+The base revision must include these tools. Until this work is merged, use
+`codex/parallel-worktrees` in place of `main` below.
+
 ```powershell
 git worktree add -b codex/my-change ..\LabCraft-my-change main
 Set-Location ..\LabCraft-my-change
@@ -77,6 +80,13 @@ existing destinations. Failed staging leaves its partial copy for diagnosis.
 Tests validate the selected replay group's bytes before and after use.
 Missing, altered, or insufficient inputs fail when replay is requested.
 The separate optimizer fixture contract is unchanged.
+
+The tracked stream-tail validation manifest is checked as a historical snapshot.
+Its generator uses small synthetic runs in default tests, including missing-file
+exclusions and density correction; default tests do not regenerate that snapshot
+by scanning the original 156 archived runs. Qt test cleanup also collects Python
+reference cycles on the GUI thread after worker shutdown, so later worker
+allocations cannot collect objects retained by a previous test.
 
 Known archive limitation: the dense-tail scout/backtrack replay currently yields
 fewer than its required five usable results. This used to skip even with data

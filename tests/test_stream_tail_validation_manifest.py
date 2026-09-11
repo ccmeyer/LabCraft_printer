@@ -1,8 +1,14 @@
+import csv
+import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from tools.stream_analysis.build_tail_validation_manifest import (
+    DEFAULT_EXPERIMENTS_ROOT,
     DEFAULT_OUTPUT,
+    DENSITY_MEASUREMENTS_CSV,
     MANIFEST_ID,
     SCHEMA_VERSION,
     build_manifest,
@@ -99,7 +105,7 @@ def test_stream_tail_validation_manifest_density_layer_assignments():
     ]
 
 
-def test_stream_tail_validation_manifest_has_replayable_relative_paths():
+def test_stream_tail_validation_manifest_declares_contained_relative_paths():
     manifest = _load_manifest()
 
     for run in manifest["runs"]:
@@ -107,7 +113,11 @@ def test_stream_tail_validation_manifest_has_replayable_relative_paths():
         for key in ("run_dir", "flow_fit_json", "tail_fit_json", "frames_jsonl", "events_jsonl", "captures_dir"):
             path_text = artifacts[key]
             assert not Path(path_text).is_absolute()
-            assert (REPO_ROOT / path_text).exists(), path_text
+            assert ".." not in Path(path_text).parts
+            assert (REPO_ROOT / path_text).resolve().is_relative_to(REPO_ROOT)
+            assert Path(artifacts["run_dir"]).name == run["run_id"]
+            if key != "run_dir":
+                assert Path(path_text).parent == Path(artifacts["run_dir"])
         assert artifacts["capture_count"] > 0
         assert artifacts["has_tail_summaries"] is True
 
@@ -134,14 +144,68 @@ def test_stream_tail_validation_manifest_current_120um_rows_are_labeled():
     )
 
 
-def test_stream_tail_validation_manifest_matches_regenerated_summary():
-    manifest = _load_manifest()
-    regenerated = build_manifest(REPO_ROOT)
+@pytest.fixture
+def synthetic_recording(tmp_path):
+    density = tmp_path / DENSITY_MEASUREMENTS_CSV
+    density.parent.mkdir(parents=True)
+    density.write_bytes((REPO_ROOT / DENSITY_MEASUREMENTS_CSV).read_bytes())
+    experiment = tmp_path / DEFAULT_EXPERIMENTS_ROOT / "EF-Ts_rep1-20260424_223016"
+    run = experiment / "calibration_recordings/OnlineStreamCalibrationProcess/run_synthetic"
+    (run / "captures").mkdir(parents=True)
+    # The manifest builder inventories captures; it does not decode images.
+    (run / "captures/frame.txt").write_text("synthetic capture inventory entry")
+    (run / "frames.jsonl").write_text("{}\n")
+    (run / "events.jsonl").write_text("{}\n")
+    (run / "flow_fit.json").write_text(json.dumps({"fit": {
+        "flow_rate_nl_per_us": 0.02, "flow_intercept_nl": 1.0}}))
+    (run / "tail_fit.json").write_text(json.dumps({
+        "scout_delay_summaries": [{"delay_us": 4000}],
+        "backtrack_delay_summaries": [{"delay_us": 3900}],
+        "result": {"predicted_volume_nl": 75.0, "predicted_stream_duration_us": 4000.0},
+    }))
+    with (experiment / "stream_metadata.csv").open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["Dataset name", "Mass/print", "Print PW", "Print Pressure"])
+        writer.writerow(["run_synthetic", "0.0809", "2500", "0.7004"])
+        writer.writerow(["run_absent", "0.1", "2500", "0.7004"])
+        writer.writerow(["run_without_mass", "NaN", "2500", "0.7004"])
+    return tmp_path, run
 
-    assert regenerated["summary"] == manifest["summary"]
-    assert [run["run_id"] for run in regenerated["runs"]] == [
-        run["run_id"] for run in manifest["runs"]
-    ]
-    assert [row["run_id"] for row in regenerated["excluded_rows"]] == [
-        row["run_id"] for row in manifest["excluded_rows"]
-    ]
+
+def test_stream_tail_manifest_generation_uses_owned_inputs(synthetic_recording):
+    root, run_dir = synthetic_recording
+    before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob("*") if p.is_file()}
+    manifest = build_manifest(root)
+    assert manifest["summary"]["total_gravimetric_rows"] == 2
+    assert manifest["summary"]["full_replayable_rows"] == 1
+    assert manifest["summary"]["excluded_rows"] == 1
+    assert manifest["summary"]["exclusion_reason_counts"] == {"missing_run_dir": 1}
+    assert [r["run_id"] for r in manifest["excluded_rows"]] == ["run_absent"]
+    run, = manifest["runs"]
+    assert run["run_id"] == "run_synthetic"
+    assert run["density"]["solution_id"] == "EFTs"
+    assert run["gravimetric"]["gravimetric_volume_nl"] == round(80.9 / 1.087, 3)
+    assert run["current_analysis"]["gravimetric_density_corrected_equivalent_tail_start_us"] == round((80.9 / 1.087 - 1.0) / 0.02, 3)
+    assert run["artifacts"]["capture_count"] == 1
+    for key in ("run_dir", "flow_fit_json", "tail_fit_json", "frames_jsonl", "events_jsonl", "captures_dir"):
+        assert (root / run["artifacts"][key]).exists()
+        assert (root / run["artifacts"][key]).resolve().is_relative_to(root)
+    assert manifest == build_manifest(root)
+    assert before == {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("missing,reason", [
+    ("flow_fit.json", "missing_flow_fit"), ("tail_fit.json", "missing_tail_fit"),
+    ("frames.jsonl", "missing_frames_jsonl"), ("events.jsonl", "missing_events_jsonl"),
+    ("captures/frame.txt", "missing_captures"), ("summaries", "missing_tail_summaries"),
+])
+def test_stream_tail_manifest_excludes_incomplete_inputs(synthetic_recording, missing, reason):
+    root, run_dir = synthetic_recording
+    if missing == "summaries":
+        (run_dir / "tail_fit.json").write_text("{}")
+    else:
+        (run_dir / missing).unlink()
+    manifest = build_manifest(root)
+    assert manifest["runs"] == []
+    excluded = next(r for r in manifest["excluded_rows"] if r["run_id"] == "run_synthetic")
+    assert excluded["exclusion_reasons"] == [reason]
