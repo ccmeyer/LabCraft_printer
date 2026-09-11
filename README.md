@@ -12,45 +12,18 @@ Before you can run the LabCraft Printer project, make sure you have the followin
 
 ## Getting Started - Python
 
-To get started with the LabCraft Printer project, follow these steps:
+For Windows development and parallel worktrees, follow
+[Parallel Windows development worktrees](docs/windows_worktrees.md).
+Use Windows x64 CPython 3.13 and provision a separate `env` in each checkout:
 
-1. Clone the Git repository to your local machine:
+```powershell
+.\tools\setup_worktree.ps1 -Python 'C:\absolute\Python313\python.exe'
+.\tools\run_worktree_tests.ps1 -PytestArgs @('-q')
+```
 
-    ```bash
-    git clone https://github.com/ccmeyer/LabCraft_printer
-    ```
-
-2. Open the project folder in VSCode:
-
-    ```bash
-    cd LabCraft_printer
-    ```
-
-3. Create a virtual environment for the project:
-
-    ```bash
-    python -m venv venv
-    ```
-
-4. Activate the virtual environment:
-
-    - On Windows:
-
-      ```bash
-      venv\Scripts\activate
-      ```
-
-    - On macOS and Linux:
-
-      ```bash
-      source venv/bin/activate
-      ```
-
-5. Install the project dependencies:
-
-    ```bash
-    pip install -r requirements.txt
-    ```
+The Windows development lock is independent of the existing Pi runtime
+requirements. Do not install the Pi-oriented root `requirements.txt` into a
+Windows development environment or modify the shared Pi environment.
 
 ## Print-Array Pause and Queue-Clear Safety
 

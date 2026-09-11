@@ -1,0 +1,86 @@
+# Parallel Windows development worktrees
+
+Windows x64 CPython 3.13 is the supported local development platform (initial
+qualification uses 3.13.14). Each worktree owns an `env`; pip's download cache
+may be shared, but installed packages and mutable test data are never shared.
+Install Git for Windows, Python, and PowerShell first. Firmware work also needs
+CMake, Visual Studio C++ build tools, and STM32CubeIDE 1.18.1 at the location
+already used by the firmware build script.
+
+## Create and provision
+
+Run in the existing repository, supplying your new branch and destination:
+
+```powershell
+git worktree add -b codex/my-change ..\LabCraft-my-change main
+Set-Location ..\LabCraft-my-change
+.\tools\setup_worktree.ps1 -Python 'C:\absolute\Python313\python.exe'
+# Include local firmware prerequisites and the exact pinned CppUTest submodule:
+.\tools\setup_worktree.ps1 -Python 'C:\absolute\Python313\python.exe' -IncludeFirmware
+# Read-only prerequisite/environment verification:
+.\tools\setup_worktree.ps1 -Python 'C:\absolute\Python313\python.exe' -IncludeFirmware -CheckOnly
+```
+
+Setup never updates an existing environment: rerunning verifies the exact lock
+and dependency consistency. An incompatible/partial environment is a refusal;
+keep it for diagnosis and provision a fresh worktree. Do not copy environments,
+CMake caches, experiment directories, or submodule `.git` files. Git submodule
+commands use the installed Git for Windows Bash environment without modifying
+global PATH or Git configuration. Missing tools and dirty/mismatched submodules
+are blockers, not permission to overwrite them.
+
+Development requirements live under `requirements/windows-dev/` so adding them
+does not change the existing Pi root dependency fingerprint. `requirements.in`
+records direct dependencies; `requirements.lock` pins their complete Windows
+closure, including packaging tools. To change dependencies, update both files
+on a branch and qualify a fresh environment; do not change the Pi interpreter.
+
+## Tests and simulation
+
+```powershell
+.\tools\run_worktree_tests.ps1 -PytestArgs @('-q','tests/test_legacy_execution_migration.py')
+.\tools\run_worktree_tests.ps1 -PytestArgs @('-q')
+.\tools\run_worktree_tests.ps1 -PytestArgs @('-q','--run-sil-lifecycle','tests/system/test_virtual_workflow_smoke.py')
+```
+
+The runner verifies this worktree's environment, clears inherited Python/pytest
+and machine/hardware authority settings, uses offscreen Qt, and selects the
+known pytest-qt plugin. Each invocation receives a fresh external OS temporary
+root with `run.json`, `pytest.log`, `junit.xml`, pytest data and caches. The
+runner prints that path immediately and preserves pytest's exit status.
+Caller overrides of temporary/report paths, plugins and pytest configuration
+are refused. Invoke only one setup operation per worktree; use separate
+worktrees for concurrent testing. Direct `env\Scripts\python.exe -m pytest`
+remains available for diagnosis; give it a unique external `--basetemp`.
+
+Use distinct fresh SIL sessions for interactive simulation. Keep acceptance
+benchmarks and timing qualifications separate from competing heavy work.
+Allow at least 15 minutes per full-suite process.
+
+## Firmware and shared resources
+
+```powershell
+powershell -ExecutionPolicy Bypass -File firmware/scripts/run_fw_checks.ps1 -Config Debug
+```
+
+Host build output stays in this worktree and CubeIDE uses a unique temporary
+workspace. The combined gate rebuilds `firmware/artifacts/LabCraft_firmware.bin`;
+review any difference and include the same-build artifact with firmware
+milestone commits. Never reset a changed binary to obtain a clean gate.
+
+Git worktrees share refs, repository configuration and object storage. Give each
+worktree a distinct branch, avoid concurrent ref/configuration changes, and do
+not remove retained worktrees. The Pi development worktree, production Python
+environment, machine-data store and installed firmware remain shared resources.
+Serialize Pi operations through the existing guarded wrappers. Local setup and
+tests do not authorize any Pi launch, flash, or physical hardware operation.
+
+## Recovery and retirement
+
+Keep failed-run evidence. Repair missing system prerequisites explicitly and
+rerun check-only; never bypass blockers. Do not automatically delete partial
+environments. Before retiring a task-owned worktree, verify its absolute path,
+clean Git/submodule state, retained files and stopped owned processes, then use
+normal `git worktree remove` without force. Preserve user data and evidence.
+Rollback repository changes with normal branch commits/reverts; no machine-data
+migration or installed-firmware rollback is required for this local workflow.

@@ -134,7 +134,13 @@ Stable Pi roles:
 
 ## Python commands
 
-Use the repository Windows environment directly:
+For parallel Windows worktrees, follow `docs/windows_worktrees.md`. Provision
+an independent `env` with `tools/setup_worktree.ps1`; prefer
+`tools/run_worktree_tests.ps1 -PytestArgs @('-q', '<test path>')` for isolated
+external temporary data, caches, logs, and reports. Never copy/share mutable
+environments or infer Pi/hardware authority from a local worktree.
+
+The repository Windows environment also supports direct diagnostic commands:
 
 - Focused tests: `.\env\Scripts\python.exe -m pytest -q <test paths>`
 - Default full suite: `.\env\Scripts\python.exe -m pytest -q`
