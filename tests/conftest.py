@@ -131,6 +131,8 @@ _ensure_serial_stub()
 
 
 def pytest_addoption(parser):
+    parser.addoption("--historical-fixture-root", default=None,
+                     help="Explicit external manifest-verified historical replay inputs.")
     parser.addoption(
         "--run-analysis-pipeline",
         action="store_true",
@@ -179,6 +181,8 @@ def pytest_collection_modifyitems(config, items):
         ),
     )
     for item in items:
+        if item.get_closest_marker("historical_replay") and not config.getoption("--historical-fixture-root"):
+            item.add_marker(pytest.mark.skip(reason="historical replay requires --historical-fixture-root"))
         if (
             item.get_closest_marker("analysis_pipeline")
             and not config.getoption("--run-analysis-pipeline")
@@ -270,6 +274,17 @@ def _isolate_qt_top_level_widgets(request):
     except RuntimeError:
         pass
 
+    # Python cycles can retain QObject wrappers after native widget deletion.
+    # Collect them here, with worker shutdown complete and on the GUI thread,
+    # before allocations in a later worker can trigger their destruction.
+    import gc
+
+    signal_sources = []
+    widget = source = manager = None
+    assert QtCore.QThread.currentThread() == app.thread()
+    gc.collect()
+    app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+
 
 @pytest.fixture
 def test_profile():
@@ -345,3 +360,44 @@ def experiment_model_factory(tmp_path):
         return m
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _historical_replay_inputs(request):
+    marker = request.node.get_closest_marker("historical_replay")
+    if marker is None:
+        yield
+        return
+    # Do not eagerly request monkeypatch for unrelated tests: doing so changes
+    # teardown ordering relative to the Qt cleanup fixture, leaving test patches
+    # active while widgets and their asynchronous services are being destroyed.
+    monkeypatch = request.getfixturevalue("monkeypatch")
+    from tools.historical_fixtures import external_root, load_manifest, verified_files
+    root = external_root(request.config.getoption("--historical-fixture-root"))
+    groups = load_manifest()
+    group = marker.args[0]
+    verified_files(root, groups[group])
+    if group == "dense_stream":
+        from tools.historical_geometry import verify as verify_geometry
+        verify_geometry(root)
+    module = request.module
+    if group == "dense_stream":
+        experiment = root / "Stream_characterization-20260327_225650"
+        monkeypatch.setattr(module, "EXPERIMENT_ROOT", experiment)
+        monkeypatch.setattr(module, "SUMMARY_CSV", experiment / "analysis/stream_characterization/experiment_summary.csv")
+    elif group == "htps_tail":
+        monkeypatch.setattr(module, "HTPS_ONLINE_STREAM_ROOT", root / "HTPS_rep1-20260423_200444/calibration_recordings/OnlineStreamCalibrationProcess")
+    elif group == "focus":
+        for relative in groups[group]:
+            if relative.endswith("/analysis.jsonl"):
+                captures = (root / relative).parent / "captures"
+                actual = {p.relative_to(root).as_posix() for p in captures.glob("cap_*_droplet.jpg")}
+                expected = {p for p in groups[group] if p.startswith(captures.relative_to(root).as_posix() + "/")}
+                if actual != expected:
+                    pytest.fail(f"Historical focus capture inventory mismatch: {captures}")
+        monkeypatch.setattr(module, "EXPERIMENT_ROOTS", {k: root / p for k, p in module.EXPERIMENT_ROOTS.items()})
+        monkeypatch.setattr(module, "RUN_SPECS", {k: {**v, "background": root / v["background"]} for k, v in module.RUN_SPECS.items()})
+    yield
+    verified_files(root, groups[group])
+    if group == "dense_stream":
+        verify_geometry(root)

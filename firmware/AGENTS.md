@@ -162,6 +162,13 @@ abort handling. New SAFE tests must remain non-actuating.
 
 ## Build and commit discipline
 
+Parallel Windows worktrees use the setup in `docs/windows_worktrees.md`.
+Build one configuration at a time per worktree; never share CMake caches or
+CubeIDE project directories. The headless build preserves language-settings
+bytes when only generated environment hashes change. Embedded build date/time
+still changes the tracked binary on rebuild; review and record those bytes.
+Local build qualification grants no flash or Pi hardware authority.
+
 - Run headless builds in the isolated workspace provided by the scripts. Do
   not assume STM32CubeIDE is open on the same workspace.
 - One firmware milestone per commit. Include source, host tests, build/HIL tool

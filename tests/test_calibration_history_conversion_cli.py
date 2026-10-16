@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 from tests.calibration_history_conversion_helpers import experiment
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PYTHON = REPO_ROOT / "env" / "Scripts" / "python.exe"
+PYTHON = sys.executable
 TOOL = REPO_ROOT / "tools" / "convert_calibration_history.py"
 
 

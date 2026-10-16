@@ -71,8 +71,8 @@ class _LogReaderForRelease(_ReaderForRelease):
         self.flashStateChanged = _SignalTracker()
 
 
-def test_on_goodbye_done_does_not_block_with_sleep(qapp, test_profile, monkeypatch):
-    machine = Machine(SimpleNamespace(), profile=test_profile)
+def test_on_goodbye_done_does_not_block_with_sleep(qapp, test_profile, monkeypatch, tmp_path):
+    machine = Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     called = {"disconnect": 0}
 
     def _no_sleep(_seconds):
@@ -92,8 +92,8 @@ def test_on_goodbye_done_does_not_block_with_sleep(qapp, test_profile, monkeypat
     assert called["disconnect"] == 1
 
 
-def test_on_goodbye_done_disconnects_without_input_buffer_api(qapp, test_profile):
-    machine = Machine(SimpleNamespace(), profile=test_profile)
+def test_on_goodbye_done_disconnects_without_input_buffer_api(qapp, test_profile, tmp_path):
+    machine = Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     called = {"disconnect": 0}
 
     machine.ser = SimpleNamespace(is_open=True)
@@ -104,8 +104,8 @@ def test_on_goodbye_done_disconnects_without_input_buffer_api(qapp, test_profile
     assert called["disconnect"] == 1
 
 
-def test_stop_log_thread_uses_reader_wait_for_stop_only(qapp, test_profile):
-    machine = Machine(SimpleNamespace(), profile=test_profile)
+def test_stop_log_thread_uses_reader_wait_for_stop_only(qapp, test_profile, tmp_path):
+    machine = Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
 
     class _SignalTracker:
         def disconnect(self, _slot):
@@ -139,8 +139,8 @@ def test_stop_log_thread_uses_reader_wait_for_stop_only(qapp, test_profile):
     assert machine.log_reader is None
 
 
-def test_stop_log_thread_disconnects_signals_before_stop(qapp, test_profile):
-    machine = Machine(SimpleNamespace(), profile=test_profile)
+def test_stop_log_thread_disconnects_signals_before_stop(qapp, test_profile, tmp_path):
+    machine = Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
 
     class _SignalTracker:
         def __init__(self):
@@ -171,8 +171,8 @@ def test_stop_log_thread_disconnects_signals_before_stop(qapp, test_profile):
     assert machine.log_reader is None
 
 
-def test_stop_log_thread_keeps_reader_reference_when_reader_stop_fails(qapp, test_profile, capsys):
-    machine = Machine(SimpleNamespace(), profile=test_profile)
+def test_stop_log_thread_keeps_reader_reference_when_reader_stop_fails(qapp, test_profile, capsys, tmp_path):
+    machine = Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
 
     class _SignalTracker:
         def disconnect(self, _slot):
@@ -205,7 +205,7 @@ def test_stop_log_thread_keeps_reader_reference_when_reader_stop_fails(qapp, tes
     assert "did not stop cleanly" in out
 
 
-def test_begin_log_thread_replaces_stopped_reader_reference(qapp, monkeypatch):
+def test_begin_log_thread_replaces_stopped_reader_reference(qapp, monkeypatch, tmp_path):
     profile = SimpleNamespace(
         name="current",
         has_refuel_camera=False,
@@ -221,6 +221,7 @@ def test_begin_log_thread_replaces_stopped_reader_reference(qapp, monkeypatch):
         profile=profile,
         machine_log_port="COM_LOG",
         serial_identity_resolver=lambda *_args, **_kwargs: identity,
+        black_box_log_dir=tmp_path,
     )
 
     class _SignalTracker:
@@ -267,8 +268,8 @@ def test_begin_log_thread_replaces_stopped_reader_reference(qapp, monkeypatch):
     assert created[0].start_calls == 1
 
 
-def test_begin_reader_thread_replaces_stopped_reader_reference(qapp, test_profile, monkeypatch):
-    machine = Machine(SimpleNamespace(), profile=test_profile)
+def test_begin_reader_thread_replaces_stopped_reader_reference(qapp, test_profile, monkeypatch, tmp_path):
+    machine = Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     machine.ser = object()
 
     class _SignalTracker:
@@ -313,8 +314,8 @@ def test_begin_reader_thread_replaces_stopped_reader_reference(qapp, test_profil
     assert created[0].start_calls == 1
 
 
-def test_reset_board_requests_both_reader_stops_before_waiting(qapp, test_profile, capsys):
-    machine = Machine(SimpleNamespace(), profile=test_profile)
+def test_reset_board_requests_both_reader_stops_before_waiting(qapp, test_profile, capsys, tmp_path):
+    machine = Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     events = []
 
     class _SignalTracker:
@@ -371,8 +372,8 @@ def test_reset_board_requests_both_reader_stops_before_waiting(qapp, test_profil
     assert machine._pre_reset_mcu_log_history["entries"][0]["text"] == "pre-reset XY fault"
 
 
-def test_release_serial_for_external_owner_closes_without_goodbye_or_disconnect_signal(qapp, test_profile):
-    machine = Machine(SimpleNamespace(), profile=test_profile)
+def test_release_serial_for_external_owner_closes_without_goodbye_or_disconnect_signal(qapp, test_profile, tmp_path):
+    machine = Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     ser = _SerialForRelease()
     serial_reader = _ReaderForRelease()
     log_reader = _LogReaderForRelease()
@@ -406,8 +407,8 @@ def test_release_serial_for_external_owner_closes_without_goodbye_or_disconnect_
     assert disconnects == []
 
 
-def test_release_serial_for_external_owner_failure_keeps_serial_open(qapp, test_profile):
-    machine = Machine(SimpleNamespace(), profile=test_profile)
+def test_release_serial_for_external_owner_failure_keeps_serial_open(qapp, test_profile, tmp_path):
+    machine = Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     ser = _SerialForRelease()
     machine.ser = ser
     machine.reader = _ReaderForRelease(stop_ok=False)
@@ -425,8 +426,8 @@ def test_release_serial_for_external_owner_failure_keeps_serial_open(qapp, test_
     assert machine._expected_serial_reader_stop_reason is None
 
 
-def test_disconnect_board_still_sends_goodbye(qapp, test_profile):
-    machine = Machine(SimpleNamespace(), profile=test_profile)
+def test_disconnect_board_still_sends_goodbye(qapp, test_profile, tmp_path):
+    machine = Machine(SimpleNamespace(), profile=test_profile, black_box_log_dir=tmp_path)
     ser = _SerialForRelease()
     machine.ser = ser
     machine._start_ack_wait = lambda *args, **kwargs: None

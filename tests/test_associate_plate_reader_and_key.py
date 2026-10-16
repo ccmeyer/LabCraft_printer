@@ -13,7 +13,7 @@ def _write_plate_export(path: Path, *, incomplete_final: bool = True) -> None:
     rows = [
         ["##BLOCKS= 1"],
         ["Plate:", "Plate1", "1.3", "502 540", "Manual", "460 515"],
-        ["Time", "Temperature(°C)", "A1", "A2", "A3", "A4"],
+        ["Time", "Temperature(Â°C)", "A1", "A2", "A3", "A4"],
         ["00:00:00", "37", "10", "20", "30", ""],
         ["00:01:00", "37", "11", "21", "31", ""],
         ["00:02:00", "37", "12", "22", "32", ""],
@@ -225,7 +225,7 @@ def _write_compact_time_matrix_plate_export(path: Path) -> None:
     rows = [
         ["##BLOCKS= 1"],
         metadata_row,
-        ["Time(hh:mm:ss)", "Temperature(¡C)", "1", "2", "3"],
+        ["Time(hh:mm:ss)", "Temperature(Â¡C)", "1", "2", "3"],
     ]
     rows.extend(_matrix_timepoint_rows("0:00", "37.0", (10, 20, 30, 40)))
     rows.extend(_matrix_timepoint_rows("2:00", "37.1", (11, 21, 31, 41)))
@@ -271,7 +271,7 @@ def _write_endpoint_matrix_plate_export(path: Path) -> None:
     rows = [
         ["##BLOCKS= 1"],
         metadata_row,
-        ["", "Temperature(¡C)", "1", "2", "3"],
+        ["", "Temperature(Â¡C)", "1", "2", "3"],
         ["", "23.50", "100.5", "200.5", ""],
         ["", "", "300.5", "400.5", ""],
         ["", "", "", "500.5", ""],
@@ -576,7 +576,7 @@ def test_multiple_matching_plate_exports_fail_with_useful_error(tmp_path, capsys
 def test_legacy_wrapper_delegates_to_new_tool_with_legacy_args(tmp_path):
     _exp_dir, plate, key = _make_experiment(tmp_path)
     out = tmp_path / "legacy.csv"
-    wrapper_path = Path("FreeRTOS-interface/Experiments/associate_plate_reader_and_key.py")
+    wrapper_path = Path(__file__).resolve().parents[1] / "FreeRTOS-interface/Experiments/associate_plate_reader_and_key.py"
     spec = importlib.util.spec_from_file_location("legacy_plate_assoc", wrapper_path)
     assert spec is not None
     legacy = importlib.util.module_from_spec(spec)

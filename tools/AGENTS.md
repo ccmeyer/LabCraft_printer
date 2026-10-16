@@ -9,6 +9,12 @@ firmware-state management, and evidence collection.
 Read `README.md` and `docs/pi_development_workflow_plan.md` before changing the
 behavior or interface of a Pi development wrapper.
 
+For local Windows worktrees, follow `docs/windows_worktrees.md`.
+`setup_worktree.ps1` and `run_worktree_tests.ps1` call the local Python supervisor
+only; they must never add SSH, production-data discovery, or hardware authority.
+Keep development dependencies scoped away from the Pi inventory, refuse
+incompatible existing environments, and retain external test evidence.
+
 ## Protected orchestration invariants
 
 - `/home/labcraft/LabCraft_printer` is a protected production worktree. Tools

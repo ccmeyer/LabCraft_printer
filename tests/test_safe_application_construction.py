@@ -747,7 +747,11 @@ def test_simulation_configuration_and_experiment_writes_use_supplied_roots(
     components.close()
 
 
-def test_local_config_explicit_roots_do_not_change_production_defaults(tmp_path):
+def test_local_config_explicit_roots_do_not_change_production_defaults(tmp_path, monkeypatch):
+    # Verify the configured default without seeding the actual checkout.
+    assert LocalConfig.LOCAL_DIR == LocalConfig.REPO_ROOT / "local"
+    default_root = tmp_path / "default-local"
+    monkeypatch.setattr(LocalConfig, "LOCAL_DIR", default_root)
     assert (
         LocalConfig.get_machine_config_path("Settings.json")
         == LocalConfig.LOCAL_DIR / "Settings.json"

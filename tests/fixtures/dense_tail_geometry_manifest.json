@@ -1,0 +1,185 @@
+{
+  "receipt": {
+    "path": "dense_tail_geometry_provenance.json",
+    "sha256": "a75ec5b5723b2a65ab159cacfc63ac9076f0c814eee77c843667183ecedbb6d0"
+  },
+  "recipe": {
+    "algorithm": "direct_threshold_silhouette_geometry_v1",
+    "dependencies": {
+      "numpy": "2.5.1",
+      "opencv": "5.0.0",
+      "scipy": "1.18.0"
+    },
+    "implementation_lf_sha256": {
+      "tools/historical_geometry.py": "07766f79d806389d7f62ac11afea6fa6ac567b8cf39a396e8886dd64430092e0",
+      "tools/stream_analysis/silhouette.py": "7c9f6373744ec273c8dfc42b5b75ca72896de6f32cb3607277f236d7bb01b2c9"
+    },
+    "parameters": {
+      "corridor_width_frac": 0.7,
+      "min_component_area_px": 120,
+      "nozzle_guard_px": 2,
+      "roi_bottom_frac": 1.0,
+      "roi_top_frac": 0.1,
+      "roi_width_frac": 0.35
+    }
+  },
+  "runs": {
+    "run_20260327_230520_9567e1ee": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260327_230520_9567e1ee/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "8f6ce211632a1f5068b7e17852602efbdae9b13598234f4d22c6ba871f3b6a76",
+      "source_inventory_sha256": "3cd3363f953dff2b4ce08c5802d1291bdc1d49643d9ea458c5f108eea25a7fb3"
+    },
+    "run_20260327_230807_2858b360": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260327_230807_2858b360/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "c36564e5f16d105c9c9b395247f453270141f55958e999e4479b4c2545343bef",
+      "source_inventory_sha256": "52696a6879d908f79d1d285334f29057961d723836eddf19d9b5361338d2789d"
+    },
+    "run_20260327_231322_ecc89833": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260327_231322_ecc89833/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "9f219958ee86a22f3b5f569cd3321f784462f339200e3804e179cfbbf3b07c61",
+      "source_inventory_sha256": "a47ad3189a9fa9d4a1140cd1653114ed3e05b328a626dacbd6c2e3720a00aa40"
+    },
+    "run_20260327_231641_7f78f806": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260327_231641_7f78f806/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "6f8e57be5f8654f417e07cb1af09a31c73bc7952f7399cad1460a7124c1777a8",
+      "source_inventory_sha256": "04ba79e2c424d8d6fbbf409995f837cf9b3c250a887b625579d2407c58ac13c8"
+    },
+    "run_20260327_231931_2fd25ece": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260327_231931_2fd25ece/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "83b404da62df967b7499c4882c38d9b35a808dd40287b2413a9e8b7db66bb0b2",
+      "source_inventory_sha256": "395ee37593b617a71b0e47bc83253ceb270787cffaa24fb2da65cce0a7d3017c"
+    },
+    "run_20260327_233836_0fc8ba1f": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260327_233836_0fc8ba1f/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "c04b03f1f79b08f9d3b92fc0a7c51dd3aff8d54c54f69c708e59e08ca57f632c",
+      "source_inventory_sha256": "82e61b1d74b93d5b097995e6aa86842fa9f612d527715ab9eb2786975167d84d"
+    },
+    "run_20260327_234220_53b02b0b": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260327_234220_53b02b0b/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "0387320e87a1c9ee0c9cb5c171dd5d89d62905fa3d37c6f68e57709da4c1e8b1",
+      "source_inventory_sha256": "c400d38df6cac54c71ad7235bf7f791e278a69707cda7d1a76f3086a641edafe"
+    },
+    "run_20260327_235517_33d560ad": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260327_235517_33d560ad/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "757efaa86bdf6b67d1537584fd406d968f247796b30fb520c5bd68aa09e5eb28",
+      "source_inventory_sha256": "47f357bf2fae97a798330263ba45cdd58c929ab8a89f9e508b84ce2cffdc1850"
+    },
+    "run_20260327_235824_fc32934b": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260327_235824_fc32934b/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "53798d800a3d00cea4e7409901044454dbc6ba433b672aea51ce40d424d8145a",
+      "source_inventory_sha256": "40eaf1439f46c9cf2b1b7011acdb6e671982b954b1d5f81708b9be5cd14c70fb"
+    },
+    "run_20260328_000102_5ef6ee34": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_000102_5ef6ee34/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "919a9c30bb5c99643890f9b7c8e97c4d2816ee61b82dea09c673b784ca6875f6",
+      "source_inventory_sha256": "4830237228b1724a5b84b548a0dd882c9b54aa5c5969881ff94fbfe6c29cc150"
+    },
+    "run_20260328_000537_372c9635": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_000537_372c9635/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "87d483df5a18bb5b88d7dacd8db24360c5e768449c5a06353c0a374eeaa58ae7",
+      "source_inventory_sha256": "f459c3a3faaba1feea6b8687783e136a6667d398ec0f1e69e47e3bced5b4d77f"
+    },
+    "run_20260328_000952_5e69ac8e": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_000952_5e69ac8e/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "7d142e68fcecd00e8bd715e10a80627477a242241a9b3396824742911550312a",
+      "source_inventory_sha256": "2e3379d973619af4c2829c4d486e58acd5c1870ced1c1c29275cd69e298b2955"
+    },
+    "run_20260328_001202_ceb0a9f3": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_001202_ceb0a9f3/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "732cde1fd1e732afd669a3abd9d5d5d767cda22527b977f927374a400ed03e17",
+      "source_inventory_sha256": "ff9aad16ffb807e5722ee7714c5ba6b561f866277758e777e3e1b45210bfe8e1"
+    },
+    "run_20260328_001451_2eb92b3c": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_001451_2eb92b3c/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "213e566a981f776ed5b0a7b3af49ee527ad3b172b8bd33cb7798af78c7ed1939",
+      "source_inventory_sha256": "a5eda5f5447696b33f8ae0acb7f0026f7f492fb33fce089d81d9ea170a5e289e"
+    },
+    "run_20260328_001819_65e7f48d": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_001819_65e7f48d/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "1d03860844c5f488d9813b56d303430072c30f91928623d71dfb8e812475c052",
+      "source_inventory_sha256": "2f5cb1a1c2b8b2665e150edc2f713db865fd197a08af9ec662b9b5bfb0600ec3"
+    },
+    "run_20260328_002139_43c84188": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_002139_43c84188/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "d02f4cfb86948c7e953431e9c71a899855ecb8cdcdd432cde4ce2a99c308e8fb",
+      "source_inventory_sha256": "ea4fb70498da7385a1011303d8dc9894354bc17d47e84d99c228677a9f307582"
+    },
+    "run_20260328_002422_43295974": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_002422_43295974/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "be3137ab6e9e0052d13e31c29b337678e15ce8f34d4c18f9540998fcc2e37c81",
+      "source_inventory_sha256": "06adbd7d94cd7c39cd53b4fdd94bbd94be2263e89fe333b6ef4789b669266662"
+    },
+    "run_20260328_002804_3e0e902c": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_002804_3e0e902c/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "92ec93785cef27f4eb936614fa8c285e1ceb313e40dea4ad1e1fcd321872ad58",
+      "source_inventory_sha256": "31178358a4cdd27b2b6dc127ae36fa1dfdc0a1ecacf9e98ed42cc656d257684c"
+    },
+    "run_20260328_003114_c8957963": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_003114_c8957963/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "0425f3c1e60054bb760498e7db2cdf3ed33abe589301d8e36fb829931f240cdd",
+      "source_inventory_sha256": "93b23f17e11ff129329ce3d718eec49d27aacb061f22ff6b065eb6ad5da9b646"
+    },
+    "run_20260328_003354_8cf1bfcb": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_003354_8cf1bfcb/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "6e527b80a4fd6fad85b6e72d7bfa7a26006fb25087cc7472c8a60410348b7c88",
+      "source_inventory_sha256": "abb5ed110bfe13ff3d6cf78b4cf366e37169d23dea15b08ab510444a61ad7dc8"
+    },
+    "run_20260328_003734_5e31c12d": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_003734_5e31c12d/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "7b6dca0947bd95c877029e1ce65338979dedcb6b269b34e6fdd7d31db4131b88",
+      "source_inventory_sha256": "afec8470f093db902c5471e13c2bacb0fbb865a7ac2715e21a2ac12162f07b37"
+    },
+    "run_20260328_004129_bb464967": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_004129_bb464967/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "886526e789fe6a9dc9aec8993f7718a3f570ad407b7662f73ec0817296381140",
+      "source_inventory_sha256": "ec7e9925f64ed24e224671aa9f21316eae97dd9170c5a1ce2f48eb63421602e1"
+    },
+    "run_20260328_004354_b93b503f": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_004354_b93b503f/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "ae26ecc25999154e6b74aac8c6e129d3ef561bd0ab5f935c9909e2a729a05a87",
+      "source_inventory_sha256": "0ce36a222e4968c6180e80797075f0f4161b1b082fccc730e2f965749cf2b171"
+    },
+    "run_20260328_004724_cfc969f5": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_004724_cfc969f5/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "fcb9124a4dc1a74c9a39fce7c71cafe0c0cde0cb09587abd536c8e5362392047",
+      "source_inventory_sha256": "b11a39445ad8fbadfadb760f27f76f0e838ed0093955de7dc3039d6cc6598354"
+    },
+    "run_20260328_004925_93d336a3": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_004925_93d336a3/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "00ad33a105c3fd431f3d1f7133545fc25f3850bb1c0c717048d3dd717822177d",
+      "source_inventory_sha256": "71cc484d33c01214fd03a6ed5fa78978ed184de797126878fcba85e4ab385487"
+    },
+    "run_20260328_005146_dd931d49": {
+      "path": "Stream_characterization-20260327_225650/analysis/stream_characterization/runs/run_20260328_005146_dd931d49/stage_05_fit/tail_geometry.csv",
+      "row_count": 121,
+      "sha256": "6b07dbe5b8a25821c12636602ad6d2ceea69f8d1c8068e95d5de2197efd92bb3",
+      "source_inventory_sha256": "89cdce3ee0e4db4018ede37fd265fc46626ae249d1f66acfe3b8287159a98039"
+    }
+  },
+  "schema_version": 1
+}
