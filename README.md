@@ -28,6 +28,9 @@ Windows development environment or modify the shared Pi environment.
 The worktree test runner owns pytest configuration and external evidence paths.
 It refuses configuration overrides (`-c`/`--config-file`) and `--debug` logs;
 use the documented isolated diagnostic workflow when those options are needed.
+Historical replay uses an explicit external dataset with verified capture and
+derived-geometry provenance; staging commands and unchanged numerical gates are
+documented in the Windows worktree guide.
 
 ## Print-Array Pause and Queue-Clear Safety
 

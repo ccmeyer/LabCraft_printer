@@ -53,8 +53,9 @@ root with `run.json`, `pytest.log`, `junit.xml`, pytest data and caches. The
 runner prints that path immediately and preserves pytest's exit status.
 Caller overrides of temporary/report paths, plugins and pytest configuration
 are refused, including `-c`/`--config-file` and all `--debug` forms, which could
-otherwise select checkout-local logs or caches. Invoke only one setup operation per worktree; use separate
-worktrees for concurrent testing. Direct `env\Scripts\python.exe -m pytest`
+otherwise select checkout-local logs or caches. Invoke only one setup operation
+per worktree; use separate worktrees for concurrent testing.
+Direct `env\Scripts\python.exe -m pytest`
 remains available for diagnosis; give it a unique external `--basetemp`.
 
 Test fixtures must pass temporary configuration and black-box log roots rather
@@ -70,7 +71,8 @@ Allow at least 15 minutes per full-suite process.
 
 Default tests never discover archived recordings under an ignored checkout.
 Historical tests require `--historical-fixture-root`; synthetic tests still run.
-Stage only the 175 manifest-listed input files once, preserving the originals:
+Stage the 175 manifest-listed inputs plus the bounded dense-tail geometry
+derivation once, preserving the originals:
 
 ```powershell
 .\env\Scripts\python.exe tools\historical_fixtures.py `
@@ -82,7 +84,16 @@ Stage only the 175 manifest-listed input files once, preserving the originals:
 The source may be an existing ignored `FreeRTOS-interface/Experiments` archive.
 The destination must be new and outside every registered worktree. Staging
 copies only declared CSV/JSON/image inputs, checks SHA-256 values, and refuses
-existing destinations. Failed staging leaves its partial copy for diagnosis.
+existing destinations. For the 26 dense stream runs it also reads the exact
+referenced 3,146 raw captures, derives geometry using the recorded nozzle
+coordinates and pinned silhouette parameters, and writes 26 small geometry CSVs
+plus a provenance receipt. Raw dense captures are read only, not copied. Their
+per-run source inventory hashes, derived output hashes, LF-normalized analyser
+source hashes, dependency versions, and parameters are pinned in
+`tests/fixtures/dense_tail_geometry_manifest.json`. The resulting staged dataset
+has 202 files. Allow a few minutes for geometry extraction. Changed sources,
+implementation, dependencies, or derived bytes are refusals. Failed staging
+leaves its partial copy for diagnosis.
 Tests validate the selected replay group's bytes before and after use.
 Missing, altered, or insufficient inputs fail when replay is requested.
 The separate optimizer fixture contract is unchanged.
@@ -94,11 +105,14 @@ by scanning the original 156 archived runs. Qt test cleanup also collects Python
 reference cycles on the GUI thread after worker shutdown, so later worker
 allocations cannot collect objects retained by a previous test.
 
-Known archive limitation: the dense-tail scout/backtrack replay currently yields
-fewer than its required five usable results. This used to skip even with data
-present; the explicit lane now fails visibly. Preserve its numerical assertions;
-additional qualifying archived evidence or a separate analysis investigation
-is needed. The other 25 tests in the three replay modules pass with this dataset.
+Dense-tail replay joins independently extracted geometry to feature rows by
+capture identity and both absolute/relative times. It validates the emergence
+reference and uses the existing runtime plateau-anchor selection and capture
+budget compression helpers. The original numerical gates remain at least five
+usable results, median error <=400 us, and worst error <=700 us. The archived
+feature CSVs alone do not contain the required geometry; older 175-file staged
+datasets must be preserved and replaced by a newly staged external dataset.
+Do not synthesize geometry from expected tail-start labels or lower the gates.
 
 ## Firmware and shared resources
 

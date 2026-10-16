@@ -377,6 +377,9 @@ def _historical_replay_inputs(request):
     groups = load_manifest()
     group = marker.args[0]
     verified_files(root, groups[group])
+    if group == "dense_stream":
+        from tools.historical_geometry import verify as verify_geometry
+        verify_geometry(root)
     module = request.module
     if group == "dense_stream":
         experiment = root / "Stream_characterization-20260327_225650"
@@ -396,3 +399,5 @@ def _historical_replay_inputs(request):
         monkeypatch.setattr(module, "RUN_SPECS", {k: {**v, "background": root / v["background"]} for k, v in module.RUN_SPECS.items()})
     yield
     verified_files(root, groups[group])
+    if group == "dense_stream":
+        verify_geometry(root)

@@ -64,15 +64,25 @@ def stage(source, destination):
     destination = external_root(destination)
     if source == destination or destination.is_relative_to(source):
         raise ValueError("Staging destination must be separate from the source")
-    entries = {p: h for group in load_manifest().values() for p, h in group.items()}
+    groups = load_manifest()
+    entries = {p: h for group in groups.values() for p, h in group.items()}
     verified_files(source, entries)
+    if "dense_stream" in groups:
+        from tools import historical_geometry
+        expected_geometry = historical_geometry.load_contract()
+        historical_geometry.validate_sources(source, groups["dense_stream"], expected_geometry)
     destination.mkdir(parents=True, exist_ok=False)
     for relative in entries:
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source / relative, target)
     verified_files(destination, entries)
-    return len(entries)
+    derived_count = 0
+    if "dense_stream" in groups:
+        historical_geometry.derive(source, destination, groups["dense_stream"], expected=expected_geometry)
+        historical_geometry.verify(destination)
+        derived_count = len(expected_geometry["runs"]) + 1
+    return len(entries) + derived_count
 
 
 def main():

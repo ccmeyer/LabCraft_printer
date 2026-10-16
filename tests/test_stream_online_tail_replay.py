@@ -107,6 +107,8 @@ def _feature_row_is_tail_width_usable(row: dict) -> bool:
 
 
 def _feature_row_is_tail_landmark(row: dict) -> bool:
+    if row.get("geometry_silhouette_status", "ok") != "ok":
+        return False
     cutoff_y_px = _to_float(row.get("cutoff_y_px"))
     selected_component_top_y_px = _to_float(row.get("selected_component_top_y_px"))
     near_nozzle_band_top_px = float(
@@ -129,8 +131,11 @@ def _phase_features_by_delay(run_id: str) -> dict[int, dict]:
     )
     if not phase_features_path.exists():
         return {}
+    from tools.historical_geometry import merge_geometry
+    feature_rows = _read_csv_rows(phase_features_path)
+    feature_rows = merge_geometry(feature_rows, phase_features_path.with_name("tail_geometry.csv"))
     rows = {}
-    for row in _read_csv_rows(phase_features_path):
+    for row in feature_rows:
         delay_from_emergence_us = _to_int(row.get("delay_from_emergence_us"))
         if delay_from_emergence_us is None:
             continue
@@ -185,6 +190,7 @@ def _build_tail_delay_summary(
     delay_from_emergence_us: int,
     baseline_width_px: float,
     phase: str,
+    emergence_time_us: int = 0,
 ):
     feature_row = rows_by_delay.get(int(delay_from_emergence_us))
     if feature_row is None:
@@ -193,7 +199,7 @@ def _build_tail_delay_summary(
                 {
                     "phase": phase,
                     "status": "rejected_replay_missing",
-                    "delay_us": int(delay_from_emergence_us),
+                    "delay_us": int(emergence_time_us + delay_from_emergence_us),
                     "delay_from_emergence_us": int(delay_from_emergence_us),
                     "replicate_index": 1,
                     "qc": {"tail_qc_pass": False, "tail_width_usable": False, "tail_landmark_usable": False},
@@ -243,6 +249,13 @@ def _build_tail_delay_summary(
 
 
 def _replay_tail_result(rows_by_delay: dict[int, dict]):
+    origins = {
+        int(row["flash_delay_us"]) - int(offset)
+        for offset, row in rows_by_delay.items()
+    }
+    if len(origins) != 1:
+        raise ValueError("Replay rows must share one explicit emergence time")
+    emergence_time_us = origins.pop()
     flow_fit_result, flow_delay_summaries = _build_sparse_flow_fit(rows_by_delay)
     flow_capture_count = int(len(flow_delay_summaries))
     capture_budget = online_cal_mod.consume_online_stream_budget(
@@ -253,7 +266,7 @@ def _replay_tail_result(rows_by_delay: dict[int, dict]):
     tail_plan = online_tail_mod.plan_online_stream_tail_phase(
         flow_fit_result=flow_fit_result,
         priors=None,
-        emergence_time_us=0,
+        emergence_time_us=emergence_time_us,
         capture_budget=capture_budget,
         flow_delay_summaries=flow_delay_summaries,
         policy={"scout_replicates": 1, "backtrack_replicates": 1},
@@ -283,21 +296,27 @@ def _replay_tail_result(rows_by_delay: dict[int, dict]):
         for idx in range(int(tail_plan["planned_scout_delay_count"]))
     ]
 
-    for scout_index, scout_delay_us in enumerate(scout_delays):
+    for scout_delay_us in scout_delays:
+        if not capture_budget["captures_remaining_hard"]:
+            break
         summary = _build_tail_delay_summary(
             rows_by_delay,
-            delay_from_emergence_us=int(scout_delay_us),
+            delay_from_emergence_us=int(scout_delay_us - emergence_time_us),
+            emergence_time_us=emergence_time_us,
             baseline_width_px=baseline_width_px,
             phase="tail_scout",
         )
         scout_summaries.append(summary)
+        capture_budget = online_cal_mod.consume_online_stream_budget(capture_budget, phase="tail_scout")
         if bool(summary.get("delay_accepted")) and bool(summary.get("landmark_detected")):
             landmark_delay_us = int(summary["delay_us"])
             landmark_reason = str(summary.get("landmark_reason") or "")
-            if scout_index > 0:
-                backtrack_left_delay_us = int(scout_delays[scout_index - 1])
-            else:
-                backtrack_left_delay_us = int(tail_plan["scout_anchor_delay_us"])
+            left_anchor = online_tail_mod.select_online_stream_tail_left_anchor(
+                scout_summaries=scout_summaries,
+                scout_anchor_delay_us=tail_plan["scout_anchor_delay_us"],
+                landmark_delay_us=landmark_delay_us,
+            )
+            backtrack_left_delay_us = left_anchor["left_endpoint_delay_us"]
             break
 
     if landmark_delay_us is None:
@@ -316,22 +335,36 @@ def _replay_tail_result(rows_by_delay: dict[int, dict]):
         )
 
     backtrack_summaries = []
-    for backtrack_delay_us in online_tail_mod.build_online_stream_tail_backtrack_plan(
+    backtrack_sequence = online_tail_mod.build_online_stream_tail_backtrack_plan(
         scout_anchor_delay_us=int(tail_plan["scout_anchor_delay_us"]),
         left_endpoint_delay_us=backtrack_left_delay_us,
         landmark_delay_us=landmark_delay_us,
         backtrack_step_us=int(tail_plan["backtrack_step_us"]),
         fine_prepad_us=int(tail_plan.get("fine_prepad_us") or 100),
         fine_postpad_us=int(tail_plan.get("fine_postpad_us") or 100),
-    ):
+    )
+    compression = online_tail_mod.compress_online_stream_tail_backtrack_plan(
+        delay_sequence=backtrack_sequence,
+        left_endpoint_delay_us=backtrack_left_delay_us,
+        landmark_delay_us=landmark_delay_us,
+        backtrack_step_us=tail_plan["backtrack_step_us"],
+        available_capture_count=capture_budget["captures_remaining_hard"],
+    )
+    tail_plan["tail_backtrack_compressed"] = compression["compressed"]
+    tail_plan["tail_backtrack_requested_capture_count"] = compression["requested_capture_count"]
+    tail_plan["tail_backtrack_applied_capture_count"] = compression["applied_capture_count"]
+    for backtrack_delay_us in compression["delay_sequence"]:
         backtrack_summaries.append(
             _build_tail_delay_summary(
                 rows_by_delay,
-                delay_from_emergence_us=int(backtrack_delay_us),
+                delay_from_emergence_us=int(backtrack_delay_us - emergence_time_us),
+                emergence_time_us=emergence_time_us,
                 baseline_width_px=baseline_width_px,
                 phase="tail_backtrack",
             )
         )
+        capture_budget = online_cal_mod.consume_online_stream_budget(capture_budget, phase="tail_backtrack")
+    assert capture_budget["captures_used"] <= capture_budget["hard_limit"]
 
     return online_tail_mod.resolve_online_stream_tail_result(
         flow_fit_result=flow_fit_result,
@@ -350,7 +383,8 @@ def _replay_tail_result(rows_by_delay: dict[int, dict]):
     )
 
 
-def test_sparse_online_tail_replay_ignores_bottom_of_fov_signals_without_landmark():
+@pytest.mark.parametrize("emergence_time_us", [0, 4800])
+def test_sparse_online_tail_replay_ignores_bottom_of_fov_signals_without_landmark(emergence_time_us):
     rows_by_delay = {
         650: {
             "flash_delay_us": 650,
@@ -531,12 +565,15 @@ def test_sparse_online_tail_replay_ignores_bottom_of_fov_signals_without_landmar
         },
     }
 
+    for row in rows_by_delay.values():
+        row["flash_delay_us"] += emergence_time_us
     result = _replay_tail_result(rows_by_delay)
 
     assert result["tail_phase"]["status"] == "unresolved_no_landmark"
 
 
-def test_sparse_online_tail_replay_applies_settling_rule_to_long_separated_shoulder(monkeypatch):
+@pytest.mark.parametrize("emergence_time_us", [0, 4800])
+def test_sparse_online_tail_replay_applies_settling_rule_to_long_separated_shoulder(monkeypatch, emergence_time_us):
     monkeypatch.setattr(
         sys.modules[__name__],
         "_build_sparse_flow_fit",
@@ -549,7 +586,7 @@ def test_sparse_online_tail_replay_applies_settling_rule_to_long_separated_shoul
             },
             [
                 {
-                    "delay_us": 650,
+                    "delay_us": 650 + emergence_time_us,
                     "delay_from_emergence_us": 650,
                     "attempted_replicates": 1,
                     "accepted_replicates": 1,
@@ -559,7 +596,7 @@ def test_sparse_online_tail_replay_applies_settling_rule_to_long_separated_shoul
                     "warnings": [],
                 },
                 {
-                    "delay_us": 850,
+                    "delay_us": 850 + emergence_time_us,
                     "delay_from_emergence_us": 850,
                     "attempted_replicates": 1,
                     "accepted_replicates": 1,
@@ -569,7 +606,7 @@ def test_sparse_online_tail_replay_applies_settling_rule_to_long_separated_shoul
                     "warnings": [],
                 },
                 {
-                    "delay_us": 1000,
+                    "delay_us": 1000 + emergence_time_us,
                     "delay_from_emergence_us": 1000,
                     "attempted_replicates": 1,
                     "accepted_replicates": 1,
@@ -643,6 +680,8 @@ def test_sparse_online_tail_replay_applies_settling_rule_to_long_separated_shoul
         },
     }
 
+    for row in rows_by_delay.values():
+        row["flash_delay_us"] += emergence_time_us
     result = _replay_tail_result(rows_by_delay)
 
     assert result["tail_phase"]["status"] == "captured"
@@ -651,6 +690,46 @@ def test_sparse_online_tail_replay_applies_settling_rule_to_long_separated_shoul
     assert result["tail_phase"]["initial_confirmed_collapse_delay_from_emergence_us"] == 1150
     assert result["tail_phase"]["tail_start_delay_from_emergence_us"] == 1150
     assert result["tail_phase"]["confirmed_collapse_delay_from_emergence_us"] == 1150
+
+
+def test_tail_replay_rejects_inconsistent_emergence_reference():
+    with pytest.raises(ValueError, match="one explicit emergence time"):
+        _replay_tail_result({100: {"flash_delay_us": 4900}, 150: {"flash_delay_us": 5000}})
+
+
+def test_missing_tail_capture_preserves_absolute_and_relative_times():
+    summary = _build_tail_delay_summary({}, delay_from_emergence_us=2050,
+                                        emergence_time_us=4800, baseline_width_px=74,
+                                        phase="tail_scout")
+    assert summary["delay_us"] == 6850
+    assert summary["delay_from_emergence_us"] == 2050
+    assert not summary["delay_accepted"]
+    assert not summary["landmark_detected"]
+
+
+def test_tail_replay_backtracks_from_last_plateau_not_collapsed_scout(monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "_build_sparse_flow_fit", lambda rows: (
+        {"fit_status": "ok", "steady_width_baseline_px": 74.0,
+         "flow_rate_nl_per_us": 0.02, "flow_intercept_nl": 0.0},
+        [{"delay_us": 5800, "delay_from_emergence_us": 1000, "delay_accepted": True,
+          "median_width_px": 74.0}],
+    ))
+    rows = {}
+    for offset in range(1000, 2650, 50):
+        rows[offset] = {"flash_delay_us": 4800 + offset, "silhouette_status": "ok",
+                        "attached_near_nozzle_width_median_px": 74.0 if offset <= 1550 else 30.0,
+                        "cutoff_y_px": 100, "selected_component_top_y_px": 150 if offset >= 2500 else 100}
+    selected = []
+    original = online_tail_mod.select_online_stream_tail_left_anchor
+    def observe(**kwargs):
+        result = original(**kwargs)
+        selected.append(result)
+        return result
+    monkeypatch.setattr(online_tail_mod, "select_online_stream_tail_left_anchor", observe)
+    result = _replay_tail_result(rows)
+    assert selected[0]["left_endpoint_delay_us"] == 6300  # 1500 us after emergence.
+    assert result["tail_phase"]["status"] == "captured"
+    assert 1500 <= result["tail_phase"]["tail_start_delay_from_emergence_us"] <= 1650
 
 
 @pytest.mark.parametrize(
