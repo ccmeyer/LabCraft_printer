@@ -17,10 +17,40 @@ def test_lock_is_complete_pinned_and_scoped_away_from_pi_inventory():
 @pytest.mark.parametrize("args", [
     ["--basetemp=x"], ["--junitxml", "x"], ["--junit-xml=x"], ["-o", "addopts=x"],
     ["-oaddopts=x"], ["-cother.ini"], ["-p", "other"], ["--log-file=x"], ["--rootdir=x"],
+    ["--config-file", "other.ini"], ["--config-file=other.ini"],
+    ["--debug"], ["--debug=other.log"], ["--debug", "other.log"],
 ])
 def test_runner_refuses_evidence_overrides(args):
     with pytest.raises(ValueError, match="Runner owns"):
         dev.test_arguments(args)
+
+
+@pytest.mark.parametrize("option", ["config", "config_equals", "debug", "debug_equals", "debug_path"])
+def test_runner_refuses_config_and_debug_before_launch(tmp_path, option):
+    protected = tmp_path / "protected.log"
+    protected.write_text("preserve existing evidence")
+    plugin_marker = tmp_path / "plugin-loaded"
+    plugin = tmp_path / "conftest.py"
+    plugin.write_text(f"from pathlib import Path\nPath({str(plugin_marker)!r}).touch()\n")
+    config = tmp_path / "custom.ini"
+    config.write_text(f"[pytest]\nlog_file={protected.as_posix()}\n")
+    args = {
+        "config": ["--config-file", str(config)],
+        "config_equals": [f"--config-file={config}"],
+        "debug": ["--debug"],
+        "debug_equals": [f"--debug={protected}"],
+        "debug_path": ["--debug", str(protected)],
+    }[option]
+    result = subprocess.run(
+        [sys.executable, "-B", str(dev.ROOT / "tools/worktree_development.py"), "test", "--", *args],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "Runner owns pytest configuration and evidence paths" in result.stderr
+    assert not plugin_marker.exists()
+    assert not (tmp_path / "pytestdebug.log").exists()
+    assert not (tmp_path / ".pytest_cache").exists()
+    assert protected.read_text() == "preserve existing evidence"
 
 
 def test_runner_preserves_selectors_and_opt_in_arguments():

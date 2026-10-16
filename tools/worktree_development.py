@@ -158,7 +158,8 @@ def test_arguments(args):
     # Prevent aliases, ini overrides, and external plugins from changing the
     # runner-owned temporary/report paths or restoring inherited pytest options.
     prohibited = ("--basetemp", "--junit", "--log-file", "--html", "--self-contained-html",
-                  "--output", "--rootdir", "--override-ini", "--confcutdir")
+                  "--output", "--rootdir", "--override-ini", "--confcutdir",
+                  "--config-file", "--debug")
     for arg in args:
         if (arg.startswith(prohibited) or arg in ("-c", "-o", "-p")
                 or (arg.startswith(("-o", "-c", "-p")) and not arg.startswith("--"))):

@@ -52,7 +52,8 @@ known pytest-qt plugin. Each invocation receives a fresh external OS temporary
 root with `run.json`, `pytest.log`, `junit.xml`, pytest data and caches. The
 runner prints that path immediately and preserves pytest's exit status.
 Caller overrides of temporary/report paths, plugins and pytest configuration
-are refused. Invoke only one setup operation per worktree; use separate
+are refused, including `-c`/`--config-file` and all `--debug` forms, which could
+otherwise select checkout-local logs or caches. Invoke only one setup operation per worktree; use separate
 worktrees for concurrent testing. Direct `env\Scripts\python.exe -m pytest`
 remains available for diagnosis; give it a unique external `--basetemp`.
 

@@ -25,6 +25,10 @@ The Windows development lock is independent of the existing Pi runtime
 requirements. Do not install the Pi-oriented root `requirements.txt` into a
 Windows development environment or modify the shared Pi environment.
 
+The worktree test runner owns pytest configuration and external evidence paths.
+It refuses configuration overrides (`-c`/`--config-file`) and `--debug` logs;
+use the documented isolated diagnostic workflow when those options are needed.
+
 ## Print-Array Pause and Queue-Clear Safety
 
 The full-height `Pause` button in the Connection group pauses command transport
