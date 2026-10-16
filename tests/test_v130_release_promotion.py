@@ -12,7 +12,7 @@ from MachineDataUpdate import MachineDataUpdateError
 from tools import update_and_restart as updater
 from tests import test_legacy_bridge_software_qualification as legacy
 from tests.test_machine_data_update_preservation import _active_context
-from tests.machine_data_migration_helpers import machine_data_paths
+from tests.machine_data_migration_helpers import machine_data_paths, write_candidate
 from tests.test_update_and_restart import FakeGitRunner, _write_version
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +40,11 @@ def test_immutable_clients_resolve_final_stable_or_existing_rc_bridge(tmp_path, 
     final_commit = legacy._git(author, "rev-parse", "HEAD")
     legacy._git(author, "tag", "-a", VERSION, "-m", "Owned synthetic final tag")
     legacy._run(["git", "push", str(tmp_path / "origin.git"), "main", "--tags"], cwd=author)
+    write_candidate(machine / "local", custom_camera=True,
+                    cohort="v1.2.0-rc.6" if source_version == "v1.2.0" else source_version)
     before = _inventory(machine / "local")
+    assert "Settings.json" in before and "Locations.json" in before
+    assert any(path.startswith("CalibrationMemory/") for path in before)
     result = legacy._run(
         [sys.executable, str(machine / "tools/update_and_restart.py"),
          "--repo-root", str(machine), "--release-channel", channel,
