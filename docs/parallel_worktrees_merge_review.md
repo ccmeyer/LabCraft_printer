@@ -1,9 +1,11 @@
 # Parallel worktrees: evidence audit and merge review
 
 Initial review: 2026-10-16. The three findings below describe the original
-`3328b768` candidate. **They have been fixed at `aec12fa7`; all final
-qualification gates passed.** See the remediation record at the end for
-current status. The original inspection and failed evidence are retained.
+`3328b768` candidate. R1-R3 were fixed at `aec12fa7` and integration-qualified
+as recorded below. A subsequent review of PR #6 at `887f1bbb` found two more
+P2 issues, R4 and R5. **Both are fixed at `12bf3e52`; the latest checks pass
+and no reviewed merge blockers remain.** See the PR follow-up at the end for
+current scope and evidence. Original inspections and failed trials are retained.
 
 ## Candidate and review scope
 
@@ -374,3 +376,101 @@ Rollback uses ordinary coherent reverts of the remediation commits and final
 artifact/documentation commit. Preserve old and new external datasets and
 qualification evidence. No machine-data migration or installed-firmware
 rollback is needed. Review and merge remain separate from this qualification.
+
+## PR #6 follow-up: historical invocation and UTF-8 worktree paths
+
+The follow-up review covered published head
+`887f1bbb43bbfab8cc9c720ded894981acc78ee4` against unchanged main
+`84e0fa088cea2b0cb54c83db6e08e11de4d86a6e`. Its two P2 findings are fixed in
+`12bf3e52f7cc23a17df900ccea7c6d684fa982a1`. The fix changes only the local
+Windows supervisor, its tests, and the Windows workflow guide; this audit is
+a documentation-only follow-up. No Pi or hardware operation was performed.
+
+### R4 resolved: documented historical command failed before collection
+
+The original copyable command omitted a positional test target. With the
+existing external fixture directory passed as a separate option value, pytest
+selected a common ancestor outside the repository before loading the custom
+option from `tests/conftest.py`. The reproduced command exited 4 with
+`unrecognized arguments: --historical-fixture-root`; it never ran the replay.
+
+The guide now explicitly selects `tests` and explains why that target is
+required. A regression extracts the actual argument list from the guide and
+runs it through the PowerShell wrapper with an existing external directory and
+`--collect-only`. It checks successful collection of the dense-tail and focus
+tests without requiring private recordings. The complete corrected invocation
+was also run against the pinned external dataset at committed source `12bf3e52`:
+**24 passed, 6,751 deselected, 68.69 s**, exit 0. Input/output hash checks and the
+minimum-five, 400/700 us numerical gates are unchanged.
+
+### R5 resolved: locale decoding corrupted Git worktree paths
+
+Git emitted UTF-8 path bytes, but the supervisor decoded them with the Windows
+locale. An owned real Git repository with `worktree-é` reproduced both a valid
+root being refused and the registered-worktree containment check missing a
+temporary root inside that checkout.
+
+Git calls, including the Git-for-Windows Bash submodule helper, now explicitly
+decode UTF-8. The runner uses `git worktree list --porcelain -z` and parses
+NUL-delimited fields, matching the historical fixture tool's existing safe
+path. An empty inventory is a refusal. Other subprocesses retain their existing
+encoding behavior; no Git configuration is changed.
+
+New real-Git regressions use an accented worktree name containing spaces. They
+verify valid-root acceptance and reject temporary output inside that registered
+checkout when either the ASCII or accented checkout is active, before output
+setup or pytest launch. A further regression rejects an empty inventory. The
+fixture owns its local repository and uses no remote or project Git mutations.
+
+### Follow-up validation and evidence
+
+The expanded focused run covers the runner, fixtures/geometry, synthetic tail
+replay, Qt cleanup, offline compatibility command, manifest generation, and
+fake headless-build preservation: **105 passed, 9 deselected, 18.36 s**. This
+includes five new regression cases. It ran immediately before committing the
+unchanged source files as `12bf3e52`; its unmodified metadata retains the earlier
+HEAD `887f1bbb`. Source file hashes and that distinction are recorded externally.
+The subsequent historical run records clean committed source `12bf3e52`.
+
+Read-only `setup_worktree.ps1 -IncludeFirmware -CheckOnly` passed with the
+qualified CPython 3.13.14 environment and clean CppUTest at
+`79c066ef278263b25d7c4512ccddce81345050a3`. `git diff --check` passed.
+The earlier two full suites, overlapping functional/SIL runs, and combined
+firmware gates retain their original source applicability; they are not
+presented as reruns of this follow-up. No application, analysis, dependency,
+firmware source/build/artifact, or replay-contract changes require repeating
+those gates for this narrow runner and documentation fix.
+
+Durable follow-up evidence is outside all worktrees:
+
+`C:/Users/conar/.codex/visualizations/2026/10/16/01a1461e-ef4f-7131-a577-45ed406a81cb/pr6-remediation/`
+
+`qualification.json` binds source hashes, original run locations, archive
+receipts, and test results. Reports were copied byte-for-byte; the original
+96 indexed evidence files were rehashed with zero mismatches. The previous
+review's failed-command and Unicode reproductions remain in `pr6-review/`.
+The first follow-up trial is also retained: 38 passed and one new assertion
+failed because it used a nonexistent test-name fragment after collection had
+succeeded. The assertion now names the real focus test; no acceptance check
+was removed or relaxed.
+
+| Follow-up report | JUnit SHA-256 |
+| --- | --- |
+| Expanded focused checks | `dd1f105efecb9b0f24dde26e12c52befe8975784d4e765a2cb1e5afe3a927b18` |
+| Corrected documented historical command | `2a60e6c2fa5a9396bccbb2f5d51b3cebf025beb80e1ae1d63d97f2e2d469deac` |
+
+### Merge recommendation, user effects, and rollback
+
+R1-R5 are resolved and the reviewed scope is ready to merge into main, subject
+to the final PR head containing this tested fix plus the audit-only closeout.
+This recommendation does not perform or authorize the merge, release, or
+deployment. GitHub had no CI checks or review submissions at the reviewed head;
+the validation above is local evidence.
+
+These two fixes change developer workflow behavior: the documented historical
+command works, accented Windows worktree names are accepted, and temporary
+output inside those checkouts is refused. Normal printer UI, motion, pressure,
+dispensing, live calibration, saved machine data, protocol, and installed
+firmware are unchanged. Rollback is an ordinary revert of `12bf3e52` and this
+audit closeout; preserve external data and evidence. No machine-data migration
+or firmware restoration is needed.
