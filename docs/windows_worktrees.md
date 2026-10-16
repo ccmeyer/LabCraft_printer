@@ -51,6 +51,12 @@ and machine/hardware authority settings, uses offscreen Qt, and selects the
 known pytest-qt plugin. Each invocation receives a fresh external OS temporary
 root with `run.json`, `pytest.log`, `junit.xml`, pytest data and caches. The
 runner prints that path immediately and preserves pytest's exit status.
+Keep the Windows temporary base short: deeply nested paths can exceed Git's
+filename limit in local-remote fixtures. For durable retention, copy the finished
+`run.json`, `pytest.log`, and `junit.xml` into an external evidence directory;
+preserve their bytes and record the original run directory. Do not redirect
+live test data into a deep report-archive path or change Git limits to hide a
+failing qualification.
 Caller overrides of temporary/report paths, plugins and pytest configuration
 are refused, including `-c`/`--config-file` and all `--debug` forms, which could
 otherwise select checkout-local logs or caches. Invoke only one setup operation
