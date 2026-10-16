@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.3.0 - 2026-10-16
+
+### Stable promotion
+
+- Promote the tested v1.3.0-rc.15 application and firmware payload unchanged to final stable. This includes the dense-plate refresh fix and the preceding accepted v1.3.0 changes. PR #6 development-worktree tooling is excluded.
+- Update final version and stable discovery metadata. Immutable legacy clients can select stable directly, so this target explicitly declares the existing v1.2.0-rc.6, v1.2.0 and v1.3.0-rc.1 migration cohorts. Retain the separate pinned rc.11 release-candidate route and its exact legacy-source declaration.
+- Keep rollback unconfigured: historical v1.2.0 is not qualified to reopen version-4 execution history. Use protected current-version or exactly qualified compatible-bundle recovery; preserve measurements, counts, revisions and calibration history.
+- Application code, firmware bytes, protocol, runtime dependency declarations, saved-data schemas and execution-data capability requirements remain identical to rc.15. No firmware flash is needed solely for this promotion of an already verified rc.15 installation.
+- Retain the accepted optimizer timing limitation and rc.15 validation boundaries. This metadata-only preparation adds no new Pi/physical or long-session memory claim. Direct legacy rollout retains the attended canary and firmware/recovery verification requirements.
+- Tagging, publication, promotion of main/stable and deployment remain pending. Validation and any release blockers are recorded in docs/v1.3.0_release_qualification.md.
+
 ## v1.3.0-rc.15 - 2026-09-10
 
 ### Fixed

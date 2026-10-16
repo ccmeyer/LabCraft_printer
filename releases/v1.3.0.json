@@ -1,0 +1,40 @@
+{
+  "schema_version": "labcraft_release_v1",
+  "version": "v1.3.0",
+  "tag": "v1.3.0",
+  "channel": "stable",
+  "release_date": "2026-10-16",
+  "previous_version": "v1.3.0-rc.15",
+  "rollback_version": null,
+  "requires_firmware": null,
+  "machine_data": {
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "data_schema_version": 1,
+    "transition": "none",
+    "transition_id": null
+  },
+  "update_compatibility": {
+    "schema_version": "labcraft_update_compatibility_v1",
+    "direct_legacy_sources": [
+      "v1.2.0-rc.6",
+      "v1.2.0",
+      "v1.3.0-rc.1"
+    ]
+  },
+  "summary": "Final stable promotion of the tested v1.3.0-rc.15 application and firmware payload.",
+  "notes": [
+    "Application, firmware artifact, protocol, runtime dependencies and execution-data capabilities are identical to tested rc.15. The development-worktree changes in PR #6 are excluded.",
+    "Promotes stable discovery to v1.3.0. Because immutable legacy clients select the stable pointer directly, this target explicitly declares only the existing v1.2.0-rc.6, v1.2.0 and v1.3.0-rc.1 migration cohorts. The separate release-candidate pointer remains pinned to rc.11.",
+    "Direct legacy migration requires the existing operator-reviewed source, external machine-data activation and verification workflow. Declaration of compatibility does not authorize hardware operation or establish installed-firmware provenance; verify the existing released firmware/recovery binding separately.",
+    "No configured app rollback is advertised. Preserve execution-calibration version-4 history and use protected current-version recovery or an exactly qualified compatible offline bundle. v1.2.0 is not an automatic rollback target.",
+    "The accepted rc.13 optimizer timing limitation and rc.15 qualification boundaries remain: occasional large-calculation UI pauses, no new long-session memory qualification, and no new physical-hardware qualification for this metadata-only promotion.",
+    "Release preparation only. Tagging, publication, advancing main/stable, and deployment remain pending. See docs/v1.3.0_release_qualification.md for current validation and any blockers."
+  ],
+  "validation": [
+    "Focused updater, release metadata, packaging, legacy bridge, bootstrap, preservation/recovery and execution-data rollback qualification",
+    "New v1.3.0 tests execute immutable legacy updater bytes for stable and RC discovery, verify exact-cohort enrollment and refusal, and check no configured rollback",
+    "Full Windows Python suite on this prepared release source; exact result and applicability recorded in docs/v1.3.0_release_qualification.md",
+    "Before tagging: tools/validate_release_metadata.py, strict release JSON parsing, git diff --check, and rc.15 application/firmware byte comparison",
+    "After publication authorization: exact metadata revision tagging, validate_release_metadata.py --check-tags, then release-aware bundle creation and verification"
+  ]
+}
