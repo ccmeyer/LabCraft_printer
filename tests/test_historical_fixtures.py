@@ -1,6 +1,8 @@
 import hashlib
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -82,3 +84,18 @@ def test_stage_validates_before_creating_destination(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="Missing"):
         fixtures.stage(source, tmp_path / "destination")
     assert not (tmp_path / "destination").exists()
+
+
+def test_staging_cli_resolves_own_modules_from_an_unrelated_directory(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    destination = tmp_path / "destination"
+    result = subprocess.run(
+        [sys.executable, "-B", str(fixtures.ROOT / "tools/historical_fixtures.py"),
+         "--source", str(source), "--destination", str(destination)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0
+    assert "Missing historical fixture" in result.stderr
+    assert "ModuleNotFoundError" not in result.stderr
+    assert not destination.exists()

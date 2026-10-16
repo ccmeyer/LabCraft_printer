@@ -66,10 +66,11 @@ def stage(source, destination):
         raise ValueError("Staging destination must be separate from the source")
     groups = load_manifest()
     entries = {p: h for group in groups.values() for p, h in group.items()}
-    verified_files(source, entries)
     if "dense_stream" in groups:
         from tools import historical_geometry
         expected_geometry = historical_geometry.load_contract()
+    verified_files(source, entries)
+    if "dense_stream" in groups:
         historical_geometry.validate_sources(source, groups["dense_stream"], expected_geometry)
     destination.mkdir(parents=True, exist_ok=False)
     for relative in entries:
@@ -94,4 +95,6 @@ def main():
 
 
 if __name__ == "__main__":
+    import sys
+    sys.path.insert(0, str(ROOT))
     main()
