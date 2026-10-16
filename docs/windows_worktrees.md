@@ -31,6 +31,8 @@ CMake caches, experiment directories, or submodule `.git` files. Git submodule
 commands use the installed Git for Windows Bash environment without modifying
 global PATH or Git configuration. Missing tools and dirty/mismatched submodules
 are blockers, not permission to overwrite them.
+Git paths are decoded as UTF-8, including accented worktree names; temporary
+output checks inventory every registered worktree with NUL-delimited paths.
 
 Development requirements live under `requirements/windows-dev/` so adding them
 does not change the existing Pi root dependency fingerprint. `requirements.in`
@@ -83,9 +85,12 @@ derivation once, preserving the originals:
 ```powershell
 .\env\Scripts\python.exe tools\historical_fixtures.py `
   --source 'C:\archive\Experiments' --destination 'C:\LabCraft-test-data\historical-v1'
-.\tools\run_worktree_tests.ps1 -PytestArgs @('-q','-m','historical_replay',
+.\tools\run_worktree_tests.ps1 -PytestArgs @('-q','tests','-m','historical_replay',
   '--historical-fixture-root','C:\LabCraft-test-data\historical-v1')
 ```
+
+Keep the explicit `tests` target: it loads the repository's custom pytest
+options before pytest interprets the external fixture directory.
 
 The source may be an existing ignored `FreeRTOS-interface/Experiments` archive.
 The destination must be new and outside every registered worktree. Staging

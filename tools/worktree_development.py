@@ -20,16 +20,17 @@ SUBMODULE = "firmware/third_party/cpputest"
 CUBE = Path(r"C:\ST\STM32CubeIDE_1.18.1\STM32CubeIDE")
 
 
-def invoke(args, *, cwd=ROOT, env=None):
+def invoke(args, *, cwd=ROOT, env=None, encoding=None):
     result = subprocess.run([str(a) for a in args], cwd=cwd, env=env,
-                            capture_output=True, text=True, check=False)
+                            capture_output=True, text=True, encoding=encoding, check=False)
     if result.returncode:
         raise subprocess.CalledProcessError(result.returncode, args, result.stdout, result.stderr)
     return result.stdout.strip()
 
 
 def git(*args, root=ROOT):
-    return invoke(["git", "-C", root, *args], cwd=root)
+    # Git emits UTF-8 paths even when Windows' locale encoding is different.
+    return invoke(["git", "-C", root, *args], cwd=root, encoding="utf-8")
 
 
 def git_submodule(*args, root=ROOT):
@@ -39,7 +40,7 @@ def git_submodule(*args, root=ROOT):
     bash = exe.parent.parent / "bin/bash.exe"
     if os.name == "nt" and bash.is_file():
         return invoke([bash, "-lc", 'exec git "$@"', "worktree-git", "-C", root,
-                       "submodule", *args], cwd=root)
+                       "submodule", *args], cwd=root, encoding="utf-8")
     return git("submodule", *args, root=root)
 
 
@@ -186,8 +187,11 @@ def run_tests(root, args):
     args = test_arguments(args)
     identity = verify_environment(root)
     run_root = Path(tempfile.mkdtemp(prefix="labcraft-worktree-tests-")).resolve()
-    roots = [Path(line[9:]).resolve() for line in git("worktree", "list", "--porcelain", root=root).splitlines()
-             if line.startswith("worktree ")]
+    roots = [Path(field[9:]).resolve() for field in
+             git("worktree", "list", "--porcelain", "-z", root=root).split("\0")
+             if field.startswith("worktree ")]
+    if not roots:
+        raise ValueError("Cannot establish registered worktree boundaries")
     if any(run_root.is_relative_to(r) for r in roots):
         raise ValueError("OS temporary directory must be outside all worktrees")
     env = test_environment(run_root)

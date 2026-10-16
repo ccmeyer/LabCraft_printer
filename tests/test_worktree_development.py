@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -57,6 +58,82 @@ def test_runner_preserves_selectors_and_opt_in_arguments():
     args = ["-q", "tests/a file.py", "-k", "one or two", "--run-sil-lifecycle",
             "--historical-fixture-root", "C:/fixture data"]
     assert dev.test_arguments(args) == args
+
+
+def test_documented_historical_command_collects_through_powershell(tmp_path):
+    guide = (dev.ROOT / "docs/windows_worktrees.md").read_text(encoding="utf-8")
+    section = guide.split("## Historical recording replays", 1)[1]
+    command = re.search(r"\.\\tools\\run_worktree_tests\.ps1 -PytestArgs @\((.*?)\)",
+                        section, re.DOTALL)
+    assert command is not None
+    arguments = re.findall(r"'([^']*)'", command.group(1))
+    fixture_option = arguments.index("--historical-fixture-root")
+    # An existing external path used to change pytest's initial conftest lookup.
+    # Collect only: this checks the documented invocation without archive inputs.
+    arguments[fixture_option + 1] = str(tmp_path)
+    arguments.append("--collect-only")
+    wrapper = dev.ROOT / "tools/run_worktree_tests.ps1"
+    def quote(value):
+        return "'" + str(value).replace("'", "''") + "'"
+
+    script = tmp_path / "documented-command.ps1"
+    script.write_text(
+        f"& {quote(wrapper)} -PytestArgs @({','.join(map(quote, arguments))})\n"
+        "exit $LASTEXITCODE\n", encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        cwd=dev.ROOT, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "test_sparse_online_tail_replay_matches_dense_offline_tail_start_with_scout_backtrack" in result.stdout
+    assert "test_replay_legacy_metric_keeps_best_actual_y_in_known_focus_basin" in result.stdout
+    assert "unrecognized arguments" not in result.stdout + result.stderr
+
+
+@pytest.fixture
+def accented_git_worktrees(tmp_path):
+    primary = tmp_path / "primary"
+    accented = tmp_path / "worktree-\u00e9 with spaces"
+    hooks = tmp_path / "empty-hooks"
+    hooks.mkdir()
+    subprocess.run(["git", "init", "-q", str(primary)], check=True, capture_output=True)
+    prefix = ["git", "-C", str(primary), "-c", f"core.hooksPath={hooks}",
+              "-c", "user.name=Worktree Regression", "-c", "user.email=regression@example.invalid"]
+    subprocess.run([*prefix, "commit", "--allow-empty", "-qm", "Owned regression fixture"],
+                   check=True, capture_output=True)
+    subprocess.run([*prefix, "worktree", "add", "-qb", "regression", str(accented)],
+                   check=True, capture_output=True)
+    return primary, accented
+
+
+def test_git_accepts_accented_worktree_root(accented_git_worktrees):
+    _, accented = accented_git_worktrees
+    assert dev.validate_root(accented) == accented.resolve()
+
+
+@pytest.mark.parametrize("active", [0, 1])
+def test_runner_refuses_temp_inside_accented_registered_worktree(accented_git_worktrees, monkeypatch, active):
+    primary, accented = accented_git_worktrees
+    run_root = accented / "temporary-output"
+    run_root.mkdir()
+    monkeypatch.setattr(dev, "verify_environment", lambda root: {})
+    monkeypatch.setattr(dev.tempfile, "mkdtemp", lambda **kwargs: str(run_root))
+    monkeypatch.setattr(dev, "test_environment", lambda *args: pytest.fail("Output setup reached"))
+    with pytest.raises(ValueError, match="outside all worktrees"):
+        dev.run_tests((primary, accented)[active], [])
+    assert list(run_root.iterdir()) == []
+
+
+def test_runner_refuses_missing_worktree_inventory(tmp_path, monkeypatch):
+    monkeypatch.setattr(dev, "validate_root", lambda root: root)
+    monkeypatch.setattr(dev, "verify_environment", lambda root: {})
+    monkeypatch.setattr(dev.tempfile, "mkdtemp", lambda **kwargs: str(tmp_path))
+    monkeypatch.setattr(dev, "git", lambda *args, **kwargs: "")
+    monkeypatch.setattr(dev, "test_environment", lambda *args: pytest.fail("Output setup reached"))
+    with pytest.raises(ValueError, match="Cannot establish registered worktree boundaries"):
+        dev.run_tests(tmp_path, [])
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_runner_scrubs_authority_without_mutating_parent(tmp_path):
