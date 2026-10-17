@@ -53,6 +53,24 @@ unless the user explicitly requests it.
 If generation status is unclear, search for `USER CODE BEGIN` markers and
 assume the file is generated until proven otherwise.
 
+## Required worktree setup
+
+Before firmware implementation or local firmware validation, run the shared
+setup from the task's Windows worktree root with `-IncludeFirmware`. Supply an
+existing absolute Windows x64 CPython 3.13 executable, as documented in
+`docs/windows_worktrees.md`:
+
+```powershell
+.\tools\setup_worktree.ps1 -Python 'C:\absolute\Python313\python.exe' -IncludeFirmware
+```
+
+Run this even if normal Codex setup already created the worktree's `env`.
+It verifies that independent environment, checks firmware build prerequisites,
+and initializes the exact pinned CppUTest submodule when needed. Resolve
+missing tools or environment/submodule mismatches before proceeding; preserve
+partial or dirty state rather than overwriting it. This setup grants no Pi,
+flashing, or physical hardware authority.
+
 ## Required local validation
 
 After any firmware source, firmware test, build-tool, or HIL-tool change, run:
