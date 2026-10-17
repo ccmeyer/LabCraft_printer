@@ -49,6 +49,34 @@ them.
 - Motion, homing, pressure, pumps, valves, dispensing, cameras, balances, and
   timing-sensitive behavior require explicit verification and rollback plans.
 
+## Task startup defaults
+
+For each new independent implementation task:
+
+- Use a separate Windows worktree based on a freshly fetched `origin/main`,
+  unless the user requests a different base. Creating the worktree and its
+  feature branch is part of normal task setup; no repeated instruction is
+  needed.
+- If Codex already supplied a worktree for the task, use it rather than
+  creating another. Before the first edit, verify its starting commit against
+  the requested base; report and resolve an unexpected mismatch without
+  resetting or overwriting existing work.
+- Create a unique `codex/<change-name>` branch in that worktree before editing.
+  When continuing an existing task, reuse its worktree and branch; do not
+  silently change its base or discard in-progress changes.
+- Report the absolute worktree path, active branch, starting commit, and
+  working-tree status before implementation so the user can open the same
+  checkout in VS Code.
+- Follow `docs/windows_worktrees.md` and the Python commands below to provision
+  or verify this worktree's independent `env` before Python work and to run
+  focused tests. Documentation-only changes do not require an environment;
+  validate their diff and links as appropriate.
+
+Read-only investigations may use the existing checkout. Worktree setup does
+not authorize Pi execution, firmware flashing, physical hardware operation,
+merging, protected-branch pushes, or release tags; obtain the task-specific
+scope required by the rules below.
+
 ## Required working method
 
 For each implementation task:
