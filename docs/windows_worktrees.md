@@ -9,13 +9,20 @@ already used by the firmware build script.
 
 ## Create and provision
 
-Run in the existing repository, supplying your new branch and destination:
+Start each independent implementation task from a freshly fetched
+`origin/main`, unless the user requests a different base. If Codex already
+created a worktree for the task, use it, verify its starting commit, and create
+a unique `codex/<change-name>` branch there before editing; do not create a
+second worktree. Continue existing tasks in their own worktree and branch.
+Report the absolute worktree path, branch, starting commit, and working-tree
+status before implementation, as required by the root `AGENTS.md`.
 
-The base revision must include these tools. Until this work is merged, use
-`codex/parallel-worktrees` in place of `main` below.
+For manual creation, run in the existing repository, supplying your new branch
+and destination. Stop if fetching fails; do not proceed with a stale base:
 
 ```powershell
-git worktree add -b codex/my-change ..\LabCraft-my-change main
+git fetch origin main
+git worktree add -b codex/my-change ..\LabCraft-my-change origin/main
 Set-Location ..\LabCraft-my-change
 .\tools\setup_worktree.ps1 -Python 'C:\absolute\Python313\python.exe'
 # Include local firmware prerequisites and the exact pinned CppUTest submodule:
