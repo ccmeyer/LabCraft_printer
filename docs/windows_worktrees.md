@@ -47,6 +47,25 @@ records direct dependencies; `requirements.lock` pins their complete Windows
 closure, including packaging tools. To change dependencies, update both files
 on a branch and qualify a fresh environment; do not change the Pi interpreter.
 
+## Codex project environment
+
+The shared Codex setup configuration is tracked in
+`.codex/environments/environment.toml`. Edit it through Codex's environment
+editor rather than editing the generated TOML manually. Select this environment
+when starting a worktree task. Its Windows-specific setup calls the same
+`tools/setup_worktree.ps1` shown above; Default setup and cleanup remain empty.
+
+Setup uses `LABCRAFT_PYTHON313` when supplied to the Codex process. Set it to an
+existing absolute Windows x64 CPython 3.13 executable for a custom installation.
+Otherwise setup uses `%LOCALAPPDATA%\Python\pythoncore-3.13-64\python.exe`.
+It does not install Python or search unrelated interpreters. A missing or
+incompatible interpreter is a blocker. Firmware tasks must additionally run
+setup with `-IncludeFirmware`, as required by `firmware/AGENTS.md`.
+
+The generated TOML is intentional shared project configuration. Each worktree's
+installed `env`, transient build outputs, logs, and test evidence remain
+separate and must not be committed or copied into another worktree.
+
 ## Tests and simulation
 
 ```powershell
