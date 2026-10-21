@@ -397,8 +397,36 @@ def test_worker_design_load_cancels_before_notifying_or_reading_another_row(row_
     assert not notifications
 
 
-def test_large_editable_copy_keeps_heartbeat_through_publication(qapp, real_editor, tmp_path, monkeypatch):
+def test_large_editable_copy_keeps_heartbeat_through_publication(request, tmp_path):
+    import os
+
+    # A latency benchmark must not inherit thousands of earlier tests' live
+    # Python/Qt objects: full GC traverses that unrelated retained heap while
+    # holding the GIL. Keep normal GC and the complete workload in a fresh
+    # interpreter, including publication and the next GUI heartbeat.
+    child_marker = "LABCRAFT_COPY_HEARTBEAT_CHILD"
+    if os.environ.get(child_marker) != "1":
+        environment = dict(os.environ, **{child_marker: "1"})
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-p", "pytestqt.plugin",
+             "-p", "no:cacheprovider", "-q", "-s",
+             f"{__file__}::test_large_editable_copy_keeps_heartbeat_through_publication",
+             "--basetemp", str(tmp_path / "heartbeat-child")],
+            cwd=Path(__file__).resolve().parents[1], env=environment,
+            capture_output=True, text=True, timeout=90,
+        )
+        output = result.stdout + result.stderr
+        (tmp_path / "heartbeat-child.log").write_text(output, encoding="utf-8")
+        assert result.returncode == 0, output
+        assert "maximum heartbeat gap:" in output, output
+        print(output)
+        return
+
+    qapp = request.getfixturevalue("qapp")
+    real_editor = request.getfixturevalue("real_editor")
+    monkeypatch = request.getfixturevalue("monkeypatch")
     import gc
+    assert gc.isenabled(), "The copy benchmark requires normal automatic GC"
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QMessageBox
     editor, rows = real_editor, 10000

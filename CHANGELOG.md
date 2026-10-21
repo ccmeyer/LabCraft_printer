@@ -8,6 +8,7 @@
 - Replace the splash image's static `Initializing...` label with live white status text on the transparent background. Startup cancellation waits for a safe checkpoint and worker shutdown before releasing locks.
 - Add cooperative checkpoints between uploaded-design serialization and loading rows so large editable-copy operations can service GUI callbacks and cancellation. Data formats, fingerprints, source-file guards and publication checks are unchanged; the copy heartbeat limit remains 250 ms.
 - Make the simulated pressure-profile test wait for both chart targets instead of accepting an intermediate print-only update.
+- Run the large-copy latency benchmark in a fresh interpreter with normal GC so unrelated full-suite heap history does not change its workload. The strict 250 ms limit and complete publication/safety assertions are retained; arbitrary long-session GC latency is not qualified.
 
 ### Qualification and recovery
 
