@@ -71,6 +71,10 @@ from InitialExecutionPlan import (
     initial_execution_content_matches,
 )
 from StockIdentity import stock_id_for_parts, stock_id_for_row
+from FixedStock import (
+    fixed_stock_concentrations, fixed_stock_matches, has_fixed_stock,
+    normalize_fixed_stock_pair,
+)
 from ExecutionPlanRevision import (
     REVISION_DIRECTORY_NAME,
     build_calibrated_revision,
@@ -372,6 +376,11 @@ class OptionSpec:
     intended_head_type_display_name: str | None = None
     intended_droplet_nL: float | None = None
     intended_printing_mode: str | None = None
+    forced_stock_concs: Tuple[float, float] | None = None
+
+    def __post_init__(self):
+        self.forced_stock_concs = normalize_fixed_stock_pair(self.forced_stock_concs)
+        fixed_stock_concentrations(self)  # Reject conflicting scalar/pair constraints.
 
 
 @dataclass
@@ -726,6 +735,7 @@ class ExperimentModel(QObject):
         intended_head_type_id: str | None = None,
         intended_head_type_display_name: str | None = None,
         printing_mode: str | None = None,
+        forced_stock_concs: Tuple[float, float] | None = None,
     ):
         o = OptionSpec(name=f"{name}",
                     targets=list(targets), units=units,
@@ -733,6 +743,7 @@ class ExperimentModel(QObject):
                     printing_mode=self._resolve_option_printing_mode(printing_mode, droplet_nL),
                     starting_conc=float(starting_conc or 0.0),
                     forced_stock_conc=float(forced_stock_conc) if forced_stock_conc is not None else None,
+                    forced_stock_concs=forced_stock_concs,
                     max_stock_conc=float(max_stock_conc) if max_stock_conc is not None else None,
                     reagent_id=reagent_id,
                     reagent_display_name=reagent_display_name,
@@ -760,6 +771,7 @@ class ExperimentModel(QObject):
         intended_head_type_id: str | None = None,
         intended_head_type_display_name: str | None = None,
         printing_mode: str | None = None,
+        forced_stock_concs: Tuple[float, float] | None = None,
     ):
         for f in self.factors:
             if f.name == group_name and f.kind == "choice":
@@ -769,6 +781,7 @@ class ExperimentModel(QObject):
                             float(starting_conc or 0.0),
                             float(forced_stock_conc) if forced_stock_conc is not None else None,
                             float(max_stock_conc) if max_stock_conc is not None else None,
+                            forced_stock_concs=forced_stock_concs,
                             reagent_id=reagent_id,
                             reagent_display_name=reagent_display_name,
                             intended_head_type_id=intended_head_type_id,
@@ -790,6 +803,7 @@ class ExperimentModel(QObject):
             intended_head_type_id,
             intended_head_type_display_name,
             printing_mode,
+            forced_stock_concs=forced_stock_concs,
         )
     def set_metadata(self, **kwargs):
         self.metadata.update(kwargs)
@@ -2255,7 +2269,7 @@ class ExperimentModel(QObject):
             rows: List[Dict[str, Any]] = []
             if plan.get("n_stocks", 1) == 1:
                 stock = plan["stocks"][0]
-                plan_mode = "fixed" if getattr(opt, "forced_stock_conc", None) not in (None, 0.0) else "auto"
+                plan_mode = "fixed" if has_fixed_stock(opt) else "auto"
                 for t_final in self._effective_targets_for_key(key, opt):
                     row = self._evaluate_single_forced_target(
                         t_final=t_final,
@@ -2299,7 +2313,7 @@ class ExperimentModel(QObject):
                     if un1 or un2:
                         row["reachable"] = False
                         row["reason"] = "missing_target_mapping"
-                    row["plan_mode"] = "auto"
+                    row["plan_mode"] = "fixed" if has_fixed_stock(opt) else "auto"
                     rows.append(row)
 
             if not rows:
@@ -3681,6 +3695,61 @@ class ExperimentModel(QObject):
                 n_stocks=1,
             )
 
+        def _build_fixed_pair_plan(opt, key):
+            concentrations = fixed_stock_concentrations(opt)
+            dv = float(opt.droplet_nL)
+            rows = {}
+            drops = {}
+            limit = max(0, int(math.floor((V_accept + 1e-6) / dv)))
+            for target in _effective_targets_for_opt(key, opt):
+                self._optimization_checkpoint()
+                row = self._evaluate_two_stock_target(
+                    t_final=target,
+                    starting_conc=float(opt.starting_conc or 0.0),
+                    stock_concentrations=concentrations,
+                    droplet_nL=dv, final_volume_nL=V_final, units=opt.units,
+                    max_total_drops=limit, diagnostics=two_stock_diagnostics,
+                    deadline_reached=lambda: (self._optimization_checkpoint() or False),
+                )
+                row["plan_mode"] = "fixed"
+                adjusted = self._normalize_target_key(row["requested_adjusted"])
+                drops[adjusted] = row["droplets"]
+                # Cache adjusted targets, as expected by _evaluate_two_stock_plan_rows.
+                rows[adjusted] = dict(row)
+                if not row["reachable"]:
+                    message = f"Fixed stocks for {self._design_key_label(key)} cannot reach target {target:.6g} within the printed-volume budget."
+                    _add_issue(key, field="fixed_stock", severity="error",
+                               code="fixed_unreachable_targets", message=message,
+                               fixed_stock_concs=list(concentrations), unreachable_targets=[target])
+                    return None
+            max_volume = max((sum(counts) * dv for counts in drops.values()), default=0.0)
+            return TwoStockPlan(
+                deltas=tuple(c * dv / V_final for c in concentrations),
+                stock_concs=concentrations, droplet_nL=dv, units=opt.units,
+                droplets_per_target=drops, max_volume_nL=max_volume,
+                conc_sum=sum(concentrations), target_rows=rows,
+                fits_nominal_volume=max_volume <= V_print + 1e-6,
+            )
+
+        for factor in self.factors:
+            for opt in factor.options:
+                key = (factor.name, None if factor.kind == "additive" else opt.name)
+                if getattr(opt, "forced_stock_concs", None) is None:
+                    continue
+                try:
+                    concentrations = fixed_stock_concentrations(opt)
+                except ValueError as exc:
+                    _add_issue(key, field="fixed_stock", severity="error",
+                               code="invalid_fixed_pair", message=str(exc))
+                    return _failure(str(exc))
+                if opt.max_stock_conc is not None and any(c > float(opt.max_stock_conc) + 1e-12 for c in concentrations):
+                    message = f"Fixed stocks for {self._design_key_label(key)} exceed max stock {opt.max_stock_conc:.6g} {opt.units}."
+                    for field_name in ("fixed_stock", "max_stock"):
+                        _add_issue(key, field=field_name, severity="error",
+                                   code="fixed_exceeds_max", message=message,
+                                   fixed_stock_concs=list(concentrations), max_stock_conc=opt.max_stock_conc)
+                    return _failure(message)
+
         for f in self.factors:
             self._optimization_checkpoint()
             if f.kind == "additive":
@@ -3689,7 +3758,12 @@ class ExperimentModel(QObject):
                 t_adj = _adj_targets_for_opt((f.name, None), o)
                 forced = getattr(o, "forced_stock_conc", None)
                 max_stock = getattr(o, "max_stock_conc", None)
-                if forced is not None and forced > 0:
+                if o.forced_stock_concs is not None:
+                    pair_plan = _build_fixed_pair_plan(o, (f.name, None))
+                    if pair_plan is None:
+                        return _failure("Fixed stock pair cannot reach all targets within the printed-volume budget.")
+                    additives.append((f.name, [], [pair_plan]))
+                elif forced is not None and forced > 0:
                     if max_stock is not None and float(forced) > float(max_stock) + 1e-12:
                         key = (f.name, None)
                         msg = (
@@ -3779,7 +3853,12 @@ class ExperimentModel(QObject):
                     t_adj = _adj_targets_for_opt((f.name, opt.name), opt)
                     forced = getattr(opt, "forced_stock_conc", None)
                     max_stock = getattr(opt, "max_stock_conc", None)
-                    if forced is not None and forced > 0:
+                    if opt.forced_stock_concs is not None:
+                        pair_plan = _build_fixed_pair_plan(opt, (f.name, opt.name))
+                        if pair_plan is None:
+                            return _failure("Fixed stock pair cannot reach all targets within the printed-volume budget.")
+                        bucket.append((opt.name, [], [pair_plan]))
+                    elif forced is not None and forced > 0:
                         if max_stock is not None and float(forced) > float(max_stock) + 1e-12:
                             key = (f.name, opt.name)
                             msg = (
@@ -3928,7 +4007,7 @@ class ExperimentModel(QObject):
             required_volume_nL: float,
             code: str,
         ):
-            field = "fixed_stock" if getattr(opt, "forced_stock_conc", None) not in (None, 0.0) else "stock_plan"
+            field = "fixed_stock" if has_fixed_stock(opt) else "stock_plan"
             if field == "stock_plan" and getattr(opt, "max_stock_conc", None) is not None:
                 field = "max_stock"
             units = getattr(opt, "units", "") or ""
@@ -3955,6 +4034,7 @@ class ExperimentModel(QObject):
                     if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
                     else None
                 ),
+                fixed_stock_concs=getattr(opt, "forced_stock_concs", None),
                 max_stock_conc=(
                     float(getattr(opt, "max_stock_conc"))
                     if getattr(opt, "max_stock_conc", None) is not None
@@ -4840,7 +4920,7 @@ class ExperimentModel(QObject):
                         if selected.max_volume_nL > V_accept + 1e-6:
                             code = (
                                 "fixed_volume_budget_exceeded"
-                                if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
+                                if has_fixed_stock(opt)
                                 else "single_stock_volume_budget_exceeded"
                             )
                             _record_volume_budget_issue((name, None), opt, required_volume_nL=selected.max_volume_nL, code=code)
@@ -4856,7 +4936,7 @@ class ExperimentModel(QObject):
                             if selected.max_volume_nL > V_accept + 1e-6:
                                 code = (
                                     "fixed_volume_budget_exceeded"
-                                    if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
+                                    if has_fixed_stock(opt)
                                     else "single_stock_volume_budget_exceeded"
                                 )
                                 _record_volume_budget_issue(key, opt, required_volume_nL=selected.max_volume_nL, code=code)
@@ -4898,6 +4978,8 @@ class ExperimentModel(QObject):
                 continue
             twos = twos if twos is not None else _ensure_additive_twos(name)
             p2 = twos[add_two_idx[name]]
+            if additive_option_map[name].forced_stock_concs is not None:
+                continue
             if is_two_plan_degenerate(p2):
                 use_leg = 0 if all(ab[1] == 0 for ab in p2.droplets_per_target.values()) else 1
                 drops = {float(t): ab[use_leg] for t, ab in p2.droplets_per_target.items()}
@@ -4950,6 +5032,9 @@ class ExperimentModel(QObject):
                     continue
                 twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
                 p2 = twos[ch_two_idx[key]]
+                if choice_option_map[key].forced_stock_concs is not None:
+                    new_bucket.append((oname, singles, twos))
+                    continue
                 if is_two_plan_degenerate(p2):
                     use_leg = 0 if all(ab[1] == 0 for ab in p2.droplets_per_target.values()) else 1
                     drops = {float(t): ab[use_leg] for t, ab in p2.droplets_per_target.items()}
@@ -5051,7 +5136,7 @@ class ExperimentModel(QObject):
         for name, singles, twos in additives:
             self._optimization_checkpoint()
             opt = additive_option_map[name]
-            if getattr(opt, "forced_stock_conc", None) not in (None, 0.0):
+            if has_fixed_stock(opt):
                 continue
             if add_two_idx[name] is not None:
                 resolved_twos = twos if twos is not None else _ensure_additive_twos(name)
@@ -5085,7 +5170,7 @@ class ExperimentModel(QObject):
                 self._optimization_checkpoint()
                 key = (gname, oname)
                 opt = choice_option_map[key]
-                if getattr(opt, "forced_stock_conc", None) not in (None, 0.0):
+                if has_fixed_stock(opt):
                     continue
                 if ch_two_idx[key] is not None:
                     resolved_twos = twos if twos is not None else _ensure_choice_twos(gname, oname)
@@ -5271,16 +5356,7 @@ class ExperimentModel(QObject):
                     value > float(max_stock) + 1e-9 for value in concentrations
                 ):
                     raise ValueError(f"Resolution allocation exceeds the stock bound for {key!r}.")
-                forced_stock = getattr(opt, "forced_stock_conc", None)
-                if forced_stock not in (None, 0.0) and (
-                    len(concentrations) != 1
-                    or not math.isclose(
-                        concentrations[0],
-                        float(forced_stock),
-                        rel_tol=1e-9,
-                        abs_tol=1e-9,
-                    )
-                ):
+                if not fixed_stock_matches(opt, concentrations, abs_tol=1e-9, rel_tol=1e-9):
                     raise ValueError(f"Resolution allocation changed the fixed stock for {key!r}.")
 
                 exact_max_volume_nL = 0.0
@@ -5288,7 +5364,7 @@ class ExperimentModel(QObject):
                     # A fixed user-provided stock can legitimately leave a target
                     # unreachable; generated candidates may not introduce that state.
                     self._optimization_checkpoint()
-                    if not bool(row.get("reachable")) and forced_stock in (None, 0.0):
+                    if not bool(row.get("reachable")) and not has_fixed_stock(opt):
                         raise ValueError(
                             f"Resolution allocation cannot reach a target for {key!r}."
                         )
@@ -5503,7 +5579,7 @@ class ExperimentModel(QObject):
                 return False
             resolution_two_keys.add(key)
             opt = option_by_key[key]
-            if getattr(opt, "forced_stock_conc", None) not in (None, 0.0):
+            if has_fixed_stock(opt):
                 return False
             _kind, _idx, _singles, existing = _candidate_lists_for_key(key)
             # Feasibility fallback candidates were already resolution-aware and
@@ -5849,7 +5925,7 @@ class ExperimentModel(QObject):
                 deduplicated_total += len(entries) - len(unique_entries)
 
                 opt = option_by_key[key]
-                forced = getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
+                forced = has_fixed_stock(opt)
                 retained = self._filter_resolution_candidate_entries(
                     unique_entries, forced=forced, diagnostics=dominance_diagnostics,
                     **({"control": self._optimization_control}
@@ -6385,7 +6461,7 @@ class ExperimentModel(QObject):
                     # candidates. A difficult first reagent cannot starve peers.
                     eligible_keys = [
                         key for key, evaluation in best_details["evaluations"].items()
-                        if getattr(option_by_key[key], "forced_stock_conc", None) in (None, 0.0)
+                        if not has_fixed_stock(option_by_key[key])
                         and (
                             int(evaluation["score"].lost_levels) > 0
                             or float(evaluation["score"].max_volume_nL) > 0.0
@@ -6510,7 +6586,7 @@ class ExperimentModel(QObject):
                 if selected.max_volume_nL > V_accept + 1e-6:
                     code = (
                         "fixed_volume_budget_exceeded"
-                        if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
+                        if has_fixed_stock(opt)
                         else "single_stock_volume_budget_exceeded"
                     )
                     _record_volume_budget_issue((name, None), opt, required_volume_nL=selected.max_volume_nL, code=code)
@@ -6526,7 +6602,7 @@ class ExperimentModel(QObject):
                     if selected.max_volume_nL > V_accept + 1e-6:
                         code = (
                             "fixed_volume_budget_exceeded"
-                            if getattr(opt, "forced_stock_conc", None) not in (None, 0.0)
+                            if has_fixed_stock(opt)
                             else "single_stock_volume_budget_exceeded"
                         )
                         _record_volume_budget_issue(key, opt, required_volume_nL=selected.max_volume_nL, code=code)
@@ -6560,7 +6636,7 @@ class ExperimentModel(QObject):
                             "droplet_volume_nL": p2.droplet_nL,
                             "units": p2.units,
                             "droplets_per_target": {float(t): ab[0] for t, ab in p2.droplets_per_target.items()},
-                            "quantum": quantum
+                            "quantum": 1e-6 if additive_option_map[name].forced_stock_concs is not None else quantum
                          },
                         {
                             "delta_per_drop": p2.deltas[1],
@@ -6568,7 +6644,7 @@ class ExperimentModel(QObject):
                             "droplet_volume_nL": p2.droplet_nL,
                             "units": p2.units,
                             "droplets_per_target": {float(t): ab[1] for t, ab in p2.droplets_per_target.items()},
-                            "quantum": quantum
+                            "quantum": 1e-6 if additive_option_map[name].forced_stock_concs is not None else quantum
                         },
                     ]
                 }
@@ -6630,7 +6706,7 @@ class ExperimentModel(QObject):
                                 "droplet_volume_nL": p2.droplet_nL,
                                 "units": p2.units,
                                 "droplets_per_target": {float(t): ab[0] for t, ab in p2.droplets_per_target.items()},
-                                "quantum": quantum
+                                "quantum": 1e-6 if choice_option_map[key].forced_stock_concs is not None else quantum
                             },
                             {
                                 "delta_per_drop": p2.deltas[1],
@@ -6638,7 +6714,7 @@ class ExperimentModel(QObject):
                                 "droplet_volume_nL": p2.droplet_nL,
                                 "units": p2.units,
                                 "droplets_per_target": {float(t): ab[1] for t, ab in p2.droplets_per_target.items()},
-                                "quantum": quantum
+                                "quantum": 1e-6 if choice_option_map[key].forced_stock_concs is not None else quantum
                             },
                         ]
                     }
@@ -6874,7 +6950,7 @@ class ExperimentModel(QObject):
         for key, rows in self._target_preview_map.items():
             self._optimization_checkpoint()
             opt = self._get_option_for_key(key)
-            if opt is None or getattr(opt, "forced_stock_conc", None) in (None, 0.0):
+            if opt is None or not has_fixed_stock(opt):
                 continue
             unreachable_rows = [row for row in rows if not bool(row.get("reachable"))]
             if not unreachable_rows:
@@ -6885,10 +6961,11 @@ class ExperimentModel(QObject):
                 severity="error",
                 code="fixed_unreachable_targets",
                 message=(
-                    f"Fixed stock {float(getattr(opt, 'forced_stock_conc')):.6g} {opt.units} cannot reach "
+                    f"Fixed stock {' + '.join(f'{value:.6g}' for value in fixed_stock_concentrations(opt))} {opt.units} cannot reach "
                     f"{len(unreachable_rows)} target(s) for {key[0] if key[1] in (None, '') else f'{key[0]}/{key[1]}'}."
                 ),
-                fixed_stock_conc=float(getattr(opt, "forced_stock_conc")),
+                fixed_stock_conc=getattr(opt, "forced_stock_conc", None),
+                fixed_stock_concs=getattr(opt, "forced_stock_concs", None),
                 unreachable_targets=[float(row.get("requested_final", 0.0)) for row in unreachable_rows],
             )
 
@@ -6959,16 +7036,7 @@ class ExperimentModel(QObject):
                 )
                 continue
 
-            forced_stock = getattr(opt, "forced_stock_conc", None)
-            if forced_stock not in (None, 0.0) and (
-                n_stocks != 1
-                or not math.isclose(
-                    float(stocks[0].get("stock_concentration", float("nan"))),
-                    float(forced_stock),
-                    rel_tol=0.0,
-                    abs_tol=1e-12,
-                )
-            ):
+            if not fixed_stock_matches(opt, [stock.get("stock_concentration", float("nan")) for stock in stocks]):
                 materialized_mappings_valid = False
                 _add_issue(
                     key,
@@ -6979,7 +7047,8 @@ class ExperimentModel(QObject):
                         f"The materialized plan for {label} does not preserve its "
                         "fixed stock concentration."
                     ),
-                    fixed_stock_conc=float(forced_stock),
+                    fixed_stock_conc=getattr(opt, "forced_stock_conc", None),
+                    fixed_stock_concs=getattr(opt, "forced_stock_concs", None),
                 )
 
             max_stock = getattr(opt, "max_stock_conc", None)
@@ -7060,7 +7129,7 @@ class ExperimentModel(QObject):
                 ):
                     materialized_mappings_valid = False
                     if not (
-                        forced_stock not in (None, 0.0)
+                        has_fixed_stock(opt)
                         and preview_row is not None
                         and not bool(preview_row.get("reachable"))
                     ):
@@ -8185,6 +8254,8 @@ class ExperimentModel(QObject):
                     "forced_stock_conc": number(
                         getattr(option, "forced_stock_conc", None)
                     ),
+                    **({"forced_stock_concs": list(fixed_stock_concentrations(option))}
+                       if getattr(option, "forced_stock_concs", None) is not None else {}),
                     "max_stock_conc": number(
                         getattr(option, "max_stock_conc", None)
                     ),
@@ -8706,17 +8777,8 @@ class ExperimentModel(QObject):
                 n_stocks = int(plan.get("n_stocks", len(stocks)))
                 if n_stocks not in (1, 2) or len(stocks) != n_stocks:
                     raise ValueError(f"Invalid reusable stock count for {key!r}.")
-                forced = getattr(option, "forced_stock_conc", None)
                 maximum = getattr(option, "max_stock_conc", None)
-                if forced not in (None, 0.0) and (
-                    n_stocks != 1
-                    or not math.isclose(
-                        float(stocks[0]["stock_concentration"]),
-                        float(forced),
-                        rel_tol=1e-9,
-                        abs_tol=1e-9,
-                    )
-                ):
+                if not fixed_stock_matches(option, [stock["stock_concentration"] for stock in stocks], abs_tol=1e-9, rel_tol=1e-9):
                     raise ValueError(f"Reusable plan violates fixed stock for {key!r}.")
                 for stock in stocks:
                     concentration = float(stock["stock_concentration"])
@@ -13855,6 +13917,8 @@ class ExperimentModel(QObject):
                                 if getattr(o, "intended_printing_mode", None) is not None
                                 else {}
                             ),
+                            **({"forced_stock_concs": list(fixed_stock_concentrations(o))}
+                               if o.forced_stock_concs is not None else {}),
                             "forced_stock_conc": (
                                 float(o.forced_stock_conc)
                                 if o.forced_stock_conc is not None
@@ -14008,6 +14072,7 @@ class ExperimentModel(QObject):
                         option_droplet_nl,
                     ),
                     starting_conc=float(o.get("starting_conc", 0.0)),
+                    forced_stock_concs=o.get("forced_stock_concs"),
                     forced_stock_conc=(
                         float(o["forced_stock_conc"])
                         if o.get("forced_stock_conc") is not None
@@ -19774,6 +19839,10 @@ class ExperimentModel(QObject):
         applied: list[dict[str, object]] = []
 
         for key, option, progress_names in self._iter_progress_option_specs():
+            # The persisted fixed pair is authoritative; the legacy scalar override
+            # cannot reconstruct a pair from progress in which one leg is unused.
+            if getattr(option, "forced_stock_concs", None) is not None:
+                continue
             concentrations: set[float] = set()
             for name in progress_names:
                 concentrations.update(saved_concentrations.get((name, option.units), set()))
