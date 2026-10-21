@@ -13962,6 +13962,7 @@ class ExperimentModel(QObject):
 
             serialized_rxns: list[list[dict]] = []
             for rxn in self._uploaded_reactions:
+                self._optimization_checkpoint()
                 row: list[dict] = []
                 for (fac, opt), val in rxn.items():
                     row.append(
@@ -13972,6 +13973,7 @@ class ExperimentModel(QObject):
                         }
                     )
                 serialized_rxns.append(row)
+            self._optimization_checkpoint()
 
             csv_name = None
             if self._uploaded_design_source:
@@ -14121,6 +14123,7 @@ class ExperimentModel(QObject):
             uploaded_reactions: list[dict[tuple[str, Optional[str]], float]] = []
 
             for rxn_list in raw_rxns:
+                self._optimization_checkpoint()
                 # Expect a list of {factor, option, target}
                 rxn_map: dict[tuple[str, Optional[str]], float] = {}
                 if isinstance(rxn_list, list):
@@ -14139,6 +14142,7 @@ class ExperimentModel(QObject):
                         rxn_map[(fac, opt)] = v
                 if rxn_map:
                     uploaded_reactions.append(rxn_map)
+            self._optimization_checkpoint()
 
             if uploaded_reactions:
                 self._uploaded_reactions = uploaded_reactions
