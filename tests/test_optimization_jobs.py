@@ -331,7 +331,102 @@ def test_allocation_fingerprint_can_cancel_during_uploaded_row_preparation(monke
     assert not hashed
 
 
-def test_large_editable_copy_keeps_heartbeat_through_publication(qapp, real_editor, tmp_path, monkeypatch):
+def test_worker_design_round_trip_preserves_uncontrolled_serialization():
+    model = _large_import_model()[0]
+    document = model.to_dict()
+    model._optimization_control = ComputationControl()
+    assert model.to_dict() == document
+    reference = ExperimentModel()
+    reference.from_dict(document)
+    worker = ExperimentModel()
+    worker._optimization_control = ComputationControl()
+    worker.from_dict(document)
+    assert worker.to_dict() == reference.to_dict()
+
+
+@pytest.mark.parametrize("row_count", [1, 2])
+def test_worker_design_save_cancellation_preserves_existing_file(tmp_path, row_count):
+    model = ExperimentModel()
+    control = model._optimization_control = ComputationControl()
+
+    class CancelAfterFirstRow(dict):
+        def items(self):
+            control.cancelled.set()
+            return super().items()
+
+    class UnexpectedRow(dict):
+        def items(self):
+            pytest.fail("Cancellation must stop before serializing the next row")
+
+    path = tmp_path / "experiment_design.json"
+    original = b'{"metadata":{"name":"saved design"}}'
+    path.write_bytes(original)
+    model.experiment_file_path = str(path)
+    model._uploaded_reactions = [CancelAfterFirstRow({("R", None): 1.0})]
+    if row_count == 2:
+        model._uploaded_reactions.append(UnexpectedRow({("R", None): 2.0}))
+    with pytest.raises(OptimizationCancelled):
+        model.save_experiment()
+    assert path.read_bytes() == original
+    assert not list(tmp_path.glob("._tmp_*"))
+
+
+@pytest.mark.parametrize("row_count", [1, 2])
+def test_worker_design_load_cancels_before_notifying_or_reading_another_row(row_count):
+    model = ExperimentModel()
+    document = model.to_dict()
+    control = model._optimization_control = ComputationControl()
+
+    class CancelAfterFirstRow(list):
+        def __iter__(self):
+            control.cancelled.set()
+            return super().__iter__()
+
+    class UnexpectedRow(list):
+        def __iter__(self):
+            pytest.fail("Cancellation must stop before loading the next row")
+
+    rows = [CancelAfterFirstRow([{"factor": "R", "option": None, "target": 1.0}])]
+    if row_count == 2:
+        rows.append(UnexpectedRow([]))
+    document["uploaded_design"] = {"reactions": rows}
+    notifications = []
+    model.stock_updated.connect(lambda: notifications.append(True))
+    with pytest.raises(OptimizationCancelled):
+        model.from_dict(document)
+    assert not notifications
+
+
+def test_large_editable_copy_keeps_heartbeat_through_publication(request, tmp_path):
+    import os
+
+    # A latency benchmark must not inherit thousands of earlier tests' live
+    # Python/Qt objects: full GC traverses that unrelated retained heap while
+    # holding the GIL. Keep normal GC and the complete workload in a fresh
+    # interpreter, including publication and the next GUI heartbeat.
+    child_marker = "LABCRAFT_COPY_HEARTBEAT_CHILD"
+    if os.environ.get(child_marker) != "1":
+        environment = dict(os.environ, **{child_marker: "1"})
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-p", "pytestqt.plugin",
+             "-p", "no:cacheprovider", "-q", "-s",
+             f"{__file__}::test_large_editable_copy_keeps_heartbeat_through_publication",
+             "--basetemp", str(tmp_path / "heartbeat-child")],
+            cwd=Path(__file__).resolve().parents[1], env=environment,
+            capture_output=True, text=True, timeout=90,
+        )
+        output = result.stdout + result.stderr
+        (tmp_path / "heartbeat-child.log").write_text(output, encoding="utf-8")
+        assert result.returncode == 0, output
+        assert "maximum heartbeat gap:" in output, output
+        print(output)
+        return
+
+    qapp = request.getfixturevalue("qapp")
+    real_editor = request.getfixturevalue("real_editor")
+    monkeypatch = request.getfixturevalue("monkeypatch")
+    import gc
+    assert gc.isenabled(), "The copy benchmark requires normal automatic GC"
     from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QMessageBox
     editor, rows = real_editor, 10000
@@ -371,11 +466,25 @@ def test_large_editable_copy_keeps_heartbeat_through_publication(qapp, real_edit
         return result
     monkeypatch.setattr(model, "publish_editable_copy", publish)
     editor.optimization_finished.connect(lambda *args: outcomes.append(args))
+    collections, collecting = [], {}
+
+    def observe_gc(phase, info):
+        key = (threading.get_ident(), info["generation"])
+        now = time.monotonic()
+        if phase == "start":
+            frame = sys._getframe(1)
+            collecting[key] = (now, frame.f_code.co_name, frame.f_lineno)
+        else:
+            started, function, line = collecting.pop(key, (now, "", 0))
+            if now - started >= 0.040:
+                collections.append((now - started, key, function, line))
+
     beats = [time.monotonic()]
     timer = QTimer()
     timer.setInterval(5)
     timer.timeout.connect(lambda: beats.append(time.monotonic()))
     timer.start()
+    gc.callbacks.append(observe_gc)
     try:
         editor._start_duplicate_design_job(source_path, source, "LargeCopy", destination, document)
         startup_elapsed = time.monotonic() - beats[0]
@@ -392,9 +501,10 @@ def test_large_editable_copy_keeps_heartbeat_through_publication(qapp, real_edit
         assert not list(tmp_path.glob(".*.staging-*"))
         max_gap = max(b - a for a, b in zip(beats, beats[1:]))
         print(f"Copy startup: {startup_elapsed:.3f}s; publication: {publications[0]:.3f}s; maximum heartbeat gap: {max_gap:.3f}s")
-        assert max_gap < 0.250
+        assert max_gap < 0.250, f"maximum gap={max_gap:.3f}s; long GC pauses={collections}"
     finally:
         timer.stop()
+        gc.callbacks.remove(observe_gc)
 
 
 def test_destroyed_copy_owner_discards_prepared_files(qapp, manager, tmp_path):

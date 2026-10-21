@@ -1,5 +1,27 @@
 # MCU liveness and editor responsiveness milestone
 
+## Upload serialization follow-up (2026-10-21)
+
+Startup release checks reproduced the 10,000-row copy heartbeat failure on both
+the startup branch (305 ms) and its unchanged main base (269 ms). The limit
+remains 250 ms. Generation-2 GC in the worker can hold up GUI callbacks; the
+uploaded-row loops in `to_dict` and `from_dict` previously had no cooperative
+checkpoints to separate that pause from the rest of the loop.
+
+Those loops now check between rows and after the final row, using the existing
+worker cancellation/yield control. Ordinary synchronous callers retain the same
+serialization. No fingerprint format, JSON schema, allocation rule, source-byte
+guard or publication interlock changes. Cancellation during save leaves the
+existing file intact; cancellation during load stops before the next row and
+before the stock-table notification. The heartbeat test records long GC pauses
+on failure without changing GC settings or its timing threshold.
+
+The simulated imager profile test separately waits for both chart target lines.
+The model can already contain both new settings while the throttled chart still
+shows an intermediate frame. The existing timeout, tolerance and assertions are
+unchanged. Neither correction changes pressure commands or firmware behavior.
+Revert these follow-up code/test changes to roll back; no data migration is needed.
+
 ## Motivation and evidence
 
 On 2026-09-09 at 19:42:03 UTC, rc.12 reported `mcu_unresponsive` after

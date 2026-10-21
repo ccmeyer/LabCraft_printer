@@ -322,6 +322,25 @@ def test_ready_state_revalidates_in_worker_before_accepting(qapp, monkeypatch, t
     assert started[0]().kind == "ready"
 
 
+def test_preinspected_action_state_does_not_repeat_inspection_on_gui_thread(
+    qapp, monkeypatch, tmp_path
+):
+    inspection = _inspection(
+        tmp_path, MachineDataBootstrap.BootstrapState.CANDIDATE_SELECTION_REQUIRED
+    )
+    bootstrap = FakeBootstrap(inspection)
+    monkeypatch.setattr(
+        bootstrap, "inspect",
+        lambda: pytest.fail("App already inspected the state in its startup worker"),
+    )
+    dialog = MachineDataBootstrapDialog.MachineDataBootstrapDialog(
+        bootstrap, inspection=inspection
+    )
+    assert dialog.inspection is inspection
+    assert dialog.candidate is None
+    assert dialog.pages.currentIndex() == 0
+
+
 def test_recovery_state_disables_candidate_actions_and_returns_typed_error(
     qapp, monkeypatch, tmp_path
 ):

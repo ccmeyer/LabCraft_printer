@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.3.2 - 2026-10-21
+
+### Fixed
+
+- Paint the loading splash before machine-data verification starts. Healthy stores open without briefly showing the verification window; setup, migration and recovery still use the existing verification workflow. Identity, configuration-lock, deployment, receipt and authorization checks remain enforced before application construction.
+- Replace the splash image's static `Initializing...` label with live white status text on the transparent background. Startup cancellation waits for a safe checkpoint and worker shutdown before releasing locks.
+- Add cooperative checkpoints between uploaded-design serialization and loading rows so large editable-copy operations can service GUI callbacks and cancellation. Data formats, fingerprints, source-file guards and publication checks are unchanged; the copy heartbeat limit remains 250 ms.
+- Make the simulated pressure-profile test wait for both chart targets instead of accepting an intermediate print-only update.
+- Run the large-copy latency benchmark in a fresh interpreter with normal GC so unrelated full-suite heap history does not change its workload. The strict 250 ms limit and complete publication/safety assertions are retained; arbitrary long-session GC latency is not qualified.
+
+### Qualification and recovery
+
+- The complete Windows application suite passed 6,690 tests with 205 skips and zero failures. Twenty repeated pressure-test trials and five full-collection copy trials passed; copy heartbeat gaps were 191–222 ms. The operator confirmed the revised splash presentation on the isolated Pi development app.
+- Firmware artifact bytes, protocol, runtime dependencies, machine-data schema and execution-data capabilities are identical to v1.3.1. No firmware change accompanies this patch.
+- Retain the exact legacy migration cohorts and pinned rc.11 discovery route. Automatic rollback remains unconfigured; preserve history and use protected current-version or exactly qualified compatible-bundle recovery.
+- Release metadata, discovery, packaging and final integration gates are recorded in `docs/v1.3.2_release_qualification.md` and the external release evidence archive. Existing accepted large-optimizer timing limitations remain separate from this copy regression.
+
 ## v1.3.1 - 2026-10-21
 
 ### Added

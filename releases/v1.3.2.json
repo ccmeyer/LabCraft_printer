@@ -1,0 +1,45 @@
+{
+  "schema_version": "labcraft_release_v1",
+  "version": "v1.3.2",
+  "tag": "v1.3.2",
+  "channel": "stable",
+  "release_date": "2026-10-21",
+  "previous_version": "v1.3.1",
+  "rollback_version": null,
+  "requires_firmware": null,
+  "machine_data": {
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "data_schema_version": 1,
+    "transition": "none",
+    "transition_id": null
+  },
+  "update_compatibility": {
+    "schema_version": "labcraft_update_compatibility_v1",
+    "direct_legacy_sources": [
+      "v1.2.0-rc.6",
+      "v1.2.0",
+      "v1.3.0-rc.1"
+    ]
+  },
+  "summary": "Show the loading splash earlier and open machine-data verification only when needed, preserving startup safety checks.",
+  "notes": [
+    "The splash paints before machine-data checks and uses live white status text on its transparent background. An already-ready store opens under its configuration lock without briefly displaying the verification dialog.",
+    "Setup, migration, recovery, identity, receipt, deployment and authorization checks remain in place. Cancellation waits for a safe checkpoint and worker shutdown before locks are released; hardware-capable construction stays behind authorization on the GUI thread.",
+    "Large uploaded-design serialization and loading yield between rows using the existing worker control. Saving, fingerprints, source-file guards, allocation validation and publication interlocks retain their existing semantics. The 250 ms copy-heartbeat threshold is unchanged.",
+    "The simulated pressure-profile test waits for both chart targets before asserting convergence. No pressure command or firmware behavior changes.",
+    "The copy timing benchmark uses a fresh interpreter with normal GC and the unchanged workload, safety assertions and strict 250 ms limit. A full-suite run exposed 252-268 ms full-GC pauses on its accumulated test heap; arbitrary long-session GC latency remains unqualified.",
+    "Firmware artifact bytes and runtime dependencies are identical to v1.3.1. Machine-data schema, execution-calibration version 4 and both execution-data compatibility capabilities are unchanged. Existing installed-firmware provenance and SAFE requirements still apply.",
+    "Retains the three exact stable legacy migration cohorts and the separate pinned rc.11 release-candidate route. Legacy deployment retains its guarded migration, firmware/recovery verification and attended first-machine canary requirements.",
+    "Automatic rollback remains unconfigured. Preserve calibration measurements, committed counts, progress and immutable revisions; use protected current-version or exactly qualified compatible-bundle recovery.",
+    "See docs/v1.3.2_release_qualification.md for scope and evidence. Existing accepted large-optimizer timing limitations remain; this patch does not add physical-operation or long-session memory qualification."
+  ],
+  "validation": [
+    "Complete Windows application suite on e6dccad4: 6690 passed, 205 skipped, zero failures/errors",
+    "Focused copy/publication, serialization, fixed-stock, additional-condition and simulated pressure checks: 175 passed",
+    "Twenty repeated corrected pressure trials passed; five full-collection copy trials passed with heartbeat gaps of 191-222 ms against the unchanged 250 ms limit",
+    "Operator-reviewed isolated Pi no-hardware splash preview; production and firmware protected invariants preserved",
+    "Release-focused updater, metadata, packaging, immutable-client discovery, bootstrap preservation/refusal and rollback qualification: 361 passed",
+    "Final full Windows suite on the committed release-metadata revision; external run metadata, pytest log and JUnit retained",
+    "tools/validate_release_metadata.py, strict release JSON parsing and git diff --check before tagging; validate_release_metadata.py --check-tags before publication"
+  ]
+}
