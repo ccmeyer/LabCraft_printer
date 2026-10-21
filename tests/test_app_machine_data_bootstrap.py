@@ -15,6 +15,32 @@ class _Signal:
     def connect(self, callback):
         self.callbacks.append(callback)
 
+    def emit(self):
+        for callback in self.callbacks:
+            callback()
+
+
+class _Splash:
+    def __init__(self, events):
+        self.events = events
+        self.cancel_requested = _Signal()
+        events.append("splash_created")
+
+    def set_status(self, message):
+        self.events.append(("splash_status", message))
+
+    def show(self):
+        self.events.append("splash_shown")
+
+    def hide(self):
+        self.events.append("splash_hidden")
+
+    def finish(self, _view):
+        self.events.append("splash_finished")
+
+    def close_startup(self):
+        self.events.append("splash_closed")
+
 
 class _Application:
     def __init__(self, argv, events, *, result=0):
@@ -48,6 +74,10 @@ class _Application:
     def quit(self):
         self.events.append("app_quit")
 
+    def exit(self, code):
+        self.result = code
+        self.events.append(("app_exit", code))
+
 
 class _Lock:
     def __init__(self, events):
@@ -72,6 +102,7 @@ def _install_bootstrap_modules(
     dialog_result,
     inspection_state="candidate_selection_required",
     dialog_error=None,
+    ready_error=None,
 ):
     machine_data = types.ModuleType("MachineData")
     machine_data.resolve_machine_data_base = lambda **_kwargs: events.append(
@@ -93,12 +124,29 @@ def _install_bootstrap_modules(
             events.append("bootstrap_inspected")
             return SimpleNamespace(state=inspection_state)
 
+        def open_ready(self):
+            events.append("bootstrap_open_ready")
+            if ready_error is not None:
+                raise ready_error
+            return dialog_result
+
+        def request_cancel(self):
+            events.append("bootstrap_cancel_requested")
+
+    class BootstrapError(RuntimeError):
+        def __init__(self, code, message):
+            self.code = code
+            super().__init__(message)
+
     bootstrap_module.BootstrapState = BootstrapState
+    bootstrap_module.BootstrapError = BootstrapError
     bootstrap_module.MachineDataBootstrap = Bootstrap
 
     dialog_module = types.ModuleType("MachineDataBootstrapDialog")
 
     def run_dialog(*_args, **_kwargs):
+        assert "splash_hidden" in events
+        assert _kwargs["inspection"].state == inspection_state
         events.append("bootstrap_dialog")
         if dialog_error is not None:
             raise dialog_error
@@ -113,11 +161,35 @@ def _install_bootstrap_modules(
 
 def _patch_app_shell(monkeypatch, tmp_path, events):
     monkeypatch.setattr(
+        App.QMessageBox, "critical",
+        lambda *_args: pytest.fail(f"Unexpected startup error: {_args[-1]}"),
+    )
+    monkeypatch.setattr(
         App,
         "QApplication",
         lambda argv: _Application(argv, events),
     )
     monkeypatch.setattr(App, "QIcon", _Icon)
+    splashes = []
+
+    def make_splash(_pixmap):
+        splash = _Splash(events)
+        splashes.append(splash)
+        return splash
+
+    monkeypatch.setattr(App, "StartupSplash", make_splash)
+    monkeypatch.setattr(App, "QPixmap", lambda _path: object())
+
+    def run_operation(operation, *, splash):
+        assert splash is splashes[0]
+        assert "splash_shown" in events
+        events.append("splash_painted")
+        return operation()
+
+    monkeypatch.setattr(App, "run_startup_operation", run_operation)
+    optimization_jobs = types.ModuleType("OptimizationJobs")
+    optimization_jobs.optimization_job_manager = lambda: events.append("optimizer")
+    monkeypatch.setitem(sys.modules, "OptimizationJobs", optimization_jobs)
     monkeypatch.setattr(App, "set_dark_theme", lambda _app: events.append("theme"))
     monkeypatch.setattr(App, "single_instance_lock_path", lambda: tmp_path / "app.lock")
     monkeypatch.setattr(
@@ -130,9 +202,10 @@ def _patch_app_shell(monkeypatch, tmp_path, events):
         "writableLocation",
         lambda _location: str(tmp_path / "app-data"),
     )
+    return splashes
 
 
-def test_bootstrap_cancel_exits_before_splash_settings_or_composition(
+def test_bootstrap_cancel_closes_early_splash_before_settings_or_composition(
     monkeypatch, tmp_path
 ):
     events = []
@@ -144,22 +217,16 @@ def test_bootstrap_cancel_exits_before_splash_settings_or_composition(
         "ApplicationComposition",
         types.ModuleType("ApplicationComposition"),
     )
-    monkeypatch.setattr(
-        App,
-        "QSplashScreen",
-        lambda *_args: (_ for _ in ()).throw(
-            AssertionError("splash must not be constructed")
-        ),
-    )
-
     assert App.main() == App.EXIT_BOOTSTRAP_CANCELLED
     assert events[:4] == [
         "qapplication",
         "app_lock_acquired",
         "theme",
-        "resolve_base",
+        "splash_created",
     ]
+    assert events.index("splash_painted") < events.index("resolve_base")
     assert "bootstrap_dialog" in events
+    assert "splash_closed" in events
     assert "app_lock_released" == events[-1]
     assert state.CANDIDATE_SELECTION_REQUIRED == "candidate_selection_required"
 
@@ -187,11 +254,109 @@ def test_bootstrap_error_maps_exit_code_and_releases_app_lock(monkeypatch, tmp_p
     assert events[-1] == "app_lock_released"
 
 
-def test_ready_bootstrap_precedes_settings_and_component_construction(
+def test_dialog_cancellation_reinspects_durable_state_for_recovery(
     monkeypatch, tmp_path
 ):
     events = []
     _patch_app_shell(monkeypatch, tmp_path, events)
+    state = _install_bootstrap_modules(monkeypatch, events, dialog_result=None)
+    bootstrap_type = sys.modules["MachineDataBootstrap"].MachineDataBootstrap
+    inspections = iter(
+        [state.CANDIDATE_SELECTION_REQUIRED, state.RECOVERY_REQUIRED]
+    )
+    monkeypatch.setattr(
+        bootstrap_type, "inspect",
+        lambda _self: SimpleNamespace(state=next(inspections)),
+    )
+    assert App.main() == App.EXIT_RECOVERY_REQUIRED
+    assert "bootstrap_dialog" in events
+    assert events[-2:] == ["splash_closed", "app_lock_released"]
+
+
+@pytest.mark.parametrize(
+    "code, expected_exit",
+    [
+        ("configuration_lock_unavailable", App.EXIT_CONFIGURATION_LOCK_UNAVAILABLE),
+        ("recovery_required", App.EXIT_RECOVERY_REQUIRED),
+        ("bootstrap_failed", App.EXIT_BOOTSTRAP_FAILED),
+        ("bootstrap_cancelled", App.EXIT_BOOTSTRAP_CANCELLED),
+    ],
+)
+def test_ready_revalidation_failure_never_constructs_components_or_opens_dialog(
+    monkeypatch, tmp_path, code, expected_exit
+):
+    events = []
+    _patch_app_shell(monkeypatch, tmp_path, events)
+    error = RuntimeError("revalidation rejected")
+    error.code = code
+    _install_bootstrap_modules(
+        monkeypatch, events, dialog_result=None, inspection_state="ready",
+        ready_error=error,
+    )
+    messages = []
+    monkeypatch.setattr(
+        App.QMessageBox, "critical", lambda *_args: messages.append(_args)
+    )
+
+    assert App.main() == expected_exit
+    assert "bootstrap_open_ready" in events
+    assert "bootstrap_dialog" not in events
+    assert "settings_consumed" not in events
+    assert bool(messages) is (code != "bootstrap_cancelled")
+    assert events[-2:] == ["splash_closed", "app_lock_released"]
+
+
+@pytest.mark.parametrize("cancel_after_authorization", [False, True])
+def test_splash_cancellation_waits_for_worker_and_releases_any_authorized_context(
+    monkeypatch, tmp_path, cancel_after_authorization
+):
+    events = []
+    splashes = _patch_app_shell(monkeypatch, tmp_path, events)
+    context = SimpleNamespace(close=lambda: events.append("context_closed"))
+    _install_bootstrap_modules(
+        monkeypatch, events, dialog_result=context, inspection_state="ready"
+    )
+
+    def cancelled_operation(operation, *, splash):
+        assert splash is splashes[0]
+        if not cancel_after_authorization:
+            splash.cancel_requested.emit()
+        result = operation()
+        splash.cancel_requested.emit()
+        events.append("worker_stopped")
+        return result
+
+    monkeypatch.setattr(App, "run_startup_operation", cancelled_operation)
+    assert App.main() == App.EXIT_BOOTSTRAP_CANCELLED
+    assert "bootstrap_dialog" not in events
+    assert "settings_consumed" not in events
+    if cancel_after_authorization:
+        assert events.index("worker_stopped") < events.index("context_closed")
+        assert events.count("context_closed") == 1
+    else:
+        assert "bootstrap_open_ready" not in events
+        assert "context_closed" not in events
+    assert events[-2:] == ["splash_closed", "app_lock_released"]
+
+
+@pytest.mark.parametrize("real_presentation", [False, True])
+def test_ready_bootstrap_precedes_settings_and_component_construction(
+    qapp, monkeypatch, tmp_path, real_presentation
+):
+    events = []
+    _patch_app_shell(monkeypatch, tmp_path, events)
+    if real_presentation:
+        from PySide6 import QtGui
+        from StartupPresentation import StartupSplash, run_startup_operation
+
+        def make_splash(pixmap):
+            splash = StartupSplash(pixmap)
+            splash.painted.connect(lambda: events.append("splash_painted"))
+            return splash
+
+        monkeypatch.setattr(App, "StartupSplash", make_splash)
+        monkeypatch.setattr(App, "QPixmap", QtGui.QPixmap)
+        monkeypatch.setattr(App, "run_startup_operation", run_startup_operation)
     config_root = tmp_path / "machine" / "config"
     config_root.mkdir(parents=True)
     settings_path = config_root / "Settings.json"
@@ -210,7 +375,9 @@ def test_ready_bootstrap_precedes_settings_and_component_construction(
             events.append("context_closed")
 
     context = Context()
-    _install_bootstrap_modules(monkeypatch, events, dialog_result=context)
+    _install_bootstrap_modules(
+        monkeypatch, events, dialog_result=context, inspection_state="ready"
+    )
 
     composition = types.ModuleType("ApplicationComposition")
     composition.ExperimentalFeatures = SimpleNamespace(
@@ -231,6 +398,18 @@ def test_ready_bootstrap_precedes_settings_and_component_construction(
             "update_result"
         ),
     )
+    if real_presentation:
+        from PySide6 import QtWidgets
+
+        class StartupView(QtWidgets.QWidget):
+            def show(self):
+                events.append("view_show")
+                super().show()
+
+            def show_pending_app_update_result_after_startup(self):
+                events.append("update_result")
+
+        view = StartupView()
 
     class Components:
         def __init__(self):
@@ -239,6 +418,8 @@ def test_ready_bootstrap_precedes_settings_and_component_construction(
 
         def close(self):
             self.close_calls += 1
+            if real_presentation:
+                view.close()
             context.close()
             return True
 
@@ -258,18 +439,6 @@ def test_ready_bootstrap_precedes_settings_and_component_construction(
         lambda _name: events.append("settings_consumed") or object(),
     )
 
-    class Splash:
-        def __init__(self, _pixmap):
-            events.append("splash_created")
-
-        def show(self):
-            events.append("splash_shown")
-
-        def finish(self, _view):
-            events.append("splash_finished")
-
-    monkeypatch.setattr(App, "QSplashScreen", Splash)
-    monkeypatch.setattr(App, "QPixmap", lambda _path: object())
     monkeypatch.setattr(
         App.QTimer,
         "singleShot",
@@ -282,8 +451,10 @@ def test_ready_bootstrap_precedes_settings_and_component_construction(
     )
 
     assert App.main() == 0
-    assert events.index("bootstrap_dialog") < events.index("settings_consumed")
-    assert events.index("bootstrap_dialog") < events.index("splash_created")
+    assert "bootstrap_dialog" not in events
+    assert events.index("splash_painted") < events.index("bootstrap_inspected")
+    assert events.index("bootstrap_inspected") < events.index("bootstrap_open_ready")
+    assert events.index("bootstrap_open_ready") < events.index("settings_consumed")
     assert events.index("settings_consumed") < events.index("components_constructed")
     assert components.close_calls == 1
     assert context.close_calls == 1
@@ -313,15 +484,6 @@ def test_settings_hash_change_after_bootstrap_closes_context_without_components(
         "components_constructed"
     )
     monkeypatch.setitem(sys.modules, "ApplicationComposition", composition)
-    monkeypatch.setattr(
-        App,
-        "QSplashScreen",
-        lambda _pixmap: SimpleNamespace(
-            show=lambda: None,
-            finish=lambda _view: None,
-        ),
-    )
-    monkeypatch.setattr(App, "QPixmap", lambda _path: object())
     messages = []
     monkeypatch.setattr(
         App.QMessageBox,
@@ -383,6 +545,7 @@ def test_development_launch_requires_ready_store_skips_dialog_and_records_sessio
             return context
 
     bootstrap_module.BootstrapState = BootstrapState
+    bootstrap_module.BootstrapError = RuntimeError
     bootstrap_module.MachineDataBootstrap = Bootstrap
     monkeypatch.setitem(sys.modules, "MachineDataBootstrap", bootstrap_module)
     dialog_module = types.ModuleType("MachineDataBootstrapDialog")
@@ -471,12 +634,6 @@ def test_development_launch_requires_ready_store_skips_dialog_and_records_sessio
     composition.build_application_components = build
     monkeypatch.setitem(sys.modules, "ApplicationComposition", composition)
     monkeypatch.setattr(App, "get_profile", lambda _name: object())
-    monkeypatch.setattr(
-        App,
-        "QSplashScreen",
-        lambda _pixmap: SimpleNamespace(show=lambda: None, finish=lambda _view: None),
-    )
-    monkeypatch.setattr(App, "QPixmap", lambda _path: object())
     monkeypatch.setattr(
         App.QTimer,
         "singleShot",

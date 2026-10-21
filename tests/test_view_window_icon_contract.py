@@ -237,7 +237,7 @@ def test_app_main_duplicate_instance_exits_before_splash_or_hardware(monkeypatch
     monkeypatch.setattr(App, "single_instance_lock_path", lambda: lock_path)
     monkeypatch.setattr(App, "acquire_single_instance_lock", lambda path: None)
     monkeypatch.setattr(App, "show_single_instance_warning", lambda path: calls.append(("warning", path)))
-    monkeypatch.setattr(App, "QSplashScreen", fail_splash)
+    monkeypatch.setattr(App, "StartupSplash", fail_splash)
 
     assert App.main() == App.EXIT_ALREADY_RUNNING
     assert ("warning", lock_path) in calls

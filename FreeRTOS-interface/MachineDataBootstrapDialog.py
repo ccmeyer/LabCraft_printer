@@ -48,6 +48,7 @@ class MachineDataBootstrapDialog(QtWidgets.QDialog):
         bootstrap: MachineDataBootstrap,
         *,
         current_checkout_local: str | Path | None = None,
+        inspection=None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -57,7 +58,7 @@ class MachineDataBootstrapDialog(QtWidgets.QDialog):
             if current_checkout_local is not None
             else None
         )
-        self.inspection = bootstrap.inspect()
+        self.inspection = inspection if inspection is not None else bootstrap.inspect()
         self.candidate: CandidateEvidence | None = None
         self._candidate_history: dict[str, CandidateEvidence] = {}
         self.context: AuthorizedMachineContext | None = None
@@ -539,11 +540,13 @@ def run_bootstrap_dialog(
     bootstrap: MachineDataBootstrap,
     *,
     current_checkout_local: str | Path | None = None,
+    inspection=None,
     parent=None,
 ) -> AuthorizedMachineContext | None:
     dialog = MachineDataBootstrapDialog(
         bootstrap,
         current_checkout_local=current_checkout_local,
+        inspection=inspection,
         parent=parent,
     )
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:

@@ -32,6 +32,35 @@ Historical replay uses an explicit external dataset with verified capture and
 derived-geometry provenance; staging commands and unchanged numerical gates are
 documented in the Windows worktree guide.
 
+## Application startup
+
+After the single-instance lock is acquired, LabCraft paints a loading splash
+before importing the machine-data bootstrap modules. The splash displays
+`Checking machine data...` while a hardware-free worker inspects the external
+store and opens an already-ready store under its configuration lock. Qt keeps
+servicing events during these checks. All existing identity, configuration,
+receipt, deployment, recovery, and authorization checks still precede Settings
+consumption and hardware-capable application construction.
+
+The machine-data verification window opens only when setup, migration/resume,
+or recovery needs attention. The splash hides while that window or a startup
+error is shown. On successful authorization, it displays `Loading interface...`
+until the main window is ready. Clicking the splash does not dismiss it;
+closing it requests cancellation and waits for the worker's safe checkpoint
+and thread shutdown before releasing locks. Widget construction stays on the
+GUI thread, so the splash may remain static while the interface is built.
+
+Focused hardware-free startup validation:
+
+```powershell
+.\tools\run_worktree_tests.ps1 -PytestArgs @('-q',
+  'tests/test_startup_presentation.py',
+  'tests/test_app_machine_data_bootstrap.py',
+  'tests/test_machine_data_bootstrap_dialog.py',
+  'tests/test_view_window_icon_contract.py',
+  'tests/test_safe_application_construction.py')
+```
+
 ## Print-Array Pause and Queue-Clear Safety
 
 The full-height `Pause` button in the Connection group pauses command transport

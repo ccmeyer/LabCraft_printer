@@ -1,5 +1,5 @@
 import sys
-from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
+from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import QLockFile, QStandardPaths, QTimer
 from PySide6.QtWidgets import QStyleFactory
 from PySide6.QtGui import QPalette, QColor, QPixmap, QIcon
@@ -34,6 +34,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from hardware.profile import get_profile
 from AppVersion import get_app_commit, get_app_version
+from StartupPresentation import StartupSplash, run_startup_operation
 
 def configure_app_identity(app):
     app.setOrganizationName(APP_ORGANIZATION_NAME)
@@ -243,6 +244,16 @@ def main():
     authorized_context = None
     development_launch = None
     development_session_path = None
+    splash = None
+    bootstrap = None
+    startup_cancelled = threading.Event()
+
+    def request_startup_cancel():
+        startup_cancelled.set()
+        if bootstrap is not None:
+            bootstrap.request_cancel()
+        splash.set_status("Cancellation requested. Waiting for a safe checkpoint...")
+
     try:
         # Bootstrap-safe presentation only. Production composition, Settings,
         # MVC, serial, camera, balance, and Machine imports happen later.
@@ -253,14 +264,17 @@ def main():
             app.setWindowIcon(app_icon)
         set_dark_theme(app)
 
-        from MachineData import resolve_machine_data_base
-        from MachineDataBootstrap import BootstrapState, MachineDataBootstrap
-        from MachineDataBootstrapDialog import run_bootstrap_dialog
+        logo_path = os.path.join(script_dir, 'Presets', 'LabCraft_logo.png')
+        splash = StartupSplash(QPixmap(logo_path))
+        splash.cancel_requested.connect(request_startup_cancel)
+        splash.set_status("Checking machine data...")
+        splash.show()
 
         app_local_data = QStandardPaths.writableLocation(
             QStandardPaths.AppLocalDataLocation
         )
         if not app_local_data:
+            splash.hide()
             QMessageBox.critical(
                 None,
                 "Machine Data Bootstrap Failed",
@@ -268,55 +282,87 @@ def main():
             )
             return EXIT_BOOTSTRAP_FAILED
         try:
-            base = resolve_machine_data_base(
-                app_local_data_root=app_local_data,
-                repo_root=REPO_ROOT,
-            )
-            app_version = get_app_version(REPO_ROOT)
-            app_commit = get_app_commit(REPO_ROOT)
-            record_development_session = None
-            if str(os.environ.get("LABCRAFT_DEPLOYMENT_MODE", "")).strip():
-                from MachineDataDevelopment import (
-                    development_launch_from_environment,
-                    record_no_hardware_runtime_evidence,
-                    record_development_session,
+            def prepare_bootstrap():
+                nonlocal bootstrap, authorized_context, development_launch
+                nonlocal development_session_path
+                from MachineData import resolve_machine_data_base
+                from MachineDataBootstrap import (
+                    BootstrapError, BootstrapState, MachineDataBootstrap,
                 )
 
-                development_launch = development_launch_from_environment(
-                    base.root,
-                    os.environ,
+                base = resolve_machine_data_base(
+                    app_local_data_root=app_local_data,
+                    repo_root=REPO_ROOT,
                 )
-            bootstrap_kwargs = {
-                "app_version": app_version,
-                "app_commit": app_commit,
-            }
-            if development_launch is not None:
-                bootstrap_kwargs["deployment_gate_enabled"] = False
-            bootstrap = MachineDataBootstrap(base, **bootstrap_kwargs)
-            if development_launch is None:
-                authorized_context = run_bootstrap_dialog(
-                    bootstrap,
-                    current_checkout_local=REPO_ROOT / "local",
-                )
-            else:
+                app_version = get_app_version(REPO_ROOT)
+                app_commit = get_app_commit(REPO_ROOT)
+                record_no_hardware_runtime_evidence = None
+                if str(os.environ.get("LABCRAFT_DEPLOYMENT_MODE", "")).strip():
+                    from MachineDataDevelopment import (
+                        development_launch_from_environment,
+                        record_no_hardware_runtime_evidence,
+                        record_development_session,
+                    )
+
+                    development_launch = development_launch_from_environment(
+                        base.root,
+                        os.environ,
+                    )
+                bootstrap_kwargs = {
+                    "app_version": app_version,
+                    "app_commit": app_commit,
+                }
+                if development_launch is not None:
+                    bootstrap_kwargs["deployment_gate_enabled"] = False
+                bootstrap = MachineDataBootstrap(base, **bootstrap_kwargs)
+                if startup_cancelled.is_set():
+                    raise BootstrapError("bootstrap_cancelled", "Startup cancelled.")
                 inspection = bootstrap.inspect()
-                if inspection.state is not BootstrapState.READY:
+                if startup_cancelled.is_set():
+                    raise BootstrapError("bootstrap_cancelled", "Startup cancelled.")
+                if inspection.state is BootstrapState.READY:
+                    # open_ready still acquires the configuration lock and
+                    # revalidates the exact store; READY alone authorizes nothing.
+                    authorized_context = bootstrap.open_ready()
+                elif development_launch is not None:
                     raise RuntimeError(
                         "Development store is not ready; recreate it from a verified "
                         f"production store ({inspection.state.value})."
                     )
-                authorized_context = bootstrap.open_ready()
-                development_session_path = record_development_session(
-                    development_launch,
-                    app_version=app_version,
-                    app_commit=app_commit,
+                if development_launch is not None:
+                    development_session_path = record_development_session(
+                        development_launch,
+                        app_version=app_version,
+                        app_commit=app_commit,
+                    )
+                    print(
+                        f"Development session evidence: {development_session_path}",
+                        flush=True,
+                    )
+                return (
+                    inspection, app_version, app_commit,
+                    record_no_hardware_runtime_evidence,
                 )
-                print(
-                    f"Development session evidence: {development_session_path}",
-                    flush=True,
+
+            inspection, app_version, app_commit, record_no_hardware_runtime_evidence = (
+                run_startup_operation(prepare_bootstrap, splash=splash)
+            )
+            if startup_cancelled.is_set():
+                return EXIT_BOOTSTRAP_CANCELLED
+            if authorized_context is None:
+                from MachineDataBootstrapDialog import run_bootstrap_dialog
+
+                splash.hide()
+                authorized_context = run_bootstrap_dialog(
+                    bootstrap,
+                    current_checkout_local=REPO_ROOT / "local",
+                    inspection=inspection,
                 )
         except Exception as exc:
             code = str(getattr(exc, "code", "bootstrap_failed"))
+            if code == "bootstrap_cancelled":
+                return EXIT_BOOTSTRAP_CANCELLED
+            splash.hide()
             QMessageBox.critical(
                 None,
                 "Machine Data Bootstrap Failed",
@@ -328,19 +374,22 @@ def main():
                 return EXIT_RECOVERY_REQUIRED
             return EXIT_BOOTSTRAP_FAILED
         if authorized_context is None:
-            state = bootstrap.inspect().state
-            if state is BootstrapState.RECOVERY_REQUIRED:
+            from MachineDataBootstrap import BootstrapState
+
+            # Cancellation may have crossed a durable migration checkpoint.
+            # Preserve the original post-dialog recovery-state classification.
+            if bootstrap.inspect().state is BootstrapState.RECOVERY_REQUIRED:
                 return EXIT_RECOVERY_REQUIRED
             return EXIT_BOOTSTRAP_CANCELLED
 
-        # Create the normal splash only after exact external-store
-        # authorization and configuration-lock ownership.
-        logo_path = os.path.join(script_dir, 'Presets','LabCraft_logo.png')
-        pixmap = QPixmap(logo_path)  # Replace with your logo image path
-        splash = QSplashScreen(pixmap)
+        # Only presentation precedes authorization. Settings, MVC, and all
+        # hardware-capable composition remain behind the original safety gate.
+        splash.set_status("Loading interface...")
         splash.show()
         # Let the splash paint before heavier module imports and object setup continue.
         app.processEvents()
+        if startup_cancelled.is_set():
+            return EXIT_BOOTSTRAP_CANCELLED
 
         from ApplicationComposition import (
             ExperimentalFeatures,
@@ -430,13 +479,15 @@ def main():
         view = components.view
 
         def show_main_window():
+            if startup_cancelled.is_set():
+                app.exit(EXIT_BOOTSTRAP_CANCELLED)
+                return
             view.show()
             splash.finish(view)
             if development_launch is None:
                 view.show_pending_app_update_result_after_startup()
 
-        # Delay briefly so the splash can paint before the main window appears.
-        QTimer.singleShot(100, show_main_window)
+        QTimer.singleShot(0, show_main_window)
         auto_close_ms = development_autoclose_delay_ms(
             os.environ, development_launch
         )
@@ -456,6 +507,8 @@ def main():
         install_ui_freeze_watchdog(app)
         return app.exec()
     except Exception as exc:
+        if splash is not None:
+            splash.hide()
         QMessageBox.critical(
             None,
             "LabCraft Startup Failed",
@@ -473,6 +526,8 @@ def main():
                 )
         elif authorized_context is not None:
             authorized_context.close()
+        if splash is not None:
+            splash.close_startup()
         app_lock.unlock()
 
 
