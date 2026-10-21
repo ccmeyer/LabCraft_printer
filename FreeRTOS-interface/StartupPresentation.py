@@ -22,14 +22,6 @@ class StartupSplash(QtWidgets.QSplashScreen):
             QtGui.QColor("white"),
         )
 
-    def drawContents(self, painter):
-        # The logo has transparent corners; keep status text legible there.
-        painter.fillRect(
-            QtCore.QRect(0, self.height() - 36, self.width(), 36),
-            QtGui.QColor(25, 25, 25),
-        )
-        super().drawContents(painter)
-
     def paintEvent(self, event):
         super().paintEvent(event)
         if self.isVisible() and not self.has_painted:
