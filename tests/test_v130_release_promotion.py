@@ -1,4 +1,4 @@
-"""Qualify final stable metadata with immutable clients and real bootstrap paths."""
+"""Qualify historical and proposed stable metadata with immutable clients."""
 import hashlib
 import json
 from pathlib import Path
@@ -17,10 +17,19 @@ from tests.test_update_and_restart import FakeGitRunner, _write_version
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "v1.3.0"
+STABLE_VERSIONS = tuple(dict.fromkeys((
+    VERSION,
+    json.loads((ROOT / "releases/latest.json").read_text(encoding="utf-8"))["stable"],
+)))
 
 
-def _manifest():
-    return json.loads((ROOT / "releases/v1.3.0.json").read_text(encoding="utf-8"))
+@pytest.fixture(params=STABLE_VERSIONS)
+def stable_version(request):
+    return request.param
+
+
+def _manifest(version):
+    return json.loads((ROOT / "releases" / f"{version}.json").read_text(encoding="utf-8"))
 
 
 def _inventory(root):
@@ -30,15 +39,19 @@ def _inventory(root):
 
 @pytest.mark.parametrize("source_version", legacy.LEGACY_SOURCES)
 @pytest.mark.parametrize("channel", ["stable", "release_candidate"])
-def test_immutable_clients_resolve_final_stable_or_existing_rc_bridge(tmp_path, source_version, channel):
+def test_immutable_clients_resolve_final_stable_or_existing_rc_bridge(tmp_path, source_version, channel, stable_version):
     machine, bridge_commit, bundle, nested = legacy._build_world(tmp_path, source_version)
     author = tmp_path / "author"
-    for relative in ("VERSION", "releases/latest.json", "releases/v1.3.0.json"):
-        (author / relative).write_bytes((ROOT / relative).read_bytes())
+    (author / "VERSION").write_text(stable_version + "\n", encoding="utf-8")
+    relative = f"releases/{stable_version}.json"
+    (author / relative).write_bytes((ROOT / relative).read_bytes())
+    index = json.loads((ROOT / "releases/latest.json").read_text(encoding="utf-8"))
+    index["stable"] = stable_version
+    legacy._write_json(author / "releases/latest.json", index)
     legacy._git(author, "add", ".")
     legacy._git(author, "commit", "-m", "Owned final stable qualification target")
     final_commit = legacy._git(author, "rev-parse", "HEAD")
-    legacy._git(author, "tag", "-a", VERSION, "-m", "Owned synthetic final tag")
+    legacy._git(author, "tag", "-a", stable_version, "-m", "Owned synthetic final tag")
     legacy._run(["git", "push", str(tmp_path / "origin.git"), "main", "--tags"], cwd=author)
     write_candidate(machine / "local", custom_camera=True,
                     cohort="v1.2.0-rc.6" if source_version == "v1.2.0" else source_version)
@@ -53,7 +66,7 @@ def test_immutable_clients_resolve_final_stable_or_existing_rc_bridge(tmp_path, 
     assert "Status: updated" in result.stdout
     expected_commit = final_commit if channel == "stable" else bridge_commit
     assert legacy._git(machine, "rev-parse", "HEAD") == expected_commit
-    assert (machine / "VERSION").read_text().strip() == (VERSION if channel == "stable" else legacy.BRIDGE_VERSION)
+    assert (machine / "VERSION").read_text().strip() == (stable_version if channel == "stable" else legacy.BRIDGE_VERSION)
     assert _inventory(machine / "local") == before
     assert (machine / "local/LabCraftUpdates/legacy.bundle").read_bytes() == bundle
     assert (machine / "local/LabCraftUpdates/nested/legacy.json").read_bytes() == nested
@@ -61,10 +74,10 @@ def test_immutable_clients_resolve_final_stable_or_existing_rc_bridge(tmp_path, 
 
 
 @pytest.mark.parametrize("source_version", legacy.LEGACY_SOURCES)
-def test_final_manifest_authorizes_only_reviewed_legacy_enrollment(tmp_path, source_version):
-    manifest = _manifest()
+def test_final_manifest_authorizes_only_reviewed_legacy_enrollment(tmp_path, source_version, stable_version):
+    manifest = _manifest(stable_version)
     context = _active_context(
-        tmp_path, app_version=VERSION, app_commit="3" * 40,
+        tmp_path, app_version=stable_version, app_commit="3" * 40,
         cohort="v1.2.0-rc.6" if source_version == "v1.2.0" else source_version,
         source_version=source_version, release_contract=manifest["machine_data"],
         update_compatibility=manifest["update_compatibility"],
@@ -72,7 +85,7 @@ def test_final_manifest_authorizes_only_reviewed_legacy_enrollment(tmp_path, sou
     try:
         assert load_migration_receipt(context.paths.migration_receipt_path).source_version == source_version
         anchor = json.loads(context.paths.deployment_anchor_path.read_text())
-        assert anchor["app_version"] == VERSION
+        assert anchor["app_version"] == stable_version
         assert anchor["app_commit"] == "3" * 40
         assert context.paths.base.active_machine_path.is_file()
         assert context.migration.backup.archive_path.is_file()
@@ -81,8 +94,8 @@ def test_final_manifest_authorizes_only_reviewed_legacy_enrollment(tmp_path, sou
 
 
 @pytest.mark.parametrize("defect", ["missing", "undeclared", "wildcard"])
-def test_final_legacy_enrollment_refuses_invalid_authority_before_publication(tmp_path, monkeypatch, defect):
-    manifest = _manifest()
+def test_final_legacy_enrollment_refuses_invalid_authority_before_publication(tmp_path, monkeypatch, defect, stable_version):
+    manifest = _manifest(stable_version)
     compatibility = manifest["update_compatibility"]
     if defect == "missing":
         compatibility = None
@@ -94,7 +107,7 @@ def test_final_legacy_enrollment_refuses_invalid_authority_before_publication(tm
         compatibility["direct_legacy_sources"] = ["v1.3.0-rc.*"]
     with pytest.raises((MachineDataBootstrap.BootstrapError, MachineDataUpdateError)):
         _active_context(
-            tmp_path, app_version=VERSION, app_commit="3" * 40,
+            tmp_path, app_version=stable_version, app_commit="3" * 40,
             cohort="v1.3.0-rc.1", release_contract=manifest["machine_data"],
             update_compatibility=compatibility,
         )
@@ -103,13 +116,13 @@ def test_final_legacy_enrollment_refuses_invalid_authority_before_publication(tm
     assert not paths.deployment_anchor_path.exists()
 
 
-def test_final_release_has_no_automatic_historical_rollback(tmp_path):
-    manifest = _manifest()
+def test_final_release_has_no_automatic_historical_rollback(tmp_path, stable_version):
+    manifest = _manifest(stable_version)
     assert manifest["rollback_version"] is None
     repo = tmp_path / "checkout"
     repo.mkdir()
-    _write_version(repo, VERSION)
-    runner = FakeGitRunner(repo, target_release_version=VERSION, release_manifest_payload=manifest)
+    _write_version(repo, stable_version)
+    runner = FakeGitRunner(repo, target_release_version=stable_version, release_manifest_payload=manifest)
     result = updater.run_rollback_check(
         updater.UpdaterConfig(repo_root=repo, no_relaunch=True, log_path=tmp_path / "rollback.log"),
         command_runner=runner,

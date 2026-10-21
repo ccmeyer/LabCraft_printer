@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.3.1 - 2026-10-21
+
+### Added
+
+- Enter two comma-separated concentrations, such as `5, 500`, in a reagent's Fixed Stock field to use that exact pair. The pair enables two-stock allocation regardless of the automatic two-stock checkbox and keeps both stocks even when one is unused.
+- Use the existing nearest-achievable two-stock solver, volume checks, calibration, printing and saved-progress resume paths. Fixed pairs survive saving, editable copies, recalculation and allocation reuse. Invalid or indistinguishable concentrations are rejected without replacing the last valid result.
+
+### Qualification and release payload
+
+- The feature passed the complete Windows suite (6,653 passed, 205 skipped), focused tests and a real-Qt partial-print/save/close/reopen/resume workflow. The attended Pi operator confirmed that applying calibrations, printing with both stocks and resuming progress worked. Normal exit, released-firmware restoration and SAFE 30/30 passed.
+- Include the Windows development-worktree tooling and offline-analysis CLI import correction already merged into main. Runtime dependencies, machine-data schema, execution-calibration version 4 and execution-data capability requirements are unchanged.
+- Retain the qualified same-source firmware rebuild already on main. Against v1.3.0, exactly eight bytes differ, all in embedded build date/time strings; all other binary bytes and firmware runtime source/configuration are identical. The manifest explicitly identifies the changed artifact. Installed firmware still requires the normal provenance and SAFE checks.
+- Keep the rc.11 legacy release-candidate route and the three exact stable migration cohorts. Automatic rollback remains unconfigured; use protected current-version or exactly qualified compatible-bundle recovery. Older designers do not support the new fixed-pair constraint.
+- See docs/v1.3.1_release_qualification.md for release validation, artifact hashes, evidence, limitations and publication order.
+
 ## v1.3.0 - 2026-10-16
 
 ### Stable promotion

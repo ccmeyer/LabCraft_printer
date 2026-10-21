@@ -1,0 +1,45 @@
+{
+  "schema_version": "labcraft_release_v1",
+  "version": "v1.3.1",
+  "tag": "v1.3.1",
+  "channel": "stable",
+  "release_date": "2026-10-21",
+  "previous_version": "v1.3.0",
+  "rollback_version": null,
+  "requires_firmware": {
+    "artifact": "firmware/artifacts/LabCraft_firmware.bin",
+    "note": "Retains main's qualified same-source rebuild. Compared with v1.3.0, only eight embedded build date/time bytes differ; firmware behavior and all other bytes are unchanged. Exact artifact SHA-256: ff40b46ff1a3273d6996bfafda04fea0f5971feac3563eef0468a900fc08fb45. Verify installed firmware through the normal guarded provenance/SAFE workflow; an application checkout is not installation evidence."
+  },
+  "machine_data": {
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "data_schema_version": 1,
+    "transition": "none",
+    "transition_id": null
+  },
+  "update_compatibility": {
+    "schema_version": "labcraft_update_compatibility_v1",
+    "direct_legacy_sources": [
+      "v1.2.0-rc.6",
+      "v1.2.0",
+      "v1.3.0-rc.1"
+    ]
+  },
+  "summary": "Define two fixed stock concentrations for one reagent using the established two-stock allocation, calibration and printing workflow.",
+  "notes": [
+    "Enter two positive finite concentrations separated by a comma, for example 5, 500. The exact pair overrides the automatic two-stock checkbox, and both stocks remain present even when one is unused. Concentrations must have distinct stock identities at two decimal places.",
+    "Fixed-pair allocation uses the existing nearest-achievable two-stock solver and volume checks. Saving, editable copies, calibration and saved-progress resume preserve the pair. Invalid input retains the last valid result.",
+    "Includes the Windows development-worktree tooling and offline-analysis CLI import correction already on main. Runtime dependencies, machine-data schema, execution-calibration version 4 and execution-data capabilities are unchanged.",
+    "The tracked firmware artifact differs from v1.3.0 only in eight build date/time bytes. No firmware runtime source, configuration or wire-protocol change accompanies this feature. The changed artifact is explicitly declared above; application updating does not itself establish installed firmware readiness.",
+    "Retains the exact v1.2.0-rc.6, v1.2.0 and v1.3.0-rc.1 stable migration cohorts and the separate pinned rc.11 release-candidate route. Direct legacy deployment still requires the established guarded migration, firmware/recovery verification and attended first-machine canary.",
+    "No historical app rollback is configured or qualified for this release. Preserve calibration measurements, committed counts, immutable revisions and progress; use protected current-version or exactly qualified compatible-bundle recovery. Older designers do not support the new fixed-pair constraint.",
+    "The attended Pi operator confirmed fixed-pair calibration, printing and resume. This does not add long-session memory, historical-recording replay or optimizer timing qualification; existing accepted large-optimizer UI-pause limitations remain. See docs/v1.3.1_release_qualification.md."
+  ],
+  "validation": [
+    "Complete Windows Python suite on feature c13ec85b: 6653 passed, 205 skipped, zero failures/errors",
+    "Focused fixed-pair tests and real-Qt partial-print/save/close/reopen/resume acceptance",
+    "Attended Pi hardware application test; normal exit, exact released restoration, strict SAFE 30/30 and final production-ready status with zero related processes",
+    "Exact v1.3.0/current firmware comparison: eight build-string bytes only; firmware runtime source/configuration unchanged",
+    "tools/run_worktree_tests.ps1: focused updater, metadata, packaging, legacy discovery/bootstrap and rollback tests; final full-suite results recorded in docs/v1.3.1_release_qualification.md",
+    "tools/validate_release_metadata.py, strict release JSON parsing and git diff --check before tagging; validate_release_metadata.py --check-tags after approved exact-revision tagging"
+  ]
+}
