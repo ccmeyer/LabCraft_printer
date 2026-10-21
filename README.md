@@ -50,6 +50,11 @@ closing it requests cancellation and waits for the worker's safe checkpoint
 and thread shutdown before releasing locks. Widget construction stays on the
 GUI thread, so the splash may remain static while the interface is built.
 
+The live status is white text beneath the LabCraft wordmark, with no filled
+background. The editable `FreeRTOS-interface/Presets/LabCraft_logo.svg` and its
+PNG export omit the former static `Initializing...` text; Qt draws the current
+status in that position, scaling longer cancellation messages to fit.
+
 Focused hardware-free startup validation:
 
 ```powershell

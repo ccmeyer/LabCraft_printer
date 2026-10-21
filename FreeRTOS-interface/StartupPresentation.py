@@ -18,9 +18,31 @@ class StartupSplash(QtWidgets.QSplashScreen):
     def set_status(self, message):
         self.showMessage(
             message,
-            QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter,
+            QtCore.Qt.AlignCenter,
             QtGui.QColor("white"),
         )
+
+    def drawContents(self, painter):
+        # Match the former text beneath the wordmark in the 120 x 160 SVG.
+        area = QtCore.QRect(
+            round(self.width() * 0.08), round(self.height() * 0.69),
+            round(self.width() * 0.84), round(self.height() * 0.055),
+        )
+        flags = QtCore.Qt.AlignCenter | QtCore.Qt.TextWordWrap
+        font = QtGui.QFont(self.font())
+        font.setWeight(QtGui.QFont.DemiBold)
+        size = max(8, round(self.height() * 5.64444 / 160))
+        while True:
+            font.setPixelSize(size)
+            bounds = QtGui.QFontMetrics(font).boundingRect(area, flags, self.message())
+            if size <= 8 or (bounds.width() <= area.width() and bounds.height() <= area.height()):
+                break
+            size -= 1
+        painter.save()
+        painter.setFont(font)
+        painter.setPen(QtGui.QColor("white"))
+        painter.drawText(area, flags, self.message())
+        painter.restore()
 
     def paintEvent(self, event):
         super().paintEvent(event)

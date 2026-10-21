@@ -1,9 +1,54 @@
 import threading
+from pathlib import Path
 
 import pytest
 from PySide6 import QtCore, QtGui, QtTest
 
 from StartupPresentation import StartupSplash, run_startup_operation
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Checking machine data...",
+        "Loading interface...",
+        "Cancellation requested. Waiting for a safe checkpoint...",
+    ],
+)
+def test_live_status_renders_white_beneath_wordmark_without_a_background(qapp, message):
+    logo = QtGui.QPixmap("FreeRTOS-interface/Presets/LabCraft_logo.png")
+    splash = StartupSplash(logo)
+    splash.set_status(message)
+    image = QtGui.QImage(logo.size(), QtGui.QImage.Format_RGBA8888)
+    image.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(image)
+    splash.drawContents(painter)
+    painter.end()
+    pixels = bytes(image.constBits())
+    drawn = [i for i, alpha in enumerate(pixels[3::4]) if alpha]
+    assert drawn
+    xs = [i % image.width() for i in drawn]
+    ys = [i // image.width() for i in drawn]
+    assert min(xs) >= image.width() * 0.08
+    assert max(xs) <= image.width() * 0.92
+    assert min(ys) >= image.height() * 0.69
+    assert max(ys) <= image.height() * 0.745
+    assert all(pixels[i * 4:i * 4 + 3] == b"\xff\xff\xff" for i in drawn)
+    # An opaque rectangle would fill this entire region, including its corners.
+    assert image.pixelColor(40, 416).alpha() == 0
+    splash.close_startup()
+
+
+def test_logo_source_and_export_have_no_static_initializing_label(qapp):
+    source = Path("FreeRTOS-interface/Presets/LabCraft_logo.svg")
+    assert "Initializing" not in source.read_text(encoding="utf-8")
+    image = QtGui.QImage(str(source.with_suffix(".png")))
+    assert image.size() == QtCore.QSize(453, 602)
+    assert image.pixelColor(0, 0).alpha() == 0
+    for y in range(420, 450):
+        for x in range(100, 350):
+            color = image.pixelColor(x, y)
+            assert max(color.red(), color.green(), color.blue()) < 30
 
 
 def _splash():
