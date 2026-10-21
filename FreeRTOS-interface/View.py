@@ -2,6 +2,7 @@ from __future__ import annotations
 from OptimizationJobs import (
     OptimizationRequest, OptimizationOutcome, optimization_job_manager, input_fingerprint,
 )
+from FixedStock import format_fixed_stock_text, parse_fixed_stock_text
 
 # Import your model & dataclasses
 from Model import (
@@ -15586,7 +15587,8 @@ class ExperimentDesignDialog(QDialog):
                         intended_head_type_display_name: str | None = None,
                         printing_mode: str | None = None,
                         insert_at: int | None = None,
-                        schedule_update: bool = True):
+                        schedule_update: bool = True,
+                        forced_stock_concs: Tuple[float, float] | None = None):
         reagent_count = self._reagent_row_count()
         row = (
             reagent_count
@@ -15654,7 +15656,7 @@ class ExperimentDesignDialog(QDialog):
         self._set_reagent_cell_widget(row, self.COL_UNITS, units_edit)
 
         # 8 Fixed Stock Conc (blank => optimize)
-        stock_edit = QLineEdit("" if forced_stock_conc in (None, 0.0) else str(forced_stock_conc))
+        stock_edit = QLineEdit(format_fixed_stock_text(forced_stock_conc, forced_stock_concs))
         stock_edit.setPlaceholderText("auto")
         stock_edit.setToolTip(self._default_fixed_stock_tooltip())
         stock_edit.textEdited.connect(self._schedule_auto_update)
@@ -15749,6 +15751,10 @@ class ExperimentDesignDialog(QDialog):
 
         reagent_payload = self._combo_current_payload(reagent_combo) or {}
         head_type_payload = self._combo_current_payload(head_type_combo) or {}
+        try:
+            fixed_single, fixed_pair = parse_fixed_stock_text(stock_edit.text() if stock_edit is not None else "")
+        except ValueError:
+            fixed_single, fixed_pair = None, None
         self._add_reagent_row(
             name=name_edit.text() if name_edit is not None else "",
             group=self._combo_current_text(group_combo) or self.GROUP_ADDITIVE,
@@ -15756,7 +15762,8 @@ class ExperimentDesignDialog(QDialog):
             units=units_edit.text() if units_edit is not None else "",
             droplet_nL=float(droplet_spin.value()) if droplet_spin is not None else self.default_droplet_volume_nL,
             starting_conc=float(start_spin.value()) if start_spin is not None else 0.0,
-            forced_stock_conc=self._parse_float_or_none(stock_edit.text()) if stock_edit is not None else None,
+            forced_stock_conc=fixed_single,
+            forced_stock_concs=fixed_pair,
             max_stock_conc=self._parse_float_or_none(max_stock_edit.text()) if max_stock_edit is not None else None,
             reagent_id=reagent_payload.get("reagent_id"),
             reagent_display_name=self._combo_current_text(reagent_combo),
@@ -15769,6 +15776,8 @@ class ExperimentDesignDialog(QDialog):
             insert_at=row + 1,
             schedule_update=False,
         )
+        if stock_edit is not None:
+            self._reagent_cell_widget(row + 1, self.COL_SET_STOCK).setText(stock_edit.text())
         self._mark_design_optimization_dirty()
         self._mark_draft_dirty()
         message = (
@@ -16399,6 +16408,7 @@ class ExperimentDesignDialog(QDialog):
                         droplet_nL=o.droplet_nL,
                         starting_conc=getattr(o, "starting_conc", 0.0),
                         forced_stock_conc=getattr(o, "forced_stock_conc", None),
+                        forced_stock_concs=getattr(o, "forced_stock_concs", None),
                         max_stock_conc=getattr(o, "max_stock_conc", None),
                         reagent_id=getattr(o, "reagent_id", None),
                         reagent_display_name=getattr(o, "reagent_display_name", None),
@@ -16419,6 +16429,7 @@ class ExperimentDesignDialog(QDialog):
                             droplet_nL=o.droplet_nL,
                             starting_conc=getattr(o, "starting_conc", 0.0),
                             forced_stock_conc=getattr(o, "forced_stock_conc", None),
+                            forced_stock_concs=getattr(o, "forced_stock_concs", None),
                             max_stock_conc=getattr(o, "max_stock_conc", None),
                             reagent_id=getattr(o, "reagent_id", None),
                             reagent_display_name=getattr(o, "reagent_display_name", None),
@@ -17244,7 +17255,9 @@ class ExperimentDesignDialog(QDialog):
 
     @staticmethod
     def _default_fixed_stock_tooltip() -> str:
-        return "Leave blank to auto-optimize. Enter a positive number to force the stock concentration."
+        return ("Leave blank to auto-optimize. Enter one positive concentration, or two separated by a comma "
+                "(e.g. 5, 500) to keep both stocks fixed, even when automatic two-stock search is off. "
+                "Both stocks are retained if one is unused.")
 
     @staticmethod
     def _default_max_stock_tooltip() -> str:
@@ -17269,6 +17282,12 @@ class ExperimentDesignDialog(QDialog):
                 "severity": "error",
                 "code": "invalid_number",
                 "message": f"{row_label}: {field.replace('_', ' ')} must be a positive number.",
+                "raw_text": text,
+            }
+        if not math.isfinite(value):
+            return {
+                "field": field, "severity": "error", "code": "invalid_number",
+                "message": f"{row_label}: {field.replace('_', ' ')} must be a positive finite number.",
                 "raw_text": text,
             }
         if value <= 0:
@@ -17307,6 +17326,15 @@ class ExperimentDesignDialog(QDialog):
 
             for field_name, widget in (("fixed_stock", stock_edit), ("max_stock", max_stock_edit)):
                 if widget is None:
+                    continue
+                if field_name == "fixed_stock" and "," in widget.text():
+                    try:
+                        parse_fixed_stock_text(widget.text())
+                    except ValueError as exc:
+                        issues.setdefault(key, []).append({
+                            "field": field_name, "severity": "error", "code": "invalid_number",
+                            "message": f"{label}: {exc}", "raw_text": widget.text(),
+                        })
                     continue
                 issue = self._parse_positive_float_issue(
                     widget.text(),
@@ -17497,7 +17525,11 @@ class ExperimentDesignDialog(QDialog):
             r_start = float(start_spin.value() if start_spin is not None else 0.0)
             r_targets = self._parse_targets(tgt_edit.text())
             r_units = (units_edit.text() or "mM").strip()
-            r_forced = self._parse_float_or_none(stock_edit.text())
+            try:
+                r_forced, r_forced_pair = parse_fixed_stock_text(stock_edit.text())
+            except ValueError:
+                # Raw validation below blocks publication and keeps the last valid result.
+                r_forced, r_forced_pair = None, None
             r_max_stock = self._parse_float_or_none(max_stock_edit.text()) if max_stock_edit is not None else None
             r_dv = float(dv_spin.value())
             r_reagent_id = resolved_reagent.get("reagent_id")
@@ -17518,6 +17550,7 @@ class ExperimentDesignDialog(QDialog):
                                         printing_mode=r_printing_mode,
                                         starting_conc=r_start,
                                         forced_stock_conc=r_forced,
+                                        forced_stock_concs=r_forced_pair,
                                         max_stock_conc=r_max_stock,
                                         reagent_id=r_reagent_id,
                                         reagent_display_name=r_reagent_display,
@@ -17532,6 +17565,7 @@ class ExperimentDesignDialog(QDialog):
                                             printing_mode=r_printing_mode,
                                             starting_conc=r_start,
                                             forced_stock_conc=r_forced,
+                                            forced_stock_concs=r_forced_pair,
                                             max_stock_conc=r_max_stock,
                                             reagent_id=r_reagent_id,
                                             reagent_display_name=r_reagent_display,
@@ -18619,7 +18653,8 @@ class ExperimentDesignDialog(QDialog):
                 f"{cls._fmt_target_preview_num(val)} {units}".strip()
                 for val in stock_info
             ]
-            header = f"Achievable with 2 stocks {' + '.join(stock_bits)}:"
+            stock_kind = "2 fixed stocks" if plan_mode == "fixed" else "2 stocks"
+            header = f"Achievable with {stock_kind} {' + '.join(stock_bits)}:"
         else:
             stock_text = cls._fmt_target_preview_num(stock_info)
             stock_label = f"{stock_text} {units}".strip()

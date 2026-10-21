@@ -92,6 +92,19 @@ only results matching the current editor inputs can publish. **Recalculate
 Stocks** commits the current inputs explicitly. Pending edits mark stock results
 as out of date. Turning automatic updates off permits explicit recalculation only.
 
+The experiment designer's **Fixed Stock Conc** field accepts one positive
+concentration or two comma-separated concentrations, such as `5, 500`, in the
+reagent's selected units. A pair fixes both stocks even when automatic two-stock
+selection is disabled. The designer chooses the nearest accepted droplet
+combination within the printed-volume limits and retains both stocks if one is
+unused. Either stock can contribute zero droplets to a reaction. Blank retains
+automatic concentration selection. Both fixed values must respect any maximum
+stock concentration and must have distinct stock IDs (two decimal places).
+Saved pair designs use the optional `forced_stock_concs` array; existing
+single-stock designs retain `forced_stock_conc`. Open pair designs with a
+version of the application that supports fixed pairs, since older versions do
+not understand this constraint.
+
 Calculation progress occupies a permanently reserved footer in the editor and
 import wizard. Status, a short progress bar, and Cancel share one fixed-height
 row; the full status is also available in a tooltip. Idle controls retain their
