@@ -771,13 +771,15 @@ def test_imager_printing_controls_round_trip_through_virtual_machine(qapp, tmp_p
         assert stream["target_refuel_pressure_psi"] == 0.8
         assert stream["print_pulse_width_us"] == 2500
         assert stream["refuel_pulse_width_us"] == 6000
-        driver.wait_until(
-            lambda: abs(
-                driver.inspect_live_pressure_plot()["target_print_pressure_psi"]
-                - 0.8
-            ) <= 0.005,
-            "stream target line",
-        )
+        def stream_target_lines_ready():
+            # A timer can render between the print and refuel setting commands.
+            live = driver.inspect_live_pressure_plot()
+            return all(
+                abs(live[key] - 0.8) <= 0.005
+                for key in ("target_print_pressure_psi", "target_refuel_pressure_psi")
+            )
+
+        driver.wait_until(stream_target_lines_ready, "stream target lines")
         live_stream = driver.inspect_live_pressure_plot()
         assert abs(live_stream["target_print_pressure_psi"] - 0.8) <= 0.005
         assert abs(live_stream["target_refuel_pressure_psi"] - 0.8) <= 0.005
