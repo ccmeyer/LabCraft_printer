@@ -10,6 +10,7 @@
     "v1.3.0-rc.1"
   ],
   "releases": [
+    "v1.3.1",
     "v1.3.0",
     "v1.3.0-rc.11",
     "v1.3.0-rc.10",
@@ -43,5 +44,5 @@
     "v1.1.0"
   ],
   "schema_version": "labcraft_release_index_v1",
-  "stable": "v1.3.0"
+  "stable": "v1.3.1"
 }
