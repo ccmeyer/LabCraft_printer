@@ -1,0 +1,43 @@
+{
+  "schema_version": "labcraft_release_v1",
+  "version": "v1.3.3",
+  "tag": "v1.3.3",
+  "channel": "stable",
+  "release_date": "2026-11-05",
+  "previous_version": "v1.3.2",
+  "rollback_version": null,
+  "requires_firmware": null,
+  "machine_data": {
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "data_schema_version": 1,
+    "transition": "none",
+    "transition_id": null
+  },
+  "update_compatibility": {
+    "schema_version": "labcraft_update_compatibility_v1",
+    "direct_legacy_sources": [
+      "v1.2.0-rc.6",
+      "v1.2.0",
+      "v1.3.0-rc.1"
+    ]
+  },
+  "summary": "Restore manual gantry jogging in the droplet imager while preserving strict motion safety validation.",
+  "notes": [
+    "Camera-derived image-plane moves now return integer X, Y and Z displacements. Stationary Y is integer zero, so arrow and Ctrl+arrow requests pass the existing integer motion contract.",
+    "Preserves X/Z rounding, firmware motion quantization, focus shortcuts, travel bounds, collision checks, command ordering and queue-rejection behavior. The shared conversion also serves nozzle dataset capture and pixel-to-machine positioning.",
+    "Regression tests check exact output types and real shortcut-to-controller paths in both imaging windows, including X/Y/Z jogging, odd and sub-quantum requests, invalid values, bounds/collisions and first-command queue failure.",
+    "The attended LC-001 operator confirmed imager jogging works on c0ba0e972aa95837b407008c30fea63424d9432a. Normal exit, protected postflight, exact released-firmware restoration and SAFE 30/30 passed. This is operator-reported physical verification, not a new motion accuracy or timing measurement.",
+    "Firmware artifact bytes, protocol, runtime dependencies, machine-data schema, execution-calibration version 4 and execution-data compatibility capabilities are identical to v1.3.2. No firmware flash is required solely for this application update; existing provenance and SAFE requirements remain enforced.",
+    "Retains the three exact stable legacy migration cohorts and the pinned rc.11 release-candidate discovery route. Legacy deployment retains its guarded migration, firmware/recovery verification and attended canary requirements.",
+    "Automatic rollback remains unconfigured. Preserve calibration measurements, committed counts, progress and immutable revisions; use protected current-version or exactly qualified compatible-bundle recovery.",
+    "See docs/v1.3.3_release_qualification.md for scope, evidence and publication order. Existing large-optimizer and long-session timing limitations remain unchanged."
+  ],
+  "validation": [
+    "96 focused optics, imager shortcut, motion-contract, quantization and absolute-motion failure tests passed on c0ba0e97; the pre-fix regression selection exposed 45 failures",
+    "Pi Status -> Sync -> Validate and sandboxed offscreen no-hardware launch passed with matching protected invariants and no forbidden hardware access",
+    "Attended imager jog test passed by operator report; app exited normally; released restoration passed SAFE 30/30; final status was production-ready with no blockers and zero related processes",
+    "Required release gate: full default Windows Python suite on the committed release metadata revision, with external run metadata, pytest log and JUnit evidence",
+    "350 release-focused updater request/UI/backend, metadata, packaging, execution-data rollback, immutable legacy discovery and stable bootstrap preservation/refusal tests passed",
+    "tools/validate_release_metadata.py, strict release JSON parsing and git diff --check; validate_release_metadata.py --check-tags after authorized tag creation"
+  ]
+}

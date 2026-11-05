@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.3.3 - 2026-11-05
+
+### Fixed
+
+- Restore arrow and Ctrl+arrow gantry jogging in the droplet imager. Camera-derived moves return integer X/Y/Z values, including integer zero for the stationary focus axis, so strict controller validation accepts valid requests.
+- Preserve X/Z rounding, motion quantization, focus shortcuts, travel bounds, collision checks and queue failure behavior. Add exact-type and real shortcut-to-controller regressions for both imaging windows and shared camera-positioning helpers.
+
+### Qualification and recovery
+
+- The fix passed 96 focused automated tests. The attended LC-001 operator confirmed jogging works; the app exited normally, exact released-firmware restoration and SAFE 30/30 passed, and final status was production-ready with zero related processes. No new physical accuracy or timing measurement is claimed.
+- Firmware bytes, protocol, runtime dependencies, machine-data schema and execution-data compatibility are unchanged from v1.3.2. No firmware update accompanies this patch.
+- Preserve the pinned rc.11 discovery route and existing exact legacy migration cohorts. Automatic rollback remains unconfigured; preserve execution history and use protected current-version or qualified compatible-bundle recovery.
+- Release gates, evidence and publication order are recorded in `docs/v1.3.3_release_qualification.md`. Existing accepted optimizer and long-session timing limitations remain unchanged.
+
 ## v1.3.2 - 2026-10-21
 
 ### Fixed
