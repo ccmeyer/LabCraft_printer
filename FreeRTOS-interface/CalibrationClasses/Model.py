@@ -37663,10 +37663,10 @@ class DropletCameraModel(QObject):
         
         return intercept_cx, intercept_cy, A, A_inv
 
-    def compute_stage_move(self, delta_cx, delta_cy):
+    def compute_stage_move(self, delta_cx, delta_cy) -> tuple[int, int, int]:
         """
         Given desired changes in (cx, cy), return the necessary (dX, dY, dZ)
-        stage moves that achieve that image-plane shift, using the matrix inverse.
+        integer stage moves that achieve that image-plane shift, using the matrix inverse.
         
         This code assumes:
         delta_cx = A[0,0]*dX + A[0,1]*dZ
@@ -37677,8 +37677,8 @@ class DropletCameraModel(QObject):
         dX, dZ = self.A_inv.dot(delta_c)
         
         # Y controls the focus so it was not part of the calibration (coefficient = 0),
-        # so we leave it at 0.0
-        dY = 0.0
+        # so we leave it at integer zero to preserve the motion input contract.
+        dY = 0
         dX = round(dX)
         dZ = round(dZ)
         

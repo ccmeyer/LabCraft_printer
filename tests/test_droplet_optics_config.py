@@ -6,6 +6,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from CalibrationClasses.Model import DropletCameraModel
 
@@ -30,6 +31,11 @@ def _make_camera(tmp_path, monkeypatch, config_path=None):
         config_path = tmp_path / "droplet_imager_optics.json"
     monkeypatch.setattr(DropletCameraModel, "OPTICS_CONFIG_PATH", config_path)
     return DropletCameraModel(str(_step_calibration_path(tmp_path)))
+
+
+def _assert_integer_move(actual, expected):
+    assert actual == expected
+    assert all(type(value) is int for value in actual)
 
 
 def test_droplet_camera_optics_config_falls_back_and_persists(tmp_path, monkeypatch):
@@ -109,7 +115,7 @@ def test_droplet_camera_motion_conversion_falls_back_to_preset_when_missing_or_i
     assert cam.get_um_per_pixel() == 2.0
     assert cam.get_motion_conversion_config() == {}
     assert cam.get_step_conversion_source().startswith("preset:")
-    assert cam.compute_stage_move(5, 7) == (5, 0.0, 7)
+    _assert_integer_move(cam.compute_stage_move(5, 7), (5, 0, 7))
 
 
 def test_droplet_camera_valid_local_motion_conversion_overrides_preset(tmp_path, monkeypatch):
@@ -134,7 +140,7 @@ def test_droplet_camera_valid_local_motion_conversion_overrides_preset(tmp_path,
 
     assert cam.get_step_conversion_source() == "unit_motion"
     assert cam.get_motion_conversion_config()["intercept_cx"] == 10.0
-    assert cam.compute_stage_move(8, 12) == (4, 0.0, 3)
+    _assert_integer_move(cam.compute_stage_move(8, 12), (4, 0, 3))
 
 
 def test_droplet_camera_apply_combined_optics_payload_persists_motion_conversion(tmp_path, monkeypatch):
@@ -191,7 +197,7 @@ def test_droplet_camera_apply_combined_optics_payload_persists_motion_conversion
     assert written["motion_conversion"]["A"] == [[2.0, 0.0], [0.0, 4.0]]
     assert reloaded.get_um_per_pixel() == 2.5
     assert reloaded.get_step_conversion_source() == "scale_bar_motion_calibration"
-    assert reloaded.compute_stage_move(8, 12) == (4, 0.0, 3)
+    _assert_integer_move(reloaded.compute_stage_move(8, 12), (4, 0, 3))
 
 
 def test_characterize_droplet_uses_configured_factor_unless_explicit(tmp_path, monkeypatch):
@@ -269,3 +275,55 @@ def test_droplet_camera_stop_saving_discards_pending_jobs_after_timeout(tmp_path
     assert cam._saving_enabled is False
     assert cam._save_queue.empty()
     assert cam._save_queue_pending_count() == 0
+
+
+@pytest.mark.parametrize(
+    ('delta', 'expected'),
+    [
+        ((5, 7), (5, 0, 7)),
+        ((-5, -7), (-5, 0, -7)),
+        ((0, 0), (0, 0, 0)),
+        ((2.5, 3.5), (2, 0, 4)),
+        ((-2.5, -3.5), (-2, 0, -4)),
+        ((2.49, -3.51), (2, 0, -4)),
+    ],
+)
+def test_stage_move_returns_integers_and_preserves_rounding(tmp_path, monkeypatch, delta, expected):
+    cam = _make_camera(tmp_path, monkeypatch)
+
+    _assert_integer_move(cam.compute_stage_move(*delta), expected)
+
+
+def test_stage_move_preserves_coupled_matrix_conversion(tmp_path, monkeypatch):
+    cam = _make_camera(tmp_path, monkeypatch)
+    cam.A_inv = np.array([[0.5, -0.125], [0.0, 0.25]])
+
+    _assert_integer_move(cam.compute_stage_move(10, 12), (4, 0, 3))
+
+
+@pytest.mark.parametrize(
+    ('fractions', 'expected'),
+    [
+        ((0.1, 0.1), (10, 0, 8)),
+        ((-0.1, -0.1), (-10, 0, -8)),
+        ((0, 0), (0, 0, 0)),
+    ],
+)
+def test_camera_position_helpers_preserve_integer_coordinates(
+    tmp_path, monkeypatch, fractions, expected
+):
+    cam = _make_camera(tmp_path, monkeypatch)
+    cam.image_width, cam.image_height = 100, 80
+    dx, _, dz = expected
+
+    _assert_integer_move(cam.compute_move_by_fraction(*fractions), expected)
+    _assert_integer_move(cam.calculate_move_to_target((20, 30), (20 + dx, 30 + dz)), expected)
+    _assert_integer_move(cam.calculate_move_to_top_center((50 - dx, 150 - dz)), expected)
+
+    origin = {'X': 10000, 'Y': 10000, 'Z': 10000}
+    center_x, center_y = cam.get_center_in_pixels()
+    target = cam.convert_pixel_position_to_motor_steps((center_x + dx, center_y + dz), origin)
+
+    assert target == {'X': 10000 + dx, 'Y': 10000, 'Z': 10000 + dz}
+    assert all(type(value) is int for value in target.values())
+    assert origin == {'X': 10000, 'Y': 10000, 'Z': 10000}
