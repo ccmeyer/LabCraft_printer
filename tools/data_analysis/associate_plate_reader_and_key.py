@@ -8,6 +8,7 @@ Primary workflow:
 The experiment directory must contain:
 - concentration_key.csv
 - one plate-reader export matching *_data.xls, or one plate-reader .txt export
+  or Tecan i-control .xlsx workbook (use --sheet when it has multiple runs)
 
 The plate-reader export may have an .xls extension, but is expected to be a
 UTF-16, tab-delimited text export.
@@ -32,8 +33,10 @@ WAVELENGTH_RE = re.compile(r"^\d{3}(?:\.0)?$")
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$")
 PLATE_ROW_LABELS = "ABCDEFGHIJKLMNOP"
 DEFAULT_KEY_FILENAME = "concentration_key.csv"
-DEFAULT_PLATE_PATTERN = "*_data.xls or plate-reader .txt"
+DEFAULT_PLATE_PATTERN = "*_data.xls, plate-reader .txt, or Tecan .xlsx"
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 DEFAULT_EXPERIMENTS_DIR = REPO_ROOT / "FreeRTOS-interface" / "Experiments"
 PLATE_READER_TEXT_ENCODINGS = ("utf-16", "utf-8-sig", "cp1252")
 
@@ -44,6 +47,7 @@ class ResolvedInputs:
     plate_file: Path
     key_file: Path
     output_file: Path
+    sheet_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -444,7 +448,13 @@ def parse_wide_plate_reader_rows(rows: list[list[str]], metadata_row: list[str],
     return finalize_plate_dataframe(plate_df)
 
 
-def parse_plate_reader(path: str | Path) -> pd.DataFrame:
+def parse_plate_reader(path: str | Path, *, sheet_name: str | None = None) -> pd.DataFrame:
+    if Path(path).suffix.lower() == ".xlsx":
+        from tools.data_analysis.tecan_plate_reader import parse_tecan_plate_reader
+
+        return parse_tecan_plate_reader(path, sheet_name)
+    if sheet_name is not None:
+        raise ValueError("Worksheet selection is only supported for Tecan .xlsx exports.")
     rows = read_plate_rows(path)
     if len(rows) < 4:
         raise ValueError("Plate-reader file is too short to parse.")
@@ -575,6 +585,13 @@ def discover_plate_file(experiment_dir: Path) -> Path:
 
 
 def is_plate_reader_export_candidate(path: Path) -> bool:
+    if path.suffix.lower() == ".xlsx":
+        from tools.data_analysis.tecan_plate_reader import list_tecan_measurement_sheets
+
+        try:
+            return bool(list_tecan_measurement_sheets(path))
+        except ValueError:
+            return False
     if path.name.lower().endswith("_data.xls"):
         return True
     if path.suffix.lower() != ".txt":
@@ -693,29 +710,45 @@ def resolve_inputs(args: argparse.Namespace) -> ResolvedInputs:
     if not key_file.exists() or not key_file.is_file():
         raise ValueError(f"Key CSV does not exist or is not a file: {key_file}")
 
-    output_file = Path(args.output) if args.output else experiment_dir / f"{plate_file.stem}_merged_tidy.csv"
+    sheet_name = getattr(args, "sheet", None)
+    if plate_file.suffix.lower() == ".xlsx":
+        from tools.data_analysis.tecan_plate_reader import resolve_tecan_sheet_name
+
+        sheet_name = resolve_tecan_sheet_name(plate_file, sheet_name)
+    elif sheet_name is not None:
+        raise ValueError("--sheet is only supported for Tecan .xlsx exports.")
+    output_file = Path(args.output) if args.output else experiment_dir / default_output_path(plate_file, sheet_name).name
     return ResolvedInputs(
         experiment_dir=experiment_dir,
         plate_file=plate_file,
         key_file=key_file,
         output_file=output_file,
+        sheet_name=sheet_name,
     )
 
 
 def build_merged_tidy_data(
     plate_file: str | Path,
     key_file: str | Path,
+    *,
+    sheet_name: str | None = None,
 ) -> tuple[pd.DataFrame, TimepointFilterResult, MergeSummary]:
-    plate_df = parse_plate_reader(plate_file)
+    plate_df = parse_plate_reader(plate_file, sheet_name=sheet_name)
     filter_result = filter_complete_timepoints(plate_df)
     key_df = parse_key_csv(key_file)
     merged_df, merge_summary = merge_plate_and_key(filter_result.dataframe, key_df)
+    merged_df.attrs.update(plate_df.attrs)
     return merged_df, filter_result, merge_summary
 
 
-def default_output_path(plate_path: str | Path) -> Path:
+def default_output_path(plate_path: str | Path, sheet_name: str | None = None) -> Path:
     p = Path(plate_path)
-    return p.with_name(f"{p.stem}_merged_tidy.csv")
+    stem = p.stem
+    if sheet_name is not None:
+        from tools.data_analysis.tecan_plate_reader import worksheet_output_token
+
+        stem += "_" + worksheet_output_token(sheet_name)
+    return p.with_name(f"{stem}_merged_tidy.csv")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -740,8 +773,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--plate-file",
         type=Path,
         default=None,
-        help="Optional plate-reader export override. Defaults to the only *_data.xls file in the experiment dir.",
+        help="Optional plate-reader export override. Otherwise discover one supported .xls/.txt/.xlsx export.",
     )
+    parser.add_argument("--sheet", default=None, help="Tecan XLSX worksheet name; required when multiple measurement sheets exist.")
     parser.add_argument(
         "--key-file",
         type=Path,
@@ -773,6 +807,8 @@ def print_summary(
 ) -> None:
     print(f"Experiment directory: {inputs.experiment_dir}")
     print(f"Plate-reader file: {inputs.plate_file}")
+    if inputs.sheet_name is not None:
+        print(f"Worksheet: {inputs.sheet_name}; gain: {merged_df.attrs.get('gain')}")
     print(f"Concentration key: {inputs.key_file}")
     print(f"Saved merged tidy data to: {inputs.output_file}")
     print(f"Rows written: {len(merged_df):,}")
@@ -811,6 +847,7 @@ def main(argv: list[str] | None = None) -> int:
         merged_df, filter_result, merge_summary = build_merged_tidy_data(
             inputs.plate_file,
             inputs.key_file,
+            sheet_name=inputs.sheet_name,
         )
     except Exception as exc:  # pragma: no cover - CLI reporting
         print(f"ERROR: {exc}", file=sys.stderr)

@@ -119,6 +119,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Rebuild the merged tidy CSV before analysis. Only valid with an experiment directory.",
     )
+    parser.add_argument("--analysis-settings", type=Path, default=None, help="Saved grouping targets, tolerance, and manual well exclusions.")
     return parser
 
 
@@ -160,11 +161,27 @@ def main(argv: list[str] | None = None) -> int:
         print_progress("Resolving merged tidy data input")
         merged_csv, experiment_dir = resolve_merged_tidy_csv(args)
         output_dir = args.output_dir or default_output_dir(merged_csv, experiment_dir)
+        settings = None
+        settings_path = args.analysis_settings
+        if settings_path is None and experiment_dir is not None:
+            from tools.data_analysis.analysis_settings import SETTINGS_FILENAME
+
+            candidate = experiment_dir / SETTINGS_FILENAME
+            settings_path = candidate if candidate.exists() else None
+        if settings_path is not None:
+            from tools.data_analysis.analysis_settings import load_settings
+
+            settings = load_settings(settings_path)
+        elif experiment_dir is not None and (experiment_dir / "experiment_design.json").exists():
+            from tools.data_analysis.analysis_settings import settings_from_design
+
+            settings = settings_from_design(experiment_dir / "experiment_design.json")
         result = analysis.analyze_merged_tidy_csv(
             merged_csv,
             output_dir,
             endpoint_last_n=args.endpoint_last_n,
             progress_callback=print_progress,
+            analysis_settings=settings,
         )
     except Exception as exc:  # pragma: no cover - CLI reporting
         print(f"ERROR: {exc}", file=sys.stderr)

@@ -208,6 +208,46 @@ def prepare_analysis_dataframe(dataframe: pd.DataFrame) -> tuple[pd.DataFrame, l
     return prepared, condition_columns
 
 
+def prepare_reviewed_analysis_dataframe(dataframe: pd.DataFrame, settings: dict | None = None) -> tuple[pd.DataFrame, list[str], dict, pd.DataFrame]:
+    from tools.data_analysis.analysis_settings import apply_nominal_targets, normalize_settings
+
+    settings = normalize_settings(settings)
+    columns = infer_condition_columns(dataframe)
+    normalized, grouping = apply_nominal_targets(dataframe, columns, settings)
+    all_prepared, columns = prepare_analysis_dataframe(normalized)
+    exclusions = settings["excluded_wells"]
+    unknown = set(exclusions) - set(all_prepared["well"].astype(str))
+    if unknown:
+        raise ValueError("Excluded wells have no measurements: " + ", ".join(sorted(unknown)))
+    prepared = all_prepared.loc[~all_prepared["well"].isin(exclusions)].copy()
+    keyed = prepared.loc[prepared["is_keyed"].astype(bool)]
+    if exclusions and keyed.empty:
+        raise ValueError("Exclusions leave no keyed measured wells for analysis.")
+    all_keyed = all_prepared.loc[all_prepared["is_keyed"].astype(bool)]
+    counts = keyed[["condition_id", "well"]].drop_duplicates().groupby("condition_id").size()
+    all_conditions = all_keyed[["condition_id", "condition_label"]].drop_duplicates()
+    replicate_counts = [{"condition_id": row.condition_id, "condition_label": row.condition_label,
+                         "included_replicates": int(counts.get(row.condition_id, 0))}
+                        for row in all_conditions.itertuples()]
+    audit = dataframe[["well", "is_keyed"] + columns].drop_duplicates().copy()
+    if audit["well"].duplicated().any():
+        raise ValueError("Calculated concentrations change within a well; a single condition cannot be assigned.")
+    audit = audit.rename(columns={column: f"calculated_{column}" for column in columns})
+    analysis_values = all_prepared[["well", "condition_id"] + columns].drop_duplicates("well")
+    audit = audit.merge(analysis_values.rename(columns={c: f"analysis_{c}" for c in columns}), on="well", validate="one_to_one")
+    audit["is_manually_excluded"] = audit["well"].isin(exclusions)
+    audit["exclusion_reason"] = audit["well"].map(exclusions).fillna("")
+    review = {
+        "settings": settings, "grouping": grouping,
+        "measured_well_count_before_exclusions": int(all_prepared["well"].nunique()),
+        "included_measured_well_count": int(prepared["well"].nunique()),
+        "included_keyed_well_count": int(keyed["well"].nunique()),
+        "excluded_well_count": len(exclusions), "replicate_counts": replicate_counts,
+        "conditions_without_usable_wells": [row["condition_label"] for row in replicate_counts if row["included_replicates"] == 0],
+    }
+    return prepared, columns, review, audit
+
+
 def normalize_keyed_condition_values(dataframe: pd.DataFrame, condition_columns: Iterable[str]) -> pd.DataFrame:
     result = dataframe.copy()
     keyed_mask = result["is_keyed"].astype(bool)
@@ -2361,6 +2401,28 @@ def render_analysis_report(manifest: dict[str, object]) -> str:
     if not dataset["has_timecourse_data"]:
         timecourse_note = "<p><strong>Timecourse plots were skipped because fewer than two timepoints were found.</strong></p>"
 
+    review_html = ""
+    review = manifest.get("analysis_review")
+    if review:
+        grouping_rows = []
+        for group in review["grouping"]:
+            for level in group["analysis_levels"]:
+                calculated = [item["calculated"] for item in group["mapping"] if item["intended"] == level]
+                grouping_rows.append(f"<tr><td>{escape(group['reagent'])}</td><td>{min(calculated):g} to {max(calculated):g}</td><td>{level:g}</td></tr>")
+        exclusions = review["settings"]["excluded_wells"]
+        exclusion_rows = "".join(f"<tr><td>{escape(well)}</td><td>{escape(reason)}</td></tr>" for well, reason in exclusions.items())
+        replicate_rows = "".join(f"<tr><td>{escape(row['condition_label'])}</td><td>{row['included_replicates']}</td></tr>" for row in review["replicate_counts"])
+        review_html = f"""<section><h2>Concentration grouping and manual exclusions</h2>
+        <p>Matching tolerance: {review['settings']['target_tolerance_percent']:g}% of each intended level.
+        Zero targets require zero within numerical precision. Unlisted reagents retain their calculated concentrations.</p>
+        <table><tr><th>Reagent</th><th>Calculated concentration range</th><th>Analysis concentration</th></tr>{''.join(grouping_rows)}</table>
+        <p>Manually excluded wells: {review['excluded_well_count']}. Included measured wells: {review['included_measured_well_count']}.
+        Included keyed wells: {review['included_keyed_well_count']}. Manual exclusions apply to every analytical summary and plot,
+        including variants that retain statistical outliers. Raw readings remain available in {html_link('raw_measurements.csv', 'raw measurements')}.</p>
+        <table><tr><th>Excluded well</th><th>Reason</th></tr>{exclusion_rows}</table>
+        <p>Included replicates before automatic outlier filtering:</p>
+        <table><tr><th>Condition</th><th>Included wells</th></tr>{replicate_rows}</table></section>"""
+
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -2378,6 +2440,7 @@ def render_analysis_report(manifest: dict[str, object]) -> str:
     .warnings {{ border-left: 4px solid #f0b429; padding-left: 12px; background: #fffbea; }}
     code {{ background: #f0f4f8; padding: 2px 4px; border-radius: 4px; }}
     a {{ color: #1261a0; }}
+    td, th {{ padding: 5px 12px; text-align: left; border-bottom: 1px solid #d9e2ec; }}
   </style>
 </head>
 <body>
@@ -2400,6 +2463,8 @@ def render_analysis_report(manifest: dict[str, object]) -> str:
     {timecourse_note}
   </section>
   {warning_html}
+  {review_html}
+  {image_section("Manual Exclusions QC (excluded wells do not contribute to statistics)", "manual_exclusions")}
   {image_section("Absolute RFU Plate Heatmaps", "absolute_rfu_heatmaps")}
   {image_section("Endpoint Outlier Heatmaps", "endpoint_outlier_heatmaps")}
   {image_section("Endpoint Variability QC", "endpoint_variability")}
@@ -2422,8 +2487,11 @@ def analyze_merged_tidy_csv(
     *,
     endpoint_last_n: int = 3,
     progress_callback: ProgressCallback | None = None,
+    analysis_settings: dict | None = None,
 ) -> AnalysisResult:
     output_root = Path(output_dir)
+    merged = load_merged_tidy(merged_csv)
+    prepared, condition_columns, review, audit = prepare_reviewed_analysis_dataframe(merged, analysis_settings)
     report_progress(progress_callback, f"Preparing output directory: {output_root}")
     output_root.mkdir(parents=True, exist_ok=True)
     absolute_dir = output_root / "heatmaps_absolute_rfu"
@@ -2438,7 +2506,6 @@ def analyze_merged_tidy_csv(
     combined_timecourse_dir.mkdir(parents=True, exist_ok=True)
 
     report_progress(progress_callback, f"Loading merged tidy CSV: {merged_csv}")
-    merged = load_merged_tidy(merged_csv)
     report_progress(
         progress_callback,
         (
@@ -2449,7 +2516,6 @@ def analyze_merged_tidy_csv(
         ),
     )
     report_progress(progress_callback, "Preparing condition groups and plate coordinates")
-    prepared, condition_columns = prepare_analysis_dataframe(merged)
     report_progress(
         progress_callback,
         f"Condition columns: {', '.join(condition_columns) if condition_columns else '(none)'}",
@@ -2666,6 +2732,12 @@ def analyze_merged_tidy_csv(
     manifest_json = output_root / "analysis_manifest.json"
     report_html = output_root / "analysis_report.html"
     warnings: list[str] = []
+    if review["excluded_well_count"]:
+        warnings.append(f"{review['excluded_well_count']} manually excluded wells were omitted from every analytical calculation; raw measurements are retained.")
+    if review["conditions_without_usable_wells"]:
+        warnings.append("Conditions with no usable wells: " + "; ".join(review["conditions_without_usable_wells"]))
+    if analysis_settings is not None and any(0 < row["included_replicates"] < 3 for row in review["replicate_counts"]):
+        warnings.append("Some conditions have fewer than three included replicates. Endpoint replicate-based outlier checks require at least three.")
     if not should_write_timecourse_plots:
         warnings.append("Timecourse plots were skipped because fewer than two timepoints were found.")
     fluorophores = sorted(endpoint["fluorophore"].dropna().astype(str).unique())
@@ -2710,6 +2782,47 @@ def analyze_merged_tidy_csv(
         outputs=output_records,
         warnings=warnings,
     )
+    if analysis_settings is not None:
+        from tools.data_analysis.analysis_settings import save_settings
+
+        settings_path = output_root / "analysis_settings.json"
+        save_settings(settings_path, review["settings"])
+        audit_path = output_root / "well_analysis_audit.csv"
+        audit.to_csv(audit_path, index=False)
+        raw_path = output_root / "raw_measurements.csv"
+        merged.to_csv(raw_path, index=False)
+        exclusion_path = output_root / "manual_exclusions.csv"
+        audit.loc[audit["is_manually_excluded"]].to_csv(exclusion_path, index=False)
+        add_output_records(output_records, output_root, [settings_path, audit_path, raw_path, exclusion_path],
+                           category="analysis_review", title="Analysis choices and audit", fluorophores=fluorophores)
+        if review["excluded_well_count"]:
+            matrix = pd.DataFrame(np.nan, index=PLATE_ROWS, columns=PLATE_COLUMNS)
+            for well in merged["well"].astype(str).unique():
+                matrix.loc[well[0], int(well[1:])] = int(well in review["settings"]["excluded_wells"])
+            map_path = output_root / "manually_excluded_wells.png"
+            write_plate_heatmap_plot(matrix, map_path, title="Manually excluded wells (1 = excluded, 0 = included)",
+                                     label="Manual exclusion", cmap="Oranges", vmin=0, vmax=1)
+            qc_paths = [map_path]
+            if has_timecourse_data(merged):
+                excluded = merged.loc[merged["well"].isin(review["settings"]["excluded_wells"])]
+                for channel, traces in excluded.groupby("fluorophore"):
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    for well, trace in traces.groupby("well"):
+                        trace = trace.sort_values("time_seconds")
+                        ax.plot(trace["time_minutes"], trace["rfu"], label=well, alpha=0.7)
+                    ax.set(xlabel="Time (min)", ylabel="RFU", title=f"{channel}: manually excluded traces (not used in statistics)")
+                    ax.legend(ncol=4)
+                    fig.tight_layout()
+                    trace_path = output_root / f"{safe_filename(channel)}_manually_excluded_traces.png"
+                    fig.savefig(trace_path, dpi=150)
+                    plt.close(fig)
+                    qc_paths.append(trace_path)
+            add_output_records(output_records, output_root, qc_paths, category="manual_exclusions", title="Manual exclusions QC", fluorophores=fluorophores)
+        manifest["analysis_review"] = review
+        manifest["inputs"]["analysis_settings"] = "analysis_settings.json"
+        manifest["dataset"]["measured_well_count"] = review["measured_well_count_before_exclusions"]
+        manifest["dataset"]["included_measured_well_count"] = review["included_measured_well_count"]
+        manifest["dataset"]["included_keyed_well_count"] = review["included_keyed_well_count"]
     report_progress(progress_callback, "Writing analysis manifest and HTML report")
     manifest_json.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     report_html.write_text(render_analysis_report(manifest), encoding="utf-8")

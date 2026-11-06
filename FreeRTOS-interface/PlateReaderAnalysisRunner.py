@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -17,6 +17,8 @@ class PlateReaderAnalysisConfig:
     key_file: str | Path | None = None
     output_dir: str | Path | None = None
     endpoint_last_n: int = 3
+    sheet_name: str | None = None
+    analysis_settings: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -56,12 +58,40 @@ def coerce_plate_reader_analysis_config(config: PlateReaderAnalysisConfig | dict
     return PlateReaderAnalysisConfig(**dict(config))
 
 
+def resolve_plate_reader_workbook_config(config: PlateReaderAnalysisConfig) -> PlateReaderAnalysisConfig:
+    from tools.data_analysis.analysis_settings import SETTINGS_FILENAME, load_settings, normalize_settings, settings_from_design
+
+    settings = config.analysis_settings
+    if settings is None:
+        experiment = Path(config.experiment_dir).expanduser()
+        saved = experiment / SETTINGS_FILENAME
+        design = experiment / "experiment_design.json"
+        if saved.exists():
+            settings = load_settings(saved)
+        elif design.exists():
+            settings = settings_from_design(design)
+    elif settings is not None:
+        settings = normalize_settings(settings)
+    config = replace(config, analysis_settings=settings)
+    if Path(config.plate_reader_file).suffix.lower() == ".xlsx":
+        from tools.data_analysis.tecan_plate_reader import resolve_tecan_sheet_name
+
+        return replace(config, sheet_name=resolve_tecan_sheet_name(config.plate_reader_file, config.sheet_name))
+    if config.sheet_name is not None:
+        raise ValueError("Worksheet selection is only supported for Tecan .xlsx exports.")
+    return config
+
+
 def resolve_plate_reader_analysis_paths(config: PlateReaderAnalysisConfig | dict) -> dict[str, Path]:
     resolved = coerce_plate_reader_analysis_config(config)
     experiment_dir = Path(resolved.experiment_dir).expanduser()
     plate_reader_file = Path(resolved.plate_reader_file).expanduser()
     key_file = Path(resolved.key_file).expanduser() if resolved.key_file is not None else experiment_dir / "concentration_key.csv"
     output_dir = Path(resolved.output_dir).expanduser() if resolved.output_dir is not None else experiment_dir / "plate_reader_analysis"
+    if resolved.output_dir is None and resolved.sheet_name is not None:
+        from tools.data_analysis.tecan_plate_reader import worksheet_output_token
+
+        output_dir /= worksheet_output_token(resolved.sheet_name)
     return {
         "experiment_dir": experiment_dir,
         "plate_reader_file": plate_reader_file,
@@ -99,14 +129,16 @@ def next_raw_plate_reader_destination(source: Path, raw_dir: Path) -> Path:
     raise RuntimeError(f"Could not choose a unique raw plate-reader filename for {source.name}")
 
 
-def plate_reader_analysis_output_paths(paths: dict[str, Path]) -> dict[str, Path]:
+def plate_reader_analysis_output_paths(paths: dict[str, Path], sheet_name: str | None = None) -> dict[str, Path]:
+    from tools.data_analysis.associate_plate_reader_and_key import default_output_path
+
     copied_plate = next_raw_plate_reader_destination(
         paths["plate_reader_file"],
         paths["experiment_dir"] / "raw_plate_reader",
     )
     return {
         "copied_plate_reader_file": copied_plate,
-        "merged_csv": paths["experiment_dir"] / f"{copied_plate.stem}_merged_tidy.csv",
+        "merged_csv": paths["experiment_dir"] / default_output_path(copied_plate, sheet_name).name,
         "manifest_json": paths["output_dir"] / "analysis_manifest.json",
         "report_html": paths["output_dir"] / "analysis_report.html",
     }
@@ -121,13 +153,21 @@ def _format_preview_values(values: list[str], *, limit: int = 12) -> str:
 
 
 def build_plate_reader_analysis_preview(config: PlateReaderAnalysisConfig | dict) -> PlateReaderAnalysisPreviewResult:
+    config = coerce_plate_reader_analysis_config(config)
     paths = resolve_plate_reader_analysis_paths(config)
     output_paths: dict[str, Path] = {}
     errors = validate_plate_reader_analysis_paths(paths)
     warnings: list[str] = []
 
     if not errors:
-        output_paths = plate_reader_analysis_output_paths(paths)
+        try:
+            config = resolve_plate_reader_workbook_config(config)
+            paths = resolve_plate_reader_analysis_paths(config)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            errors.append(str(exc))
+
+    if not errors:
+        output_paths = plate_reader_analysis_output_paths(paths, config.sheet_name)
         if output_paths["merged_csv"].exists():
             warnings.append(f"Merged tidy CSV already exists and may be overwritten: {output_paths['merged_csv']}")
         if paths["output_dir"].exists():
@@ -153,8 +193,9 @@ def build_plate_reader_analysis_preview(config: PlateReaderAnalysisConfig | dict
         merged_df, filter_result, merge_summary = association.build_merged_tidy_data(
             paths["plate_reader_file"],
             paths["key_file"],
+            sheet_name=config.sheet_name,
         )
-        prepared_df, condition_columns = analysis.prepare_analysis_dataframe(merged_df)
+        prepared_df, condition_columns, review, _audit = analysis.prepare_reviewed_analysis_dataframe(merged_df, config.analysis_settings)
     except Exception as exc:
         return PlateReaderAnalysisPreviewResult(
             ok=False,
@@ -194,6 +235,12 @@ def build_plate_reader_analysis_preview(config: PlateReaderAnalysisConfig | dict
         warnings.append(f"{len(filter_result.dropped_timepoints)} incomplete timepoint(s) will be dropped before analysis.")
     if not has_timecourse:
         warnings.append("Endpoint-only data detected; timecourse plots will be skipped.")
+    if review["excluded_well_count"]:
+        warnings.append(f"{review['excluded_well_count']} manual exclusions apply to all timepoints and channels; {review['included_keyed_well_count']} keyed wells remain.")
+    if review["conditions_without_usable_wells"]:
+        warnings.append("Conditions without usable wells: " + "; ".join(review["conditions_without_usable_wells"]))
+    if config.analysis_settings is not None and any(0 < row["included_replicates"] < 3 for row in review["replicate_counts"]):
+        warnings.append("Some conditions have fewer than three included replicates; endpoint replicate-based outlier checks require at least three.")
 
     summary = {
         "row_count": int(len(merged_df)),
@@ -218,6 +265,9 @@ def build_plate_reader_analysis_preview(config: PlateReaderAnalysisConfig | dict
         "composition_count": composition_count,
         "dropped_timepoint_count": int(len(filter_result.dropped_timepoints)),
     }
+    if config.sheet_name is not None:
+        summary.update(sheet_name=config.sheet_name, gain=merged_df.attrs.get("gain"))
+    summary["analysis_review"] = review
     ok = not errors
     return PlateReaderAnalysisPreviewResult(
         ok=ok,
@@ -290,22 +340,33 @@ class PlateReaderAnalysisWorker(QtCore.QThread):
         self.run_finished.emit(ok, message, payload)
 
     def _run_analysis(self) -> dict[str, object]:
+        from tools.data_analysis.associate_plate_reader_and_key import default_output_path
+
         self.stage.emit("Preparing plate reader analysis")
         paths = self._prepare_paths()
         self.output.emit(f"Experiment directory: {paths['experiment_dir']}")
         self.output.emit(f"Plate-reader file: {paths['plate_reader_file']}")
         self.output.emit(f"Concentration key: {paths['key_file']}")
+        if self.config.sheet_name is not None:
+            self.output.emit(f"Worksheet: {self.config.sheet_name}")
 
         copied_plate = self._copy_plate_reader_file(
             paths["plate_reader_file"],
             paths["experiment_dir"] / "raw_plate_reader",
         )
         paths["copied_plate_reader_file"] = copied_plate
-        paths["merged_csv"] = paths["experiment_dir"] / f"{copied_plate.stem}_merged_tidy.csv"
+        paths["merged_csv"] = paths["experiment_dir"] / default_output_path(copied_plate, self.config.sheet_name).name
         paths["manifest_json"] = paths["output_dir"] / "analysis_manifest.json"
         paths["report_html"] = paths["output_dir"] / "analysis_report.html"
 
         payload = self._payload(paths)
+        if self.config.analysis_settings is not None:
+            from tools.data_analysis.analysis_settings import SETTINGS_FILENAME, save_settings
+
+            save_settings(paths["experiment_dir"] / SETTINGS_FILENAME, self.config.analysis_settings)
+            snapshot = paths["output_dir"] / "analysis_settings.json"
+            save_settings(snapshot, self.config.analysis_settings)
+            payload["analysis_settings_file"] = str(snapshot)
         returncodes: dict[str, int | None] = {"associate": None, "analyze": None}
         payload["command_returncodes"] = returncodes
 
@@ -347,7 +408,14 @@ class PlateReaderAnalysisWorker(QtCore.QThread):
         errors = validate_plate_reader_analysis_paths(paths)
         if errors:
             raise ValueError(errors[0])
-        return paths
+        self.config = resolve_plate_reader_workbook_config(self.config)
+        if self.config.analysis_settings is not None:
+            from tools.data_analysis.associate_plate_reader_and_key import build_merged_tidy_data
+            from tools.data_analysis.plate_reader_analysis import prepare_reviewed_analysis_dataframe
+
+            merged, _, _ = build_merged_tidy_data(paths["plate_reader_file"], paths["key_file"], sheet_name=self.config.sheet_name)
+            prepare_reviewed_analysis_dataframe(merged, self.config.analysis_settings)
+        return resolve_plate_reader_analysis_paths(self.config)
 
     def _copy_plate_reader_file(self, source: Path, raw_dir: Path) -> Path:
         raw_dir.mkdir(parents=True, exist_ok=True)
@@ -378,6 +446,8 @@ class PlateReaderAnalysisWorker(QtCore.QThread):
             "--output",
             str(paths["merged_csv"]),
         ]
+        if self.config.sheet_name is not None:
+            command.extend(["--sheet", self.config.sheet_name])
         return PlateReaderAnalysisCommand(step="associate", command=command, cwd=self.repo_root)
 
     def _analysis_command(self, paths: dict[str, Path]) -> PlateReaderAnalysisCommand:
@@ -391,6 +461,8 @@ class PlateReaderAnalysisWorker(QtCore.QThread):
             "--endpoint-last-n",
             str(int(self.config.endpoint_last_n)),
         ]
+        if self.config.analysis_settings is not None:
+            command.extend(["--analysis-settings", str(paths["output_dir"] / "analysis_settings.json")])
         return PlateReaderAnalysisCommand(step="analyze", command=command, cwd=self.repo_root)
 
     def _run_command(self, command: PlateReaderAnalysisCommand) -> int:
@@ -430,8 +502,7 @@ class PlateReaderAnalysisWorker(QtCore.QThread):
         if text.startswith(self.ANALYSIS_PROGRESS_PREFIX):
             self.stage.emit(text[len(self.ANALYSIS_PROGRESS_PREFIX) :])
 
-    @staticmethod
-    def _payload(paths: dict[str, Path]) -> dict[str, object]:
+    def _payload(self, paths: dict[str, Path]) -> dict[str, object]:
         return {
             "experiment_dir": str(paths["experiment_dir"]),
             "plate_reader_file": str(paths["plate_reader_file"]),
@@ -441,4 +512,6 @@ class PlateReaderAnalysisWorker(QtCore.QThread):
             "output_dir": str(paths["output_dir"]),
             "manifest_json": str(paths["manifest_json"]),
             "report_html": str(paths["report_html"]),
+            "sheet_name": self.config.sheet_name,
+            "analysis_settings": self.config.analysis_settings,
         }
