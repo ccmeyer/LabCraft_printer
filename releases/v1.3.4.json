@@ -1,0 +1,42 @@
+{
+  "schema_version": "labcraft_release_v1",
+  "version": "v1.3.4",
+  "tag": "v1.3.4",
+  "channel": "stable",
+  "release_date": "2026-11-06",
+  "previous_version": "v1.3.3",
+  "rollback_version": null,
+  "requires_firmware": null,
+  "machine_data": {
+    "preservation_contract": "labcraft.machine_data_update.v1",
+    "data_schema_version": 1,
+    "transition": "none",
+    "transition_id": null
+  },
+  "update_compatibility": {
+    "schema_version": "labcraft_update_compatibility_v1",
+    "direct_legacy_sources": [
+      "v1.2.0-rc.6",
+      "v1.2.0",
+      "v1.3.0-rc.1"
+    ]
+  },
+  "summary": "Analyze Tecan kinetic and endpoint exports with intended concentration grouping and documented well exclusions.",
+  "notes": [
+    "The normal Plate Reader Analysis window accepts Tecan Infinite i-control XLSX fluorescence data. Select the acquisition worksheet explicitly when several measurement sheets exist; gain and worksheet provenance are retained and different gains are never combined or normalized.",
+    "Kinetic imports preserve fractional elapsed times and cycle temperatures. Endpoint grids become one timepoint. Missing, invalid, formula-based or over-range readings block the selected acquisition instead of being replaced with zeros or silently dropped.",
+    "Grouping & Exclusions proposes declared targets from experiment_design.json unless saved experiment analysis settings exist. Review intended levels and matching tolerance, initially 2%. Every keyed concentration must match exactly one intended level; unmatched, ambiguous or malformed saved settings block analysis.",
+    "Manual well and range exclusions require reasons and apply to all channels and timepoints before analytical calculations and outlier baselines. Reports and ZIP exports retain settings, raw readings, calculated-to-intended mappings, per-well audit, excluded-well QC and remaining replicate counts. Conditions with fewer than three replicates have limited replicate-based outlier detection.",
+    "The supplied kinetic and unsaturated endpoint acquisitions passed complete analysis and ZIP export. All 1,664 readings matched independent inspection and source hashes were unchanged. Excluding N1:P4 leaves 48 keyed wells across 15 conditions; MM groups at 1 mM and pSTOPv2 at 1.25, 2.5 and 5 nM. The Windows no-hardware simulation was accepted by the operator.",
+    "Firmware artifact bytes, protocol, runtime dependency declarations, canonical machine-data schema, execution-calibration version 4 and execution-data capabilities are identical to v1.3.3. No firmware flash is required solely for this application update; existing provenance and SAFE requirements remain enforced.",
+    "Retains the three exact stable legacy migration cohorts and pinned rc.11 discovery route. Automatic rollback remains unconfigured; preserve measurements, committed counts, progress and immutable revisions and use protected current-version or exactly qualified compatible-bundle recovery.",
+    "See docs/v1.3.4_release_qualification.md for validation, limitations and publication order. Existing large-optimizer and long-session timing limitations remain unchanged."
+  ],
+  "validation": [
+    "148 focused parser, association, grouping, exclusions, Qt settings/window, worker-subprocess, report and export tests passed",
+    "Complete supplied-data kinetic and endpoint analyses and ZIP exports passed; all 1,664 raw readings matched independent inspection and original source hashes were unchanged",
+    "Required release gate: full Windows suite with --run-analysis-pipeline on the committed metadata revision; external run.json, pytest.log, junit.xml and qualification receipt retain exact counts and outcomes",
+    "Full-suite coverage includes updater request/UI/backend, release metadata, packaging, execution-data rollback, immutable legacy discovery and stable bootstrap preservation/refusal",
+    "tools/validate_release_metadata.py, strict release JSON parsing and git diff --check; tools/validate_release_metadata.py --check-tags only after separately authorized tag creation"
+  ]
+}

@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.3.4 - 2026-11-06
+
+### Added
+
+- Import Tecan Infinite i-control XLSX fluorescence exports through the normal Plate Reader Analysis window. Select one kinetic or endpoint worksheet; the preview identifies its gain. Fractional acquisition times are preserved, empty sheets are ignored, and missing, invalid, formula-based or saturated readings are rejected with well context. Different gains remain separate acquisitions.
+- Review intended reagent concentrations in **Grouping & Exclusions...**. Saved choices take precedence over proposed experiment-design levels. Each calculated concentration must match exactly one intended level within the visible tolerance (initially 2%); ambiguous or unmatched values block analysis. Original calculated concentrations and measurement signals are preserved.
+- Exclude known invalid wells or rectangular ranges with a required reason before statistics, outlier detection and analytical plots. Save choices with the experiment and include concentration mappings, per-well audits, remaining replicate counts, exclusion reasons, raw readings and separate QC plots in reports and exports.
+
+### Qualification and recovery
+
+- The focused analysis selection passed 148 tests, including actual worker subprocesses for kinetic and endpoint data. The supplied workbook was also analyzed and exported in both formats: all 1,664 readings matched independent inspection, source hashes were unchanged, and excluding N1:P4 left 48 keyed wells across 15 conditions. The operator accepted the changes in the Windows no-hardware simulation.
+- Firmware bytes, protocol, runtime dependencies, canonical machine-data schema and execution-data compatibility are unchanged from v1.3.3. No firmware update accompanies this application release.
+- Keep the pinned rc.11 discovery route and existing exact legacy migration cohorts. Automatic rollback remains unconfigured; preserve execution history and use protected current-version or qualified compatible-bundle recovery.
+- Full-suite release evidence, limitations and publication order are recorded in `docs/v1.3.4_release_qualification.md` and its external qualification receipt. Release preparation does not publish a tag or advance stable.
+
 ## v1.3.3 - 2026-11-05
 
 ### Fixed
