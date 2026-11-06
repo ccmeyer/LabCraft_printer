@@ -21,8 +21,10 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
         self._running = False
         self._previewing = False
         self._preview_valid = False
-        self._preview_signature: tuple[str, str, str, str, int] | None = None
-        self._pending_preview_signature: tuple[str, str, str, str, int] | None = None
+        self._preview_signature: tuple | None = None
+        self._pending_preview_signature: tuple | None = None
+        self._analysis_settings = None
+        self._analysis_settings_error = None
         self._last_preview_payload: dict[str, object] = {}
         self._last_payload: dict[str, object] = {}
         self._last_manifest: dict[str, object] = {}
@@ -63,6 +65,14 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
         self.plate_reader_file_edit.textChanged.connect(self._mark_preview_stale)
         form.addRow("Plate Reader Export", self._path_row(self.plate_reader_file_edit, self.plate_reader_file_button))
 
+        self.sheet_combo = QtWidgets.QComboBox()
+        self.sheet_combo.setObjectName("plateReaderWorksheetCombo")
+        self.sheet_combo.addItem("Automatic (single measurement sheet)", None)
+        self.sheet_combo.setEnabled(False)
+        self.sheet_combo.currentIndexChanged.connect(self._mark_preview_stale)
+        self.plate_reader_file_edit.textChanged.connect(self._refresh_workbook_sheets)
+        form.addRow("Worksheet", self.sheet_combo)
+
         self.key_file_edit = QtWidgets.QLineEdit()
         self.key_file_edit.setObjectName("keyFileEdit")
         self.key_file_button = QtWidgets.QPushButton("Browse...")
@@ -84,6 +94,18 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
         self.endpoint_last_n_spin.setValue(3)
         self.endpoint_last_n_spin.valueChanged.connect(self._mark_preview_stale)
         form.addRow("Endpoint Last N", self.endpoint_last_n_spin)
+
+        settings_row = QtWidgets.QWidget()
+        settings_layout = QtWidgets.QHBoxLayout(settings_row)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        self.settings_summary = QtWidgets.QLabel("Calculated concentrations; no manual exclusions")
+        self.settings_summary.setWordWrap(True)
+        self.settings_button = QtWidgets.QPushButton("Grouping && Exclusions...")
+        self.settings_button.setObjectName("plateReaderAnalysisSettingsButton")
+        self.settings_button.clicked.connect(self._edit_analysis_settings)
+        settings_layout.addWidget(self.settings_summary, 1)
+        settings_layout.addWidget(self.settings_button)
+        form.addRow("Analysis Settings", settings_row)
 
         root.addWidget(form_group)
 
@@ -230,10 +252,39 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
             self.key_file_edit.setText(str(Path(str(experiment_dir)) / "concentration_key.csv"))
 
     def _on_experiment_dir_changed(self, text: str):
-        if self.key_file_edit.text().strip():
-            return
-        if str(text).strip():
+        if str(text).strip() and not self.key_file_edit.text().strip():
             self.key_file_edit.setText(str(Path(str(text).strip()) / "concentration_key.csv"))
+        from tools.data_analysis.analysis_settings import SETTINGS_FILENAME, load_settings, settings_from_design
+
+        self._analysis_settings = None
+        self._analysis_settings_error = None
+        experiment = Path(text.strip())
+        try:
+            if (experiment / SETTINGS_FILENAME).is_file():
+                self._analysis_settings = load_settings(experiment / SETTINGS_FILENAME)
+            elif (experiment / "experiment_design.json").is_file():
+                self._analysis_settings = settings_from_design(experiment / "experiment_design.json")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self._analysis_settings_error = f"Could not load analysis settings: {exc}"
+        self._refresh_settings_summary()
+
+    def _refresh_settings_summary(self):
+        if self._analysis_settings_error:
+            self.settings_summary.setText(self._analysis_settings_error)
+            return
+        settings = self._analysis_settings or {}
+        mode = "Intended design concentrations" if settings.get("nominal_targets") else "Calculated concentrations"
+        self.settings_summary.setText(f"{mode}; {len(settings.get('excluded_wells', {}))} manually excluded wells")
+
+    def _edit_analysis_settings(self):
+        from PlateReaderAnalysisSettingsDialog import PlateReaderAnalysisSettingsDialog
+
+        dialog = PlateReaderAnalysisSettingsDialog(self._analysis_settings, experiment_dir=self.experiment_dir_edit.text().strip(), parent=self)
+        if dialog.exec() == QtWidgets.QDialog.Accepted:
+            self._analysis_settings = dialog.settings
+            self._analysis_settings_error = None
+            self._refresh_settings_summary()
+            self._mark_preview_stale()
 
     def _browse_experiment_dir(self):
         start_dir = self.experiment_dir_edit.text().strip() or str(Path.home())
@@ -247,10 +298,31 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
             self,
             "Select Plate Reader Export",
             start_dir,
-            "Plate reader exports (*.txt *.csv *.tsv);;All files (*)",
+            "Plate reader exports (*.xlsx *.xls *.txt *.csv *.tsv);;All files (*)",
         )
         if path:
             self.plate_reader_file_edit.setText(path)
+
+    def _refresh_workbook_sheets(self, text: str):
+        self.sheet_combo.blockSignals(True)
+        try:
+            self.sheet_combo.clear()
+            self.sheet_combo.addItem("Automatic (single measurement sheet)", None)
+            self.sheet_combo.setToolTip("Select one measurement sheet. Measurements with different gains are analyzed separately.")
+            path = Path(text.strip()).expanduser()
+            if path.suffix.lower() == ".xlsx" and path.is_file():
+                from tools.data_analysis.tecan_plate_reader import list_tecan_measurement_sheets
+
+                for name in list_tecan_measurement_sheets(path):
+                    self.sheet_combo.addItem(name, name)
+                if self.sheet_combo.count() == 2:
+                    self.sheet_combo.setCurrentIndex(1)
+        except (OSError, ValueError) as exc:
+            self.sheet_combo.setToolTip(str(exc))
+        finally:
+            self.sheet_combo.blockSignals(False)
+        self._update_input_enabled()
+        self._mark_preview_stale()
 
     def _browse_key_file(self):
         start_dir = self.experiment_dir_edit.text().strip() or str(Path.home())
@@ -270,6 +342,8 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
             self.output_dir_edit.setText(path)
 
     def _build_config(self, *, validate_paths: bool = True) -> PlateReaderAnalysisConfig:
+        if self._analysis_settings_error:
+            raise ValueError(self._analysis_settings_error)
         experiment_dir = Path(self.experiment_dir_edit.text().strip())
         plate_reader_file = Path(self.plate_reader_file_edit.text().strip())
         key_file = Path(self.key_file_edit.text().strip())
@@ -289,16 +363,20 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
             key_file=key_file,
             output_dir=Path(output_text) if output_text else None,
             endpoint_last_n=int(self.endpoint_last_n_spin.value()),
+            sheet_name=self.sheet_combo.currentData(),
+            analysis_settings=self._analysis_settings,
         )
 
     @staticmethod
-    def _config_signature(config: PlateReaderAnalysisConfig) -> tuple[str, str, str, str, int]:
+    def _config_signature(config: PlateReaderAnalysisConfig) -> tuple:
         return (
             str(Path(config.experiment_dir)),
             str(Path(config.plate_reader_file)),
             str(Path(config.key_file)) if config.key_file is not None else "",
             str(Path(config.output_dir)) if config.output_dir is not None else "",
             int(config.endpoint_last_n),
+            config.sheet_name,
+            json.dumps(config.analysis_settings, sort_keys=True, allow_nan=False),
         )
 
     @QtCore.Slot()
@@ -312,7 +390,12 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
             )
             return
 
-        config = self._build_config(validate_paths=False)
+        try:
+            config = self._build_config(validate_paths=False)
+        except (ValueError, TypeError) as exc:
+            self._set_status("Invalid analysis settings")
+            self._set_preview_messages([str(exc)], [])
+            return
         self._pending_preview_signature = self._config_signature(config)
         self._preview_valid = False
         self._preview_signature = None
@@ -521,6 +604,11 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
             ("Endpoint outliers", outliers.get("final_outlier_count", "")),
             ("Warnings", len(warnings)),
         ]
+        review = manifest.get("analysis_review")
+        if review:
+            rows += [("Manually excluded wells", review["excluded_well_count"]),
+                     ("Included measured wells", review["included_measured_well_count"]),
+                     ("Included keyed wells", review["included_keyed_well_count"])]
 
         self.result_summary_table.setRowCount(len(rows))
         for row_index, (label, value) in enumerate(rows):
@@ -621,6 +709,19 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
             ("Report", paths.get("report_html", "")),
         ]
 
+        if summary.get("sheet_name") is not None:
+            rows = [("Worksheet", summary["sheet_name"]), ("Gain", summary.get("gain", ""))] + rows
+        review = summary.get("analysis_review", {})
+        if review:
+            rows += [("Manually excluded wells", review["excluded_well_count"]),
+                     ("Included measured wells", review["included_measured_well_count"]),
+                     ("Included keyed wells", review["included_keyed_well_count"])]
+            rows += [("Target tolerance", f"{review['settings']['target_tolerance_percent']:g}%")]
+            for group in review["grouping"]:
+                for level in group["analysis_levels"]:
+                    calculated = [item["calculated"] for item in group["mapping"] if item["intended"] == level]
+                    rows.append((f"Grouping: {group['reagent']}", f"{min(calculated):g} to {max(calculated):g} → {level:g}"))
+            rows += [("Included replicates", ", ".join(f"{r['condition_id']}: {r['included_replicates']}" for r in review["replicate_counts"]))]
         self.preview_table.setRowCount(len(rows))
         for row_index, (label, value) in enumerate(rows):
             label_item = QtWidgets.QTableWidgetItem(str(label))
@@ -697,8 +798,10 @@ class PlateReaderAnalysisWindow(QtWidgets.QDialog):
             self.output_dir_edit,
             self.output_dir_button,
             self.endpoint_last_n_spin,
+            self.settings_button,
         ):
             widget.setEnabled(enabled)
+        self.sheet_combo.setEnabled(enabled and Path(self.plate_reader_file_edit.text().strip()).suffix.lower() == ".xlsx")
 
     def _set_running(self, running: bool):
         self._running = bool(running)

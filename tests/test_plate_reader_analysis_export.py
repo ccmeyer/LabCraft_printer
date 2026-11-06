@@ -55,7 +55,12 @@ def _make_export_sources(tmp_path: Path):
 
 
 def test_export_plate_reader_analysis_package_writes_zip_and_provenance(tmp_path):
+    from tools.data_analysis.analysis_settings import normalize_settings, save_settings
+
     payload, _output_dir, _raw_file = _make_export_sources(tmp_path)
+    payload["sheet_name"] = "gain 100 actual data"
+    payload["analysis_settings"] = normalize_settings({"excluded_wells": {"N1": "reagent missing"}})
+    save_settings(_output_dir / "analysis_settings.json", payload["analysis_settings"])
     destination = tmp_path / "export.zip"
 
     result = export_plate_reader_analysis_package(
@@ -68,6 +73,7 @@ def test_export_plate_reader_analysis_package_writes_zip_and_provenance(tmp_path
     with zipfile.ZipFile(destination) as archive:
         names = set(archive.namelist())
         assert "analysis/analysis_report.html" in names
+        assert "analysis/analysis_settings.json" in names
         assert "analysis/analysis_manifest.json" in names
         assert "analysis/heatmaps_absolute_rfu/488_509_endpoint_rfu.png" in names
         assert "inputs/reader.txt" in names
@@ -82,6 +88,8 @@ def test_export_plate_reader_analysis_package_writes_zip_and_provenance(tmp_path
     assert provenance["analysis_manifest_created_at"] == "2026-06-13T12:00:00"
     assert provenance["command_returncodes"] == {"associate": 0, "analyze": 0}
     assert provenance["source_payload"]["output_dir"] == payload["output_dir"]
+    assert provenance["source_payload"]["sheet_name"] == "gain 100 actual data"
+    assert provenance["source_payload"]["analysis_settings"]["excluded_wells"] == {"N1": "reagent missing"}
     assert "analysis/analysis_report.html" in provenance["included_files"]
     assert "plate_reader_export_provenance.json" in provenance["included_files"]
 

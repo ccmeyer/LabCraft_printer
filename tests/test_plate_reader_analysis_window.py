@@ -11,6 +11,7 @@ import View
 from Controller import Controller
 from PlateReaderAnalysisRunner import PlateReaderAnalysisConfig, PlateReaderAnalysisPreviewResult
 from PlateReaderAnalysisWindow import PlateReaderAnalysisWindow
+from tests.tecan_fixtures import tecan_endpoint_rows, tecan_kinetic_rows, write_tecan_workbook
 
 
 class _WindowController(QtCore.QObject):
@@ -651,6 +652,36 @@ def test_window_successful_preview_populates_summary_and_enables_run(tmp_path, q
     assert any("488_509" in value for value in table_values)
     assert any("DNA_mM" in value for value in table_values)
 
+    window.close()
+
+
+def test_workbook_sheet_selection_reaches_preview_and_run_and_invalidates_previous_preview(tmp_path, qapp):
+    window, controller, experiment_dir, *_ = _make_window(tmp_path, qapp)
+    path = write_tecan_workbook(tmp_path / "reader.xlsx", {
+        "gain 100 actual data": tecan_kinetic_rows(), "endpoint": tecan_endpoint_rows(), "Sheet1": [],
+    })
+    window.plate_reader_file_edit.setText(str(path))
+    assert window.sheet_combo.isEnabled()
+    assert window.sheet_combo.count() == 3
+    window.sheet_combo.setCurrentIndex(window.sheet_combo.findData("gain 100 actual data"))
+    window._on_validate_preview_clicked()
+    assert controller.started_preview_config.sheet_name == "gain 100 actual data"
+    assert not window.sheet_combo.isEnabled()
+    preview = _preview_payload(experiment_dir)
+    preview["summary"].update(sheet_name="gain 100 actual data", gain=100)
+    controller.plate_reader_analysis_preview_finished.emit(True, "passed", preview)
+    assert window.run_button.isEnabled()
+    assert window.preview_table.item(0, 1).text() == "gain 100 actual data"
+    window._on_run_clicked()
+    assert controller.started_config.sheet_name == "gain 100 actual data"
+    assert not window.sheet_combo.isEnabled()
+    controller.plate_reader_analysis_finished.emit(False, "test stopped", {})
+    window.sheet_combo.setCurrentIndex(window.sheet_combo.findData("endpoint"))
+    assert not window.run_button.isEnabled()
+    assert window._build_config().sheet_name == "endpoint"
+    window.plate_reader_file_edit.setText(str(tmp_path / "reader.txt"))
+    assert window.sheet_combo.currentData() is None
+    assert not window.sheet_combo.isEnabled()
     window.close()
 
 

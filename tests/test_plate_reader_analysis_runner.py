@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 import pytest
+
+from tests.tecan_fixtures import tecan_endpoint_rows, tecan_kinetic_rows, write_tecan_workbook
 
 from PlateReaderAnalysisRunner import (
     PlateReaderAnalysisConfig,
@@ -22,6 +25,58 @@ def _make_experiment(tmp_path: Path) -> tuple[Path, Path, Path]:
     plate_file = tmp_path / "plate_reader.txt"
     plate_file.write_text("raw plate reader export\n", encoding="utf-8")
     return experiment_dir, key_file, plate_file
+
+
+def test_tecan_preview_requires_a_sheet_and_keeps_acquisition_outputs_separate(tmp_path):
+    experiment_dir, key_file, _ = _make_experiment(tmp_path)
+    key_file.write_text("Well ID,DNA_nM\nA1,5\nA2,5\n", encoding="utf-8")
+    path = write_tecan_workbook(tmp_path / "reader.xlsx", {
+        "gain 100 actual data": tecan_kinetic_rows(), "endpoint": tecan_endpoint_rows(),
+    })
+    ambiguous = build_plate_reader_analysis_preview(PlateReaderAnalysisConfig(experiment_dir, path))
+    assert not ambiguous.ok
+    assert "Multiple Tecan" in ambiguous.errors[0]
+    previews = [build_plate_reader_analysis_preview(PlateReaderAnalysisConfig(experiment_dir, path, sheet_name=name))
+                for name in ("gain 100 actual data", "endpoint")]
+    for preview, gain, count in zip(previews, (100, 108), (4, 1)):
+        assert preview.ok
+        assert preview.summary["gain"] == gain
+        assert preview.summary["timepoint_count"] == count
+        assert preview.summary["condition_columns"] == ["DNA_nM"]
+        assert not Path(preview.paths["merged_csv"]).exists()
+        assert not Path(preview.paths["output_dir"]).exists()
+    assert previews[0].paths["merged_csv"] != previews[1].paths["merged_csv"]
+    assert previews[0].paths["output_dir"] != previews[1].paths["output_dir"]
+    assert not (experiment_dir / "raw_plate_reader").exists()
+
+
+@pytest.mark.analysis_pipeline
+@pytest.mark.parametrize("endpoint", [False, True])
+@pytest.mark.parametrize("reviewed", [False, True])
+def test_tecan_worker_runs_real_association_and_report_subprocesses(tmp_path, endpoint, reviewed):
+    from tools.data_analysis.analysis_settings import SETTINGS_FILENAME, load_settings, normalize_settings
+
+    experiment_dir, key_file, _ = _make_experiment(tmp_path)
+    key_file.write_text("Well ID,DNA_nM\nA1,5\nA2,5\n", encoding="utf-8")
+    rows = tecan_endpoint_rows() if endpoint else tecan_kinetic_rows()
+    path = write_tecan_workbook(tmp_path / "reader.xlsx", {"selected run": rows})
+    settings = normalize_settings({"nominal_targets": {"DNA_nM": [5]}, "excluded_wells": {"A2": "missing reagent"}}) if reviewed else None
+    worker = PlateReaderAnalysisWorker(PlateReaderAnalysisConfig(experiment_dir, path, analysis_settings=settings))
+    (ok, message, payload), _, _ = _run_worker(worker)
+    assert ok, message
+    assert payload["sheet_name"] == "selected run"
+    assert payload["command_returncodes"] == {"associate": 0, "analyze": 0}
+    manifest = json.loads(Path(payload["manifest_json"]).read_text(encoding="utf-8"))
+    assert manifest["dataset"]["has_timecourse_data"] is (not endpoint)
+    assert Path(payload["report_html"]).exists()
+    assert Path(payload["copied_plate_reader_file"]).read_bytes() == path.read_bytes()
+    if reviewed:
+        assert load_settings(experiment_dir / SETTINGS_FILENAME) == settings
+        assert load_settings(payload["analysis_settings_file"]) == settings
+        assert manifest["analysis_review"]["included_keyed_well_count"] == 1
+        reloaded = build_plate_reader_analysis_preview(PlateReaderAnalysisConfig(experiment_dir, path))
+        assert reloaded.ok
+        assert reloaded.summary["analysis_review"]["settings"] == settings
 
 
 def _write_preview_plate_export(path: Path) -> None:

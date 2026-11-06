@@ -98,6 +98,8 @@ def _source_payload(payload: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "experiment_dir",
         "plate_reader_file",
+        "sheet_name",
+        "analysis_settings",
         "copied_plate_reader_file",
         "key_file",
         "merged_csv",
